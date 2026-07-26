@@ -320,7 +320,7 @@
 |---|---|---|
 | CUDA Toolkit + 构建环境 | ✅ | 13.2 · `devshell.ps1` 已验证 |
 | ComfyUI 可用 | ✅ | torch 2.11.0+cu128 · sm_120 · 实测通过 |
-| llama.cpp | ✅ | A1–A3 / B / C 组都依赖它。**先试官方预编译版**,不行再用 `devshell.ps1` 自编译(记得加 `-Xcompiler /utf-8` 压掉 C4819 噪音) |
+| llama.cpp | ✅ | **2026-07-26 已就位并断言通过**:预编译 **b10107 cuda-13.3**,`llama-bench` 报 `compute capability 12.0` + `backend CUDA` + `ngl 99` + 119 tok/s → **sm_120 可用,不需自编译**。cuda-12.4 包已排除(12.4 不支持 sm_120)。落点 `D:\AI	ools\llama.cpp\` |
 | ASR / TTS | ❌ | A5 / C4 依赖 |
 | ~~桌面接核显~~ | — | **本行作废(D24)**。核显方案已彻底放弃,不做双状态测量。且原文对 §8.1 的描述对 v2.2 已经是错的 —— v2.2 §8.1 不是双列表格,双列表只存在于 `archive/PROJECT_PLAN_v2.1.md` |
 | ~~桌面显存基线的采集方式~~ | ✅ | **2026-07-26 已实测解决**。逐进程 NVML 确实全部返回 `[N/A]`,但 **A 组不需要逐进程归因**。总量用 `nvidia-smi memory.used`(或 `\GPU Adapter Memory\Dedicated Usage`,差 1.9%)。逐进程仅用 `\GPU Process Memory\Dedicated Usage` 排序,**不可求和**(高估 27%)。增量法纪律见 `P1-runbook.md` §2 的 2a |
