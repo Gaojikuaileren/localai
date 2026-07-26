@@ -29,6 +29,12 @@
     不加此开关时,脚本只**报告**哪些超出保留策略,不删任何东西 ——
     与 §8.4 GC 的原则一致:除 CACHE 根外一律先报告后执行。
 
+.PARAMETER IAcceptUnencryptedTarget
+    允许备份到**未加密**的目标盘。这是 §8.5 铁律 1 的唯一逃生口。
+    正常情况下未加密目标会**直接拒绝执行**(throw),而不是警告后继续 ——
+    因为「警告后继续」的净效果是铁律 1 生效率为 0。
+    使用本开关会写入审计日志与备份报告,留下痕迹。
+
 .EXAMPLE
     .\backup.ps1 -Target <盘符>:\localAI-backup -DryRun
     .\backup.ps1 -Target <盘符>:\localAI-backup
@@ -40,7 +46,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Target,
     [switch]$DryRun,
     [switch]$SkipHash,
-    [switch]$PruneOld
+    [switch]$PruneOld,
+    [switch]$IAcceptUnencryptedTarget
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,18 +111,47 @@ if ($null -ne $diskTarget -and ($diskTarget -eq $diskState -or $diskTarget -eq $
     throw "拒绝执行:备份目标与源数据在同一块物理盘 (Disk $diskTarget)。同盘备份等于没备份。"
 }
 
-# BitLocker 状态(§8.5 铁律 1:备份必须加密)
+# --- 加密闸门 — §8.5 铁律 1 ------------------------------------------------
+# 此前这里是 Write-Warning 后继续,净效果是铁律 1 的生效率为 0。
+# 改为**拒绝执行**,只留一个带审计痕迹的逃生口。
 $tLetter = ($Target -replace '^([A-Za-z]):.*$', '$1')
+$encStatus = 'unknown'
 try {
     $bl = Get-BitLockerVolume -MountPoint "${tLetter}:" -ErrorAction Stop
-    if ($bl.ProtectionStatus -ne 'On') {
-        Write-Warning "目标盘未启用 BitLocker。v2.1 §8.5 铁律 1:备份必须加密,否则备份就是绕过加密卷的后门。"
-        Write-Warning "建议对移动固态启用 BitLocker To Go 后再备份。"
-    } else {
-        Write-Host "  加密      : BitLocker 已启用 ✓" -ForegroundColor Green
-    }
+    $encStatus = [string]$bl.ProtectionStatus
 } catch {
-    Write-Warning "无法读取目标盘的 BitLocker 状态(可能非 NTFS 或权限不足)。请自行确认备份介质已加密。"
+    $encStatus = 'unreadable'
+}
+
+if ($encStatus -eq 'On') {
+    Write-Host "  加密      : BitLocker 已启用 ✓" -ForegroundColor Green
+} else {
+    $why = if ($encStatus -eq 'unreadable') {
+        "无法读取目标盘的 BitLocker 状态(可能非 NTFS 或权限不足)"
+    } else {
+        "目标盘 ${tLetter}: 未启用 BitLocker(ProtectionStatus=$encStatus)"
+    }
+
+    if (-not $IAcceptUnencryptedTarget) {
+        throw @"
+拒绝执行:$why。
+
+v2.1 §8.5 铁律 1:**备份必须加密**,否则备份就是绕过加密卷的后门。
+记忆库(P3 起)是全项目唯一不可重建的数据,把它明文放在一块会被随身带走的
+移动固态上,等于把加密卷这件事整个作废。
+
+请先对目标盘启用 BitLocker To Go:
+  资源管理器右键 ${tLetter}: -> 启用 BitLocker -> 用密码解锁
+  ★ 恢复密钥离线保管两份,不同物理位置,**绝不与被加密数据同盘**(§8.5 铁律 2)
+
+确需在未加密目标上备份(不建议),显式加开关:
+  .\backup.ps1 -Target '$Target' -IAcceptUnencryptedTarget
+该开关会写入审计日志与备份报告。
+"@
+    }
+
+    Write-Warning "$why —— 已由 -IAcceptUnencryptedTarget 放行。本次备份为**明文**。"
+    Write-Warning "此事已记入备份报告与审计日志。"
 }
 
 $dest = Join-Path $Target $stamp
@@ -127,6 +163,15 @@ $report = [System.Collections.Generic.List[string]]::new()
 $report.Add("# 备份报告 $stamp")
 $report.Add('')
 $report.Add("目标: $dest")
+if ($encStatus -eq 'On') {
+    $report.Add('加密: BitLocker 已启用')
+} else {
+    $report.Add("**⚠ 加密: 未启用(ProtectionStatus=$encStatus)。本备份集为明文。**")
+    $report.Add('**经 `-IAcceptUnencryptedTarget` 显式放行,违反 v2.1 §8.5 铁律 1。**')
+    $report.Add('**处置:对目标盘启用 BitLocker To Go 后重做备份,本集按已泄露面安全擦除。**')
+}
+$report.Add('')
+$report.Add('排除项: `state\quarantine`(隔离区装的是打算删除的数据,不应进备份代)')
 $report.Add('')
 
 function Copy-Root {
@@ -156,8 +201,11 @@ function Copy-Root {
 
 Write-Host '内容:' -ForegroundColor Cyan
 
-# 1. STATE — 全量。唯一不可重建的数据
-Copy-Root -Name 'state' -Source $rootState
+# 1. STATE — 全量(含记忆库),唯一不可重建的数据
+#    排除 quarantine:隔离区装的是你**打算删掉**的东西。把它备份进来,
+#    等于让已经决定丢弃的数据在 12 个备份代里继续存活,并且会把
+#    list-only 区域的正文搬进一个可被完整读取的位置(审查发现 P-3)。
+Copy-Root -Name 'state' -Source $rootState -ExcludeDir @('quarantine')
 
 # 2. ASSETS/adopted — 你标记为要用的
 Copy-Root -Name 'assets-adopted' -Source $adopted
