@@ -113,8 +113,8 @@ if ($null -ne $diskTarget -and ($diskTarget -eq $diskState -or $diskTarget -eq $
 
 # --- 介质加密检查 — §8.5 ----------------------------------------------------
 # 是否强制由 paths.toml 的 [backup].require_encryption 决定(D21:默认 false)。
-# ★ 这里只管**介质**。记忆库本身在 BitLocker VHDX 内,决定它是否明文的是
-#   备份方式(文件 vs 挂载卷内容),不是这个检查。见 §8.5.4。
+# ★ D22:记忆库本身也已取消加密(普通文件夹)。因此磁盘与备份盘上均为明文。
+#   本检查保留下来只是为了将来若改变主意时有一个开关,当前恒为放行。
 $tLetter = ($Target -replace '^([A-Za-z]):.*$', '$1')
 $encStatus = 'unknown'
 try {
@@ -155,10 +155,10 @@ $report.Add("目标: $dest")
 if ($encStatus -eq 'On') {
     $report.Add('介质加密: BitLocker 已启用')
 } else {
-    $report.Add("介质加密: **未启用**(ProtectionStatus=$encStatus)。按决议 D21,这是预期行为。")
+    $report.Add("介质加密: **未启用**(ProtectionStatus=$encStatus)。按决议 D21/D22,这是预期行为。")
     $report.Add('')
-    $report.Add('> 本备份集中,除 `memory.vhdx` 外的内容在介质上是**明文**。')
-    $report.Add('> `memory.vhdx` 若以文件形式备份,其内部仍受 BitLocker 保护(见 §8.5.4)。')
+    $report.Add('> **本备份集全部内容为明文**,包括记忆库(D22 取消了加密卷)。')
+    $report.Add('> 拿到这块盘的人可以直接读取其中的一切。物理保管是唯一的保护。')
 }
 $report.Add('')
 $report.Add('排除项: `state\quarantine`(隔离区装的是打算删除的数据,不应进备份代)')
