@@ -97,6 +97,63 @@ P3 上线后若出现「想不起上次备份是什么时候」的情况,应改�
 
 ---
 
+## 2026-07-26 · 显卡驱动由 596.36 升级到 610.62（未预期的变更）
+
+**背景**
+CUDA Toolkit 的 installer 捆绑显卡驱动。原计划用静默安装排除 Driver 组件,
+以避免 596.36 被降级(sm_120 支持依赖驱动)。但 `-extract=` 参数并未只解包而是启动了
+安装向导,实际走的是默认全量安装。
+
+**结果**
+驱动被**升级**到 610.62,不是降级。回归验证全部通过:
+
+- `nvcc` release 13.2 V13.2.51 可用
+- ComfyUI 的 torch 2.11.0+cu128 仍 `available=True`,capability `(12,0)`,实跑 matmul 通过
+- 真编译一个 `-arch=sm_120` kernel 并运行成功
+
+**为什么这个结果反而更好**
+CUDA 的兼容性方向是「driver ≥ toolkit」。原来 596.36 支持上限是 13.2,
+装 13.2 toolkit 属于刚好贴边;升级到 610.62 后 toolkit 处在更宽松的位置。
+smoke test 报告 `runtime/drv = 13030 / 13030`,说明驱动带的运行时比 13.2 更新。
+
+**代价**
+默认安装附带了 NVIDIA App · ShadowPlay · FrameView SDK · PhysX · Virtual Audio ·
+Telemetry Client · Nsight 三件套。常驻 3 个 `nvcontainer`(约 188 MB 内存)。
+**对一个显存吃紧的项目,ShadowPlay 与 NVIDIA App 的常驻部分值得评估是否关闭** ——
+但这取决于你是否要用 ShadowPlay 录游戏,不由我决定。
+
+**推翻条件**
+若 P1 实测发现新驱动在 sm_120 上有性能回退或稳定性问题,回滚到 596.36 并改用
+静默安装(正确做法是 `-s <组件名列表>`,组件名需先从安装包 manifest 读出,不能猜)。
+
+---
+
+## 2026-07-26 · 构建环境用封装脚本而非只改 PATH
+
+**背景**
+STATE.md 原有阻塞项:「`cmake` 不在系统 PATH」。最直接的解法是把 VS 自带的 cmake 加进 PATH。
+
+**但那样不够**
+编译 CUDA 还需要 `cl.exe`、`link.exe`、Windows SDK 的 include/lib 路径 ——
+这些只有 `vcvars64.bat` 初始化之后才存在于环境里。只加 cmake 会造成
+「cmake 能跑但配置阶段找不到编译器」的假就绪。
+
+**决定**
+两件事一起做:
+1. 把 VS2022 自带 cmake 3.31.6 与 ninja 1.12.1 加入**用户级** PATH(原值已备份)
+2. 写 `90-ops/devshell.ps1`,dot-source 后一次性备齐 MSVC + CUDA + CMake + Ninja,
+   并逐项校验。用 **vswhere** 定位 VS,不硬编码安装路径(遵守 §11.1)
+
+**理由**
+「可复现」比「方便」重要。将来在另一台机器上,`devshell.ps1` 能自己找到 VS;
+而写死的 PATH 不能。
+
+**推翻条件**
+若将来独立安装了更新版 cmake 并与 VS 自带版本冲突,应从 PATH 移除 VS 版本,
+只保留 `devshell.ps1` 的动态定位。
+
+---
+
 ## 2026-07-26 · `cache/hf` 排除出 GC 自动清理（待你确认）
 
 **背景**
