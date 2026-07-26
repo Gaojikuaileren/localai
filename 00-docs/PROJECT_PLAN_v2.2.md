@@ -1451,7 +1451,12 @@ eval 语料:显式「捐赠本轮」按钮采集,非默认全量抓取
 
 > **审查 P-2**:v2.1 的「永远记录工具调用参数与结果」会把文件正文写进明文日志。
 
-工具注册表每个工具加 `log_result: none | digest | full`。**凡具备读取能力的工具默认 `none`**;设为 `full` 必须在 `DECISIONS.md` 留条目(含推翻条件)。
+工具注册表每个工具加两个字段:`log_result: none | digest | full` 与
+**`log_args: none | schema_only | redact_marked | full`**。
+**凡具备读取能力的工具默认 `log_result: none`**;设为 `full` 必须在 `DECISIONS.md` 留条目。
+
+> **★ 为什么必须有 `log_args`**:`log_result` 只管**结果**,而带值的从来是**下一个**工具的**参数**。
+> 凭证工具强制 `log_args: schema_only`;任何可能接收 `fill_token` 的参数强制 `redact_marked`。
 
 **★ 原有的「区域访问日志进加密卷是 §6.7 上线的前置条件」已随 D22 取消。**
 
@@ -1680,11 +1685,17 @@ G:\localAI-backup\  ★手动全量(不加密 — D21)· 12 代保留
 - [ ] 文件整理:清单 → 哈希绑定 → 隔离区 → 回滚
 - [ ] 浏览器执行器(独立 profile)
 - [ ] 游戏日常:模板匹配 + 状态机
-- [ ] **专用 Windows 账户 + OS ACL**
+- [ ] **专用 Windows 账户 + OS ACL**(三账户:`ai-mem` / `ai-asset` / **`ai-exec`**)
+- [ ] **★ 带外凭证输入控件** + `secret.request`(`provider=manual`)
+- [ ] **★ 凭证的 E2–E5 强制点**(L1 压缩器 / Memory Gate / 出境载荷 / worklog+日志+pre-commit)
 
 ### P7 · Windows App(Tauri 完整版)
 
 补齐通知 · 连接 Profile · 自启 · 密钥存 Credential Manager · **记忆面板与审批界面** · **档位切换 UI**
+
+- [ ] **★ `external` provider 的凭据存 Credential Manager** —— **这是 `external` 接入的前置**
+  (不写死这条的话,P3 期间某个「先跑通」的实现会把它写进一个 `.env`,
+   而 `**/.env` 恰在 §6.7.4 硬禁止清单里 —— 连事后审计都看不见)
 
 ### P8 · ★ 常驻助手 Vigil
 
