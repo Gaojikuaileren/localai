@@ -194,31 +194,65 @@ if (-not $DryRun) {
         Write-Host ''
         Write-Host '生成校验清单...' -ForegroundColor Cyan
         $hashOut = Join-Path $dest 'SHA256SUMS.txt'
-        Get-ChildItem $dest -Recurse -File -Force |
+
+        # 格式必须与 GNU coreutils 的 sha256sum 兼容:
+        #   无 BOM · LF 行尾 · 正斜杠路径 · 哈希与路径间两个空格
+        # 理由:灾难恢复时可能只有 Linux live USB 或 WSL 可用(Windows 起不来正是
+        # 备份要应对的场景)。若清单只能被 PowerShell 读,就把恢复路径限死在
+        # 「Windows 还能启动」这个前提上。
+        $lines = Get-ChildItem $dest -Recurse -File -Force |
             Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
             ForEach-Object {
-                '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(),
-                              $_.FullName.Substring($dest.Length).TrimStart('\')
-            } | Out-File $hashOut -Encoding utf8
-        $n = (Get-Content $hashOut | Measure-Object -Line).Lines
-        Write-Host "  $n 个文件已记录哈希"
-        $report.Add("- 校验: SHA256SUMS.txt,$n 个文件")
+                $rel = $_.FullName.Substring($dest.Length).TrimStart('\').Replace('\', '/')
+                '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $rel
+            }
+
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($hashOut, (($lines -join "`n") + "`n"), $utf8NoBom)
+
+        $n = @($lines).Count
+        Write-Host "  $n 个文件已记录哈希(sha256sum -c 兼容格式)"
+        $report.Add("- 校验: SHA256SUMS.txt,$n 个文件(GNU sha256sum 兼容)")
     }
 
     $report.Add('')
     $report.Add('## 恢复')
+    $report.Add('')
+    $report.Add('### 1. 先校验完整性')
+    $report.Add('```bash')
+    $report.Add('# Linux / WSL / Git Bash —— 清单是 GNU sha256sum 兼容格式')
+    $report.Add('cd <本备份集目录> && sha256sum -c SHA256SUMS.txt')
     $report.Add('```')
-    $report.Add('# 代码')
-    $report.Add('git clone code.bundle <目标目录>')
-    $report.Add('# state(含记忆库)')
-    $report.Add('robocopy state\ <state 根>\ /E')
-    $report.Add('# 校验')
-    $report.Add('# 逐行比对 SHA256SUMS.txt')
+    $report.Add('```powershell')
+    $report.Add('# Windows PowerShell')
+    $report.Add('Get-Content SHA256SUMS.txt | ForEach-Object {')
+    $report.Add('    $h,$p = $_ -split "  ",2')
+    $report.Add('    $a = (Get-FileHash $p.Replace("/","\") -Algorithm SHA256).Hash.ToLower()')
+    $report.Add('    if ($a -ne $h) { "MISMATCH: $p" }')
+    $report.Add('}')
     $report.Add('```')
     $report.Add('')
-    $report.Add('> v2.1 §8.5 铁律 3:没演练过的备份不算备份。')
+    $report.Add('### 2. 恢复代码')
+    $report.Add('```bash')
+    $report.Add('git clone code.bundle <目标目录>    # bundle 含全部分支与历史')
+    $report.Add('```')
+    $report.Add('恢复后可比对 `git rev-parse HEAD^{tree}` 与原仓库是否一致。')
+    $report.Add('')
+    $report.Add('### 3. 恢复 state(含记忆库)')
+    $report.Add('```')
+    $report.Add('robocopy state\ <state 根>\ /E')
+    $report.Add('```')
+    $report.Add('')
+    $report.Add('### 4. 模型')
+    $report.Add('本备份**不含模型权重本体**,只有 `models-manifest.json`(路径 + 大小 + sha256)。')
+    $report.Add('按清单重新下载,再逐个比对 sha256。')
+    $report.Add('')
+    $report.Add('> v2.1 §8.5 铁律 3:**没演练过的备份不算备份。**')
     $report.Add('> P3 记忆系统上线前须跑通一次完整恢复,此后每季度一次。')
-    $report | Out-File (Join-Path $dest 'BACKUP-REPORT.md') -Encoding utf8
+
+    $utf8NoBomR = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText((Join-Path $dest 'BACKUP-REPORT.md'),
+                                   (($report -join "`n") + "`n"), $utf8NoBomR)
 
     Write-Host ''
     Write-Host "完成 -> $dest" -ForegroundColor Green

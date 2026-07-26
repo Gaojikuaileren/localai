@@ -97,6 +97,74 @@ P3 上线后若出现「想不起上次备份是什么时候」的情况,应改�
 
 ---
 
+## 2026-07-26 · 关闭 NVIDIA App / ShadowPlay 常驻
+
+**背景**
+CUDA 默认安装附带了 NVIDIA App · ShadowPlay · FrameView · Telemetry 等,常驻 3 个
+`nvcontainer` 进程。你于 2026-07-26 指示关闭。
+
+**决定**
+停止并禁用 `NvContainerLocalSystem`(NVIDIA App / ShadowPlay 的容器),
+同时禁用 `NVIDIA App SelfUpdate` 计划任务(否则自动更新会把服务重新拉起)。
+**保留 `NVDisplay.ContainerLocalSystem`** —— 那是驱动核心,负责控制面板与显示配置。
+
+**回归验证**
+`nvidia-smi` 正常 · torch `available=True` · capability `(12,0)` ·
+之前编译的 sm_120 kernel 重跑通过。驱动功能零影响。
+
+**⚠ 实测修正了一个我此前给出的错误暗示**
+
+```
+关闭前: nvcontainer 3 进程 · 188.8 MB 内存 · 显存 737 MiB
+关闭后: nvcontainer 0 进程 ·   0.0 MB 内存 · 显存 737 MiB   ← 未变
+```
+
+我此前说「对显存吃紧的项目,ShadowPlay 与 NVIDIA App 值得关」——**它们占系统内存,
+不占显存**。实测占显存的全是 GUI 程序(dwm.exe / explorer / SearchHost / LGHUB /
+EdgeWebView,乃至 AMD 自己的 RadeonSoftware),因为**显示器接在独显上,所有 GUI 渲染都落在独显**。
+
+**因此本条决策的净收益是 188.8 MB 系统内存 + 少 3 个进程,显存收益为零。**
+同时这强化了 P0-4(改接核显)的理由:那是唯一能真正腾出显存的手段。
+
+**代价**
+ShadowPlay(即时重放 / 游戏录制)与游戏内覆盖不可用;NVIDIA App 打不开。
+**驱动设置仍可通过 NVIDIA 控制面板调整。**
+
+**推翻条件**
+若你要用 ShadowPlay 录游戏:
+
+```powershell
+Set-Service -Name NvContainerLocalSystem -StartupType Automatic
+Start-Service -Name NvContainerLocalSystem
+Enable-ScheduledTask -TaskName "NVIDIA App SelfUpdate_*"
+```
+
+---
+
+## 2026-07-26 · 备份校验清单改为 GNU sha256sum 兼容格式
+
+**背景**
+首次恢复演练时用 `sha256sum -c` 校验备份,**3/3 全部 MISMATCH**;
+改用 PowerShell 比对则 3/3 通过 —— 数据完好,是清单**格式**的问题:
+UTF-8 BOM + CRLF 行尾 + 反斜杠路径。
+
+**为什么必须修**
+灾难恢复的典型场景就是 Windows 起不来。那时只有 Linux live USB 或 WSL 可用,
+`sha256sum -c` 是最自然的校验方式。清单只能被 PowerShell 读,
+等于**把恢复路径限死在「Windows 还能启动」这个前提上** —— 而这正是备份要应对的场景。
+
+**决定**
+`SHA256SUMS.txt` 改为:无 BOM · LF 行尾 · 正斜杠路径 · 哈希与路径间两个空格。
+`BACKUP-REPORT.md` 同改为无 BOM,并补齐两套校验命令(bash / PowerShell)与四步恢复流程。
+
+**复验**
+`sha256sum -c` 3 个全 OK 退出码 0;`git clone code.bundle` 后 HEAD tree 哈希与原仓库一致。
+
+**推翻条件**
+不适用 —— 兼容标准格式没有下行风险。
+
+---
+
 ## 2026-07-26 · 显卡驱动由 596.36 升级到 610.62（未预期的变更）
 
 **背景**
@@ -154,19 +222,31 @@ STATE.md 原有阻塞项:「`cmake` 不在系统 PATH」。最直接的解法是
 
 ---
 
-## 2026-07-26 · `cache/hf` 排除出 GC 自动清理（待你确认）
+## 2026-07-26 · `cache/hf` 排除出 GC 自动清理 ✅ 已确认并写回方案书
 
 **背景**
 v2.1 §8.4 定义 CACHE 是「唯一可静默清理的根」,85% 水位自动清空。
 但 HF 缓存虽然语义上可重建,重获成本高:动辄十几 GB,仅 WiFi 866Mbps,
 且部分模型将来可能从 HF 下架。
 
-**决定（暂行）**
+**决定**
 `paths.toml` 中设 `[gc].hf_cache_auto_purge = false`,把 `cache/hf` 排除出自动清理,
-改为在模型管家(§5.3)中按「重获成本」字段提示。
+改为在模型管家(§5.3)中按「最后使用时间 + 重获成本」提示,遵循 MODELS 根的同一原则
+——**只提示,不自动删**。
 
 **状态**
-⚠ **暂行,待你确认后写回方案书 §8.4。** 这是对方案书既定策略的偏离,不应由我单方面固化。
+✅ 你已于 2026-07-26 确认,已写回方案书 **§8.4.1**。
+
+**补充的论证**(写回文档时补上的)
+GC 策略的分界不该只看「能不能重建」,还要看「重建的代价」:
+
+| | 一般缓存(torch / pip / tmp) | `cache/hf` |
+|---|---|---|
+| 体积 | 几 GB | 十几到几十 GB |
+| 重建耗时 | 秒到分钟 | **实测 ~11 MB/s,17GB 约 27 分钟** |
+| 能否重建 | 一定能 | **不一定** —— 模型可能下架或改许可 |
+
+一个能重建但要花半小时且可能失败的东西,不该被静默删除。
 
 **推翻条件**
 若实际使用中 `cache/hf` 增长失控而磁盘吃紧,应改为「按 last_accessed 分级清理」而非全清或不清。
