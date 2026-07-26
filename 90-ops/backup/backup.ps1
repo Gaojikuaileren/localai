@@ -3,7 +3,7 @@
     本地 AI 中枢 — 手动备份脚本
 
 .DESCRIPTION
-    对应方案书 v2.1 §8.5「备份与灾难恢复」。
+    对应方案书 v2.2 §8.5「备份与灾难恢复」。
 
     手动触发式:你决定什么时候插上移动固态并运行,
     脚本负责一致性 —— 排除规则、清单、SHA256 校验、报告。
@@ -292,7 +292,7 @@ if (-not $DryRun) {
     $report.Add('本备份**不含模型权重本体**,只有 `models-manifest.json`(路径 + 大小 + sha256)。')
     $report.Add('按清单重新下载,再逐个比对 sha256。')
     $report.Add('')
-    $report.Add('> v2.1 §8.5 铁律 3:**没演练过的备份不算备份。**')
+    $report.Add('> v2.2 §8.5 铁律 3:**没演练过的备份不算备份。**')
     $report.Add('> P3 记忆系统上线前须跑通一次完整恢复,此后每季度一次。')
 
     $utf8NoBomR = New-Object System.Text.UTF8Encoding $false
@@ -306,7 +306,7 @@ if (-not $DryRun) {
     Write-Host '[DryRun] 结束,未写入任何文件。' -ForegroundColor Yellow
 }
 
-# --- 保留策略 — v2.1 §8.5.2 -------------------------------------------------
+# --- 保留策略 — v2.2 §8.5.2 -------------------------------------------------
 # 只报告,不自动删。与 §8.4 GC 的原则一致:除 CACHE 根外一律先报告后执行。
 $keepLast = 12
 if ($P['backup.keep_last']) { $keepLast = [int]$P['backup.keep_last'] }
