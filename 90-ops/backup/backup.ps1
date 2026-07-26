@@ -111,9 +111,10 @@ if ($null -ne $diskTarget -and ($diskTarget -eq $diskState -or $diskTarget -eq $
     throw "拒绝执行:备份目标与源数据在同一块物理盘 (Disk $diskTarget)。同盘备份等于没备份。"
 }
 
-# --- 加密闸门 — §8.5 铁律 1 ------------------------------------------------
-# 此前这里是 Write-Warning 后继续,净效果是铁律 1 的生效率为 0。
-# 改为**拒绝执行**,只留一个带审计痕迹的逃生口。
+# --- 介质加密检查 — §8.5 ----------------------------------------------------
+# 是否强制由 paths.toml 的 [backup].require_encryption 决定(D21:默认 false)。
+# ★ 这里只管**介质**。记忆库本身在 BitLocker VHDX 内,决定它是否明文的是
+#   备份方式(文件 vs 挂载卷内容),不是这个检查。见 §8.5.4。
 $tLetter = ($Target -replace '^([A-Za-z]):.*$', '$1')
 $encStatus = 'unknown'
 try {
@@ -123,35 +124,23 @@ try {
     $encStatus = 'unreadable'
 }
 
+$requireEnc = $false
+if ($P['backup.require_encryption']) {
+    $requireEnc = ($P['backup.require_encryption'] -match '^(?i:true|1|yes)$')
+}
+
 if ($encStatus -eq 'On') {
-    Write-Host "  加密      : BitLocker 已启用 ✓" -ForegroundColor Green
-} else {
-    $why = if ($encStatus -eq 'unreadable') {
-        "无法读取目标盘的 BitLocker 状态(可能非 NTFS 或权限不足)"
-    } else {
-        "目标盘 ${tLetter}: 未启用 BitLocker(ProtectionStatus=$encStatus)"
-    }
+    Write-Host "  介质加密  : BitLocker 已启用 ✓" -ForegroundColor Green
+} elseif ($requireEnc -and -not $IAcceptUnencryptedTarget) {
+    throw @"
+拒绝执行:目标盘 ${tLetter}: 未启用 BitLocker,而 paths.toml 的
+[backup].require_encryption = true。
 
-    if (-not $IAcceptUnencryptedTarget) {
-        throw @"
-拒绝执行:$why。
-
-v2.1 §8.5 铁律 1:**备份必须加密**,否则备份就是绕过加密卷的后门。
-记忆库(P3 起)是全项目唯一不可重建的数据,把它明文放在一块会被随身带走的
-移动固态上,等于把加密卷这件事整个作废。
-
-请先对目标盘启用 BitLocker To Go:
-  资源管理器右键 ${tLetter}: -> 启用 BitLocker -> 用密码解锁
-  ★ 恢复密钥离线保管两份,不同物理位置,**绝不与被加密数据同盘**(§8.5 铁律 2)
-
-确需在未加密目标上备份(不建议),显式加开关:
+改用未加密介质:把该项设为 false;或本次显式放行:
   .\backup.ps1 -Target '$Target' -IAcceptUnencryptedTarget
-该开关会写入审计日志与备份报告。
 "@
-    }
-
-    Write-Warning "$why —— 已由 -IAcceptUnencryptedTarget 放行。本次备份为**明文**。"
-    Write-Warning "此事已记入备份报告与审计日志。"
+} else {
+    Write-Host "  介质加密  : 未启用(按 D21 允许)" -ForegroundColor DarkGray
 }
 
 $dest = Join-Path $Target $stamp
@@ -164,11 +153,12 @@ $report.Add("# 备份报告 $stamp")
 $report.Add('')
 $report.Add("目标: $dest")
 if ($encStatus -eq 'On') {
-    $report.Add('加密: BitLocker 已启用')
+    $report.Add('介质加密: BitLocker 已启用')
 } else {
-    $report.Add("**⚠ 加密: 未启用(ProtectionStatus=$encStatus)。本备份集为明文。**")
-    $report.Add('**经 `-IAcceptUnencryptedTarget` 显式放行,违反 v2.1 §8.5 铁律 1。**')
-    $report.Add('**处置:对目标盘启用 BitLocker To Go 后重做备份,本集按已泄露面安全擦除。**')
+    $report.Add("介质加密: **未启用**(ProtectionStatus=$encStatus)。按决议 D21,这是预期行为。")
+    $report.Add('')
+    $report.Add('> 本备份集中,除 `memory.vhdx` 外的内容在介质上是**明文**。')
+    $report.Add('> `memory.vhdx` 若以文件形式备份,其内部仍受 BitLocker 保护(见 §8.5.4)。')
 }
 $report.Add('')
 $report.Add('排除项: `state\quarantine`(隔离区装的是打算删除的数据,不应进备份代)')
