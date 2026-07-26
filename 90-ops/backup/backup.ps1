@@ -24,16 +24,23 @@
 .PARAMETER SkipHash
     跳过 SHA256 校验(快,但违反「没演练过的备份不算备份」的精神,仅用于赶时间)。
 
+.PARAMETER PruneOld
+    删除超出保留数(paths.toml 的 [backup].keep_last)的旧备份集。
+    不加此开关时,脚本只**报告**哪些超出保留策略,不删任何东西 ——
+    与 §8.4 GC 的原则一致:除 CACHE 根外一律先报告后执行。
+
 .EXAMPLE
     .\backup.ps1 -Target <盘符>:\localAI-backup -DryRun
     .\backup.ps1 -Target <盘符>:\localAI-backup
+    .\backup.ps1 -Target <盘符>:\localAI-backup -PruneOld
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Target,
     [switch]$DryRun,
-    [switch]$SkipHash
+    [switch]$SkipHash,
+    [switch]$PruneOld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -259,4 +266,43 @@ if (-not $DryRun) {
 } else {
     Write-Host ''
     Write-Host '[DryRun] 结束,未写入任何文件。' -ForegroundColor Yellow
+}
+
+# --- 保留策略 — v2.1 §8.5.2 -------------------------------------------------
+# 只报告,不自动删。与 §8.4 GC 的原则一致:除 CACHE 根外一律先报告后执行。
+$keepLast = 12
+if ($P['backup.keep_last']) { $keepLast = [int]$P['backup.keep_last'] }
+
+$sets = @(Get-ChildItem $Target -Directory -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{4}$' } |
+          Sort-Object Name -Descending)
+
+Write-Host ''
+Write-Host ("备份集: {0} 个,保留策略 keep_last = {1}" -f $sets.Count, $keepLast) -ForegroundColor Cyan
+
+if ($sets.Count -gt $keepLast) {
+    $stale = $sets[$keepLast..($sets.Count - 1)]
+    $staleBytes = 0
+    foreach ($s in $stale) {
+        $staleBytes += (Get-ChildItem $s.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                        Measure-Object Length -Sum).Sum
+    }
+    Write-Host ("  超出保留策略: {0} 个,共 {1:N2} GB" -f $stale.Count, ($staleBytes / 1GB)) -ForegroundColor Yellow
+    foreach ($s in $stale) { Write-Host "    $($s.Name)" -ForegroundColor DarkGray }
+
+    if ($PruneOld) {
+        if ($DryRun) {
+            Write-Host '  [DryRun] 未删除。' -ForegroundColor Yellow
+        } else {
+            foreach ($s in $stale) {
+                Remove-Item -LiteralPath $s.FullName -Recurse -Force
+                Write-Host "    已删除 $($s.Name)" -ForegroundColor Green
+            }
+            Write-Host ("  释放 {0:N2} GB" -f ($staleBytes / 1GB)) -ForegroundColor Green
+        }
+    } else {
+        Write-Host '  未删除 —— 加 -PruneOld 才执行清理(先报告后执行,§8.4)' -ForegroundColor Yellow
+    }
+} else {
+    Write-Host '  未超出保留策略,无需清理。'
 }
