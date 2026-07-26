@@ -119,6 +119,7 @@ P0 验收标准三项全部满足:
 | ComfyUI | `D:\ComfyUI` · models 61 files / 16.92 GB · **`extra_model_paths.yaml` 未配置** | 2026-07-26 |
 | NVIDIA 常驻 | **已关闭**。`NvContainerLocalSystem` Disabled · SelfUpdate 任务 Disabled · 驱动核心服务保留 | 2026-07-26 |
 | **记忆库形态** | **普通文件夹 D:\AI\state\memory\,不加密(D22)**。P3a 创建 | 2026-07-26 |
+| **剪贴板** | **历史与跨设备同步均已关闭**(实测 `IsHistoryEnabled()=False` / `IsRoamingEnabled()=False`)。⚠ 策略层未配置 —— 这是用户设置,可被任何以你身份运行的程序重新打开 | 2026-07-26 |
 | 主板 | ASUS PRIME X870-P WIFI · 尚有 2 个空 M.2 插槽 | 2026-07-26 |
 
 ---

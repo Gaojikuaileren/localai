@@ -925,7 +925,9 @@ Thing "德国工资账户"
 
 - 控件**禁用粘贴**;若必须支持,粘贴后立即 `EmptyClipboard`,并对自身写入的内容附加
   `ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory=0`
-- **P2 验收项**:检查 Windows 剪贴板历史与跨设备同步状态(两者默认关闭)。**不合规时凭证控件 fail-closed**
+- **P2 验收项**:检查 Windows 剪贴板历史与跨设备同步状态。**不合规时凭证控件 fail-closed**
+  > **2026-07-26 实测已关闭**(`IsHistoryEnabled()=False` / `IsRoamingEnabled()=False`)。
+  > ⚠ 但策略层未配置 —— 这是用户设置,可被改回。**P2 时必须复检,不能沿用本次结论。**
 - **§4.11.5 明文例外条款新增「剪贴板历史及其云同步」** —— 它按 D2 判据构成出境,
   而现在处于「未提及」状态。**未提及比明文接受更危险。**
 
