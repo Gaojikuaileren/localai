@@ -1,0 +1,228 @@
+<#
+.SYNOPSIS
+    本地 AI 中枢 — 手动备份脚本
+
+.DESCRIPTION
+    对应方案书 v2.1 §8.5「备份与灾难恢复」。
+
+    手动触发式:你决定什么时候插上移动固态并运行,
+    脚本负责一致性 —— 排除规则、清单、SHA256 校验、报告。
+
+    备份矩阵(§8.5.2):
+      state       全量      记忆库、数据库、票据、日志 —— 唯一不可重建的数据
+      assets\adopted 全量   你标记为要用的产物
+      code        git bundle(完整仓库快照,含全部历史)
+      models      只备清单  权重可重新下载;备份「清单 + 哈希 + 来源」即可
+      assets\draft / exported / cache   不备份
+
+.PARAMETER Target
+    备份目标目录,通常在移动固态上。例:<盘符>:\localAI-backup
+
+.PARAMETER DryRun
+    只输出将要做什么,不实际复制。
+
+.PARAMETER SkipHash
+    跳过 SHA256 校验(快,但违反「没演练过的备份不算备份」的精神,仅用于赶时间)。
+
+.EXAMPLE
+    .\backup.ps1 -Target <盘符>:\localAI-backup -DryRun
+    .\backup.ps1 -Target <盘符>:\localAI-backup
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$Target,
+    [switch]$DryRun,
+    [switch]$SkipHash
+)
+
+$ErrorActionPreference = 'Stop'
+$stamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
+
+# --- 定位仓库与配置(全部相对路径 — §11.1 禁止硬编码绝对路径)-----------------
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$repoRoot  = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
+$tomlPath  = Join-Path $repoRoot 'config\paths.toml'
+
+if (-not (Test-Path $tomlPath)) {
+    throw "找不到路径配置源: $tomlPath"
+}
+
+# --- 极简 TOML 读取(只认 key = 'value' 形式的字面字符串)---------------------
+function Read-PathsToml {
+    param([string]$Path)
+    $map = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $l = $line.Trim()
+        if ($l -eq '' -or $l.StartsWith('#')) { continue }
+        if ($l -match '^\[([^\]]+)\]') { $section = $Matches[1]; continue }
+        if ($l -match "^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*'([^']*)'") {
+            $map["$section.$($Matches[1])"] = $Matches[2]
+        }
+    }
+    return $map
+}
+
+$P = Read-PathsToml -Path $tomlPath
+$rootCode   = $P['roots.code']
+$rootState  = $P['roots.state']
+$rootModels = $P['roots.models']
+$adopted    = $P['assets.adopted']
+
+foreach ($k in @('roots.code','roots.state','roots.models','assets.adopted')) {
+    if (-not $P[$k]) { throw "paths.toml 缺少 $k" }
+}
+
+# --- 安全检查:目标不得与数据同一块物理盘 ------------------------------------
+function Get-DiskNumberOf {
+    param([string]$PathValue)
+    $letter = ($PathValue -replace '^([A-Za-z]):.*$', '$1')
+    if ($letter.Length -ne 1) { return $null }
+    try { return (Get-Partition -DriveLetter $letter -ErrorAction Stop).DiskNumber }
+    catch { return $null }
+}
+
+$diskTarget = Get-DiskNumberOf $Target
+$diskState  = Get-DiskNumberOf $rootState
+$diskCode   = Get-DiskNumberOf $rootCode
+
+Write-Host "本地 AI 中枢 — 备份  $stamp" -ForegroundColor Cyan
+Write-Host ("  目标      : {0}  (Disk {1})" -f $Target, $diskTarget)
+Write-Host ("  state 根  : {0}  (Disk {1})" -f $rootState, $diskState)
+Write-Host ("  code  根  : {0}  (Disk {1})" -f $rootCode,  $diskCode)
+Write-Host ''
+
+if ($null -ne $diskTarget -and ($diskTarget -eq $diskState -or $diskTarget -eq $diskCode)) {
+    throw "拒绝执行:备份目标与源数据在同一块物理盘 (Disk $diskTarget)。同盘备份等于没备份。"
+}
+
+# BitLocker 状态(§8.5 铁律 1:备份必须加密)
+$tLetter = ($Target -replace '^([A-Za-z]):.*$', '$1')
+try {
+    $bl = Get-BitLockerVolume -MountPoint "${tLetter}:" -ErrorAction Stop
+    if ($bl.ProtectionStatus -ne 'On') {
+        Write-Warning "目标盘未启用 BitLocker。v2.1 §8.5 铁律 1:备份必须加密,否则备份就是绕过加密卷的后门。"
+        Write-Warning "建议对移动固态启用 BitLocker To Go 后再备份。"
+    } else {
+        Write-Host "  加密      : BitLocker 已启用 ✓" -ForegroundColor Green
+    }
+} catch {
+    Write-Warning "无法读取目标盘的 BitLocker 状态(可能非 NTFS 或权限不足)。请自行确认备份介质已加密。"
+}
+
+$dest = Join-Path $Target $stamp
+Write-Host ''
+if ($DryRun) { Write-Host '[DryRun] 以下动作不会实际执行' -ForegroundColor Yellow }
+
+# --- 执行 ---------------------------------------------------------------------
+$report = [System.Collections.Generic.List[string]]::new()
+$report.Add("# 备份报告 $stamp")
+$report.Add('')
+$report.Add("目标: $dest")
+$report.Add('')
+
+function Copy-Root {
+    param([string]$Name, [string]$Source, [string[]]$ExcludeDir = @())
+    if (-not (Test-Path $Source)) {
+        Write-Host ("  {0,-16} 源不存在,跳过" -f $Name) -ForegroundColor DarkGray
+        $script:report.Add("- **$Name**: 源不存在,跳过")
+        return
+    }
+    $files = Get-ChildItem $Source -Recurse -File -Force -ErrorAction SilentlyContinue |
+             Where-Object { $p = $_.FullName; -not ($ExcludeDir | Where-Object { $p -like "*\$_\*" }) }
+    $sum = ($files | Measure-Object Length -Sum).Sum
+    $gb  = [math]::Round(($sum / 1GB), 2)
+    Write-Host ("  {0,-16} {1,6} files  {2,8} GB" -f $Name, $files.Count, $gb)
+    $report.Add("- **$Name**: $($files.Count) files, $gb GB")
+
+    if (-not $DryRun) {
+        $to = Join-Path $dest $Name
+        New-Item -ItemType Directory -Force -Path $to | Out-Null
+        $roboArgs = @($Source, $to, '/E', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+        foreach ($x in $ExcludeDir) { $roboArgs += @('/XD', $x) }
+        & robocopy @roboArgs | Out-Null
+        # robocopy 退出码 <8 表示成功
+        if ($LASTEXITCODE -ge 8) { throw "robocopy 失败 ($Name),退出码 $LASTEXITCODE" }
+    }
+}
+
+Write-Host '内容:' -ForegroundColor Cyan
+
+# 1. STATE — 全量。唯一不可重建的数据
+Copy-Root -Name 'state' -Source $rootState
+
+# 2. ASSETS/adopted — 你标记为要用的
+Copy-Root -Name 'assets-adopted' -Source $adopted
+
+# 3. CODE — git bundle(完整历史,单文件,自带校验)
+if (Test-Path (Join-Path $rootCode '.git')) {
+    Write-Host ("  {0,-16} git bundle" -f 'code')
+    if (-not $DryRun) {
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        Push-Location $rootCode
+        & git bundle create (Join-Path $dest 'code.bundle') --all 2>&1 | Out-Null
+        Pop-Location
+    }
+    $report.Add('- **code**: git bundle (--all,含全部分支与历史)')
+} else {
+    Write-Host ("  {0,-16} 非 git 仓库,改为整目录复制" -f 'code') -ForegroundColor Yellow
+    Copy-Root -Name 'code' -Source $rootCode -ExcludeDir @('node_modules','venv','.venv','target','__pycache__')
+}
+
+# 4. MODELS — 只备清单(权重可重新下载;§8.5.2)
+Write-Host ("  {0,-16} 只备清单" -f 'models')
+if (-not $DryRun) {
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    $manifest = @()
+    if (Test-Path $rootModels) {
+        $manifest = Get-ChildItem $rootModels -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            [PSCustomObject]@{
+                rel    = $_.FullName.Substring($rootModels.Length).TrimStart('\')
+                bytes  = $_.Length
+                sha256 = if ($SkipHash) { $null } else { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
+            }
+        }
+    }
+    $manifest | ConvertTo-Json -Depth 3 | Out-File (Join-Path $dest 'models-manifest.json') -Encoding utf8
+    $report.Add("- **models**: 清单 $($manifest.Count) 条(路径 + 大小" + $(if ($SkipHash) { '' } else { ' + sha256' }) + ")")
+}
+
+# --- 校验与报告 ---------------------------------------------------------------
+if (-not $DryRun) {
+    if (-not $SkipHash) {
+        Write-Host ''
+        Write-Host '生成校验清单...' -ForegroundColor Cyan
+        $hashOut = Join-Path $dest 'SHA256SUMS.txt'
+        Get-ChildItem $dest -Recurse -File -Force |
+            Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
+            ForEach-Object {
+                '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(),
+                              $_.FullName.Substring($dest.Length).TrimStart('\')
+            } | Out-File $hashOut -Encoding utf8
+        $n = (Get-Content $hashOut | Measure-Object -Line).Lines
+        Write-Host "  $n 个文件已记录哈希"
+        $report.Add("- 校验: SHA256SUMS.txt,$n 个文件")
+    }
+
+    $report.Add('')
+    $report.Add('## 恢复')
+    $report.Add('```')
+    $report.Add('# 代码')
+    $report.Add('git clone code.bundle <目标目录>')
+    $report.Add('# state(含记忆库)')
+    $report.Add('robocopy state\ <state 根>\ /E')
+    $report.Add('# 校验')
+    $report.Add('# 逐行比对 SHA256SUMS.txt')
+    $report.Add('```')
+    $report.Add('')
+    $report.Add('> v2.1 §8.5 铁律 3:没演练过的备份不算备份。')
+    $report.Add('> P3 记忆系统上线前须跑通一次完整恢复,此后每季度一次。')
+    $report | Out-File (Join-Path $dest 'BACKUP-REPORT.md') -Encoding utf8
+
+    Write-Host ''
+    Write-Host "完成 -> $dest" -ForegroundColor Green
+} else {
+    Write-Host ''
+    Write-Host '[DryRun] 结束,未写入任何文件。' -ForegroundColor Yellow
+}

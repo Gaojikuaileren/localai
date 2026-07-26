@@ -1,0 +1,57 @@
+#!/bin/sh
+# =============================================================================
+#  pre-commit — 绝对路径检查
+#  方案书 v2.1 §11.1 路径契约第 1 条:
+#    「禁止任何绝对路径出现在代码里,pre-commit 钩子 grep 到 E:\ / D:\ 即拒绝提交」
+#
+#  安装(仓库内一次性):
+#    git config core.hooksPath .githooks
+# =============================================================================
+
+fail=0
+
+# 允许含绝对路径的文件:唯一路径配置源、文档、钩子自身
+is_exempt() {
+  case "$1" in
+    config/paths.toml)   return 0 ;;
+    00-docs/*)           return 0 ;;
+    .githooks/*)         return 0 ;;
+    .gitignore)          return 0 ;;
+    *.md)                return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  if is_exempt "$f"; then
+    continue
+  fi
+
+  # -I 跳过二进制;匹配 X:\ 或 X:/ 形式的盘符路径
+  hits=$(git show ":$f" 2>/dev/null | grep -nIE '[A-Za-z]:[\\/]' | head -5)
+  if [ -n "$hits" ]; then
+    echo "✗ 绝对路径: $f"
+    echo "$hits" | sed 's/^/      /'
+    fail=1
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then
+  cat <<'EOF'
+
+────────────────────────────────────────────────────────────
+提交被拒绝 — 方案书 v2.1 §11.1:代码中禁止出现绝对路径。
+
+  路径一律从 config/paths.toml 读取。
+  数据库存 {root, rel} 二元组,不存绝对路径。
+
+  这条规则的意义:换 SSD 时只改 paths.toml 一个文件,
+  而不是把 250GB+ 的整个项目搬一遍再逐个验证路径。
+
+确需绕过(不建议):  git commit --no-verify
+────────────────────────────────────────────────────────────
+EOF
+  exit 1
+fi
+
+exit 0
