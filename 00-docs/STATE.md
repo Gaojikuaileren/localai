@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-27 16:30
+> 更新时间: 2026-07-27 17:30
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 
@@ -172,7 +172,7 @@ speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
 **P2 进行中**:✅ **命名决定完成**(tailnet `tail71cfd7.ts.net` · 机器名 `hongkongpingpong` · RP ID `tail71cfd7.ts.net` · D28 本机走 OS 信任)。Tailscale 客户端已装并登录(GitHub)。
 **P2 进度**:✅ 命名决定 · ✅ **统一入口网关**(别名层,自写非 LiteLLM,D29)—— 端到端测通:
 `assistant.fast`→8B 后端、契约回写、503带缺口、404。安全层 STUB 标注未实装。
-**P2 进度续**:✅ **PostgreSQL 18**(SSPI · ai-mem · 隔离实证)· 下一步 Qdrant×2 · 然后 schema/E1。原下一步:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· ✅ **账户隔离**(ai-mem/asset/exec 建成 + memory 目录 Deny ACL,核验通过)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
+**P2 进度续**:✅ **PostgreSQL 18**(SSPI)· ✅ **Qdrant×2**(mem_main/mem_s2 · key 隔离)—— 记忆库基础设施全就位 · 下一步 PG schema + E1。原下一步:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· ✅ **账户隔离**(ai-mem/asset/exec 建成 + memory 目录 Deny ACL,核验通过)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
 
 |---|---|
 | A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |
