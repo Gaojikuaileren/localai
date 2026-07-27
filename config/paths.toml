@@ -45,6 +45,29 @@ quarantine   = 'D:\AI\state\quarantine'   # delete 的替代品,保留 N 天
 memory       = 'D:\AI\state\memory'       # P3a 创建 · 普通文件夹 · PostgreSQL + Qdrant
                                           # ★ D22:不加密。磁盘与备份盘上均为明文,见 §4.6
 
+# -----------------------------------------------------------------------------
+#  记忆库骨架 — P2/P3a · 见 00-docs/memory-backbone-design.md · 决议 D30
+#  · 全部在 {state}/memory 下,继承已核验的强 ACL(ai-mem FullControl / ai-asset,ai-exec Deny)
+#    —— 二进制也在此根内,把 DLL 投毒面纳入 OS 隔离(复核 isolation 维度要求)
+#  · 扁平唯一键(现有简易解析器只认 key = 'value' 单引号;端口也写成单引号字符串)
+#  · ★ 活库绝不文件级复制(§8.5.5):pg\18\data 与 qdrant*/storage 走 pg_dump / snapshot
+#  · config.yaml 含明文 api_key(S2)→ 靠 NTFS 强 ACL 保护(它在 E: 仓库外,.gitignore 管不到它)
+[memory]
+pg_bin              = 'D:\AI\state\memory\pg\18\bin'
+pg_data             = 'D:\AI\state\memory\pg\18\data'
+pg_port             = '5432'
+qdrant_bin          = 'D:\AI\state\memory\qdrant\bin'              # qdrant.exe(两实例共用)
+qdrant_config       = 'D:\AI\state\memory\qdrant\config\config.yaml'
+qdrant_storage      = 'D:\AI\state\memory\qdrant\storage'
+qdrant_snapshots    = 'D:\AI\state\memory\qdrant\snapshots'
+qdrant_http_port    = '6333'
+qdrant_grpc_port    = '6334'
+qdrant_s2_config    = 'D:\AI\state\memory\qdrant-s2\config\config.yaml'
+qdrant_s2_storage   = 'D:\AI\state\memory\qdrant-s2\storage'
+qdrant_s2_snapshots = 'D:\AI\state\memory\qdrant-s2\snapshots'
+qdrant_s2_http_port = '6335'   # mem_s2 独立端口(§4.11.4)· S2 机密 · local 独有
+qdrant_s2_grpc_port = '6336'
+
 [external]
 comfyui = 'D:\ComfyUI'   # 保持原位,经 extra_model_paths.yaml 挂接(P8)
 

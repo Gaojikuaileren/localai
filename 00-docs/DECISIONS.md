@@ -808,3 +808,36 @@ py3.12/Windows 无预编译 wheel,`--only-binary` 亦不成,装不动(不值得�
 **推翻条件**
 若将来 `escalate.cloud` 要接很多云端 provider 且各家 API 差异大,
 可把 LiteLLM 作为**内部库**用于云端 provider 归一化(而非主网关)。主网关始终自写。
+
+---
+
+## 2026-07-27 · D30 · 记忆库骨架落地设计(含安全模型纠正)
+
+**背景**
+P2 开始装记忆库(PostgreSQL + Qdrant)。用工作流(据方案书 + 联网调研 + 三维对抗性核验)出方案,
+核验抓到草案把安全模型弄反了 —— 在写任何脚本前拦下。全文见 `00-docs/memory-backbone-design.md`。
+
+**决定(四项)**
+1. **PG 认证走 SSPI**(非 SCRAM)。把 DB 连接绑到 Windows 账户 SID,`ai-mem→mem_rw`/`ai-mem→postgres` 经 pg_ident 映射。
+   —— 用户拍板。
+2. **mem_s2 用双 Qdrant 实例 / 双端口**(6333 mem_main + 6335 mem_s2),忠于 §4.11.4「独立 loopback 端口」。
+   —— 用户拍板(选了更严的结构级隔离)。
+3. **crypto_tier 建成可空预留列**(D22 停了加密,不能 NOT NULL 逼填空值)。—— Claude 定。
+4. **L4 程序记忆 = git + 独立签名 + PG 轻量登记表**(代码不进 PG)。—— Claude 定。
+
+**★ 核心纠正:运行时隔离 ≠ NTFS ACL**
+草案(及现网关 `classify_caller`)把「回环绑定 + NTFS Deny ACL」当运行时主防线。**错**:
+Windows 的 127.0.0.1 对本机任意账户开放,无 per-user socket ACL —— ai-asset 能直接连 PG/Qdrant 端口。
+NTFS Deny ACL 只挡静态文件,对活 socket 零作用。纯 SCRAM 下唯一真屏障就是共享口令(且逼着存磁盘明文,反 D22)。
+**修法 = §6.8 原本要求、草案偷偷丢掉的 SSPI**:绑 OS 身份,ai-asset 拿到口令也连不上,且彻底不存 DB 口令。
+Qdrant 无 SSPI 等价物 → 屏障只能是 api_key,只能 ai-mem 进程持有;网关/memory-service 必须认调用方 SID
+(现网关「回环即放行」是混淆代理漏洞,随其实装补)。
+
+**其他并入的复核修正**:PG18 用 ZIP 二进制手动 initdb(避 EDB GUI 的 GBK 编码 bug)· Qdrant 官方原生 Windows
+二进制 + NSSM(非 Docker,否则绕开 OS 隔离)· pgvector 不装(Qdrant 管全部向量)· 全部在 {state}/memory 强 ACL 内
+(二进制也在内 → 防 DLL 投毒)· 命令行不过明文密码 · 备份 P3a 必修(活库不文件级复制 + 双写一致性 + 密钥不上备份盘)。
+
+**落地物**:config/paths.toml `[memory]` 段(扁平唯一键)· 安装脚本分「用户跑(触碰 $pw)」与「Claude 只读核验」。
+
+**推翻条件**:若 SSPI 在此 standalone 机上有无法绕过的 loopback 认证边缘问题,回退 SCRAM 但须显式记录并把
+DB 口令纳入 Credential Manager/DPAPI(不落明文配置);mem_s2 双实例若运维成本过高可降为单实例双 collection。
