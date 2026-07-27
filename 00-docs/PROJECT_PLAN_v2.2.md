@@ -1187,9 +1187,9 @@ KV 按 `2 × 36层 × 8 KV头 × 128 dim × bytes × ctx` 计(F16=2B / q8_0=1B)�
 | `llm.assistant.8b@32k` | 5.0 | q8:2.48 | 0.4 | **7.19** ★实测(F16 9.23)|
 | `llm.assistant.4b@8k` | 2.5 | q8:0.61 | 0.4 | **3.27** ★实测(F16 3.78)|
 | `llm.assistant.4b@16k` | 2.5 | q8:1.21 | 0.4 | **3.86** ★实测(F16 4.92)|
-| `speech.full` | 实测 | — | — | **待定** ★ ASR:large-v3 **4.05**/turbo **2.07**(实测)· TTS:Piper(CPU,0)或 XTTS(GPU,待装)· 组合待选型 |
+| `speech.full`(large-v3 ASR + Piper CPU TTS) | 实测 | — | — | **4.05** ★实测(large-v3 GPU 4.05 + Piper CPU 0;TTS 首字节 83ms)|
 | `speech.lite`(GPU ASR + CPU TTS) | 实测 | — | — | **2.07** ★实测(turbo ASR 2.07 GPU + Piper CPU 0;原估 1.4 低了)|
-| `speech.cpu` | 0 | — | 0 | **0.0** |
+| `speech.cpu`(CPU ASR + Piper CPU TTS) | 0 | — | 0 | **0.0** ★实测:ASR RTF 0.385 · TTS 83ms |
 | `vlm.small` | 2.5 | — | 0.4 | ~~**3.2**~~ → **实测 4.35**(候选 Qwen2.5-VL-3B,含 mmproj f16 1.25;原估漏算 mmproj)·P1-A2 |
 | **`llm.assistant.30b-a3b@32k`** ★ | **实测** | q8_0 | 含 | **11.9**(ngl 30 · 38% offload · **57.5 tok/s**)|
 | `comfyui.sdxl` | 含 | — | 含 | ~~11.0~~ → **8.14** ★实测(1024²·P1-D1)|
@@ -1304,19 +1304,20 @@ KV 按 `2 × 36层 × 8 KV头 × 128 dim × bytes × ctx` 计(F16=2B / q8_0=1B)�
 
 | 推荐 | 组成 | peak | 可容桌面 | 在 `desktop_floor`=6.6 下 |
 |---|---|---|---|---|
-| **★ 日常** | `8b@16k`+`speech.lite` | **7.32** | 7.80 | ✅ **默认** · 余量 **1.20**(q8_0 后从 0.32 涨到 1.20)|
+| **★ 日常** | `8b@16k`+`speech.lite` | **7.99** | 7.13 | ✅ **默认** · 余量 0.53(speech.lite 实测 2.07)|
 | **★ 长上下文** | `8b@32k`+`speech.cpu` | **7.19** | 7.93 | ✅ 余量 1.33 —— **32K 现在日常可用!** |
-| 省显存 | `8b@8k`+`speech.lite` | 6.71 | 8.41 | ✅ |
+| 省显存 | `8b@8k`+`speech.lite` | 7.38 | 7.74 | ✅ |
 | 让位游戏 | `4b@16k`+`speech.cpu` | 3.86 | 11.26 | ✅ 任何时候 |
 | **出图** | `comfyui.sdxl`+`speech.cpu` | **8.14** | 6.98 | ✅ 余量 0.38 —— **实测,原估 11.0 过订;出图现在也进日常** |
 | **★ 深度(30B)** | `30b-a3b@32k`(ngl 30) | **11.88** | 3.24 | 🔷 deep 专用 · 桌面轻时 **57.5 tok/s**(A3/C3 实测) |
-| 长上下文+语音 | `8b@32k`+`speech.lite` | 8.59 | 6.53 | ⚠ 贴边(需桌面 ≤6.53) |
+| 长上下文+GPU语音 | `8b@32k`+`speech.lite` | 9.26 | 5.86 | ⚠ 需较轻桌面 |
 | 加视觉 | `8b@16k`+`speech.cpu`+`vlm.small` | 10.27 | 4.85 | ⚠ 需轻桌面(vlm 实测 **4.35** 不是 2.5) |
-| 全语音 | `8b@16k`+`speech.full` | 10.52 | 4.60 | ⚠ 需轻桌面(语音估算) |
+| 全语音(高精 ASR) | `8b@16k`+`speech.full` | 9.97 | 5.15 | ⚠ 需轻桌面(large-v3 精度,实测 4.05)|
 
-> **peak 口径**:LLM 用 q8_0 KV 实测(8b@16k=5.92 · 8b@32k=7.19 · 8b@8k=5.31 · 4b@16k=3.86)·
-> `comfyui.sdxl`=8.14 实测 · `vlm.small`=4.35 实测 · `speech.*` 仍估算(lite 1.4 / full 4.6 / cpu 0)。
-> 待 A5/C4 选型后语音项转实测,组合数再校准一次。
+> **★ 2026-07-27:全部转实测**(语音也定了 —— Piper 全档 TTS,D27 修订)。
+> peak 口径:LLM q8_0 KV 实测 · `comfyui.sdxl`=8.14 · `vlm.small`=4.35 ·
+> **`speech.lite`=2.07(turbo GPU ASR + Piper CPU)· `speech.full`=4.05(large-v3 + Piper)· `speech.cpu`=0**。
+> **推荐组合现在 100% 实测,无估算项。** 仅 C4 的 WER 准确率待你的语料。
 
 > **★ 推荐组合与 A7 梯级表对齐,不是两套。** A7 的「不达标时」已冻结,给出六级
 > (11.4 / 10.8 / 9.3 / 8.2 / 6.2 / 3.6),自变量正是桌面占用 —— 与本表同一条式子。

@@ -698,6 +698,13 @@ A8 决定 `speech.cpu` 是否可用,而**下列四处全部建在 `speech.cpu = 
 - A5 发现 XTTS(PyTorch)与 faster-whisper(CT2)合并冲突 → 保持分离(TTS 走 CPU Piper)
 - **换任一实现只需重下 1-2 GB**,故门槛低,不进「不易反悔」范畴
 
+**★ 修订(2026-07-27 当日,实测后)**:**TTS 改为 Piper 全档,XTTS 推到 P9。**
+实测 Piper CPU TTS:首字节 **83ms**、RTF 0.016、**0 显存**、多语言(zh/en/de 分语音)。
+XTTS 相比只剩「克隆你的声音 + 音质稍好」,代价 +2GB 显存 + 重装 —— 对记忆助手不值当。
+用户「Piper 全档」。**连带 A5 结案**:TTS 在 CPU、ASR 在 GPU,天然不合并。
+speech 三档定稿:cpu 0 · lite 2.07(turbo)· full 4.05(large-v3)· 均 Piper TTS。
+**语音克隆列为 P9 可选增强,不进 P1。**
+
 **A5 的答案已半定**:走路线 B 时 XTTS 在 GPU,可与 faster-whisper 塞一个进程省 ~0.4 GiB
 CUDA context,但两运行时(CT2+PyTorch)增复杂度;走 Piper(CPU TTS)则天然无需合并。
 **A5 实测时二者都试,取更稳的。**
