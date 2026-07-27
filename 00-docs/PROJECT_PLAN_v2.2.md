@@ -1189,7 +1189,7 @@ KV 按 `2 × 36层 × 8 KV头 × 128 dim × 1 B × ctx` 计。
 | `speech.full` | 4.0 | — | 0.4 | **4.6** |
 | `speech.lite`(GPU ASR + CPU TTS) | 0.9 | — | 0.4 | **1.4** |
 | `speech.cpu` | 0 | — | 0 | **0.0** |
-| `vlm.small` | 2.5 | — | 0.4 | **3.2** |
+| `vlm.small` | 2.5 | — | 0.4 | ~~**3.2**~~ → **实测 4.35**(候选 Qwen2.5-VL-3B,含 mmproj f16 1.25;原估漏算 mmproj)·P1-A2 |
 | **`llm.assistant.30b-a3b@32k`** ★ | **实测** | q8_0 | 含 | **11.9**(ngl 30 · 38% offload · **57.5 tok/s**)|
 | `comfyui.sdxl` | 含 | — | 含 | **11.0** |
 | `comfyui.sdxl.lowvram` | 含 | — | 含 | **7.8** |
