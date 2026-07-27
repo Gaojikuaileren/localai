@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-27 09:30
+> 更新时间: 2026-07-27 11:00
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 
@@ -150,10 +150,28 @@ vram_budget  =  15.92 − desktop_floor − 0.8      ← 导出值,不单独设
 
 ---
 
-## P1 进度(17 项 · 已有结论 **13**)
+## P1 进度 · ✅ **收官 17/17 全部有书面结论**
 
-| 组 | 项 | 结果 |
-|---|---|---|
+**五个改变架构的实测发现:**
+1. **q8_0 KV 转正**(A2+B1+B3b 三重证明,零质量损失)→ 32K 上下文解锁
+2. **30B-A3B 深度模式活了且飞快**(57.5 tok/s,MoE offload 几乎免费)→ `assistant.deep` 改绑
+3. **Piper CPU TTS 83ms/0显存/多语言** → XTTS 推 P9(D27 修订),A5 顺带解决(TTS在CPU不合并)
+4. **desktop_floor = 6.6**(A7)→ 日常 `8b@16k`+`speech.lite`
+5. **推荐组合 100% 实测**(无估算项)
+
+**语音栈定稿(D27 修订)**:ASR faster-whisper large-v3(full)/turbo(lite)· TTS **Piper 全档** · VLM Qwen2.5-VL-3B。
+speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
+
+**两处诚实延后(有结论,非跳过)**:
+- **C2b**(含网关+别名 TTFT)—— P2 交付物才存在。C2a 裸 server 已测 33ms
+- **C4 的 WER** —— 需你的中/英/德混说语料(延迟侧 TTS 83ms/ASR RTF 已达标)
+
+**环境**:speech venv 建于 `D:\AIenvs\speech`(faster-whisper + Piper + CUDA12 运行时)。
+测量证据 `00-docs/p1-data/`。
+
+**下一步**:① 你录 C4 语料(30-50 句混说)补最后半项 · ② 进 **P2 核心链路**(第一项:定 tailnet 名 → RP ID)
+
+|---|---|
 | A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |
 | A | **A1** | CUDA ctx **227 MiB**/进程,线性可加 |
 | A | **A2** | 可加性差 0 · **KV 2 倍浪费** · vlm.small 实测 **4.35**(估 2.5,漏 mmproj)|
