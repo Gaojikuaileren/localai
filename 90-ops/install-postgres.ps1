@@ -42,7 +42,7 @@ function Write-NoBom([string]$Path,[string]$Text) {
 }
 function Grant-UserRight([string]$Account,[string]$Right) {
   $sid = (New-Object System.Security.Principal.NTAccount($Account)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-  $inf = Join-Path $env:TEMP "sr_$Right.inf"; $sdb = Join-Path $env:TEMP "sr.sdb"
+  $inf = Join-Path $PgRoot "sr_$Right.inf"; $sdb = Join-Path $PgRoot "sr.sdb"   # 避开 %TEMP% 的 ~ 短名路径
   secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
   $c = Get-Content $inf
   $line = ($c | Where-Object { $_ -match "^$Right\s*=" } | Select-Object -First 1)
@@ -100,14 +100,14 @@ if (Test-Path (Join-Path $PgBin 'initdb.exe')) {
     exit 1
   }
   Write-Host ("  [2] 解压 {0}" -f (Split-Path $ZipPath -Leaf))
-  $tmp = Join-Path $env:TEMP 'pg18-extract'
-  Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
-  Expand-Archive -Path $ZipPath -DestinationPath $tmp -Force
-  $pgsql = Get-ChildItem $tmp -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'bin\initdb.exe') } | Select-Object -First 1
-  if (-not $pgsql) { throw "ZIP 里没找到 bin\initdb.exe,可能下错了包(需 binaries ZIP)" }
   New-Item -ItemType Directory -Force $PgRoot | Out-Null
+  $ext = Join-Path $PgRoot '_extract'    # 在 D: 目标下解压,避开 %TEMP% 的 8.3 短名(~)路径
+  if (Test-Path $ext) { Remove-Item $ext -Recurse -Force }
+  Expand-Archive -Path $ZipPath -DestinationPath $ext -Force
+  $pgsql = Get-ChildItem $ext -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'bin\initdb.exe') } | Select-Object -First 1
+  if (-not $pgsql) { throw "ZIP 里没找到 bin\initdb.exe,可能下错了包(需 binaries ZIP)" }
   Copy-Item (Join-Path $pgsql.FullName '*') $PgRoot -Recurse -Force
-  Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+  if (Test-Path $ext) { Remove-Item $ext -Recurse -Force }
   if (-not (Test-Path (Join-Path $PgBin 'initdb.exe'))) { throw "解压后仍无 $PgBin\initdb.exe" }
   Write-Host "      -> $PgBin OK"
 }
