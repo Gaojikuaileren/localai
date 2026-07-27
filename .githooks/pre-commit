@@ -27,8 +27,11 @@ for f in $(git diff --cached --name-only --diff-filter=ACM); do
     continue
   fi
 
-  # -I 跳过二进制;匹配 X:\ 或 X:/ 形式的盘符路径
-  hits=$(git show ":$f" 2>/dev/null | grep -nIE '[A-Za-z]:[\\/]' | head -5)
+  # -I 跳过二进制;匹配 X:\ 或 X:/ 形式的盘符路径。
+  # 盘符字母前必须是行首或非字母数字 —— 否则 http:// 里的 p:/ 会被误判为盘符路径。
+  # 这样 D:\ / E:/(前面是行首/空格/引号)照抓,http(s):// 放过;
+  # 而 file:///E:/foo 里真正嵌的 E:/(前面是 /)仍会被抓 —— 它确实是绝对路径。
+  hits=$(git show ":$f" 2>/dev/null | grep -nIE '(^|[^A-Za-z0-9])[A-Za-z]:[\\/]' | head -5)
   if [ -n "$hits" ]; then
     echo "✗ 绝对路径: $f"
     echo "$hits" | sed 's/^/      /'

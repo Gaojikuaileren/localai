@@ -1,0 +1,62 @@
+# 别名注册表 — 友好别名 → 后端契约
+#
+# 网关据此把 `assistant.fast` 这类别名路由到 llama.cpp 后端。
+# 后端在「无 Broker 期」(P2)由静态启动;将来 P4 的 GPU Broker 接管装载。
+#
+# 契约回写(§8.1.4):别名不写死上下文,响应的 `model` 字段与 `X-LocalAI-Contract`
+# 头返回后端真实装载的组件(如 `assistant.fast@16k(Qwen3-8B-Q4)`)。「不静默降级」
+# 由 UI 常驻显示真实契约兑现,不用阻塞式 409。
+#
+# 注:此处 backend 是 URL(http://127.0.0.1:port),不是文件路径。
+# 后端端口/模型的实际映射由 P4 Broker 或无 Broker 期的静态脚本填。
+
+[aliases."assistant.fast"]
+kind       = "chat"
+backend    = "http://127.0.0.1:18081"   # llama-server · 8B
+contract   = "8b"                        # 上下文由后端实际装载决定(D25,最低 8K)
+tier_min   = "low"
+
+[aliases."assistant.voice"]
+kind       = "chat"
+backend    = "http://127.0.0.1:18081"   # 与 fast 共后端,语音场景用 8K
+contract   = "8b@8k"
+tier_min   = "low"
+
+[aliases."assistant.deep"]
+kind       = "chat"
+backend    = "http://127.0.0.1:18082"   # llama-server · 30B-A3B@32K(P1 实测 57.5 tok/s)
+contract   = "30b-a3b@32k"
+tier_min   = "high"
+fallback   = "8b@32k"                    # 装不下时兜底(§8.1.4)
+
+[aliases."assistant.vision"]
+kind       = "chat_multimodal"
+backend    = "http://127.0.0.1:18083"   # llama-qwen2vl · vlm.small
+contract   = "vlm.small(Qwen2.5-VL-3B)"
+tier_min   = "mid"
+
+[aliases."embedding.default"]
+kind       = "embedding"
+backend    = "http://127.0.0.1:18084"   # CPU embedding(bge-m3)· P2 后续
+contract   = "bge-m3"
+
+[aliases."rerank.default"]
+kind       = "rerank"
+backend    = "http://127.0.0.1:18084"
+contract   = "bge-reranker"
+
+# —— 以下不走本网关的 chat 路由,列此仅为别名清单完整 ——
+
+[aliases."escalate.cloud"]
+kind       = "chat_cloud"
+provider   = "gemini"                    # 需 API key · 过出境闸门(§4.6)· P2 后续
+egress_gate = true
+note       = "仅升级推理能力 · 粒度锁 L2(Q2)"
+
+[aliases."image.concept"]
+kind       = "job_cloud"
+note       = "nano-banana · JOB 平面 · 不经本网关 chat 路由"
+
+[aliases."image.texture"]
+kind       = "job_local"
+note       = "ComfyUI · JOB 平面 · 不经本网关 chat 路由"

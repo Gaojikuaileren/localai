@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-27 13:00
+> 更新时间: 2026-07-27 14:00
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 
@@ -170,7 +170,9 @@ speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
 测量证据 `00-docs/p1-data/`。
 
 **P2 进行中**:✅ **命名决定完成**(tailnet `tail71cfd7.ts.net` · 机器名 `hongkongpingpong` · RP ID `tail71cfd7.ts.net` · D28 本机走 OS 信任)。Tailscale 客户端已装并登录(GitHub)。
-**下一步 P2**:不依赖名字的地基 —— LiteLLM 别名层 · PostgreSQL+Qdrant · 账户隔离(ai-mem/asset/exec)· E1 凭证检测器 · secret_ref 建表 · Open WebUI。WebAuthn 与 C2b 到有远程需求时一并做。
+**P2 进度**:✅ 命名决定 · ✅ **统一入口网关**(别名层,自写非 LiteLLM,D29)—— 端到端测通:
+`assistant.fast`→8B 后端、契约回写、503带缺口、404。安全层 STUB 标注未实装。
+**下一步 P2**:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· 账户隔离(ai-mem/asset/exec,**要你建 Windows 账户 —— 改安全设置我不替你做,会给你脚本**)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
 
 |---|---|
 | A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |

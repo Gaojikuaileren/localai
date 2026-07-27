@@ -782,3 +782,29 @@ WebAuthn 需要 HTTPS,故接 HTTPS 那一刻永久锁死。当前设备数=1、�
 (呼应 D16 推翻条件:Apple ID 与 Tailscale 账户的双因素强度。)
 
 **推翻条件**:同 D14a —— **不可推翻**。改 tailnet 名 = 改 RP ID = 所有已注册设备 passkey 全作废。
+
+---
+
+## 2026-07-27 · D29 · 网关自己写,不用 LiteLLM
+
+**背景**
+§14 P2 原写「LiteLLM 别名层」。实测 litellm 1.93.0(及回退版)的构建后端需 Rust,
+py3.12/Windows 无预编译 wheel,`--only-binary` 亦不成,装不动(不值得为「别名转发」装整套 Rust)。
+
+**决定**
+**统一入口网关自己写(FastAPI + httpx),不用 LiteLLM proxy。**
+
+**理由(不只是绕坑,是更对的选择)**
+1. **llama.cpp server 本来就 OpenAI 兼容** —— 别名→后端转发就是「字典 + httpx 透传」,~60 行。
+2. **网关本质上必须定制** —— 它要干 LiteLLM 不管的核心事:D28 认证(本机 OS 信任/远程 WebAuthn)·
+   六元组权限 + 按档位挂工具池(§6.3)· `X-LocalAI-Contract` 契约头(§8.1.4)· 出境闸门(§4.6)·
+   MEMORY/MODEL 平面隔离(§3.1)· 审计(§9)。用 LiteLLM 也得把它包在自定义网关里。
+3. LiteLLM 的价值(多 provider 路由)相对网关要干的活很小。
+
+**落地**:`10-core/gateway/{registry.toml,gateway.py,README.md}`。
+2026-07-27 端到端实测通过:别名路由 + 契约回写 + 503带缺口 + 404,全对。
+安全层(认证/权限/出境/审计)以 STUB 明确标注**未实装**,P2 后续填 —— 不假装有。
+
+**推翻条件**
+若将来 `escalate.cloud` 要接很多云端 provider 且各家 API 差异大,
+可把 LiteLLM 作为**内部库**用于云端 provider 归一化(而非主网关)。主网关始终自写。
