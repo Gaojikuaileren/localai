@@ -708,3 +708,42 @@ speech 三档定稿:cpu 0 · lite 2.07(turbo)· full 4.05(large-v3)· 均 Piper 
 **A5 的答案已半定**:走路线 B 时 XTTS 在 GPU,可与 faster-whisper 塞一个进程省 ~0.4 GiB
 CUDA context,但两运行时(CT2+PyTorch)增复杂度;走 Piper(CPU TTS)则天然无需合并。
 **A5 实测时二者都试,取更稳的。**
+
+---
+
+## 2026-07-27 · D28 · 本机访问走 OS 信任,WebAuthn 仅对远程
+
+**背景**
+用户连续两问戳中同一个单点故障:「断网跑不动?」「Tailscale 挂了本地还能跑?」
+核查发现:方案书 §6.3(696 行「工作站本机的 credential」)让**工作站自己的入口
+也走 WebAuthn + tailnet 域名 RP ID**。后果:Tailscale 客户端崩溃 →
+`hongkongpingpong.<tailnet>.ts.net` 解析不了 → 到不了入口 → 而 localhost 又没有
+匹配的 passkey(RP ID 是 tailnet 域名)→ **用户被自己正在运行的 AI 锁在门外**。
+
+计算层(llama.cpp/PG/Qdrant/ComfyUI/Vigil,全在 localhost)不受影响照跑,
+但**入口锁死** —— 这是真实单点故障。
+
+**决定**
+**本机访问走 OS 信任,不经 WebAuthn/Tailscale。**
+
+| | 身份机制 | 依赖 |
+|---|---|---|
+| **本机**(loopback · 你是登录的 Windows 用户)| **OS 会话信任**(你已登录 Windows = 身份)→ `trusted-local` 全权限 | 无 Tailscale · 无 passkey |
+| **远程**(手机/第二台 PC · 走 tailnet)| WebAuthn · RP ID `<tailnet>.ts.net` | Tailscale + WebAuthn |
+
+**理由**
+1. **消除单点故障**:Tailscale 客户端挂了,本机从 localhost 进,OS 认登录用户 → 照用。
+2. **与 §6.8 一致**:方案书已明写「所有保护来自 OS 账户隔离 + NTFS ACL」——
+   本机信任的根基本来就是 OS,不该再架一层 Tailscale 依赖在上面。
+3. **消解命名紧张的一半**:工作站本地不注册 WebAuthn 凭证 → 无「误注册到 localhost
+   然后作废」的风险;tailnet 域名 RP ID 只有远程设备用,它们本来就永远走 tailnet 域名。
+
+**实现约束(P2 WebAuthn 时必须遵守)**
+- 本机入口:loopback 端口 + 校验连接来自本机登录用户的账户(配合 §6.8 账户隔离)。
+  `trusted-local` 档位由「同机 + 登录用户」授予,不由 passkey 授予。
+- 远程入口:WebAuthn,RP ID = `<tailnet>.ts.net`,从第一天起。
+- §6.3(696 行)那句「工作站本机的 credential」作废 —— 本机不注册 credential。
+
+**推翻条件**
+若将来本机也需要多用户区分(同一台机器多个 Windows 账户各自独立记忆),
+则 OS 会话信任不足以区分,需重评。当前单用户场景不涉及。

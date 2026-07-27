@@ -693,7 +693,7 @@ v2.1 的「电脑操控」一列把两个维度压成了一维。实际是:
 
 > **`tailscale_node_id` 绑定的强度必须如实描述**:它防「密钥离机」,**不防「整机沦陷」**。文档不得用它来抵消凭据保护的弱点。
 
-**★ RP ID 必须在 P2 之前定死。** WebAuthn 的 RP ID 一经确定不可更改 —— 若 P2 用 `localhost`,P3b 切到 `ai-box.<tailnet>.ts.net` 时工作站本机的 credential **全部作废**。因此把「定死 tailnet 名与机器名」这个 **0.2 天的命名决定**提到 P2 之前。
+**★ RP ID 必须在 P2 之前定死。** WebAuthn 的 RP ID 一经确定不可更改。⚠ **D28 修正:工作站本机不注册 WebAuthn credential**(本机走 OS 信任)—— 所以「工作站本机 credential 作废」的风险已消除;RP ID `<tailnet>.ts.net` 只有远程设备用。因此把「定死 tailnet 名与机器名」这个 **0.2 天的命名决定**提到 P2 之前。
 
 ### 6.4 工具传输分层
 
