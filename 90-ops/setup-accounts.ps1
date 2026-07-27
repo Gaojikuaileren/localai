@@ -34,9 +34,9 @@ function New-RandomPassword {
 }
 
 $accounts = @(
-  @{ Name='ai-mem';   Desc='LocalAI Hub - PostgreSQL/Qdrant/embedding/memory-service (S6.8)' },
-  @{ Name='ai-asset'; Desc='LocalAI Hub - ComfyUI/game automation (S6.8)' },
-  @{ Name='ai-exec';  Desc='LocalAI Hub - browser/file executor/credential fill (S6.9.5, P6)' }
+  @{ Name='ai-mem';   Desc='LocalAI mem: PG/Qdrant/embed (6.8)' },
+  @{ Name='ai-asset'; Desc='LocalAI asset: ComfyUI/game (6.8)' },
+  @{ Name='ai-exec';  Desc='LocalAI exec: browser/file/cred (6.9.5)' }
 )
 
 Write-Host "=== 1. 建服务账户 ===" -ForegroundColor Cyan
