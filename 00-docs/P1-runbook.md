@@ -29,9 +29,9 @@ P1 要测的模型现在**一个都没有**。
 | **1** | **Qwen3-8B Q4_K_M** | `Qwen/Qwen3-8B-GGUF` · `Qwen3-8B-Q4_K_M.gguf` | A2 · B1–B3 · C1–C2 · A5 —— **7 项** | **4.68 GiB** |
 | 2 | Qwen3-4B Q4_K_M | `Qwen/Qwen3-4B-GGUF` · `Qwen3-4B-Q4_K_M.gguf` | A2(4b 两行) | **2.33 GiB** |
 | 3 | Qwen3-1.7B Q4_K_M | ★ `ggml-org/Qwen3-1.7B-GGUF`(**非官方 Qwen 仓库**,见下) | E5 Vigil | **1.19 GiB** |
-| 4 | **ASR 候选** ⚠ 待定 | — | A8 · C4 · A5 · A2 | ~1.5 GB |
-| 5 | **TTS 候选** ⚠ **完全未定** | — | C4 · A5 · A2 | ~1–2 GB |
-| 6 | **VLM 候选** ⚠ 待定 | — | A2(`vlm.small` 行) | ~2 GB |
+| 4 | **ASR** ✅ **定** faster-whisper large-v3(+ turbo 给 lite 档)| `Systran/faster-whisper-large-v3` · `mobiuslabsgmbh/faster-whisper-large-v3-turbo` | A8·C4·A5·A2 | ~2.3 GB |
+| 5 | **TTS** ✅ **定** 路线 B:XTTS-v2(speech.full)+ Piper(CPU 档)| `coqui/XTTS-v2` · `rhasspy/piper-voices` | C4·A5·A2 | ~2.5 GB |
+| 6 | **VLM** ✅ **定** Qwen2.5-VL-3B(已下已测)| `ggml-org/Qwen2.5-VL-3B-Instruct-GGUF` | A2(`vlm.small`)| 已下 |
 | 7 | Qwen3-30B-A3B Q4 | `Qwen/Qwen3-30B-A3B-GGUF` · `Qwen3-30B-A3B-Q4_K_M.gguf` | A3 · C3 —— 2 项 | **17.28 GiB** |
 | **已确定的合计** | | | | **25.48 GiB** |
 
@@ -46,8 +46,7 @@ P1 要测的模型现在**一个都没有**。
 >
 > **若改用 Q8_0(1.71 GiB)**:§17.5 的内存估算 ≈1.87 GB 会被击穿,**必须先改 §17 再测**,顺序不能反。
 
-> ⚠ **4/5/6 三行是 P1 的硬阻塞** —— 见 §5。TTS 尤其:全库 2264 行方案书 + 两份 P1 文档里
-> **一个 TTS 实现名都没有**。
+> ✅ **2026-07-27 已定**(见 `speech-stack-candidates.md`):这是**待测候选**非选型定稿(§14 P1 先于定稿)。可推翻:测出问题就换,重下 1-2 GB。
 
 **所以下载必须最先启动,并在后台跑**,不能等到要测哪个才下哪个 ——
 否则 42 分钟的下载会被拆成五段,每段都堵在关键路径上。

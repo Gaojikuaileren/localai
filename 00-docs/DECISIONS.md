@@ -673,3 +673,31 @@ A8 决定 `speech.cpu` 是否可用,而**下列四处全部建在 `speech.cpu = 
 **推翻条件**
 若 P1 期间发现**还有第四格漏网** → 说明「按清单解冻」这个做法本身不可靠,
 应改为**全表逐项过一遍**,而不是再补一条决议。
+
+---
+
+## 2026-07-27 · D27 · 语音栈 / VLM 待测候选(非选型定稿)
+
+**背景**:P1 的 A5/A8/C4/A2 四处依赖 ASR/TTS/VLM,而全库从无 TTS 实现名。
+经 `speech-stack-candidates.md` 备研 + 用户「按你推荐的」,定下**待测候选**。
+
+**决定(用户 2026-07-27「按你推荐的」)**:
+
+| 槽 | 选定 | 框架 | 理由 |
+|---|---|---|---|
+| **ASR** | **faster-whisper large-v3**(full)+ **large-v3-turbo**(lite 档 GPU ASR)| CTranslate2 | 中/英/德全强(你混说);turbo 小快给 lite。Parakeet 因英文为主排除 |
+| **TTS** | **路线 B**:**XTTS-v2**(`speech.full` · GPU · 可克隆你的声音 · 中/英/德)+ **Piper**(`speech.cpu/lite` 的 CPU TTS)| PyTorch(XTTS)/ ONNX(Piper)| 你会天天听助手,音质与德语值得;轻量场景退 Piper |
+| **VLM** | **Qwen2.5-VL-3B**(已下已测 4.35 GiB)| llama.cpp | 在工具链内、与 Qwen3 同家族 |
+
+> **★ 这是「待测候选」,不是选型定稿。** §14 明写「P1 先于任何选型定稿」——
+> 现在定稿会自相矛盾。登记为候选即可,不抬成不可逆决定。
+
+**推翻条件(本就为「可换」设计)**:
+- A8 实测 large-v3 CPU 实时率不达标 → 换 large-v3-turbo 或更小 whisper
+- C4 实测 XTTS 首字节 >300ms 或 WER 增幅超标 → 换 F5-TTS 或 MeloTTS
+- A5 发现 XTTS(PyTorch)与 faster-whisper(CT2)合并冲突 → 保持分离(TTS 走 CPU Piper)
+- **换任一实现只需重下 1-2 GB**,故门槛低,不进「不易反悔」范畴
+
+**A5 的答案已半定**:走路线 B 时 XTTS 在 GPU,可与 faster-whisper 塞一个进程省 ~0.4 GiB
+CUDA context,但两运行时(CT2+PyTorch)增复杂度;走 Piper(CPU TTS)则天然无需合并。
+**A5 实测时二者都试,取更稳的。**
