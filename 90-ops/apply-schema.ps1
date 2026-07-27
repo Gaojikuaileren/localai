@@ -124,9 +124,10 @@ if (-not $SkipVerify) {
   $r4 = Run-Sql 'postgres' (Join-Path $SqlDir 'verify.sql') 'verify.log' ''
   Write-Host ""
   Write-Host "=== 否定用例结果 ===" -ForegroundColor Cyan
-  Get-Content $r4.log | ForEach-Object { "  $_" }
+  # -Encoding UTF8:psql 以 UTF-8 写日志,PS5.1 默认按 ANSI(GBK)读会把中文显示成乱码
+  Get-Content $r4.log -Encoding UTF8 | ForEach-Object { "  $_" }
   Write-Host ""
-  $txt = (Get-Content $r4.log -Raw)
+  $txt = (Get-Content $r4.log -Raw -Encoding UTF8)
   $fails = ([regex]::Matches($txt,'FAIL')).Count
   if ($fails -gt 0) {
     Write-Host ("  XX 有 {0} 处 FAIL —— 隔离/约束未达标,不要继续。" -f $fails) -ForegroundColor Red
