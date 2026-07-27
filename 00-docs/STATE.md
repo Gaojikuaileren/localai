@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-27 12:00
+> 更新时间: 2026-07-27 13:00
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 
@@ -90,7 +90,7 @@ P0 验收标准三项全部满足:
 | ~~桌面显存基线采集方式~~ | ~~A 组~~ | ✅ **2026-07-26 已实测解决**:总量用 `nvidia-smi memory.used`;逐进程仅排序不求和 |
 | ~~llama.cpp 未装~~ | ~~17 项里 10 项~~ | ✅ **2026-07-26 解除**。b10107 cuda-13.3 预编译,**sm_120 断言通过**,不需自编译 |
 | 上行带宽未测 | P3b 手机端体验预期 | FRITZ!Box 连接信息页(5 分钟) |
-| tailnet 名未定 | P2 的 RP ID 最终值 | 注册 Tailscale 时确定,**之后绝不更改** |
+| ~~tailnet 名未定~~ | ~~P2 的 RP ID~~ | ✅ **已定(2026-07-27)**:`tail71cfd7.ts.net`(免费版随机名,自定义要付费/自有域名)。RP ID = 它,永久锁定 |
 
 ---
 
@@ -169,7 +169,8 @@ speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
 **环境**:speech venv 建于 `D:\AIenvs\speech`(faster-whisper + Piper + CUDA12 运行时)。
 测量证据 `00-docs/p1-data/`。
 
-**下一步**:**进 P2 核心链路** —— 第一项定 tailnet 名 → RP ID(0.2 天,必须在 WebAuthn 前,D14a 不可推翻)。P2 也是 C2b 能测的时候。
+**P2 进行中**:✅ **命名决定完成**(tailnet `tail71cfd7.ts.net` · 机器名 `hongkongpingpong` · RP ID `tail71cfd7.ts.net` · D28 本机走 OS 信任)。Tailscale 客户端已装并登录(GitHub)。
+**下一步 P2**:不依赖名字的地基 —— LiteLLM 别名层 · PostgreSQL+Qdrant · 账户隔离(ai-mem/asset/exec)· E1 凭证检测器 · secret_ref 建表 · Open WebUI。WebAuthn 与 C2b 到有远程需求时一并做。
 
 |---|---|
 | A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |

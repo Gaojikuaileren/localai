@@ -747,3 +747,38 @@ CUDA context,但两运行时(CT2+PyTorch)增复杂度;走 Piper(CPU TTS)则天�
 **推翻条件**
 若将来本机也需要多用户区分(同一台机器多个 Windows 账户各自独立记忆),
 则 OS 会话信任不足以区分,需重评。当前单用户场景不涉及。
+
+---
+
+## 2026-07-27 · D14a 完成 · tailnet 名定死为 `tail71cfd7.ts.net`
+
+**这是 D14a 那个「注册 Tailscale 时确定、之后绝不更改」的悬空项落地。** 现已实测锁定。
+
+**最终值(客户端 `tailscale status --json` 实测为准)**:
+
+| | |
+|---|---|
+| **tailnet 名(= RP ID 根)** | **`tail71cfd7.ts.net`** ← 永久,不可改 |
+| **工作站 DNS 名** | `hongkongpingpong.tail71cfd7.ts.net` |
+| **工作站 tailnet IP** | `100.112.147.15`(v4)/ `fd7a:115c:a1e0::1c33:9312`(v6) |
+| **tailnet 拥有者账号** | **`Gaojikuaileren@github`**(GitHub 个人账号) |
+| **Tailnet ID** | `TWpWm2CA2u11CNTRL` |
+| **计费层** | Free |
+
+**为什么是随机名而非自定义**:
+免费版 + GitHub 个人账号,Tailscale 的「Rename tailnet」**只能从随机生成的动物名里选或 re-roll**,
+**没有自由输入框**。自定义 `.ts.net` 名(如想要的 `gjklr`)需付费版或自有域名组织版 —— 不值当。
+用户 2026-07-27 决定「留着」当前随机名。**功能上随机串与动物名无区别,且日常看不见(本机用 loopback,手机看设备名)。**
+
+**RP ID 最终确定**:
+- **远程设备(手机/第二台 PC)的 WebAuthn RP ID = `tail71cfd7.ts.net`**,从第一天起。
+- **本机不注册 WebAuthn 凭证(D28)** —— 走 OS 信任,与本 RP ID 无关。
+
+**★ 锁定时机说明**:对话框明确「一旦 tailnet 名用于 HTTPS 证书,即绑定账号,不可再改」。
+WebAuthn 需要 HTTPS,故接 HTTPS 那一刻永久锁死。当前设备数=1、无 passkey,是最安全的确认点。
+
+**★ 拥有者账号是总钥匙**:`Gaojikuaileren@github` 现在是整个 tailnet 的主人。
+**必须保住这个 GitHub 账号 + 强两步验证** —— 丢了它等于丢了整个私有网络的控制权。
+(呼应 D16 推翻条件:Apple ID 与 Tailscale 账户的双因素强度。)
+
+**推翻条件**:同 D14a —— **不可推翻**。改 tailnet 名 = 改 RP ID = 所有已注册设备 passkey 全作废。
