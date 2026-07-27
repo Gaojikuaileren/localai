@@ -188,23 +188,27 @@ if ((Get-Service pg-mem).Status -ne 'Running') {
 Write-Host "  [6] 服务 pg-mem 以 .\ai-mem 运行中 OK"
 
 # ============================ 7 · 建角色 + 库(以 ai-mem 经 SSPI)============================
+# ★ CREATE DATABASE 不能在事务块里 → 必须单独一条 -c(不能与 CREATE ROLE 挤同一个 -c)。幂等。
 $psql = Join-Path $PgBin 'psql.exe'
 $qFile = Join-Path $PgRoot 'q.txt'
-Invoke-AsAiMem ('"{0}" -h 127.0.0.1 -p {1} -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname=''memory''" > "{2}" 2>&1' -f $psql,$PgPort,$qFile) $pw | Out-Null
-$dbExists = (Get-Content $qFile -EA SilentlyContinue) -match '1'
-if ($dbExists) {
+$bootLog = Join-Path $PgRoot 'bootstrap.log'
+function PgHas([string]$db,[string]$sql) {
+  Invoke-AsAiMem ('"{0}" -h 127.0.0.1 -p {1} -U postgres -d {2} -tAc "{3}" > "{4}" 2>&1' -f $psql,$PgPort,$db,$sql,$qFile) $pw | Out-Null
+  return (((Get-Content $qFile -EA SilentlyContinue) -join '') -match '1')
+}
+function PgRun([string]$sql) {
+  return (Invoke-AsAiMem ('"{0}" -h 127.0.0.1 -p {1} -U postgres -d postgres -v ON_ERROR_STOP=1 -c "{2}" > "{3}" 2>&1' -f $psql,$PgPort,$sql,$bootLog) $pw)
+}
+if (PgHas 'postgres' "SELECT 1 FROM pg_database WHERE datname='memory'") {
   Write-Host "  [7] memory 库已存在,跳过 OK"
 } else {
-  $bootLog = Join-Path $PgRoot 'bootstrap.log'
-  $sql = "CREATE ROLE mem_rw LOGIN; CREATE DATABASE memory OWNER mem_rw ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;"
-  $rc = Invoke-AsAiMem ('"{0}" -h 127.0.0.1 -p {1} -U postgres -d postgres -v ON_ERROR_STOP=1 -c "{2}" > "{3}" 2>&1' -f $psql,$PgPort,$sql,$bootLog) $pw
-  $dbNow = $false
-  Invoke-AsAiMem ('"{0}" -h 127.0.0.1 -p {1} -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname=''memory''" > "{2}" 2>&1' -f $psql,$PgPort,$qFile) $pw | Out-Null
-  $dbNow = (Get-Content $qFile -EA SilentlyContinue) -match '1'
-  if (-not $dbNow) {
-    Write-Host "  X 建角色/库失败(rc=$rc)。多半 SSPI 映射没生效(pg_ident 系统名大小写/realm)。日志:" -ForegroundColor Red
+  if (-not (PgHas 'postgres' "SELECT 1 FROM pg_roles WHERE rolname='mem_rw'")) {
+    PgRun "CREATE ROLE mem_rw LOGIN" | Out-Null      # 角色不存在才建
+  }
+  PgRun "CREATE DATABASE memory OWNER mem_rw ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0" | Out-Null  # 单独一条,不在事务块
+  if (-not (PgHas 'postgres' "SELECT 1 FROM pg_database WHERE datname='memory'")) {
+    Write-Host "  X 建库失败。日志:" -ForegroundColor Red
     if (Test-Path $bootLog) { Get-Content $bootLog -Tail 20 | ForEach-Object { "        $_" } }
-    Write-Host "    排查:$PgData\log 最新日志里的 'no pg_hba.conf entry' / SSPI 实际用户名。"
     exit 1
   }
   Write-Host "  [7] 角色 mem_rw + 库 memory(UTF8 · 无 DB 口令 · SSPI)已建 OK"
