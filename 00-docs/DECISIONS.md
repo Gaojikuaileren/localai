@@ -841,3 +841,31 @@ Qdrant 无 SSPI 等价物 → 屏障只能是 api_key,只能 ai-mem 进程持有
 
 **推翻条件**:若 SSPI 在此 standalone 机上有无法绕过的 loopback 认证边缘问题,回退 SCRAM 但须显式记录并把
 DB 口令纳入 Credential Manager/DPAPI(不落明文配置);mem_s2 双实例若运维成本过高可降为单实例双 collection。
+
+---
+
+## 2026-07-28 · D31 · ai-mem 服务如何读到自己的代码(部署边界)
+
+**背景**
+网关 / embedding / 将来的 memory-service 都以 `.i-mem` 运行,但代码在 `E:\...-core\`(git 仓库)。
+ai-mem 不在 Users 组,默认可能读不到代码根 → 服务起不来。此前网关是以【管理员】身份测的,
+未暴露这个问题;上生产(ai-mem)前必须解决。
+
+**决定**
+**授予 ai-mem 对各服务代码子目录的 Read&Execute**(`10-core/gateway`、`10-core/memory`),
+不做 deploy-copy。
+
+**理由**
+- 需要隔离的是**数据**(记忆库、api_key),不是**代码**。代码不是秘密。
+- 秘密不在 10-core:Qdrant api_key 在 `{state}/memory/qdrant/config`(强 ACL)、DB 走 SSPI 无口令、
+  mem_rw DSN 在将来的 memory-service 配置(强 ACL)。故 ai-mem(甚至 ai-asset)能读 10-core 代码
+  **不构成数据泄露面**。
+- deploy-copy(拷到 D:\AI\deploy)更隔离但引入「哪份在跑」的困惑与构建步骤,单机单人不值当。
+
+**落地**:各 install 脚本加 `icacls <服务代码目录> /grant "ai-mem:(OI)(CI)(RX)"`。
+gateway 已实装但当时以 admin 测,上 ai-mem 服务时补授。
+
+**★ 注意**:绝不能把任何**含秘密的文件**放进 10-core(它对 ai-asset 可读)。
+secret_ref 的值本就不在库、api_key 在 ACL 配置、DB 走 SSPI —— 现状满足。将来若引入含密文件,必须放强 ACL 目录。
+
+**推翻条件**:若将来多用户或需要「代码也隔离」,改 deploy-copy 到 ai-mem 专属 ACL 目录。
