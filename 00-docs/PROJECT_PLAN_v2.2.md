@@ -1190,6 +1190,7 @@ KV 按 `2 × 36层 × 8 KV头 × 128 dim × 1 B × ctx` 计。
 | `speech.lite`(GPU ASR + CPU TTS) | 0.9 | — | 0.4 | **1.4** |
 | `speech.cpu` | 0 | — | 0 | **0.0** |
 | `vlm.small` | 2.5 | — | 0.4 | **3.2** |
+| **`llm.assistant.30b-a3b@32k`** ★ | **实测** | q8_0 | 含 | **11.9**(ngl 30 · 38% offload · **57.5 tok/s**)|
 | `comfyui.sdxl` | 含 | — | 含 | **11.0** |
 | `comfyui.sdxl.lowvram` | 含 | — | 含 | **7.8** |
 | `embedding.default` / `rerank.default` | CPU | — | — | **0.0** |
@@ -1397,7 +1398,7 @@ KV 按 `2 × 36层 × 8 KV头 × 128 dim × 1 B × ctx` 计。
 | 别名 | 需要什么在位 | 不在位时 |
 |---|---|---|
 | `assistant.voice` / `assistant.fast` | 任一 LLM | ❌ |
-| `assistant.deep` | `8b@32k` | ⚠ 需换装(确认单)· 或 ⚙ 转云 |
+| `assistant.deep` | **`30b-a3b@32k`**(P1 实测可行,57.5 tok/s)· 或 `8b@32k` 兜底 | ⚠ 需换装(确认单)· 或 ⚙ 转云 |
 | `assistant.vision` | `vlm.small` | ⚠ 需装载(+3.2);装不下则 ❌ 带缺口 |
 | `speech.stt` / `speech.tts` | 任一 speech.* | ⚙ 降级契约回带 |
 | `image.texture` ⌂ | `comfyui.sdxl`(11.0) | ⚠ 需驱逐 LLM 后装载 |
