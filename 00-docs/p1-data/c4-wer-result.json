@@ -1,0 +1,498 @@
+{
+ "turbo_wer": 0.25147347740667975,
+ "full_wer": 0.2475442043222004,
+ "full_rows": [
+  [
+   "01",
+   "zh",
+   0.0,
+   "帮我记一下，下周三要交房租。",
+   "帮我记一下下周三要交房租"
+  ],
+  [
+   "02",
+   "zh",
+   0.09523809523809523,
+   "今天把八B模型的显存测完了，结果比估算好很多。",
+   "今天把8B模型的显存测完了,结果比估算好很多。"
+  ],
+  [
+   "03",
+   "zh-en",
+   0.5,
+   "帮我在 ComfyUI 里跑一张 Juggernaut 的图，分辨率一零二四。",
+   "帮我再Configure UI里跑一张Jud Renaud的图,分辨率1024。"
+  ],
+  [
+   "04",
+   "zh-en",
+   0.3,
+   "那个 thirty B 的 mixture of experts 模型跑到五十七 tokens per second，很快。",
+   "那个3GB的mixture of experts模型跑到57 token per second很快。"
+  ],
+  [
+   "05",
+   "zh-en",
+   0.5,
+   "把 KV cache 换成 q eight zero，能省一到两个 G 的显存。",
+   "把KVCase换成Q80 能省1到2G的显存"
+  ],
+  [
+   "06",
+   "zh-en",
+   0.05555555555555555,
+   "记一下，Vigil 那个常驻助手不能占任何 GPU 显存。",
+   "记一下VGI那个常驻助手不能占任何GPU显存"
+  ],
+  [
+   "07",
+   "zh-en",
+   0.18181818181818182,
+   "帮我打开 Unreal，那个 FloatingRoom 的工程。",
+   "帮我打开Unreal那个Floating Room的工程"
+  ],
+  [
+   "08",
+   "zh-en",
+   0.2857142857142857,
+   "desktop floor 定在六点六，日常常驻用 speech lite。",
+   "Desktop Floor 定在6.6 日常常驻用 Speech Light"
+  ],
+  [
+   "09",
+   "zh-de",
+   0.18181818181818182,
+   "提醒我明天去 Rewe 买 Milch 和 Brot。",
+   "提醒我明天去Heavy买milk和brot"
+  ],
+  [
+   "10",
+   "zh-de",
+   0.25,
+   "下午三点有个 Termin，别让我忘了。",
+   "下午三点有个tell me 你别让我忘了"
+  ],
+  [
+   "11",
+   "zh-de",
+   0.14285714285714285,
+   "帮我查一下这个月的 Stromrechnung 交了没有。",
+   "帮我查一下这个月的Storm Ritual交了没有"
+  ],
+  [
+   "12",
+   "zh",
+   0.05555555555555555,
+   "把昨天聊的那个灯光问题记到项目笔记里。",
+   "把昨天聊的那个灯光问题 写到项目笔记里"
+  ],
+  [
+   "13",
+   "zh",
+   0.0,
+   "我妹妹下周过生日，提醒我买礼物。",
+   "我妹妹下周过生日提醒我买礼物"
+  ],
+  [
+   "14",
+   "zh-en",
+   0.29411764705882354,
+   "faster whisper 在 CPU 上的实时率是零点三八五，够用。",
+   "Faster Whisper在CPU上的实时率是0.385够用"
+  ],
+  [
+   "15",
+   "zh-en",
+   0.15789473684210525,
+   "Piper 的首字节延迟只有八十三毫秒，比 XTTS 轻多了。",
+   "Piper的首字节延迟只有38毫秒,比XTTS轻多了。"
+  ],
+  [
+   "16",
+   "en",
+   0.25,
+   "Remind me to back up the memory database to the external drive.",
+   "Remind me to backup the memory database to the external driver."
+  ],
+  [
+   "18",
+   "en",
+   0.8,
+   "The RTX five thousand eighty has sixteen gigabytes of memory.",
+   "It's a RTX 5080 at 16GB of memory."
+  ],
+  [
+   "19",
+   "de",
+   0.0,
+   "Erinnere mich daran, morgen die Miete zu überweisen.",
+   "Erinnere mich daran, morgen die Miete zu überweisen."
+  ],
+  [
+   "20",
+   "de",
+   0.5555555555555556,
+   "Wie viel Grafikspeicher braucht das große Sprachmodell?",
+   "Für Grafikspeicher brauchen das große Sprachmode."
+  ],
+  [
+   "21",
+   "zh-en",
+   0.7222222222222222,
+   "把 assistant deep 改绑到 thirty B a three B，八B三二K 兜底。",
+   "把 Assistant Deep 改榜到 30B, 3B, 8B, 32K, 都D"
+  ],
+  [
+   "22",
+   "zh",
+   0.07142857142857142,
+   "帮我算一下，从这里到机场要多久。",
+   "帮我算一下从这里到机场了多久"
+  ],
+  [
+   "23",
+   "zh-en",
+   0.3333333333333333,
+   "记一下，Tailscale 的 tailnet 名字一旦定了就绝对不能改。",
+   "記一下Tilescale的TiNet名字,一旦訂了就絕對不能改"
+  ],
+  [
+   "24",
+   "zh-de",
+   0.07692307692307693,
+   "周末想去 Schwarzwald 徒步，帮我看看天气。",
+   "周末想去SWAT1徒步,帮我看看天气。"
+  ],
+  [
+   "25",
+   "zh-en",
+   0.42105263157894735,
+   "这个 SDXL 出图栈峰值是八点一四个 G，低于阈值。",
+   "这个SDXL出图在峰值是8.14G,低于预值。"
+  ],
+  [
+   "26",
+   "zh",
+   0.06666666666666667,
+   "把刚才那句话删掉，我不是那个意思。",
+   "把刚才那句话删掉 我不是这个意思"
+  ],
+  [
+   "27",
+   "zh-en",
+   0.0,
+   "帮我把这个 workflow 导出成 JSON。",
+   "帮我把这个workflow导出成json"
+  ],
+  [
+   "28",
+   "zh",
+   0.2857142857142857,
+   "今晚提醒我十一点睡觉，别熬夜了。",
+   "今晚提醒我11点睡觉不要熬夜了"
+  ],
+  [
+   "29",
+   "zh-en",
+   0.47368421052631576,
+   "那个 needle in a haystack 测试，q八零和 F sixteen 都是五比五。",
+   "那个needle in head hashtag测试 Q80和F16 都是5比5"
+  ],
+  [
+   "30",
+   "en",
+   0.2222222222222222,
+   "Can you summarize the last three commits for me?",
+   "Can summarize the last three comments for me."
+  ],
+  [
+   "31",
+   "zh-de",
+   0.15384615384615385,
+   "帮我预约下周的 Zahnarzt，最好是上午。",
+   "帮我预约下周擦Azt,最好是上午。"
+  ],
+  [
+   "32",
+   "zh-en",
+   0.5454545454545454,
+   "低档用 four B 模型，语音走 CPU。",
+   "抵挡用4B模型与营走CPU"
+  ],
+  [
+   "33",
+   "zh",
+   0.11764705882352941,
+   "把这个想法存到语义记忆里，标记成重要。",
+   "把这个想法存到余裕记忆里 标记成重要"
+  ],
+  [
+   "34",
+   "de",
+   0.16666666666666666,
+   "Speichere das bitte in der Projektdokumentation.",
+   "Sprechere das bitte in der Projektdokumentation."
+  ],
+  [
+   "35",
+   "zh-en",
+   0.2222222222222222,
+   "MoE 只有 three B 活跃参数，所以 offload 几乎不拖速度。",
+   "Moe只有3B活躍参数所以offload几乎不妥速度"
+  ],
+  [
+   "36",
+   "zh",
+   0.05555555555555555,
+   "明天早上九点开始跑基准测试，记得提醒我。",
+   "明天早上9点开始跑基准测试 记得提醒我"
+  ]
+ ],
+ "turbo_rows": [
+  [
+   "01",
+   "zh",
+   0.0,
+   "帮我记一下，下周三要交房租。",
+   "帮我记一下下周三要交房租"
+  ],
+  [
+   "02",
+   "zh",
+   0.09523809523809523,
+   "今天把八B模型的显存测完了，结果比估算好很多。",
+   "今天把8B模型的显存测完了 结果比估算好很多"
+  ],
+  [
+   "03",
+   "zh-en",
+   0.3888888888888889,
+   "帮我在 ComfyUI 里跑一张 Juggernaut 的图，分辨率一零二四。",
+   "帮我在config UI 里跑一张 Judgernaut的图 分辨率1024"
+  ],
+  [
+   "04",
+   "zh-en",
+   0.35,
+   "那个 thirty B 的 mixture of experts 模型跑到五十七 tokens per second，很快。",
+   "那个设计币的mixture of experts 模型跑到57 token per second 很快"
+  ],
+  [
+   "05",
+   "zh-en",
+   0.5,
+   "把 KV cache 换成 q eight zero，能省一到两个 G 的显存。",
+   "把KVCase换成Q80能省移到2G的显存"
+  ],
+  [
+   "06",
+   "zh-en",
+   0.1111111111111111,
+   "记一下，Vigil 那个常驻助手不能占任何 GPU 显存。",
+   "记一下Vgian那个常驻驻手不能占任何GPU显存"
+  ],
+  [
+   "07",
+   "zh-en",
+   0.18181818181818182,
+   "帮我打开 Unreal，那个 FloatingRoom 的工程。",
+   "帮我打开Unreal那个floating room的工程"
+  ],
+  [
+   "08",
+   "zh-en",
+   0.42857142857142855,
+   "desktop floor 定在六点六，日常常驻用 speech lite。",
+   "Desktop floor定在6.6 日常常住用 SpeechLite"
+  ],
+  [
+   "09",
+   "zh-de",
+   0.45454545454545453,
+   "提醒我明天去 Rewe 买 Milch 和 Brot。",
+   "且信我明天去黑位买Milch和Port"
+  ],
+  [
+   "10",
+   "zh-de",
+   0.25,
+   "下午三点有个 Termin，别让我忘了。",
+   "下午3点有个tell me别让我忘了"
+  ],
+  [
+   "11",
+   "zh-de",
+   0.14285714285714285,
+   "帮我查一下这个月的 Stromrechnung 交了没有。",
+   "帮我查一下这个月的Storm Hichnung交了没有"
+  ],
+  [
+   "12",
+   "zh",
+   0.05555555555555555,
+   "把昨天聊的那个灯光问题记到项目笔记里。",
+   "把昨天聊的那个灯光问题 起到项目笔记里"
+  ],
+  [
+   "13",
+   "zh",
+   0.0,
+   "我妹妹下周过生日，提醒我买礼物。",
+   "我妹妹下周过生日提醒我买礼物"
+  ],
+  [
+   "14",
+   "zh-en",
+   0.29411764705882354,
+   "faster whisper 在 CPU 上的实时率是零点三八五，够用。",
+   "Faster Whisper在CPU上的实时率是0.385够用"
+  ],
+  [
+   "15",
+   "zh-en",
+   0.3157894736842105,
+   "Piper 的首字节延迟只有八十三毫秒，比 XTTS 轻多了。",
+   "Piper的手字节延迟只有38ms,比XTTS轻多了。"
+  ],
+  [
+   "16",
+   "en",
+   0.08333333333333333,
+   "Remind me to back up the memory database to the external drive.",
+   "Remind me to back up the memory database to the external driver."
+  ],
+  [
+   "18",
+   "en",
+   0.5,
+   "The RTX five thousand eighty has sixteen gigabytes of memory.",
+   "The RTX 5080 has 16GB of memory."
+  ],
+  [
+   "19",
+   "de",
+   0.0,
+   "Erinnere mich daran, morgen die Miete zu überweisen.",
+   "erinnere mich daran morgen die miete zu überweisen"
+  ],
+  [
+   "20",
+   "de",
+   0.4444444444444444,
+   "Wie viel Grafikspeicher braucht das große Sprachmodell?",
+   "Wie viele Grafik-Sprecher brauchen das große Sprachmodell?"
+  ],
+  [
+   "21",
+   "zh-en",
+   0.6666666666666666,
+   "把 assistant deep 改绑到 thirty B a three B，八B三二K 兜底。",
+   "把 Assistant Deep 改绑到 30B, 3B, 8B, 32K, Doody"
+  ],
+  [
+   "22",
+   "zh",
+   0.07142857142857142,
+   "帮我算一下，从这里到机场要多久。",
+   "帮我算一下从这里到机场了多久"
+  ],
+  [
+   "23",
+   "zh-en",
+   0.16666666666666666,
+   "记一下，Tailscale 的 tailnet 名字一旦定了就绝对不能改。",
+   "记下TelScale的TiNet名字 一旦定了就绝对不能改"
+  ],
+  [
+   "24",
+   "zh-de",
+   0.07692307692307693,
+   "周末想去 Schwarzwald 徒步，帮我看看天气。",
+   "周末想去Schwartzwand徒步帮我看看天气"
+  ],
+  [
+   "25",
+   "zh-en",
+   0.42105263157894735,
+   "这个 SDXL 出图栈峰值是八点一四个 G，低于阈值。",
+   "这个SDXL出图Jai峰值是8.14G,低于预值"
+  ],
+  [
+   "26",
+   "zh",
+   0.06666666666666667,
+   "把刚才那句话删掉，我不是那个意思。",
+   "把刚才那句话删掉 我不是这个意思"
+  ],
+  [
+   "27",
+   "zh-en",
+   0.1,
+   "帮我把这个 workflow 导出成 JSON。",
+   "帮我们把这个workflow导出成json"
+  ],
+  [
+   "28",
+   "zh",
+   0.14285714285714285,
+   "今晚提醒我十一点睡觉，别熬夜了。",
+   "今晚提醒我11点睡觉别熬夜了"
+  ],
+  [
+   "29",
+   "zh-en",
+   0.47368421052631576,
+   "那个 needle in a haystack 测试，q八零和 F sixteen 都是五比五。",
+   "那个Needle in Hat hashtag测试 Q80和F16都是5比5"
+  ],
+  [
+   "30",
+   "en",
+   0.3333333333333333,
+   "Can you summarize the last three commits for me?",
+   "You can summarize the last three comments for me."
+  ],
+  [
+   "31",
+   "zh-de",
+   0.15384615384615385,
+   "帮我预约下周的 Zahnarzt，最好是上午。",
+   "帮我预约下周刹,最好是上午"
+  ],
+  [
+   "32",
+   "zh-en",
+   0.6363636363636364,
+   "低档用 four B 模型，语音走 CPU。",
+   "抵挡由4B模型与引走CPU"
+  ],
+  [
+   "33",
+   "zh",
+   0.11764705882352941,
+   "把这个想法存到语义记忆里，标记成重要。",
+   "把这个想法存到余意记忆里标记成重要"
+  ],
+  [
+   "34",
+   "de",
+   0.16666666666666666,
+   "Speichere das bitte in der Projektdokumentation.",
+   "Sprechere das bitte in der Projektdokumentation."
+  ],
+  [
+   "35",
+   "zh-en",
+   0.3888888888888889,
+   "MoE 只有 three B 活跃参数，所以 offload 几乎不拖速度。",
+   "Mall-E只有3B活跃参数,所以offload几乎不妥俗的"
+  ],
+  [
+   "36",
+   "zh",
+   0.05555555555555555,
+   "明天早上九点开始跑基准测试，记得提醒我。",
+   "明天早上9点开始跑基准测试,记得提醒我"
+  ]
+ ]
+}
