@@ -14,15 +14,63 @@
     先起后端:  llama-server -m <8b> --port 18081 ...
     再起网关:  uvicorn gateway:app --host 127.0.0.1 --port 8080
 """
+import json
 import tomllib
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import e1_detector as e1
+
 REGISTRY_PATH = Path(__file__).with_name("registry.toml")
+PATHS_TOML = Path(__file__).resolve().parents[2] / "config" / "paths.toml"
+
+
+def _logs_dir() -> Path:
+    """从 paths.toml 读 [state] logs(§11.1 不硬编码路径)。读不到则退回本目录。"""
+    try:
+        with open(PATHS_TOML, "rb") as f:
+            return Path(tomllib.load(f)["state"]["logs"])
+    except Exception:
+        return Path(__file__).with_name("_logs")
+
+
+def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
+    """E1 命中记账。§6.9.8:【只】记 类别 · 时间 · 会话id · 结果,
+    绝不记 body / 片段 / 哈希(定长凭证的哈希可爆破)。
+    ★ 现落 JSONL(state/logs,强 ACL);待 memory-service 上线后改写 mem.gate_rejection 表。"""
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "session_id": session_id or "unknown",
+        "categories": sorted(categories),
+        "outcome": outcome,   # blocked | continued
+    }
+    try:
+        d = _logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "gate_rejection.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # 审计落盘失败不阻断拦截本身
+
+
+def _last_user_text(messages) -> str:
+    """取本轮最后一条 user 消息文本(E1 只扫新输入,历史进来时已扫过)。"""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                return c
+            if isinstance(c, list):   # 多模态 content parts
+                return " ".join(
+                    p.get("text", "") for p in c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+    return ""
 
 
 def load_registry() -> dict:
@@ -78,6 +126,34 @@ async def chat_completions(request: Request):
             content={"error": {"message": "远程访问需 WebAuthn(P2 后续);本机请走 loopback",
                                "type": "unauthenticated", "code": "webauthn_required"}},
         )
+
+    # ---- E1 入口凭证检测(§6.9.0 · 在组装/转发之前 · 不信任前端)----
+    # 命中即拦下本轮:不转发后端、不落 L0、不记正文;只记类别(§6.9.8)。
+    session_id = request.headers.get("x-session-id", "")
+    override = request.headers.get("x-localai-e1-override", "").lower() == "continue"
+    e1r = e1.scan(_last_user_text(body.get("messages")))
+    if e1r.blocked:
+        if override:
+            # 用户显式「这不是凭证,继续」—— 记类别(不记值),放行本轮
+            log_gate_rejection(session_id, e1r.categories, "continued")
+        else:
+            log_gate_rejection(session_id, e1r.categories, "blocked")
+            return JSONResponse(
+                status_code=200,   # 对前端是一条正常回复(assistant 说明),不是错误
+                headers={"X-LocalAI-E1": "blocked",
+                         "X-LocalAI-E1-Categories": ",".join(sorted(e1r.categories))},
+                content={
+                    "id": "e1-block", "object": "chat.completion",
+                    "created": int(time.time()), "model": f"{alias}(e1-blocked)",
+                    "choices": [{
+                        "index": 0, "finish_reason": "content_filter",
+                        "message": {"role": "assistant",
+                                    "content": e1.block_message(e1r.categories)},
+                    }],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "x_localai_e1": {"blocked": True, "categories": sorted(e1r.categories)},
+                },
+            )
 
     # ---- 别名解析 ----
     entry = REGISTRY.get(alias)

@@ -36,6 +36,25 @@ LiteLLM 将来可作**内部库**用于 `escalate.cloud` 归一化云端 provide
 **2026-07-27 端到端实测通过**:`assistant.fast` 路由到 8B 后端,契约头 `8b`,`model` 回写
 `assistant.fast(8b)`;`assistant.deep` 后端未起返回 503 带 fallback;未知别名 404。
 
+## E1 入口凭证检测器(§6.9.0 · 已实装 · 2026-07-27)
+
+`e1_detector.py` —— 在入口(转发/组装 prompt 之前)扫描本轮 user 输入,命中即拦下:
+不转发、不记正文,只记类别(§6.9.8)。**在网关侧做,不信任前端**(Open WebUI 是第三方)。
+
+- 类别(= `mem.cred_pattern_class`):`iban`(mod-97)· `card_pan`(Luhn)· `tax_id_de`(ISO 7064)·
+  `id_doc` · `secret_phrase`(密码/助记词/私钥触发词)· `high_entropy`(仅 E1/E4,误报高)
+- **归一化前置**:全角→半角 · 中文数字→阿拉伯 · 结构化匹配去分隔符(语音/全角通道)
+- **带校验和的类别用校验和** —— 噪声检测器会训练用户「一律点继续」,反而废掉 E1
+- 命中返回 200 + `finish_reason=content_filter` + `X-LocalAI-E1: blocked` 头 + 说明文案(不回显值)
+- **继续**:请求带 `X-LocalAI-E1-Override: continue` → 放行本轮,记 `outcome=continued`(仍只记类别)
+- 审计现落 `{state}/logs/gate_rejection.jsonl`(category·ts·session·outcome),★ 待 memory-service
+  上线后改写 `mem.gate_rejection` 表。**已实测:审计日志不含任何凭证串。**
+- 测试:`test_e1.py`(41 例:校验和/正例/归一化/误报控制/E3 剔除)· `test_gateway_e1.py`(12 例:
+  拦下/放行/override/多类别/中文,进程内 UTF-8)
+
+★ **诚实边界(§4.6.2)**:E1 拦得住【意外】,拦不住【坚持】。它把「手滑贴凭证」变成
+  「必须显式点继续」,**不是**「记忆零外发」的证明,也拦不住手动复制粘贴。
+
 ## ★ 明确未实装(P2 后续 · 代码里以 STUB 标注,不假装有)
 
 | 层 | 现状 | 依据 |
