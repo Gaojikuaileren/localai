@@ -151,9 +151,23 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 | # | 事项 | 判据 / 影响 |
 |---|---|---|
 | 1 | **Tailscale 留不留** | 选 Signal 后 Funnel 用途消失,它只剩"LAN 加密 + 准入 + 设备清单",而那三项可由 mTLS + 管理端替代且**断网时更硬**。**判据只有一个:会不会带笔记本出门用全功能?** |
-| 2 | 宠物渲染选型 | 决定 A7-pet 实测对象与 `desktop_floor` 新值 |
+| 2 | 宠物渲染选型 | 决定 A7-pet 实测对象与 `desktop_floor` 新值。★ **默认已收窄为 DragonBones(MIT)** —— Live2D 的 **Expandable Application 条款**(用户可加载不确定数量的模型)需事前审批 + 收入分成 + EULA 插条款,且**连个人与小微都不豁免**,会直接阻断贩卖(D40 补记) |
 | 3 | 租约三参数 | TTL / 心跳间隔 / 空闲卸载(实测后定) |
 | 4 | 产品化是否真启动 | 决定 D41 各条何时从"记账"变"裁决" |
+
+### ★ 许可核实(2026-07-28)带回的三条硬约束
+
+1. **`signal-cli` 运行时必然携带 AGPLv3**(`turasa:signal-network` → `org.signal:libsignal-client`),
+   而 GPLv3 §13 规定组合体整体承担 AGPL §13 的网络源码义务 ⇒ **产品不打包 signal-cli**,
+   安装向导引导用户自取;产品侧只留自己原创的 JSON-RPC 客户端。**绝不 fork、绝不 patch。**
+2. **FSF 的判准是双要件:通信机制 + 通信语义。** IPC 不是免死金牌 ——
+   契约必须**语义贫瘠**(只传扁平 DTO,禁对象图/回调/共享内存)。
+3. **Discord 开发者条款要求 encryption of data at rest** ⇒ 接 Discord 通道
+   **必须重新裁定 D21/D22**(不加密)。这是合同义务,不是隐私偏好。
+
+另:**faster-whisper 默认联网拉权重** —— 需构建期预置 + `local_files_only`;
+**Piper 已改为 GPL-3.0** 且逐个语音的 MODEL_CARD 各不相同 ⇒ 需白名单 + CI 校验。
+**代码许可通过 ≠ 权重许可通过**,两套台账分开记。
 
 ---
 

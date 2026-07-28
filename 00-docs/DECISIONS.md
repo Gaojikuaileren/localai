@@ -1359,3 +1359,166 @@ EU AI Act · 产品责任指令 2024/2853 · **Cyber Resilience Act**(可能是�
 3. **租约三参数**:TTL / 心跳间隔 / 空闲卸载时长(实测后定)。
 
 4. **产品化是否真的启动** → 决定 D41 各条何时从"记账"变成"裁决"。
+
+---
+
+## 2026-07-28 · D38 补记 · signal-cli 的许可负担比自称的重;契约要四维
+
+**核实后修正 D38 原文两处。** 依据均为已读原文(URL 见下),非二手转述。
+
+### ① signal-cli 自称 GPLv3,但运行时**必然携带 AGPLv3**
+
+```
+signal-cli                                GPLv3
+ └─ com.github.turasa:signal-network      AGPLv3   ← libsignal-service-java 的非官方 fork
+     └─ org.signal:libsignal-client       AGPLv3   ← Signal 官方协议库
+```
+
+**GPLv3 §13 原文**:「you have permission to link or combine any covered work with a work licensed
+under version 3 of the GNU Affero General Public License into a single combined work…
+**the special requirements of the GNU Affero General Public License, section 13, concerning
+interaction through a network will apply to the combination as such**」
+
+⇒ 打包 signal-cli = 分发一个含 AGPL 代码的整体,义务按 AGPL 走。
+而家庭 AI 中枢正是 AGPL §13 所指「users interacting with it remotely through a computer network」
+的典型形态。
+
+**架构裁定(二选一,此处选 A)**:
+
+- **路线 A ★采用**:产品**不分发** signal-cli。安装向导引导用户自行获取,
+  产品侧只实现 JSON-RPC 客户端 —— 那是你自己的原创代码,可闭源。
+- 路线 B(不采用):打包,则交付物必须含 GPLv3 + AGPLv3 全文、对应源码或有效书面 offer、
+  以及(若有任何修改)产品 UI 内一个网络可达的「获取本组件源码」入口。
+
+**衍生硬规则**:**绝不 fork、绝不 patch** signal-cli / libsignal,只消费上游未改动的官方发行版
+—— AGPL 的网络条款只在「你修改了它」时触发,而「修改」的边界很容易被踩到(打补丁、改版本号、改构建)。
+构建脚本要能证明 bit-for-bit 使用上游 release。
+另:适配器启动时**校验 signal-cli 版本**,过旧则报 degraded(Signal-Server 协议会变)。
+
+### ② ★ FSF 的判准是**双要件**,IPC 不是免死金牌
+
+D38 原文只写了「独立进程 + IPC」。**这不够。** FSF GPL FAQ #MereAggregation 原文:
+
+> 「pipes, sockets and command-line arguments are communication mechanisms normally used
+> between two separate programs.」
+> **「But if the semantics of the communication are intimate enough, exchanging complex
+> internal data structures, that too could be a basis to consider the two parts as combined
+> into a larger program.」**
+
+即:**通信机制 + 通信语义**两个要件。IPC 只是「通常表示独立程序」的推定。
+
+⇒ 通道契约必须刻意设计成**语义贫瘠的窄接口**:
+
+- 只传**扁平消息 DTO**(sender / text / attachment 路径 / timestamp / thread_id)的 JSON 行协议
+- **禁止**跨进程传递内部对象图 · **禁止**回调注册 · **禁止**桥反向调用 core 的内部函数 ·
+  **禁止**共享内存或共享数据结构
+- 契约文档里**显式写明**「bridge 与 core 之间只交换纯数据消息」——
+  ★ 这句话本身就是将来最有价值的合规证据
+
+**另一条硬线**:外联通道目录下**不得出现从 GPL/AGPL 仓库复制粘贴的代码**
+(协议解析、protobuf 定义、存储 schema 一概不许抄),只允许通过 wire protocol 交互。
+
+### ③ 通道契约要**四维**,原 D38 的字段不够
+
+原 D38 只给了 `operator_can_read_content` / `requires_public_ingress` /
+`inbound_mode` / `sender_identity_strength`。核实后须补两维,**少一维接第二个通道就要返工**:
+
+| 维度 | 为什么不能省 |
+|---|---|
+| `initiation` | Telegram bot **无法主动发起**首次会话;Apple 只允许消费者发起 |
+| `outbound_window` | 微信 **48 小时 5 条**;Signal 无限制 |
+| `data_policy` | **Discord 条款禁止用消息内容训练 ML/AI**;Telegram 禁止为构建数据集采集 |
+| `self_contained` | WhatsApp 官方通道**无法纯本地实现**(需厂商持有的 Meta App + 公网 OAuth 回调),
+须与「客户端自持凭据、零厂商基础设施」的适配器区分,并在 UI 上明示 |
+
+★ `data_policy` 对**记忆系统**有直接影响:记忆条目必须把**来源通道**做成一等字段并随导出流转,
+因为这些条款把「推理时使用」与「用于训练/聚合」切成了两种不同许可的用途。
+
+### ④ Signal 是「被容忍而非被授权」
+
+Signal ToS **通篇未提第三方客户端**;官方唯一公开表态是 Moxie 2016-05-05:
+「you're free to use our source code…but you're not entitled to use our name or the service that we run」。
+
+⇒ 架构上把 Signal 当成**随时可能失效的通道**:契约要有 health / degraded 状态与自动降级路径,
+核心链路不得对它硬依赖。
+⇒ 产品文案与代码 package 名**一律不得含 "Signal"**;适配器命名中性词
+(如 `channel-adapter-sigcli`),对外描述用「可对接你自己安装的 signal-cli」。
+⇒ 许可 non-transferable ⇒ **不能预装已链接的账号**(不能镜像含 account db 的 VM/容器)。
+⇒ **计费不得与 Signal 通道耦合** —— 不能出现「Signal 通道 = 付费高级功能」这种 SKU。
+
+**本补记不构成法律意见。** 产品化前须由执业律师审阅。
+
+---
+
+## 2026-07-28 · D40 补记 · Live2D 会直接阻断贩卖;默认渲染改 DragonBones
+
+**核实后修正 D40 的渲染选型倾向。**
+
+Live2D 是本项目组件清单里**唯一真正卡死商业化**的一项,而且卡点**不是营收门槛**:
+
+> **Expandable Application 条款**:「用户可加载不确定数量的模型(例如 avatar)」
+> → 需**事前审批 + 收入分成 + 在你的 EULA 里插入 Live2D 指定条款**,
+> 且明文写着**连 General User 与 Small-Scale Enterprise 都不豁免**。
+
+而本项目「卖给别人自建、用户换自己的桌宠」**几乎必然落入该定义** ——
+换装本身就是"加载不确定数量的模型"。
+
+另有两条与项目叙事冲突:
+- **Cubism Core 是禁止逆向的闭源二进制** —— 与「真正私密的本地 AI」直接抵触
+  (一个你无法审计的二进制,持续跑在你的桌面上)
+- 素材格式(`.model3.json` / `physics3.json`)是要被运行时解析的复杂格式,
+  而换装素材最可能来自外部 ⇒ **解析器攻击面**(D40 已记,此处加重)
+
+**裁定**:**默认渲染后端选 DragonBones(MIT)一类**;Live2D 降级为**用户自装的可选插件**
+(产品不分发其 Core,不承担其条款)。渲染层与在场协议**解耦**,使将来替换的代价可控。
+
+**推翻条件**:①若 Live2D 修改 Expandable Application 条款或给出明确豁免;
+②若最终决定不贩卖(D41 待决项 4 判为"否"),则可重新评估。
+
+---
+
+## 2026-07-28 · D41 补记 · 三条新增的冲突与隐私问题
+
+### ① Discord 的「静态加密」是合同义务,与 D21/D22 冲突
+
+Discord Developer ToS 要求 **encryption of the data at rest**。
+若将来接入 Discord 通道,「记忆库不加密」(D22)与「备份盘不加密」(D21)**直接违反该条款**。
+
+⇒ 记账:**接 Discord = 必须重新裁定 D21/D22**。这不是隐私偏好问题,是合同义务。
+建议届时把「静态加密」提升为**全产品存储基线**(凭据走 DPAPI、记忆库走加密存储),
+而不是做成 Discord 专属补丁。
+
+### ② faster-whisper 默认联网拉取权重 —— 这是隐私问题,不只是合规
+
+⇒ 架构要求:**构建期预置权重 + `local_files_only`**。
+一个宣称「真正私密的本地 AI」的产品,在首次运行时默默联网下载模型,
+是叙事与实现之间最尴尬的一类缺口。
+
+### ③ 模型权重许可与代码许可是**两套独立台账**
+
+**Piper 现已改为 GPL-3.0**(此前记录为 MIT),且**逐个语音的 MODEL_CARD 各不相同** ——
+仓库标签与单个语音的实际许可**不是一回事**。
+
+⇒ 建立**语音白名单**并在 CI 中强制校验;
+⇒ 同理适用于所有模型权重(bge-m3 / Whisper / 未来的 VLM):
+   **代码许可通过不等于权重许可通过**,两者必须分开记账。
+
+其余组件对整体贩卖**无实质限制**:llama.cpp(MIT)· Qdrant(Apache-2.0)· PostgreSQL ·
+bge-m3 权重(MIT)· faster-whisper 与 Whisper 权重(MIT)。
+
+**非官方 WhatsApp 库的定位修正**:许可证不是阻碍(whatsmeow 是 MPL-2.0 文件级弱 copyleft,
+Baileys 是 MIT)——**阻碍在平台条款,两者是独立的两层**,不得把「MIT 所以没问题」写进任何内部结论。
+若将来仍要提供该路径,唯一在结构上可辩护的形态是:不随产品分发、不做适配器、不写文档,
+仅暴露一个**通用的自定义通道插件接口**,由用户自行编写 ——
+即把它从「产品能力」降级为「用户自担风险的扩展点」。
+★ 这反过来要求通道契约必须是**公开、稳定、可由第三方实现**的接口,而非硬编码的通道列表。
+
+### ④ WhatsApp 在 EEA 处于监管令撑开的临时窗口
+
+欧盟委员会 2026-06-09 临时措施令命令 Meta 按 2025-10-15 前的条款恢复第三方通用 AI 助手
+对 WhatsApp Business API 的访问,**维持到最终裁决为止**。
+
+⇒ 这不是稳定的合同权利。架构上必须把 WhatsApp 当成**可被单方关闭的通道**:
+适配器需显式 kill-switch 与状态上报;**记忆层的存储 schema 不得与 WhatsApp 的 message id 结构耦合**,
+以保证通道失效后会话历史与记忆条目能完整迁移到另一通道。
+⇒ 对外不得承诺「永久支持 WhatsApp」。
