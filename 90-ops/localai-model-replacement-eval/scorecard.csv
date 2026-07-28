@@ -1,0 +1,1 @@
+candidate_id,baseline_id,alias,case_id,run,suite,category,score_0_to_4,hard_fail,auto_checks_passed,ttft_ms,total_latency_ms,tokens_per_second,vram_peak_gib,output_path,reviewer_notes

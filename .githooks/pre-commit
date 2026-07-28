@@ -18,6 +18,9 @@ is_exempt() {
     .githooks/*)         return 0 ;;
     .gitignore)          return 0 ;;
     *.md)                return 0 ;;
+    # 第三方评测语料(纯数据,无可执行代码):题面里的 C:\... 是刻意的模型安全测试提示,
+    # 不是项目代码读取的真实路径,不受"换 SSD 只改 paths.toml"约束。
+    90-ops/localai-model-replacement-eval/*) return 0 ;;
     *) return 1 ;;
   esac
 }

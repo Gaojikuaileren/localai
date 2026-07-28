@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#64748b"/>
+  <rect x="300" y="155" width="680" height="410" rx="22" fill="#ffffff" stroke="#334155" stroke-width="4"/>
+  <circle cx="380" cy="245" r="34" fill="#f59e0b"/>
+  <text x="380" y="257" text-anchor="middle" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#ffffff">!</text>
+  <text x="440" y="240" font-family="Arial, sans-serif" font-size="38" font-weight="700" fill="#111827">Remove course preset?</text>
+  <text x="365" y="325" font-family="Arial, sans-serif" font-size="27" fill="#475569">“Photography Basics” will be moved to the recycle bin.</text>
+  <text x="365" y="370" font-family="Arial, sans-serif" font-size="27" fill="#475569">You can restore it later.</text>
+  <rect x="365" y="445" width="330" height="64" rx="10" fill="#2563eb"/>
+  <text x="530" y="486" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" fill="#ffffff">Move to recycle bin</text>
+  <rect x="725" y="445" width="180" height="64" rx="10" fill="#e2e8f0"/>
+  <text x="815" y="486" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" fill="#111827">Cancel</text>
+</svg>
