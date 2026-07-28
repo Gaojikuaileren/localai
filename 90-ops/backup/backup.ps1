@@ -107,7 +107,13 @@ Write-Host ("  state 根  : {0}  (Disk {1})" -f $rootState, $diskState)
 Write-Host ("  code  根  : {0}  (Disk {1})" -f $rootCode,  $diskCode)
 Write-Host ''
 
-if ($null -ne $diskTarget -and ($diskTarget -eq $diskState -or $diskTarget -eq $diskCode)) {
+# ★ fail-closed:解析不出目标盘号时【拒绝执行】,而不是跳过这道检查继续备。
+#   原写法 `if ($null -ne $diskTarget -and ...)` 在盘号解析失败时整条判断被短路,
+#   备份照跑 —— 与「备到同一块盘等于没备」的初衷相悖(2026-07-28 审查发现)。
+if ($null -eq $diskTarget) {
+    throw "拒绝执行:解析不出备份目标 $Target 的物理盘号,无法确认它与源数据不同盘。"
+}
+if ($diskTarget -eq $diskState -or $diskTarget -eq $diskCode) {
     throw "拒绝执行:备份目标与源数据在同一块物理盘 (Disk $diskTarget)。同盘备份等于没备份。"
 }
 
@@ -161,18 +167,31 @@ if ($encStatus -eq 'On') {
     $report.Add('> 拿到这块盘的人可以直接读取其中的一切。物理保管是唯一的保护。')
 }
 $report.Add('')
-$report.Add('排除项: `state\quarantine`(隔离区装的是打算删除的数据,不应进备份代)')
+$report.Add('排除项:')
+$report.Add('')
+$report.Add('- `state\quarantine` —— 隔离区装的是打算删除的数据,不应进备份代')
+$report.Add('- **活数据库目录**(PG `data` / Qdrant `storage`·`snapshots`·`tmp`)—— §8.5.5:')
+$report.Add('  活库不可文件级复制。它们以**逻辑转储**形式在 `memory-db\`,那才是恢复源')
+$report.Add('- `_dumps\` 暂存区 —— 已单独整理进 `memory-db\`')
+$report.Add('- **`qdrant*\config\`(含 api_key)** —— 运行期密钥不进明文备份盘;')
+$report.Add('  D22 下无 crypto-shredding,密钥一旦入代只能等 12 代轮出。恢复时重跑安装脚本重新配发')
 $report.Add('')
 
 function Copy-Root {
-    param([string]$Name, [string]$Source, [string[]]$ExcludeDir = @())
+    # ExcludeDir  : 按目录【名】排除(如 quarantine)—— 会命中任意层级的同名目录
+    # ExcludeAbs  : 按【绝对路径】排除 —— 用于活数据库目录。
+    #   ★ 为什么必须分开:活库目录叫 data / storage / logs 这类通名,用名字排会误伤
+    #     (/XD logs 会连 state\logs 一起排掉)。robocopy /XD 接受绝对路径,精确排除。
+    param([string]$Name, [string]$Source, [string[]]$ExcludeDir = @(), [string[]]$ExcludeAbs = @())
     if (-not (Test-Path $Source)) {
         Write-Host ("  {0,-16} 源不存在,跳过" -f $Name) -ForegroundColor DarkGray
         $script:report.Add("- **$Name**: 源不存在,跳过")
         return
     }
     $files = Get-ChildItem $Source -Recurse -File -Force -ErrorAction SilentlyContinue |
-             Where-Object { $p = $_.FullName; -not ($ExcludeDir | Where-Object { $p -like "*\$_\*" }) }
+             Where-Object { $p = $_.FullName
+                            (-not ($ExcludeDir | Where-Object { $p -like "*\$_\*" })) -and
+                            (-not ($ExcludeAbs | Where-Object { $p -like "$_\*" })) }
     $sum = ($files | Measure-Object Length -Sum).Sum
     $gb  = [math]::Round(($sum / 1GB), 2)
     Write-Host ("  {0,-16} {1,6} files  {2,8} GB" -f $Name, $files.Count, $gb)
@@ -183,6 +202,7 @@ function Copy-Root {
         New-Item -ItemType Directory -Force -Path $to | Out-Null
         $roboArgs = @($Source, $to, '/E', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
         foreach ($x in $ExcludeDir) { $roboArgs += @('/XD', $x) }
+        foreach ($x in $ExcludeAbs) { $roboArgs += @('/XD', $x) }
         & robocopy @roboArgs | Out-Null
         # robocopy 退出码 <8 表示成功
         if ($LASTEXITCODE -ge 8) { throw "robocopy 失败 ($Name),退出码 $LASTEXITCODE" }
@@ -191,11 +211,39 @@ function Copy-Root {
 
 Write-Host '内容:' -ForegroundColor Cyan
 
-# 1. STATE — 全量(含记忆库),唯一不可重建的数据
+# 0. ★ 记忆库【逻辑】导出 —— 必须在复制 STATE 之前(§8.5.5)
+#    活库绝不文件级复制:对运行中的 PG data / Qdrant storage 做 robocopy,
+#    得到的是撕裂快照 = 典型的「备份成功但恢复不出来」。
+$memDump = Join-Path $PSScriptRoot 'memory-dump.ps1'
+$memRoot = $P['state.memory']
+$excludeAbs = @()
+if (Test-Path $memRoot) {
+    if (-not $DryRun) {
+        $okMem = & $memDump -DestDir $dest
+        if ($okMem -ne $true) {
+            throw "记忆库逻辑导出失败 —— 拒绝产出一个不含记忆库的『成功』备份(§8.5.5)。"
+        }
+        $report.Add('- **memory-db**: PG 逻辑转储(pg_dump -Fc + globals)+ Qdrant snapshot(两实例)')
+    } else {
+        Write-Host '  [DryRun] 跳过记忆库逻辑导出'
+    }
+    # 活引擎目录:从 STATE 的文件级复制里【按绝对路径】排除
+    $excludeAbs = @(
+        $P['memory.pg_data'], $P['memory.qdrant_storage'], $P['memory.qdrant_snapshots'],
+        $P['memory.qdrant_s2_storage'], $P['memory.qdrant_s2_snapshots'],
+        (Join-Path $memRoot 'qdrant\tmp'), (Join-Path $memRoot 'qdrant-s2\tmp'),
+        (Join-Path $memRoot '_dumps'),                    # 暂存区:已单独复制进 memory-db\
+        # ★ 密钥不进备份代:config.yaml 含 Qdrant api_key。恢复时重跑安装脚本重新配发,
+        #   把运行期密钥复制到一块明文移动盘上,是丢盘即丢钥(D22 下无 crypto-shredding)。
+        (Join-Path $memRoot 'qdrant\config'), (Join-Path $memRoot 'qdrant-s2\config')
+    ) | Where-Object { $_ }
+}
+
+# 1. STATE — 全量,唯一不可重建的数据
 #    排除 quarantine:隔离区装的是你**打算删掉**的东西。把它备份进来,
 #    等于让已经决定丢弃的数据在 12 个备份代里继续存活,并且会把
 #    list-only 区域的正文搬进一个可被完整读取的位置(审查发现 P-3)。
-Copy-Root -Name 'state' -Source $rootState -ExcludeDir @('quarantine')
+Copy-Root -Name 'state' -Source $rootState -ExcludeDir @('quarantine') -ExcludeAbs $excludeAbs
 
 # 2. ASSETS/adopted — 你标记为要用的
 Copy-Root -Name 'assets-adopted' -Source $adopted
@@ -283,10 +331,38 @@ if (-not $DryRun) {
     $report.Add('```')
     $report.Add('恢复后可比对 `git rev-parse HEAD^{tree}` 与原仓库是否一致。')
     $report.Add('')
-    $report.Add('### 3. 恢复 state(含记忆库)')
+    $report.Add('### 3. 恢复 state(不含数据库 —— 见第 4 节)')
     $report.Add('```')
     $report.Add('robocopy state\ <state 根>\ /E')
     $report.Add('```')
+    $report.Add('> `state\` 里**故意不含**活数据库目录(PG data / Qdrant storage)。')
+    $report.Add('> §8.5.5:对运行中的库做文件级复制会得到撕裂快照,恢复不出来。')
+    $report.Add('> 数据库走下面第 4 节的逻辑恢复。')
+    $report.Add('')
+    $report.Add('### 4. ★ 恢复记忆库(唯一合法路径:`memory-db\`)')
+    $report.Add('')
+    $report.Add('**先读 `memory-db\pg\PG_VERSION.txt` 与 `memory-db\qdrant\QDRANT_VERSION.txt`** —— ')
+    $report.Add('它们记着必须对齐的大版本与 initdb 参数;不对齐会恢复失败或损坏中文。')
+    $report.Add('')
+    $report.Add('**PostgreSQL**')
+    $report.Add('```')
+    $report.Add('# a) 用完全相同的参数建空集群(参数见 PG_VERSION.txt)')
+    $report.Add('initdb -D <新data> -U postgres --encoding=UTF8 --locale=C --data-checksums')
+    $report.Add('# b) 先恢复角色(mem_rw / ai_mem_local / ai_mem_remote 及其权限)')
+    $report.Add('psql -h 127.0.0.1 -U postgres -f globals_<stamp>.sql')
+    $report.Add('# c) 再恢复库本体')
+    $report.Add('createdb -h 127.0.0.1 -U postgres -O mem_rw -E UTF8 memory')
+    $report.Add('pg_restore -h 127.0.0.1 -U postgres -d memory memory_<stamp>.dump')
+    $report.Add('```')
+    $report.Add('')
+    $report.Add('**Qdrant**(两个实例各自恢复;mem_s2 是 S2 机密,别混)')
+    $report.Add('```')
+    $report.Add('# 空 storage 目录 + 启动期恢复(覆盖同名集合要加 --force-snapshot,慎用)')
+    $report.Add('qdrant.exe --config-path <cfg> --snapshot <xxx.snapshot>:<collection>')
+    $report.Add('```')
+    $report.Add('')
+    $report.Add('> **`memory-db\` 是记忆库唯一合法的恢复源。** `state\` 里数据库目录的缺席是**故意的**,不是遗漏。')
+    $report.Add('> **api_key / 配置也不在备份里**(见排除项)—— 恢复时重跑安装脚本重新配发。')
     $report.Add('')
     $report.Add('### 4. 模型')
     $report.Add('本备份**不含模型权重本体**,只有 `models-manifest.json`(路径 + 大小 + sha256)。')
