@@ -9,7 +9,10 @@
 #  幂等。日志全程写文件,失败可事后看。
 # =============================================================================
 param([switch]$DownloadOnly)
-$ErrorActionPreference = 'Stop'
+# ★ 不能用 'Stop':native 命令(python/pip)往 stderr 写【警告】(如 HF「无 token」提示)时,
+#   PS5.1 会把它包成 NativeCommandError 致命错误、即使 exit code=0 也中断脚本。
+#   故用 'Continue',真失败一律靠显式 $LASTEXITCODE / Test-Path 检查(下方各步都有)。
+$ErrorActionPreference = 'Continue'
 try { Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue } catch {}
 
 $PathsToml = Join-Path $PSScriptRoot '..\config\paths.toml'
@@ -96,14 +99,16 @@ if (-not (Test-Path $Nssm)) { Say "  X 没找到 nssm($Nssm)。先跑 install-qd
 $httpPort = 18084
 
 Say "[5] 授 ai-mem 读服务代码 + venv + HF 缓存(D31)…"
-& icacls $SvcDir /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
-& icacls $Venv   /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
-& icacls $HfHome /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
+foreach ($d in @($SvcDir, $Venv, $HfHome)) {
+  & icacls $d /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
+  if ($LASTEXITCODE -ne 0) { Say "  X icacls 授权失败: $d"; exit 1 }
+}
 
 Say "[6] 重置 ai-mem 密码 + 同步已有 ai-mem 服务(否则它们下次 1069)…"
 $b = New-Object byte[] 30; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
 $pw = (([Convert]::ToBase64String($b) -replace '[+/=]','').Substring(0,24)) + '#Aa7'
-Set-LocalUser -Name 'ai-mem' -Password (ConvertTo-SecureString $pw -AsPlainText -Force)
+try { Set-LocalUser -Name 'ai-mem' -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -ErrorAction Stop }
+catch { Say "  X 重置 ai-mem 密码失败: $_"; exit 1 }
 foreach ($s in (Get-WmiObject Win32_Service | Where-Object { $_.StartName -eq '.\ai-mem' })) {
   $r = $s.Change($null,$null,$null,$null,$null,$null,".\ai-mem",$pw,$null,$null,$null)
   if ($r.ReturnValue -ne 0) { Say "  X 同步 $($s.Name) 失败 RV=$($r.ReturnValue)"; exit 1 }

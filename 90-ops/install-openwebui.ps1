@@ -11,7 +11,9 @@
 #  幂等。全程写日志。
 # =============================================================================
 param([switch]$DownloadOnly)
-$ErrorActionPreference = 'Stop'
+# ★ 同 install-embedding:不能用 'Stop' —— native 命令(pip)往 stderr 写警告时,PS5.1 会包成
+#   NativeCommandError 中断脚本(即使 exit code=0)。真失败靠显式 $LASTEXITCODE / Test-Path 检查。
+$ErrorActionPreference = 'Continue'
 try { Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue } catch {}
 
 $PathsToml = Join-Path $PSScriptRoot '..\config\paths.toml'
