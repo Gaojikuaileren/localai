@@ -55,7 +55,10 @@ Say "[2] 装依赖(torch CPU + FlagEmbedding + fastapi/uvicorn)… 这一步会�
 & $VPy -m pip install -q --upgrade pip 2>&1 | Tee-Object -FilePath $Log -Append | Out-Null
 & $VPy -m pip install -q torch --index-url https://download.pytorch.org/whl/cpu 2>&1 | Tee-Object -FilePath $Log -Append | Out-Null
 if ($LASTEXITCODE -ne 0) { Say "  X torch 安装失败,见日志尾"; Get-Content $Log -Tail 15; exit 1 }
-& $VPy -m pip install -q "FlagEmbedding" fastapi uvicorn pydantic 2>&1 | Tee-Object -FilePath $Log -Append | Out-Null
+# ★ 必须钉 transformers<5:transformers 5.x 移除了 prepare_for_model,而 FlagEmbedding 1.4.0
+#   的 reranker 仍在调它 → rerank 报 "XLMRobertaTokenizer has no attribute prepare_for_model"。
+#   (embedding 路径不受影响,所以症状是「维度对但 rerank 崩」。2026-07-28 实测确认。)
+& $VPy -m pip install -q "FlagEmbedding" "transformers<5" fastapi uvicorn pydantic 2>&1 | Tee-Object -FilePath $Log -Append | Out-Null
 if ($LASTEXITCODE -ne 0) { Say "  X FlagEmbedding 安装失败,见日志尾"; Get-Content $Log -Tail 15; exit 1 }
 Say "  依赖装好"
 
