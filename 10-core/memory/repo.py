@@ -233,6 +233,11 @@ def redact(conn: psycopg.Connection, ref, reason: str, *, table: str = "l3_fact"
         raise _sanitize(e) from None
 
 
+def as_jsonb(obj: Any):
+    """把 dict 包成 psycopg Jsonb —— 让别的模块不必直接 import psycopg(守分层)。"""
+    return psycopg.types.json.Jsonb(obj)
+
+
 def get_system_state(conn: psycopg.Connection, key: str) -> Optional[Dict[str, Any]]:
     """读系统状态标记(如 cold_start_completed)。不存在则 None。"""
     try:

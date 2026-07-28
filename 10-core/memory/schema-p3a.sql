@@ -937,3 +937,90 @@ BEGIN
     GRANT SELECT, INSERT ON mem.system_state TO ai_mem_local;
   END IF;
 END $$;
+
+-- =====================================================================
+-- =====================================================================
+--  S8 · L4 程序记忆(L4-proc)独立写路径 + 哈希绑定批准 + executor
+--
+--  ★ 术语消歧:本节的 L4 是【程序记忆】(§4.4.3),不是打扰严重度的 L4/N4。
+--  ★ L4-proc 比 L1-L3 危险:它是可执行工作流,可能直通代码执行。
+--    所以写门槛更高:内容哈希 + 签名 + 执行前哈希复核,一个都不能少。
+-- =====================================================================
+-- =====================================================================
+
+-- 现有 l4_procedure:id/name/version/git_ref/sha256/signature_ref/signed_at/
+--                    sensitivity_domain/crypto_tier + UNIQUE(name,version)
+-- 缺的三样(规格提取指出):
+--   · body           —— 过程的步骤定义(sha256 就是对它取的)
+--   · last_approved_sha256 —— 「你最近批准过的哈希」的落点。此前无处可存,
+--                            于是「执行前哈希复核」在数据模型上不可实现。
+--   · approved_at / approved_by —— 批准链
+ALTER TABLE mem.l4_procedure ADD COLUMN IF NOT EXISTS body jsonb;
+ALTER TABLE mem.l4_procedure ADD COLUMN IF NOT EXISTS last_approved_sha256 text;
+ALTER TABLE mem.l4_procedure ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+ALTER TABLE mem.l4_procedure ADD COLUMN IF NOT EXISTS approved_by text;
+
+COMMENT ON COLUMN mem.l4_procedure.last_approved_sha256 IS
+  '★ 执行前哈希复核的基准:executor 要求 sha256(当前 body) == 此列,字节级精确,'
+  '不等即拒绝执行(§4.4.3)。此前无此列 → "执行前哈希复核"无处可比。';
+
+-- ★★ 批准链表:每次批准记一条(谁、何时、批的哪个哈希、签名)。append-only。
+CREATE TABLE IF NOT EXISTS mem.l4_approval (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  procedure_id  bigint NOT NULL REFERENCES mem.l4_procedure(id),
+  approved_sha256 text NOT NULL,      -- 批准的是这个内容哈希
+  signature     text NOT NULL,        -- 对 (name|version|sha256) 的签名(非空)
+  approved_at   timestamptz NOT NULL DEFAULT now(),
+  approved_by   text NOT NULL         -- 批准者身份(trusted-local 账户)
+);
+COMMENT ON TABLE mem.l4_approval IS
+  'L4 批准链(append-only)。一次批准 = 一条。哈希绑定的是【内容哈希】,'
+  '不是凭证的 (ref,sink)、也不是文件操作的计划哈希 —— 三种"哈希绑定"载荷不可合并';
+CREATE INDEX IF NOT EXISTS idx_l4_approval_proc ON mem.l4_approval (procedure_id);
+
+-- =====================================================================
+-- 已批准的 L4 行必须有签名(§4.4.3「版本化并签名」)。
+-- 此前 signature_ref/signed_at 可空且无 CHECK ⇒ 未签名行可正常插入并被消费。
+-- 规则:last_approved_sha256 非空(=已批准)⇒ 必须同时有签名与批准时间。
+-- =====================================================================
+ALTER TABLE mem.l4_procedure DROP CONSTRAINT IF EXISTS l4_approved_needs_signature;
+ALTER TABLE mem.l4_procedure ADD CONSTRAINT l4_approved_needs_signature CHECK (
+  last_approved_sha256 IS NULL
+  OR (signature_ref IS NOT NULL AND signed_at IS NOT NULL AND approved_at IS NOT NULL));
+
+-- last_approved_sha256 也走单向棘轮式的保护:一经批准不得被清空
+-- (清空 = 把已批准降级为未批准,绕过审计)。允许改为【新的】批准哈希(版本升级),
+-- 但不允许 非空→NULL。
+CREATE OR REPLACE FUNCTION mem.tg_l4_approval_forward() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.last_approved_sha256 IS NOT NULL AND NEW.last_approved_sha256 IS NULL THEN
+    RAISE EXCEPTION
+      '不得撤销 L4 批准(id=%):last_approved_sha256 只能改为新哈希,不能清空。'
+      '要停用请删除过程或标记,而不是抹掉批准痕迹。', OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_l4_approval_forward ON mem.l4_procedure;
+CREATE TRIGGER trg_l4_approval_forward BEFORE UPDATE ON mem.l4_procedure
+  FOR EACH ROW EXECUTE FUNCTION mem.tg_l4_approval_forward();
+
+-- =====================================================================
+-- 授权:ai_mem_local 可读写 l4_procedure 与 l4_approval(应用层再按 CallerTier 收紧);
+--       ai_mem_remote 一个权限都不给(结构性排除,不可翻转)。
+-- =====================================================================
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    GRANT SELECT, INSERT, UPDATE ON mem.l4_procedure TO ai_mem_local;
+    GRANT SELECT, INSERT ON mem.l4_approval TO ai_mem_local;   -- 批准链 append-only,无 UPDATE/DELETE
+    GRANT USAGE ON ALL SEQUENCES IN SCHEMA mem TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_l4_approval_forward() TO ai_mem_local;
+  END IF;
+  -- ★★ 结构性排除,不是"默认排除":ai_mem_remote 对 L4 无任何 GRANT,
+  --   且 v_memory_nons2 不含 l4_procedure —— 不存在任何开关能把 L4 纳入远程检索。
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_remote') THEN
+    REVOKE ALL ON mem.l4_procedure, mem.l4_approval FROM ai_mem_remote;
+  END IF;
+END $$;
