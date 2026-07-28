@@ -26,9 +26,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import e1_detector as e1
 import caller_identity
+import membership
 
 # §6.8 隔离服务账户 —— 绝不允许经网关触达记忆(D30 混淆代理防护)
 LOCAL_DENY_ACCOUNTS = {"ai-asset", "ai-exec"}
+
+# P3b S3 · LAN Edge 服务账户名(低权、区别于机主)。provisioning 前为 None(该分支不激活)。
+# 它只是纵深防御的一层:真正封顶 LAN_DEVICE 的是「带指纹头 → 查成员表」(见 resolve_lan_principal)。
+LAN_EDGE_ACCOUNT = None
 
 REGISTRY_PATH = Path(__file__).with_name("registry.toml")
 PATHS_TOML = Path(__file__).resolve().parents[2] / "config" / "paths.toml"
@@ -169,7 +174,10 @@ def backend_of(alias: str):
 REGISTRY = load_registry()
 CHAT_KINDS = {"chat", "chat_multimodal"}
 
-app = FastAPI(title="LocalAI Hub Gateway", version="0.1.0-p2")
+# ★ S3:关掉自动 API 文档(/docs · /redoc · /openapi.json)—— 安全网关不对外暴露接口清单;
+#   同时使路由集合收敛为显式三条,ROUTE_TIERS 元测试可穷举。
+app = FastAPI(title="LocalAI Hub Gateway", version="0.1.0-p3b",
+              docs_url=None, redoc_url=None, openapi_url=None)
 _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
 
 
@@ -210,7 +218,42 @@ def classify_caller(request: Request) -> str:
     ident = caller_identity.account_from_request(request)
     if ident and ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
         return "denied-account"               # ai-asset / ai-exec 绝不放行(§6.8)
+    if ident and LAN_EDGE_ACCOUNT and ident[1].lower() == LAN_EDGE_ACCOUNT.lower():
+        return "lan-edge"                     # ★ Edge 代理进程档:非业务档,永不落 trusted-local(纵深防御)
     return "trusted-local"                    # 人类 / ai-mem / 解析不到 → 放行(见 fail 策略)
+
+
+# ★ P3b S3:证书指纹 → LAN_DEVICE 主体(经 S2 成员表反查)。
+#   主体只来自成员表;客户端自报的 device_id / tier 一律忽略。未知/吊销/未激活/无 store → None(fail-closed)。
+def resolve_lan_principal(cert_sha256: str):
+    dev = membership.active_device(cert_sha256)
+    if dev is None:
+        return None
+    return {"tier": "lan-device", "device_id": dev["device_id"],
+            "cert_sha256": cert_sha256, "generation": dev["generation"]}
+
+
+# ★ P3b S3:每条路由必须显式归类;新增未归类路由 → unclassified_routes() 非空 → 元测试失败(§S3)。
+ROUTE_TIERS = {
+    ("GET", "/health"): "public-minimal",
+    ("GET", "/v1/models"): "authenticated",
+    ("POST", "/v1/chat/completions"): "authenticated",
+}
+
+
+def unclassified_routes():
+    out = []
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        methods = getattr(r, "methods", None)
+        if path is None or not methods:
+            continue
+        for m in methods:
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            if (m, path) not in ROUTE_TIERS:
+                out.append((m, path))
+    return out
 
 
 def require_trusted_local(request: Request):
@@ -243,12 +286,18 @@ def log_denied_access(account: str, session_id: str) -> None:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "aliases": sorted(REGISTRY.keys())}
+    return {"status": "ok"}   # ★ S3 收窄:不再泄露别名清单(别名走已认证的 /v1/models)
 
 
 @app.get("/v1/models")
-async def list_models():
-    """OpenAI 兼容:把 chat 别名列成 models。"""
+async def list_models(request: Request):
+    """OpenAI 兼容:把 chat 别名列成 models。★ S3:纳入认证(远程/未认证拒)。"""
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
     data = [
         {"id": name, "object": "model", "owned_by": "localai-hub",
          "kind": a["kind"], "contract": a.get("contract", "")}
@@ -280,6 +329,23 @@ async def chat_completions(request: Request):
                                "type": "denied_account"}},
         )
 
+    # ---- P3b S3:LAN 设备封顶(带证书指纹头 = LAN Edge 代理的 LAN 客户端)----
+    #   一律按成员表反查、封顶 LAN_DEVICE。即使 caller 因 fail-open 成了 trusted-local,
+    #   带指纹的请求也【拿不到】trusted-local 的能力(尤其解除 E1)。本机进程若伪设此头,
+    #   只会把自己【降】为 LAN_DEVICE —— 拿到的更少,不越权。主体来自成员表,不认自报 device_id。
+    fp = request.headers.get("x-localai-cert-sha256", "")
+    if fp:
+        principal = resolve_lan_principal(fp)
+        if principal is None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "未知 / 已吊销 / 未激活的设备指纹",
+                                   "type": "lan_device_unknown"}},
+            )
+        effective_tier = "lan-device"
+    else:
+        effective_tier = caller
+
     # ---- E1 入口凭证检测(§6.9.0 · 在组装/转发之前 · 不信任前端)----
     # 命中即拦下本轮:不转发后端、不落 L0、不记正文;只记类别(§6.9.8)。
     session_id = request.headers.get("x-session-id", "")
@@ -309,11 +375,11 @@ async def chat_completions(request: Request):
     #   今天是 trusted-local(本机 OS 会话信任,D28)。将来新增的 channel-relay 之类
     #   档位**默认不在此集合内** —— 这是 allowlist,新档位默认没有解除权,
     #   与本轮 provenance 那处改动是同一条规矩:**约束要写成拒绝优先**。
-    if caller in E1_OVERRIDE_ALLOWED_TIERS:
+    if effective_tier in E1_OVERRIDE_ALLOWED_TIERS:
         override = (request.headers.get("x-localai-e1-override", "").lower() == "continue"
                     or e1.OVERRIDE_PHRASE in _current_user_text(body.get("messages")))
     else:
-        override = False          # ★ 该档位连请求头都不读 —— 不给伪造留任何入口
+        override = False          # ★ 该档位连请求头都不读 —— 不给伪造留任何入口(LAN 设备走这条)
     e1r = e1.scan(scan_text)
     if e1r.blocked:
         if override:
