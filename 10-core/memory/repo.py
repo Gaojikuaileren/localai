@@ -192,22 +192,129 @@ def supersede(conn: psycopg.Connection, old_id: int, new_id: int) -> None:
         raise _sanitize(e) from None
 
 
-def redact(conn: psycopg.Connection, fact_id: int, reason: str) -> None:
-    """D33② tombstone 删除:置 redacted_at + 正文进隔离区。永不物理 DELETE。"""
+# ★ 可被 tombstone / 手动标 S2 的内容表白名单。
+#   与 schema-p3a §3(加 redacted_at 的表)、§6(绑 append-only)一致 ——
+#   泛化的 (table,id) 操作必须先过这个白名单,否则一个拼错的表名会拼进 SQL。
+_CONTENT_TABLES = frozenset({
+    "l1_session_summary", "l2_episode", "l3_fact",
+    "entity_person", "entity_event", "entity_preference", "entity_project",
+    "entity_device", "entity_place", "entity_thing"})
+
+
+def redact(conn: psycopg.Connection, ref, reason: str, *, table: str = "l3_fact") -> None:
+    """D33② tombstone 删除:置 redacted_at + 正文进隔离区。永不物理 DELETE。
+
+    ★ S5 泛化到 (table, id):原实现硬编码 'l3_fact',而 schema/roles 给全部 10 张
+      内容表都加了 redacted_at、撤了 DELETE —— 承诺全局可删,实际只有事实能删。
+      情节/实体的删除此前是空的。
+
+    调用形态两种(向后兼容):
+      redact(conn, fact_id, reason)                    → 默认 l3_fact
+      redact(conn, id, reason, table="l2_episode")     → 指定表
+    ★ 删情节还须调 track_vector.delete_episode_vector 删掉 Qdrant 点 —— 那不在本函数里,
+      因为 repo 不依赖向量层(分层)。面板层负责把两步串起来(见 panel.delete)。
+    """
+    if table not in _CONTENT_TABLES:
+        raise RepoError("22P02", f"不是内容表: {table!r}")
+    try:
+        with conn.cursor() as cur:
+            # ★ table 已过白名单,可安全内插;id 仍走参数
+            cur.execute(f"""
+                INSERT INTO mem.quarantine (src_table, src_id, payload, expires_at, reason,
+                                            sensitivity_domain)
+                SELECT %s, id, to_jsonb(f), now() + interval '30 days', %s, sensitivity_domain
+                  FROM mem.{table} f WHERE id=%s
+            """, (table, reason, ref))
+            cur.execute(f"UPDATE mem.{table} SET redacted_at=now() "
+                        f"WHERE id=%s AND redacted_at IS NULL", (ref,))
+            if cur.rowcount == 0:
+                raise RepoError("00000", "该行不存在或已被删除")
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def set_sensitivity(conn: psycopg.Connection, row_id: int, level: str,
+                    *, table: str = "l3_fact") -> None:
+    """手动标记敏感度(§4.11.4 的第二个 S2 生产者)。
+
+    ★ 只做 DB 那一列。DB 侧 tg_sensitivity_ratchet 保证【单向收紧】(S0/S1→S2,反向拒)。
+    ★★ 若把一条【情节】标 S2,它的向量还在 mem_main(非 S2 实例)——DB 声称 S2、
+       向量却在远程可读的实例里,§4.11.4 结构隔离被悄悄破坏。所以情节标 S2 必须
+       连带迁移向量。那一步在 panel.mark_confidential 里串(repo 不碰向量层)。
+    """
+    if table not in _CONTENT_TABLES:
+        raise RepoError("22P02", f"不是内容表: {table!r}")
+    if level not in ("S0", "S1", "S2"):
+        raise RepoError("22P02", f"非法敏感度: {level!r}")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE mem.{table} SET sensitivity_domain=%s WHERE id=%s",
+                        (level, row_id))
+            if cur.rowcount == 0:
+                raise RepoError("00000", "该行不存在")
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def get_fact(conn: psycopg.Connection, fact_id: int) -> Optional["FactRow"]:
+    """按 id 取单条活跃事实(溯源展开用)。"""
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO mem.quarantine (src_table, src_id, payload, expires_at, reason,
-                                            sensitivity_domain)
-                SELECT 'l3_fact', id, to_jsonb(f), now() + interval '30 days', %s, sensitivity_domain
-                  FROM mem.l3_fact f WHERE id=%s
-            """, (reason, fact_id))
-            cur.execute("UPDATE mem.l3_fact SET redacted_at=now() WHERE id=%s AND redacted_at IS NULL",
-                        (fact_id,))
-            if cur.rowcount == 0:
-                raise RepoError("00000", "该事实不存在或已被删除")
+                SELECT id, statement, object, subject_norm, predicate_norm, provenance,
+                       source_confidence, sensitivity_domain, asserted_at, origin_device_id,
+                       write_seq, source_ref
+                  FROM mem.l3_fact
+                 WHERE id=%s AND superseded_by IS NULL AND redacted_at IS NULL
+            """, (fact_id,))
+            r = cur.fetchone()
     except psycopg.Error as e:
         raise _sanitize(e) from None
+    if r is None:
+        return None
+    return FactRow(
+        id=r[0], statement=seal(r[1], sensitivity=r[7], source=r[5]),
+        object_text=seal(r[2], sensitivity=r[7], source=r[5]),
+        subject_norm=r[3], predicate_norm=r[4], provenance=r[5],
+        source_confidence=float(r[6]) if r[6] is not None else None,
+        sensitivity_domain=r[7], asserted_at=r[8], origin_device_id=r[9],
+        write_seq=r[10], source_ref=r[11])
+
+
+def list_facts(conn: psycopg.Connection, *, include_s2: bool,
+               limit: int = 50, offset: int = 0) -> List["FactRow"]:
+    """★ 浏览:列出当前活跃事实(§4.4.1「写入后必须:用户可见」)。
+
+    此前全代码库没有任何「列出全部活跃事实」的读函数 —— 浏览的最基本形态缺失。
+
+    ★★ `include_s2` 由**调用方的档位**决定,不是可选开关:面板层根据 CallerTier
+       传 True/False。非 trusted-local 一律 False —— S2 行连列出来都不行
+       (行的存在性本身也是信息,§4.11.4)。
+    """
+    where = "superseded_by IS NULL AND redacted_at IS NULL"
+    if not include_s2:
+        where += " AND sensitivity_domain <> 'S2'"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT id, statement, object, subject_norm, predicate_norm, provenance,
+                       source_confidence, sensitivity_domain, asserted_at, origin_device_id,
+                       write_seq, source_ref
+                  FROM mem.l3_fact
+                 WHERE {where}
+                 ORDER BY asserted_at DESC
+                 LIMIT %s OFFSET %s
+            """, (limit, offset))
+            rows = cur.fetchall()
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return [FactRow(
+        id=r[0], statement=seal(r[1], sensitivity=r[7], source=r[5]),
+        object_text=seal(r[2], sensitivity=r[7], source=r[5]),
+        subject_norm=r[3], predicate_norm=r[4], provenance=r[5],
+        source_confidence=float(r[6]) if r[6] is not None else None,
+        sensitivity_domain=r[7], asserted_at=r[8], origin_device_id=r[9],
+        write_seq=r[10], source_ref=r[11]) for r in rows]
 
 
 # ── 读:结构化轨 ──────────────────────────────────────────────────

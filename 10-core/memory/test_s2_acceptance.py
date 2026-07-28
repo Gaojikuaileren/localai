@@ -178,13 +178,20 @@ try:
     # 拿噪声里那条「妹妹」开刀(不动金标,后面还要用)。
     # ★ 向量点【故意不删】—— 模拟"正文删了、向量清理失败"这个最难发现的半失败态。
     victim = ids[NOISE[0]]
+    # ★★ 用【删除前后对比】证明是 tombstone 干的活,而不是靠"结果非空"。
+    #   S5 给向量轨加了最低分闸(MIN_RERANK_SCORE)之后,查「我妹妹在哪读书」删掉妹妹那条,
+    #   其余情节本就不相关、分数远低于闸,合法地返回空。所以旧断言「len>0」不再成立 ——
+    #   那不是缺陷,是最低分闸在正确工作。改为:先证明删之前它确实被命中。
+    ps_before = track_vector.search(conn, "我妹妹在哪读书", sensitivity="S0")
+    check("★ 删除【前】妹妹那条确实被命中(否则本测试无说服力)",
+          any(p.episode_id == victim for p in ps_before),
+          f"删前返回 {[p.episode_id for p in ps_before]}")
     with conn.cursor() as cur:
         cur.execute("UPDATE mem.l2_episode SET redacted_at=now() WHERE id=%s", (victim,))
     conn.commit()
     ps = track_vector.search(conn, "我妹妹在哪读书", sensitivity="S0")
     check("★★ 正文被 tombstone 后,即便向量还在也检索不出来",
           all(p.episode_id != victim for p in ps), f"仍返回 {[p.episode_id for p in ps]}")
-    check("★ 且不是靠「整个检索空了」蒙混过关", len(ps) > 0, "检索全空,这条测试没有说服力")
     # ★ 撤销删除必须被拒(与"悄悄复活旧值"是同一个失效模式)
     try:
         with conn.cursor() as cur:
