@@ -45,6 +45,12 @@ quarantine   = 'D:\AI\state\quarantine'   # delete 的替代品,保留 N 天
 memory       = 'D:\AI\state\memory'       # P3a 创建 · 普通文件夹 · PostgreSQL + Qdrant
                                           # ★ D22:不加密。磁盘与备份盘上均为明文,见 §4.6
 secrets      = 'D:\AI\state\secrets'      # ★★ 长期第三方凭据与私钥的唯一落点
+identity     = 'D:\AI\state\identity'     # ★★ P3b 成员表/证书公共材料(D43 S0.8)
+# ★★ identity 的两条性质(同 secrets,缺一不可):
+#   ① 只放公共材料 + CNG/TPM 密钥引用(locator),CA/服务器私钥【不可导出】留在 TPM(D43 S0.7)
+#   ② **排除出备份**(backup.ps1)+ fail-closed 守护(缺登记即 throw)——
+#      旧成员表 + 存活 TPM CA 一起恢复会让 identity_generation 回滚、已吊销设备复活(D43 S0.8)
+#   恢复语义:identity 不在备份里。缺失/损坏 → 新 hub_id + 新 CA + 全量重新配对
 # ★★ secrets 的两条性质缺一不可,少任何一条这个目录就没有意义:
 #   ① 强 ACL(ai-mem FullControl / ai-asset · ai-exec Deny)—— 挡在线读取
 #   ② **排除出备份**(backup.ps1 的 $excludeAbs)—— 挡离线拷贝
