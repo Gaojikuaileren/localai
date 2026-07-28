@@ -39,7 +39,11 @@ GRANT EXECUTE ON FUNCTION mem.next_write_seq() TO ai_mem_local;
 REVOKE UPDATE, DELETE ON mem.audit_log, mem.cred_access_audit, mem.vigil_observations, mem.gate_rejection, mem.idempotent_ledger FROM ai_mem_local;
 -- secret_ref / l4_procedure 允许 UPDATE,不允许 DELETE。
 REVOKE DELETE ON mem.secret_ref, mem.l4_procedure FROM ai_mem_local;
--- (metrics_ts 保留 DELETE 供 1 年 purge;pending_review 保留全 DML 供确认/清理。)
+-- (metrics_ts 保留 DELETE 供 1 年 purge。)
+-- ★ pending_review 的 DELETE 已于 S3 撤销(见 schema-p3a.sql 的 S3-9 授权段)。
+--   那时这里写的是「保留全 DML 供确认/清理」—— 但 S3 之后过期候选走
+--   「转 expired + 正文进隔离区」,终态不可转出,**没有任何流程需要删队列行**。
+--   而删一行恰好抹掉「某人提交过这条候选」的证据。
 
 -- 5) ai_mem_remote 锁死: 先 REVOKE 一切基表/序列权限(含误挂在视图上的),再只授视图 SELECT。
 --    顺序关键: REVOKE ALL(含视图)必须在 GRANT 视图之前。

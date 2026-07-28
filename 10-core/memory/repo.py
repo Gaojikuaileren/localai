@@ -19,8 +19,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import secrets
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -374,3 +376,307 @@ def find_facts(conn: psycopg.Connection, subject_norm: str, predicate_norm: str,
             write_seq=r[10], source_ref=r[11],
         ))
     return out
+
+
+# =====================================================================
+#  S3 · 队列 · 冲突 · 熔断 · 票据 · 拒绝审计
+#  这一段全部是 S3 新增。设计依据见 schema-p3a.sql 的 S3-* 各节。
+# =====================================================================
+
+# ── 冲突检测 ─────────────────────────────────────────────────────
+def find_conflicts(conn: psycopg.Connection, subject_norm: str,
+                   predicate_norm: str) -> List[FactRow]:
+    """找出与 (subject_norm, predicate_norm) 相同的【活跃】事实。
+
+    ★ 判据是**结构性的**,不用 LLM:同主语 + 同谓词的活跃行即冲突候选。
+      语义冲突(「我住柏林」vs「我搬到慕尼黑了」)留给面板上的人判断 ——
+      机器只负责把「这条要取代谁」摆到你面前(§4.4.2:确认时它是主视觉)。
+
+    ★ 为什么不做成"自动判断是否真冲突":那需要 LLM,而 LLM 判错的方向是
+      **不对称**的 —— 判成"不冲突"就并列存两条互相矛盾的事实,检索时两条都返回,
+      而没有任何东西会报错。§4.5 铁律只管 supersede 方向,不管并列;
+      绕过它的成本本来就只是"少调一次 UPDATE"。所以宁可多报,让人来筛。
+    """
+    if not subject_norm or not predicate_norm:
+        return []
+    return find_facts(conn, subject_norm, predicate_norm, limit=20)
+
+
+# ── 待审队列 ─────────────────────────────────────────────────────
+@dataclass
+class PendingWrite:
+    """一条待人工确认的候选。★ 与 FactWrite 一样,没有 write_seq / asserted_at ——
+    调用方在类型上无法提供,因此无法伪造。"""
+    body: TaintedText
+    provenance: str
+    source_confidence: float
+    sensitivity_domain: str
+    session_id: str
+    supersedes_ref: Optional[int] = None
+    origin_device_id: str = "workstation"
+    ttl_days: int = 14
+
+
+@dataclass
+class PendingRow:
+    id: int
+    body: TaintedText
+    provenance: str
+    source_confidence: Optional[float]
+    sensitivity_domain: str
+    status: str
+    supersedes_ref: Optional[int]
+    candidate_sha256: str
+    session_id: Optional[str]
+    created_at: datetime
+    expires_at: Optional[datetime]
+    origin_device_id: Optional[str]
+
+    def trace(self) -> Dict[str, Any]:
+        return {"created_at": self.created_at.isoformat(),
+                "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+                "provenance": self.provenance, "confidence": self.source_confidence,
+                "origin_device_id": self.origin_device_id, "session_id": self.session_id,
+                "supersedes_ref": self.supersedes_ref}
+
+
+def candidate_hash(text: str) -> str:
+    """候选哈希 —— 面板显示与确认提交之间的绑定物。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def insert_pending(conn: psycopg.Connection, w: PendingWrite) -> int:
+    """把候选放进待审队列。返回队列行 id。
+
+    ★ 派生来源【只能】走这条路进库 —— gate 不再对它们调 insert_fact。
+      DB 侧 tg_pending_initial_state 保证它们以 pending 入队。
+    """
+    if not isinstance(w.body, TaintedText):
+        raise TypeError("正文必须是 TaintedText")
+    if w.provenance not in _ALLOWED_PROVENANCE:
+        raise RepoError("22P02", f"provenance 不在封闭枚举内: {w.provenance!r}")
+    body = unseal_for_storage(w.body, table="pending_review")
+    sha = candidate_hash(body)
+    now = _server_now()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO mem.pending_review
+                  (candidate_body, provenance, source_confidence, sensitivity_domain,
+                   supersedes_ref, status, origin_device_id, session_id,
+                   candidate_sha256, asserted_at, expires_at)
+                VALUES (%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s,%s) RETURNING id
+            """, (psycopg.types.json.Jsonb({"text": body}), w.provenance,
+                  w.source_confidence, w.sensitivity_domain, w.supersedes_ref,
+                  w.origin_device_id, w.session_id, sha, now,
+                  now + timedelta(days=w.ttl_days)))
+            return cur.fetchone()[0]
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def _pending_row(r) -> PendingRow:
+    body_text = (r[1] or {}).get("text", "") if isinstance(r[1], dict) else ""
+    return PendingRow(
+        id=r[0], body=seal(body_text, sensitivity=r[4], source=r[2]),
+        provenance=r[2], source_confidence=float(r[3]) if r[3] is not None else None,
+        sensitivity_domain=r[4], status=r[5], supersedes_ref=r[6],
+        candidate_sha256=r[7], session_id=r[8], created_at=r[9],
+        expires_at=r[10], origin_device_id=r[11])
+
+
+_PENDING_COLS = """id, candidate_body, provenance, source_confidence, sensitivity_domain,
+                   status, supersedes_ref, candidate_sha256, session_id,
+                   created_at, expires_at, origin_device_id"""
+
+
+def get_pending(conn: psycopg.Connection, pending_id: int) -> Optional[PendingRow]:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {_PENDING_COLS} FROM mem.pending_review WHERE id=%s",
+                        (pending_id,))
+            r = cur.fetchone()
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return _pending_row(r) if r else None
+
+
+def list_pending(conn: psycopg.Connection, limit: int = 50) -> List[PendingRow]:
+    """列出待审候选(最旧的在前 —— 队列是先进先出,不给"挑软柿子"留空间)。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""SELECT {_PENDING_COLS} FROM mem.pending_review
+                             WHERE status='pending' ORDER BY id LIMIT %s""", (limit,))
+            rows = cur.fetchall()
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return [_pending_row(r) for r in rows]
+
+
+def count_pending(conn: psycopg.Connection) -> int:
+    """熔断计数。★ 只数 status='pending' —— 已处理的不占额度。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM mem.pending_review WHERE status='pending'")
+            return int(cur.fetchone()[0])
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def set_pending_status(conn: psycopg.Connection, pending_id: int, status: str,
+                       *, expect_sha256: str) -> None:
+    """把队列行转到终态。
+
+    ★★ `expect_sha256` 是必填的:它是「面板上显示的那条」与「现在要确认的这条」
+       之间的绑定。对不上就拒 —— 防「面板看到 A、确认进库 B」。
+       DB 侧 tg_pending_immutable 已冻结候选内容,这里是第二道
+       (冻结防的是"被改",哈希回绑防的是"你看的根本不是这条")。
+    """
+    if status not in {"approved", "rejected", "expired"}:
+        raise RepoError("22P02", f"非法的终态: {status!r}")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE mem.pending_review SET status=%s
+                            WHERE id=%s AND status='pending' AND candidate_sha256=%s""",
+                        (status, pending_id, expect_sha256))
+            if cur.rowcount == 0:
+                raise RepoError("00000",
+                                "候选不存在、已被处理,或哈希与面板所示不符(拒绝执行)")
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def expire_pending(conn: psycopg.Connection) -> int:
+    """GC:把过期候选转 expired,正文搬进隔离区。返回处理条数。
+
+    ★ 裁定:过期【进隔离区】而不是静默删除(§12.4 永不 delete 只移隔离区),
+      也不放它们永久占着熔断额度 —— 否则塞满队列即达成永久 DoS。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO mem.quarantine (src_table, src_id, payload, expires_at,
+                                            reason, sensitivity_domain)
+                SELECT 'pending_review', id, to_jsonb(p), now() + interval '30 days',
+                       '待审候选超时未处理', sensitivity_domain
+                  FROM mem.pending_review p
+                 WHERE status='pending' AND expires_at IS NOT NULL AND expires_at < now()
+            """)
+            cur.execute("""UPDATE mem.pending_review SET status='expired'
+                            WHERE status='pending' AND expires_at IS NOT NULL
+                              AND expires_at < now()""")
+            return cur.rowcount
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+# ── 票据:1.0 的唯一来源,原子消费 ────────────────────────────────
+def issue_ticket(conn: psycopg.Connection, *, session_id: str, candidate_text: str,
+                 pending_id: Optional[int] = None, ttl_seconds: int = 300) -> str:
+    """签发一次性票据。绑 (会话, 候选哈希),可选绑队列行。"""
+    tid = secrets.token_urlsafe(24)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO mem.write_ticket
+                             (ticket_id, session_id, candidate_sha256, pending_id, expires_at)
+                           VALUES (%s,%s,%s,%s, now() + make_interval(secs => %s))""",
+                        (tid, session_id, candidate_hash(candidate_text), pending_id,
+                         ttl_seconds))
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return tid
+
+
+def consume_ticket(conn: psycopg.Connection, ticket_id: str, *, session_id: str,
+                   candidate_text: str) -> bool:
+    """消费票据。★ 必须是 UPDATE...RETURNING —— 「先查再改」在并发下可双花。
+
+    返回 True 表示本次消费成功(且此后该票据再不可用)。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE mem.write_ticket SET consumed_at = now()
+                 WHERE ticket_id = %s
+                   AND consumed_at IS NULL
+                   AND expires_at > now()
+                   AND session_id = %s
+                   AND candidate_sha256 = %s
+             RETURNING ticket_id
+            """, (ticket_id, session_id, candidate_hash(candidate_text)))
+            return cur.fetchone() is not None
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+# ── 熔断:状态落库(内存态"重启即复位"等于没有)────────────────────
+PENDING_BACKLOG_LIMIT = 50      # §4.4.2:积压上限 50 条 —— 积压本身是攻击信号
+
+
+def breaker_tripped(conn: psycopg.Connection, name: str = "pending_backlog") -> bool:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT 1 FROM mem.circuit_breaker
+                            WHERE name=%s AND tripped_at IS NOT NULL AND cleared_at IS NULL""",
+                        (name,))
+            return cur.fetchone() is not None
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def trip_breaker(conn: psycopg.Connection, name: str, reason: str) -> None:
+    """跳闸。幂等:已跳则不动(保留最早的 tripped_at 与原因)。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO mem.circuit_breaker (name, tripped_at, reason)
+                VALUES (%s, now(), %s)
+                ON CONFLICT (name) DO UPDATE
+                   SET tripped_at = coalesce(mem.circuit_breaker.tripped_at, now()),
+                       reason     = coalesce(mem.circuit_breaker.reason, EXCLUDED.reason),
+                       cleared_at = NULL, cleared_by = NULL
+                 WHERE mem.circuit_breaker.cleared_at IS NOT NULL
+                    OR mem.circuit_breaker.tripped_at IS NULL
+            """, (name, reason))
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def clear_breaker(conn: psycopg.Connection, name: str, *, cleared_by: str) -> None:
+    """恢复。★ 裁定:恢复走面板票据,与逐条确认同级 —— 调用方须先消费一张票据。
+
+    规格里那句「需显式恢复」是循环引用(§6.9.7 说「同 §4.4.2」,而 §4.4.2 里
+    没有这句话),故此处裁定。理由:熔断是「有人在往队列里灌东西」的信号,
+    自动恢复等于把告警关掉继续跑。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE mem.circuit_breaker
+                              SET cleared_at=now(), cleared_by=%s
+                            WHERE name=%s AND cleared_at IS NULL""",
+                        (cleared_by, name))
+            if cur.rowcount == 0:
+                raise RepoError("00000", "该熔断器未处于跳闸状态")
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+# ── E3 拒绝审计:必须落库 ──────────────────────────────────────────
+def log_gate_rejection(conn: psycopg.Connection, categories: List[str],
+                       session_id: str) -> None:
+    """E3 命中的审计。★ 只记 (类别, 时间, 会话) —— 不记 body、不记片段、不记哈希。
+
+    §6.9.8:定长 IBAN 的哈希可爆破,所以连哈希都不能记。
+    ★ 必须落库:此前只 append 进进程内存列表,重启即失,§9.3 的告警无从计数。
+    每个类别一行(表结构就是每行一个 category 枚举)。
+    """
+    if not categories:
+        return
+    try:
+        with conn.cursor() as cur:
+            for c in sorted(set(categories)):
+                cur.execute("""INSERT INTO mem.gate_rejection
+                                 (category, session_id, sensitivity_domain)
+                               VALUES (%s, %s, 'S2')""", (c, session_id or "unknown"))
+    except psycopg.Error as e:
+        raise _sanitize(e) from None

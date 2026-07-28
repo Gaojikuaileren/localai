@@ -706,7 +706,22 @@ BEGIN
     GRANT EXECUTE ON FUNCTION mem.tg_pending_terminal()  TO ai_mem_local;
     GRANT EXECUTE ON FUNCTION mem.tg_pending_immutable() TO ai_mem_local;
   END IF;
-  -- ★ 远程角色对这三张新表一个权限都不给(默认即无,此处显式撤以防将来 GRANT 泛化)
+  -- ★★ 撤掉 pending_review 与 circuit_breaker 的 DELETE(2026-07-28 实测发现)
+  --
+  -- roles.sql 有一句 `GRANT ... DELETE ON ALL TABLES IN SCHEMA mem`,并在注释里
+  -- 写着「pending_review 保留全 DML 供确认/清理」—— 那句写在 S3 定下队列语义**之前**。
+  -- S3 之后:过期候选转 expired + 正文进隔离区(§12.4 永不 delete),终态不可转出。
+  -- ⇒ **不存在任何需要 DELETE 队列行的正当流程**。
+  --
+  -- 而删一行队列记录,恰好抹掉「某人提交过这条候选」这个证据 ——
+  -- 正是刷爆队列的人被发现之后最想做的动作。
+  -- circuit_breaker 同理:删掉那一行等于绕过「显式恢复」这条规矩。
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    REVOKE DELETE ON mem.pending_review, mem.circuit_breaker,
+                     mem.write_ticket FROM ai_mem_local;
+  END IF;
+
+  -- ★ 远程角色对这四张表一个权限都不给(默认即无,此处显式撤以防将来 GRANT 泛化)
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_remote') THEN
     REVOKE ALL ON mem.pending_review, mem.circuit_breaker,
                   mem.write_ticket, mem.gate_rejection FROM ai_mem_remote;
@@ -729,6 +744,10 @@ END $$;
 --   把它写进 CHECK 等于顺手禁掉了一切后续状态转移。
 -- =====================================================================
 ALTER TABLE mem.pending_review DROP CONSTRAINT IF EXISTS pr_derived_forced_pending;
+-- ★ 新名也要先 DROP —— 否则第二次应用本文件会因「已存在」而失败,
+--   而本文件第一行就承诺「幂等,可重复应用」。2026-07-28 实测踩到:
+--   改完之后只跑了一遍,没重跑幂等验证。**改幂等脚本必须重验幂等,不能只在首次验。**
+ALTER TABLE mem.pending_review DROP CONSTRAINT IF EXISTS pr_derived_conf_cap;
 
 -- CHECK 只保留【与状态无关】的那一半:派生来源的置信度封顶
 ALTER TABLE mem.pending_review ADD CONSTRAINT pr_derived_conf_cap CHECK (
