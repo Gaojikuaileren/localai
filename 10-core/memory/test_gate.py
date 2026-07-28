@@ -108,19 +108,40 @@ for prov in ("tool_result", "rag_chunk", "web_content"):
     c6, a6 = mint_confidence(provenance=prov, ticket_id=tk4, session_id=sid, candidate=cand)
     check(f"★ {prov} 即便带票据也封顶 0.4", (c6, a6) == (0.4, "derived"), f"{c6},{a6}")
 
-print("=== 4. 服务端定级 + E3 凭证拦截 ===")
-lvl, hits = classify_sensitivity("我妹妹叫小雨")
-check("普通内容 → S0", lvl == "S0" and not hits)
-lvl2, hits2 = classify_sensitivity("我的账号 DE89370400440532013000")
-check("★ 凭证命中 → 强制 S2", lvl2 == "S2" and "iban" in hits2, f"{lvl2},{hits2}")
-# E3 不用 high_entropy(误报高,会把正常写入打死)
-lvl3, hits3 = classify_sensitivity("token sk-Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3")
-check("★ E3 排除 high_entropy", "high_entropy" not in hits3, f"{hits3}")
+print("=== 4. ★★ 凭证与机密是【两件事】,动作相反 ===")
+# 本节 2026-07-28 重写。原来只有一个 classify_sensitivity,把两件事合成了一件:
+#   旧断言「★ 凭证命中 → 强制 S2」断言的是**一个永远不会落库的值** ——
+#   凭证命中后调用点立刻 raise,那条 "S2" 返回值到不了 insert_fact。
+#   净效果:全库没有任何写路径能产生一条域S2 记忆行,而整套 S2 隔离都以它存在为前提。
+from gate import scan_credentials
+import sensitivity as _sens
+
+# (a) 凭证 → 拒绝写入,不落盘
+check("★ IBAN 被凭证检测命中(→ 将被拒绝)", "iban" in scan_credentials("我的账号 DE89370400440532013000"))
+check("★ 「密码是」被命中", bool(scan_credentials("密码是 hunter2")))
+check("★ 凭证检测排除 high_entropy(误报高,会把正常写入打死)",
+      "high_entropy" not in scan_credentials("token sk-Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3"))
+
+# (b) 机密 → 照常写入,但强制标 域S2
+lvl0, h0 = classify_sensitivity("我妹妹叫小雨")
+check("普通关系事实 → S0(它不是机密)", lvl0 == "S0" and not h0, f"{lvl0},{h0}")
+lvl1, h1 = classify_sensitivity("我家住 Musterstraße 12, 10115 Berlin")
+check("★★ 地址 → 域S2(且【不】被拒绝)", lvl1 == "S2" and "address" in h1, f"{lvl1},{h1}")
+lvl2, h2 = classify_sensitivity("医生说我对青霉素过敏")
+check("★ 健康信息 → 域S2", lvl2 == "S2" and "health" in h2, f"{lvl2},{h2}")
+
+# (c) ★ 两个判据必须是不同的集合 —— 否则又合回一件事
+check("★★ 地址不被凭证检测命中(它该被写下来,不该被拒)",
+      not scan_credentials("我家住 Musterstraße 12, 10115 Berlin"))
+check("★★ IBAN 不被机密定级命中(它该被拒,不该被写成 S2)",
+      not _sens.scan("我的账号 DE89370400440532013000"))
+check("两个模块是分开的实现(误报代价方向相反,必须分开调参)",
+      _sens.__name__ != "e1_detector" and hasattr(_sens, "ALL_CLASSES"))
 
 print("=== 5. ★ 拒绝时不落盘、不记正文(§6.9.8)===")
 n0 = len(audit_log())
 try:
-    gate.submit_fact(None, candidate=CandidateIn(body="转账到 DE89370400440532013000",
+    gate.submit(None, candidate=CandidateIn(body="转账到 DE89370400440532013000",
                                                  provenance="user_typed", session_id="s9"),
                      subject_norm="我", predicate_norm="账号", object_text="DE89370400440532013000")
     check("凭证候选被拒", False, "竟然没拒")

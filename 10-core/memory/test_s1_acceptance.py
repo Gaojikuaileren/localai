@@ -12,7 +12,11 @@ import sys
 import gate
 import repo
 import route
-from gate import CandidateIn, issue_ticket
+from gate import CandidateIn
+# ★ 票据从 PG 取,不用进程内存那套 —— S1 验收跑在活库上,就该走生产路径。
+#   S4 把 submit() 的票据消费改成 DB 原子消费后,内存票据在这里会拿不到 1.0:
+#   那不是 bug,是双存储被【响亮地】暴露出来 —— 注入式设计要的正是这个效果。
+from repo import issue_ticket
 from route import Route
 from tainted import TaintedText, unseal_for_client
 
@@ -44,8 +48,8 @@ try:
     print("=== ① 经 Gate 写入(带面板票据 ⇒ 置信度 1.0)===")
     body = f"我妹妹叫{NAME}"
     sid = "s1-acceptance"
-    tk = issue_ticket(sid, body)
-    res = gate.submit_fact(conn,
+    tk = issue_ticket(conn, session_id=sid, candidate_text=body); conn.commit()
+    res = gate.submit(conn,
                            candidate=CandidateIn(body=body, provenance="user_typed", session_id=sid),
                            subject_norm=SUBJ, predicate_norm=PRED,
                            object_text=NAME, ticket_id=tk)
@@ -81,8 +85,8 @@ try:
 
     print("=== ⑤ 冲突不覆盖:改名字必须新增+supersede,旧行仍在 ===")
     body2 = "我妹妹叫小雪"
-    tk2 = issue_ticket(sid, body2)
-    res2 = gate.submit_fact(conn,
+    tk2 = issue_ticket(conn, session_id=sid, candidate_text=body2); conn.commit()
+    res2 = gate.submit(conn,
                             candidate=CandidateIn(body=body2, provenance="user_typed", session_id=sid),
                             subject_norm=SUBJ, predicate_norm=PRED,
                             object_text="小雪", ticket_id=tk2)

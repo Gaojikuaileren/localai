@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from tainted import TaintedText, seal, safe_meta
 import repo
+import sensitivity as sens
 from repo import FactWrite, RepoError, USER_DIRECT, _ALLOWED_PROVENANCE
 
 # 凭证正则族只有一份实现(§6.9.4:五个强制点调同一个函数,五份拷贝必然漂移)。
@@ -197,14 +198,30 @@ def mint_confidence(*, provenance: str, ticket_id: Optional[str],
 
 
 # ── 服务端定级 ────────────────────────────────────────────────────
-def classify_sensitivity(text: str) -> tuple[str, Set[str]]:
-    """服务端定级。凭证正则命中 → 强制 S2(**覆写**调用方声明)。
+def scan_credentials(text: str) -> Set[str]:
+    """① 凭证检测(E3)。命中 → **拒绝写入,不落盘**。
 
-    ★ E3 用的类别子集**排除 high_entropy**(§6.9.4:它误报率高,只用于 E1/E4,
+    ★ 排除 high_entropy(§6.9.4:误报率高,只用于 E1/E4,
       拿它做 E3 拒绝会把正常写入打死)。
     """
-    hits = creds.scan(text).for_e3()
-    return ("S2" if hits else "S0"), hits
+    return creds.scan(text).for_e3()
+
+
+def classify_sensitivity(text: str) -> tuple[str, Set[str]]:
+    """② 机密定级。命中 → 标 **域S2**,但**照常写入**。
+
+    ★★ 2026-07-28 规格提取后重写。原实现是:
+          hits = creds.scan(text).for_e3(); return ("S2" if hits else "S0"), hits
+        ——它把「凭证」与「机密」当成了同一件事,而两者的**动作相反**:
+        凭证要拒绝,机密要照写。于是那条返回 "S2" 的分支在调用点被
+        无条件 raise 吃掉,成了死分支 ⇒ **全库没有任何写路径能产生一条域S2 记忆行**,
+        而整套 S2 隔离(v_memory_nons2 / mem_s2 / 远程永久不可读)都以它存在为前提。
+        `test_gate.py` 里那条「凭证命中 → 强制 S2」断言的,是一个永远不会落库的值。
+
+    ★ 判据来自 sensitivity 模块(地址 / 健康 / 亲属细节),与凭证族**分开调参** ——
+      两者误报的代价方向相反,详见 sensitivity.py 顶部。
+    """
+    return sens.classify(text)
 
 
 # ── 写路径 ────────────────────────────────────────────────────────
@@ -216,42 +233,22 @@ class GateResult:
     attestation_kind: str
 
 
-def submit_fact(conn, *, candidate: CandidateIn, subject_norm: str, predicate_norm: str,
-                object_text: str, ticket_id: Optional[str] = None) -> GateResult:
-    """经 Gate 写入一条 L3 事实。这是写路径的正门,也是唯一的门。"""
-    # 1. provenance 强制(schema 也有 NOT NULL,这里给出可读的拒绝理由)
-    if candidate.provenance not in creds.ALL_CATEGORIES and \
-       candidate.provenance not in {"user_typed", "user_voice_asr", "tool_result",
-                                     "rag_chunk", "web_content"}:
-        raise GateReject(f"provenance 不在封闭枚举内")
-
-    # 2. ★ E3 凭证拦截 —— 命中即拒绝,且【不落盘】(§6.9.8)
-    scan_target = f"{candidate.body}\n{object_text}"
-    sensitivity, hits = classify_sensitivity(scan_target)
-    if hits:
-        # 只记 (类别, 时间, 会话id) —— 不记 body、不记片段、不记哈希
-        _AUDIT.append({"ts": time.time(), "event": "gate_rejection",
-                       "categories": sorted(hits), "session_id": candidate.session_id})
-        raise GateReject("候选含疑似凭证,已拒绝写入(不落盘)", hits)
-
-    # 3. 置信度:唯一来源
-    conf, attestation = mint_confidence(
-        provenance=candidate.provenance, ticket_id=ticket_id,
-        session_id=candidate.session_id, candidate=candidate.body)
-
-    # 4. 密封后交给唯一写模块
-    w = FactWrite(
-        statement=seal(candidate.body, sensitivity=sensitivity, source=candidate.provenance),
-        subject_norm=subject_norm, predicate_norm=predicate_norm,
-        object_text=seal(object_text, sensitivity=sensitivity, source=candidate.provenance),
-        provenance=candidate.provenance,
-        source_confidence=conf,
-        sensitivity_domain=sensitivity,
-        attestation_kind=attestation,
-        source_ref={"kind": "flow", "session_id": candidate.session_id},
-    )
-    fid = repo.insert_fact(conn, w)
-    return GateResult(fid, sensitivity, conf, attestation)
+# ★★ 这里曾经有一个 `submit_fact()` —— S3/S4 时删掉了。
+#
+# 它是 S1 的最小写路径。S3 加了 `submit()`(队列分流 · 熔断 · 冲突检测 ·
+# 全字段 E3 扫描)之后,两个函数就是**两条写路径**,而本模块开篇写着:
+#     「只要存在一条绕过 Gate 的写路径,§4.4.2 的分级、§6.9.4 的 E3 拦截、
+#       §4.5 的不覆盖铁律就同时失效 —— 它们全挂在这里。」
+# 两个写函数并存,本身就是那句话说的情况。
+#
+# ★ 而且它已经真的漏了:S4 把 classify_sensitivity 从「凭证检测」改成
+#   「机密定级」(两者动作相反,见该函数注释)之后,submit_fact 里
+#   `hits = classify_sensitivity(...)` 那条拦截**不再命中凭证** ——
+#   一条带 IBAN 的候选会径直走到 repo.insert_fact。
+#   改一个函数的语义、漏掉一个调用方,就是这么发生的。
+#
+# ⇒ 结论不是"补上它",是"删掉它"。写路径只留 `submit()` 一条。
+#   历史调用点(test_s1_acceptance)已改为调 submit()。
 
 
 # =====================================================================
@@ -359,16 +356,26 @@ def submit(conn, *, candidate: CandidateIn, subject_norm: str, predicate_norm: s
     if not is_direct:
         check_breaker(conn)
 
-    # 3. ★ E3:扫【全部将落库的字符串】,不只是 body
+    # 3. ★ 两步,顺序不能反 —— 它们是【两件事】(见 classify_sensitivity 的注释):
+    #      (a) 凭证 → 拒绝写入,不落盘
+    #      (b) 机密 → 照写,但强制标 域S2
+    #    扫的是【全部将落库的字符串】,不只是 body。
     surface = scan_surface(body=candidate.body, subject_norm=subject_norm,
                            predicate_norm=predicate_norm, object_text=object_text)
-    sensitivity, hits = classify_sensitivity(surface)
-    if hits:
+
+    cred_hits = scan_credentials(surface)
+    if cred_hits:
         # 只记 (类别, 时间, 会话) —— 不记 body、不记片段、不记哈希(§6.9.8)
-        repo.log_gate_rejection(conn, sorted(hits), candidate.session_id)
+        repo.log_gate_rejection(conn, sorted(cred_hits), candidate.session_id)
         _AUDIT.append({"ts": time.time(), "event": "gate_rejection",
-                       "categories": sorted(hits), "session_id": candidate.session_id})
-        raise GateReject("候选含疑似凭证,已拒绝写入(不落盘)", hits)
+                       "categories": sorted(cred_hits), "session_id": candidate.session_id})
+        raise GateReject("候选含疑似凭证,已拒绝写入(不落盘)", cred_hits)
+
+    # ★ 走到这里说明不含凭证。现在才定机密等级 —— 命中也【不拒绝】。
+    sensitivity, conf_hits = classify_sensitivity(surface)
+    if conf_hits:
+        _AUDIT.append({"ts": time.time(), "event": "classified_confidential",
+                       "classes": sorted(conf_hits), "session_id": candidate.session_id})
 
     # 4. 冲突检测 —— 「这条将取代哪条现有事实」是确认时的主视觉(§4.4.2)
     supersedes = detect_conflict(conn, subject_norm, predicate_norm, object_text)
