@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-28 01:30
+> 更新时间: 2026-07-28 02:45
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 
@@ -172,7 +172,7 @@ speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
 **P2 进行中**:✅ **命名决定完成**(tailnet `tail71cfd7.ts.net` · 机器名 `hongkongpingpong` · RP ID `tail71cfd7.ts.net` · D28 本机走 OS 信任)。Tailscale 客户端已装并登录(GitHub)。
 **P2 进度**:✅ 命名决定 · ✅ **统一入口网关**(别名层,自写非 LiteLLM,D29)—— 端到端测通:
 `assistant.fast`→8B 后端、契约回写、503带缺口、404。安全层 STUB 标注未实装。
-**P2 进度续**:✅ **PostgreSQL 18**(SSPI)· ✅ **Qdrant×2**(mem_main/mem_s2 · key 隔离)· ✅ **PG schema**(24 表/2 角色/v_memory_nons2 · 否定用例 20/20 全通过,含行级 S2 实攻)· ✅ **E1 入口凭证检测器**(6 类 + 校验和 · 41+12 测试全过 · 审计不泄露)· ✅ **网关调用方 SID 校验**(D30 · WMI GetOwner 拒隔离账户 · 6+11 测试)· embedding 服务代码就绪(prep)—— 下一步 embedding 安装(与用户)· Open WebUI。原下一步:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· ✅ **账户隔离**(ai-mem/asset/exec 建成 + memory 目录 Deny ACL,核验通过)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
+**P2 进度续**:✅ **PostgreSQL 18**(SSPI)· ✅ **Qdrant×2**(mem_main/mem_s2 · key 隔离)· ✅ **PG schema**(24 表/2 角色/v_memory_nons2 · 否定用例 20/20 全通过,含行级 S2 实攻)· ✅ **E1 入口凭证检测器**(6 类 + 校验和 · 41+12 测试全过 · 审计不泄露)· ✅ **网关调用方 SID 校验**(D30 · WMI GetOwner 拒隔离账户 · 6+11 测试)· ✅ **embedding/rerank 实测通过**(1024 维 · rerank 语义正确 · 模型已下)—— 下一步:注册 ai-mem 服务(管理员)· Open WebUI 配置首启。原下一步:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· ✅ **账户隔离**(ai-mem/asset/exec 建成 + memory 目录 Deny ACL,核验通过)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
 
 |---|---|
 | A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |
