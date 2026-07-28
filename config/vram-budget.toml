@@ -21,6 +21,22 @@ desktop_floor = 6.6
 safety_margin = 0.8
 # 标定状态:A7 已实测,但只覆盖「一般工作情景」,故 partial 而非 true
 calibrated    = "partial"
+
+# ★ 标定指纹(P4 起由 vram_gate 在启动期比对;不一致则拒绝启动并说清要重测什么)
+#   —— 与记忆系统 S2 的「编码指纹」同一手法:不一致时不会崩,只会悄悄给出错误结论。
+#   两组指纹各自驱动不同的重测项,因为它们的可移植性不同:
+#     GPU 指纹不符  → 重测组件 peak 里【与硬件相关的部分】(主要是 CUDA context,即 P1-A1)
+#     显示指纹不符  → 重测 desktop_floor(A7)
+#   ★ desktop_floor 的决定因素是【显示配置】而非 GPU 型号 —— 桌面工作集由分辨率与
+#     显示器数量决定。换卡但显示不变时 6.6 大体可移植;换显示器则必须重测,哪怕 GPU 没动。
+#   详见 00-docs/PROJECT_PLAN_v3.0.md §13 B10。
+[calibration]
+gpu_name       = "NVIDIA GeForce RTX 5080"
+gpu_total_vram = 15.92
+driver         = "610.62"
+measured_at    = "2026-07-27"
+# 显示指纹留空 = 尚未记录;P4 实现时补测并填入(换显示器要重测 desktop_floor)
+display_note   = "P1-A7 测于当时的显示配置;分辨率/显示器数量未记录,P4 实现时补"
 # 导出值(不单独设):vram_budget = total_vram - desktop_floor - safety_margin = 8.52
 
 # =============================================================================
