@@ -75,8 +75,8 @@ check("URL 路径段不误报", HIGH_ENTROPY not in hits("https://github.com/qdr
 check("文件名不误报", hits("文件 postgresql-18.4-2-windows-x64-binaries.zip 下好了") == set())
 check("函数名不误报", hits("函数 tg_block_auto_supersede_user 和 pg_advisory_xact_lock") == set())
 # 盘符字面量拼接构造 —— 直接写会被 pre-commit 的绝对路径钩子拦(它分不清测试数据与硬编码)
-_p = "D" + ":/AI/state/memory/pg/18/data"
-check("路径不误报", hits(f"数据目录在 {_p} 下面") == set())
+_winpath = "D" + ":/AI/state/memory/pg/18/data"   # 勿用 _p:它是上面的通过计数器
+check("路径不误报", hits(f"数据目录在 {_winpath} 下面") == set())
 # 但真 token 仍要抓到
 check("★ 裸 API key 仍命中", HIGH_ENTROPY in hits("token sk-Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3"))
 check("★ 无标签的裸高熵串仍命中", HIGH_ENTROPY in hits("Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3Lm5"))
