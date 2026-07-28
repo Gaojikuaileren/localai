@@ -89,10 +89,30 @@ SELECT CASE WHEN superseded_by IS NOT NULL THEN 'PASS' ELSE 'FAIL — 用户改�
   FROM mem.l3_fact WHERE statement='用户亲口说的事实';
 
 -- B5c 对照:面板逐条确认过的条目(panel_ticket)也算人类权威,可取代用户事实
+--
+-- ★★ 本用例原本写成 (provenance='tool_result', attestation_kind='panel_ticket'),
+--   意图对、建模错 —— 而且它本身就演示了 S3 修掉的那个洞:
+--   把 panel_ticket 贴在任意来源上,守卫只看 attestation 就发最高权威。
+--
+-- 正确的分工(S3 裁定,并由 *_panel_ticket_needs_user 约束强制):
+--   provenance  记【权威来源】—— 这话算谁说的
+--   source_ref  记【溯源链】—— 这条内容原本从哪来
+--
+-- 用户在面板上点确认,等于把这句话说成自己的了 —— 与「读了一份报告后自己打字复述」
+-- 在权威上应当等同。所以 provenance 就是 user_typed;
+-- 「它源自一次工具调用」这件事属于溯源,记进 source_ref,不记进 provenance。
+-- 反过来若允许 (tool_result, panel_ticket),就等于给自动来源开了一条领取人类权威的路。
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
 VALUES ('另一条用户事实','user_typed',0.9,'S0');
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain,
+                         attestation_kind, source_ref)
+VALUES ('面板确认过的更正','user_typed',1.0,'S0','panel_ticket',
+        '{"kind":"panel_confirm","origin_provenance":"tool_result"}'::jsonb);
+
+-- B5d ★ 反面:panel_ticket 不得贴在派生来源上
+\echo '-- B5d 期望: ERROR (check_violation: panel_ticket 需 provenance 属用户直述) --'
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain, attestation_kind)
-VALUES ('面板确认过的更正','tool_result',0.4,'S0','panel_ticket');
+VALUES ('派生来源冒领人类权威','tool_result',0.4,'S0','panel_ticket');
 UPDATE mem.l3_fact SET superseded_by =
          (SELECT id FROM mem.l3_fact WHERE statement='面板确认过的更正')
  WHERE statement='另一条用户事实';
@@ -244,7 +264,8 @@ DELETE FROM mem.l3_fact
  WHERE statement LIKE '%KANARIE%' OR statement IN
        ('用户亲口说的事实','工具推断的事实','客户端谎报 write_seq',
         '满分但无票据','满分且有票据',
-        '用户改口后的事实','另一条用户事实','面板确认过的更正');
+        '用户改口后的事实','另一条用户事实','面板确认过的更正',
+        '派生来源冒领人类权威');
 SELECT CASE WHEN count(*)=0 THEN 'PASS — 测试数据已清' ELSE 'WARN — 有残留' END AS d1_cleanup,
        count(*) AS leftover
   FROM mem.l3_fact WHERE statement LIKE '%KANARIE%';

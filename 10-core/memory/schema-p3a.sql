@@ -432,3 +432,331 @@ DO $$ BEGIN
     GRANT EXECUTE ON FUNCTION mem.is_user_fact(mem.provenance, numeric) TO ai_mem_local;
   END IF;
 END $$;
+
+-- =====================================================================
+-- =====================================================================
+--  S3 · 完整记忆闸(分级 · E3 · 队列 · 熔断 · 冲突)
+--  2026-07-28 · 规格提取后落地。四条裁定见 §14 P3a S3 与本文件各节注释。
+-- =====================================================================
+-- =====================================================================
+
+-- =====================================================================
+-- S3-1) ★★ 修回归:supersede 守卫要【同时】看来源与档位
+--
+-- 2026-07-28 早些时候把 is_user_fact 从
+--     provenance IN (user_typed, user_voice_asr) AND coalesce(sc,0) >= 1.0
+-- 改成只看 provenance。那个修复救活了 §4.5 铁律(此前 sc>=1.0 的要求让
+-- 「用户事实」几乎是空集,自动来源可以随意覆盖用户的话),
+-- **但同时打开了另一扇门**:原定义里 `sc >= 1.0` 顺带挡住了
+-- 「低档用户事实 supersede 高档用户事实」。
+--
+-- 后果:一条 (provenance=user_typed, sc=0.6, attestation_kind='assistant_infer')
+-- 的行可以 supersede 一条面板逐条确认过的 (1.0, 'panel_ticket') 条目 ——
+-- 而 §4.4.2 分级表第三行明写「助理从对话流推断 ❌ 不可自动 supersede」。
+-- 那个 ❌ 此前零强制。
+--
+-- ★ 教训:权威不是一个维度。「谁说的」(provenance)与「多确定」(档位)
+--   是正交的两件事,守卫必须同时看。只看其一,另一半必然漏。
+-- =====================================================================
+CREATE OR REPLACE FUNCTION mem.authority_rank(
+    p mem.provenance, sc numeric, att mem.attestation_kind)
+  RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  -- 权威序:数字越大越权威。只用于「能否 supersede」的比较,不用于检索排序。
+  --   3 面板逐条确认(人在场,逐条看过)          —— §4.4.2 第一档
+  --   2 用户直述(打字/语音),但无票据背书        —— §4.4.2 第三档
+  --   1 设备签名的远程写入(D33③ 封顶 0.6)      —— 目前无生产者
+  --   0 派生(tool_result / rag_chunk / web_content)—— §4.4.2 第四档
+  SELECT CASE
+    WHEN att IS NOT DISTINCT FROM 'panel_ticket'::mem.attestation_kind
+         AND p IN ('user_typed','user_voice_asr')            THEN 3
+    WHEN p IN ('user_typed','user_voice_asr')                THEN 2
+    WHEN att IS NOT DISTINCT FROM 'device_signed'::mem.attestation_kind THEN 1
+    ELSE 0
+  END;
+$$;
+COMMENT ON FUNCTION mem.authority_rank(mem.provenance, numeric, mem.attestation_kind) IS
+  '§4.4.2 权威序。★ 同时看来源与档位 —— 只看其一必漏(2026-07-28 实测)';
+
+-- ★ 注意 panel_ticket 那一档【必须同时要求 provenance ∈ 用户直述】:
+--   否则 (tool_result, 0.4, panel_ticket) 这种组合会拿到最高权威 ——
+--   而 verify.sql 的 B5c 用例正是这么构造的,它本身就演示了这个洞。
+--   下面 S3-2 的 CHECK 从写入侧堵死该组合;此处是读侧的第二道。
+
+CREATE OR REPLACE FUNCTION mem.tg_block_auto_supersede_user() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+  np      mem.provenance;
+  nsc     numeric;
+  natt    mem.attestation_kind;
+  old_rank int;
+  new_rank int;
+BEGIN
+  IF NEW.superseded_by IS NULL
+     OR OLD.superseded_by IS NOT DISTINCT FROM NEW.superseded_by THEN
+    RETURN NEW;
+  END IF;
+
+  EXECUTE format(
+    'SELECT provenance, source_confidence, attestation_kind FROM %I.%I WHERE id = $1',
+    TG_TABLE_SCHEMA, TG_TABLE_NAME)
+    INTO np, nsc, natt USING NEW.superseded_by;
+
+  old_rank := mem.authority_rank(OLD.provenance, OLD.source_confidence, OLD.attestation_kind);
+  new_rank := mem.authority_rank(np, nsc, natt);
+
+  -- ★ 判据是【不得降权覆盖】,不是「自动 vs 人类」。后者只是它的一个特例。
+  IF new_rank < old_rank THEN
+    RAISE EXCEPTION
+      '不得以更低权威覆盖更高权威(%.% id=%):旧行权威=%(来源 %),新行权威=%(来源 %)。'
+      '§4.4.2 分级表:面板逐条确认(3) > 用户直述(2) > 设备签名(1) > 派生(0)。'
+      '要纠正一条面板确认过的记忆,正当路径是【再次在面板上逐条确认】,'
+      '而不是让一条推断出来的候选把它盖掉。',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id,
+      old_rank, OLD.provenance, new_rank, np
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- =====================================================================
+-- S3-2) attestation_kind 与 provenance 的一致性(写入侧堵死伪造权威)
+--
+-- 今天可以合法插入 (provenance='tool_result', attestation_kind='panel_ticket')。
+-- repo.insert_fact 接受 FactWrite 里任意 attestation_kind,而 S3 即将新增的
+-- 「面板确认 → 写库」路径正好会走这条缝。
+-- =====================================================================
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'l2_episode','l3_fact','pending_review',
+    'entity_person','entity_event','entity_preference','entity_project',
+    'entity_device','entity_place','entity_thing'] LOOP
+    EXECUTE format($c$
+      ALTER TABLE mem.%1$I DROP CONSTRAINT IF EXISTS %1$s_panel_ticket_needs_user;
+      ALTER TABLE mem.%1$I ADD CONSTRAINT %1$s_panel_ticket_needs_user CHECK (
+        attestation_kind IS DISTINCT FROM 'panel_ticket'::mem.attestation_kind
+        OR provenance IN ('user_typed','user_voice_asr'))
+    $c$, t);
+  END LOOP;
+END $$;
+
+-- =====================================================================
+-- S3-3) ★★ 队列状态机:一个状态列,不是两个
+--
+-- 此前 pending_review 有两套状态列:
+--   status         —— schema.sql 建,被 pr_derived_forced_pending 引用,有索引,**但无取值 CHECK**
+--   review_status  —— schema-p3a 后加,批准流程实际改的是它
+-- 后果:status 永远停在 'pending' ⇒ CHECK 恒真 ⇒
+-- 「派生候选必须停在待审队列」这条约束**结构上不可能被触发**。
+-- 这比漏了约束更毒 —— 它看起来在。
+--
+-- 裁定:**保留 status,废弃 review_status**(status 被 CHECK 与索引引用,动它代价大)。
+-- =====================================================================
+-- 把历史上写进 review_status 的值迁到 status(幂等)
+UPDATE mem.pending_review
+   SET status = review_status
+ WHERE review_status IS NOT NULL
+   AND review_status <> status
+   AND status = 'pending';
+
+ALTER TABLE mem.pending_review DROP CONSTRAINT IF EXISTS pr_status_enum;
+ALTER TABLE mem.pending_review ADD CONSTRAINT pr_status_enum CHECK (
+  status IN ('pending','approved','rejected','expired'));
+
+COMMENT ON COLUMN mem.pending_review.review_status IS
+  '★ 已废弃(S3):状态机唯一的列是 status。保留本列仅为不破坏历史行,新代码一律不读不写';
+
+-- 终态不可再转出 —— 否则「已拒绝」可被悄悄改回 pending 再确认一次
+CREATE OR REPLACE FUNCTION mem.tg_pending_terminal() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status <> 'pending' AND NEW.status IS DISTINCT FROM OLD.status THEN
+    RAISE EXCEPTION
+      '待审条目已处于终态 %(id=%),不得再转出。'
+      '若要重新提交,请【新建一条候选】—— 复用旧条目会让审计里看不出它被处理过几次。',
+      OLD.status, OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_pending_terminal ON mem.pending_review;
+CREATE TRIGGER trg_pending_terminal BEFORE UPDATE ON mem.pending_review
+  FOR EACH ROW EXECUTE FUNCTION mem.tg_pending_terminal();
+
+-- =====================================================================
+-- S3-4) ★★ 队列行的 TOCTOU:候选内容不可在确认前被改
+--
+-- 场景:面板上显示「候选 A 将取代事实 X」,你点确认;确认前的一瞬间
+-- candidate_body 被改成 B、supersedes_ref 被改成 Y。
+-- tg_no_bulk_review 只数行数、不看列;pending_review 又不在 append-only 的绑定清单里。
+-- gate.py 的票据之所以绑 candidate_sha256,防的正是这一手 —— 但那道防护还没接到队列上。
+-- =====================================================================
+ALTER TABLE mem.pending_review ADD COLUMN IF NOT EXISTS candidate_sha256 text;
+COMMENT ON COLUMN mem.pending_review.candidate_sha256 IS
+  '入队时算的候选哈希。确认请求必须回传它 —— 对不上即拒(防「面板看到 A、确认进库 B」)';
+
+CREATE OR REPLACE FUNCTION mem.tg_pending_immutable() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+  -- ★ 只有 status(状态机)可改,其余一律冻结。用**正面列举冻结列**而不是
+  --   「除了 status 都不能改」—— 后者在加新列时默认自由,与本项目 allowlist 的
+  --   一贯取向相反。这里刻意逐列写出,加列时会被 code review 看见。
+  IF NEW.candidate_body     IS DISTINCT FROM OLD.candidate_body
+     OR NEW.provenance      IS DISTINCT FROM OLD.provenance
+     OR NEW.supersedes_ref  IS DISTINCT FROM OLD.supersedes_ref
+     OR NEW.source_confidence  IS DISTINCT FROM OLD.source_confidence
+     OR NEW.sensitivity_domain IS DISTINCT FROM OLD.sensitivity_domain
+     OR NEW.candidate_sha256 IS DISTINCT FROM OLD.candidate_sha256
+     OR NEW.origin_device_id IS DISTINCT FROM OLD.origin_device_id
+     OR NEW.write_seq       IS DISTINCT FROM OLD.write_seq
+     -- 溯源三件套:改了它们,这条候选就说不清是谁在什么时候提的
+     OR NEW.session_id      IS DISTINCT FROM OLD.session_id
+     OR NEW.asserted_at     IS DISTINCT FROM OLD.asserted_at
+     OR NEW.created_at      IS DISTINCT FROM OLD.created_at
+     -- TTL 在入队时定死:可延长 = 可让一条候选永久占着熔断额度;
+     -- 可缩短 = 可把别人的候选逼到过期。两个方向都不许。
+     OR NEW.expires_at      IS DISTINCT FROM OLD.expires_at THEN
+    RAISE EXCEPTION
+      '待审候选一经入队即冻结(id=%):不得修改正文/来源/取代目标/定级。'
+      '否则「你在面板上看到的」与「确认后进库的」可以是两样东西。'
+      '要改请拒绝本条并新建候选。', OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_pending_immutable ON mem.pending_review;
+CREATE TRIGGER trg_pending_immutable BEFORE UPDATE ON mem.pending_review
+  FOR EACH ROW EXECUTE FUNCTION mem.tg_pending_immutable();
+
+-- =====================================================================
+-- S3-5) 队列过期(裁定:过期进隔离区,不静默删除)
+--
+-- 方案书未规定 pending_review 的 TTL。与熔断叠加会死锁:
+--   队列塞满 50 条 → 熔断暂停接受候选 → 若条目永不过期且人不逐条处理
+--   → **无出口的永久降级**,而攻击者只需塞满队列即达成 DoS。
+-- =====================================================================
+ALTER TABLE mem.pending_review
+  ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+COMMENT ON COLUMN mem.pending_review.expires_at IS
+  'S3 裁定:待审候选有 TTL。到期由 GC 转 expired 并把正文搬进 mem.quarantine —— '
+  '不静默删除(§12.4 永不 delete 只移隔离区),也不放它永久占着熔断额度';
+CREATE INDEX IF NOT EXISTS idx_pr_expires ON mem.pending_review (expires_at)
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_pr_pending ON mem.pending_review (id)
+  WHERE status = 'pending';
+
+-- =====================================================================
+-- S3-6) 熔断状态:必须持久化,否则「重启即复位」使熔断无效
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS mem.circuit_breaker (
+  name        text PRIMARY KEY,
+  tripped_at  timestamptz,
+  reason      text,
+  -- 恢复也走面板票据(与逐条确认同级)—— 规格里「显式恢复」是循环引用,此处裁定
+  cleared_at  timestamptz,
+  cleared_by  text
+);
+COMMENT ON TABLE mem.circuit_breaker IS
+  'S3 熔断状态。★ 必须落库:进程内存态的熔断「重启即复位」,等于没有';
+
+-- =====================================================================
+-- S3-7) 票据移进 PG,用 UPDATE...RETURNING 原子消费
+--
+-- 进程内存态的票据存在两个问题:与 pending_review.id 无绑定;
+-- 多进程/重启后失效。原子消费同时挡住并发双花。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS mem.write_ticket (
+  ticket_id        text PRIMARY KEY,
+  session_id       text        NOT NULL,
+  candidate_sha256 text        NOT NULL,
+  pending_id       bigint      REFERENCES mem.pending_review(id),
+  issued_at        timestamptz NOT NULL DEFAULT now(),
+  expires_at       timestamptz NOT NULL,
+  consumed_at      timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_live ON mem.write_ticket (expires_at)
+  WHERE consumed_at IS NULL;
+COMMENT ON TABLE mem.write_ticket IS
+  '§4.4.2 面板票据 —— 1.0 的唯一来源。消费必须是 UPDATE...RETURNING(原子),'
+  '否则并发两次确认可以双花同一张票';
+
+-- =====================================================================
+-- S3-8) 冲突检测的索引支撑
+--    裁定:同 subject_norm + predicate_norm 的【活跃行】即冲突候选(结构判据,不用 LLM)。
+--    语义冲突留给面板上的人 —— 机器只负责把「这条要取代谁」摆到你面前。
+-- =====================================================================
+CREATE INDEX IF NOT EXISTS idx_l3_conflict
+  ON mem.l3_fact (subject_norm, predicate_norm)
+  WHERE superseded_by IS NULL AND redacted_at IS NULL;
+
+-- =====================================================================
+-- S3-9) 授权
+-- =====================================================================
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    GRANT SELECT, INSERT, UPDATE ON mem.pending_review TO ai_mem_local;
+    GRANT SELECT, INSERT, UPDATE ON mem.circuit_breaker TO ai_mem_local;
+    GRANT SELECT, INSERT, UPDATE ON mem.write_ticket    TO ai_mem_local;
+    GRANT INSERT, SELECT          ON mem.gate_rejection TO ai_mem_local;
+    GRANT USAGE ON ALL SEQUENCES IN SCHEMA mem TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.authority_rank(
+      mem.provenance, numeric, mem.attestation_kind) TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_pending_terminal()  TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_pending_immutable() TO ai_mem_local;
+  END IF;
+  -- ★ 远程角色对这三张新表一个权限都不给(默认即无,此处显式撤以防将来 GRANT 泛化)
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_remote') THEN
+    REVOKE ALL ON mem.pending_review, mem.circuit_breaker,
+                  mem.write_ticket, mem.gate_rejection FROM ai_mem_remote;
+  END IF;
+END $$;
+
+-- =====================================================================
+-- S3-10) ★ 修:pr_derived_forced_pending 把派生候选【永久】锁在 pending
+--
+-- 原约束:  provenance IN (user_*) OR (status='pending' AND sc<=0.4)
+-- 它想说的是「派生候选**入队时**必须停在待审」,
+-- 写成的却是「派生候选**永远**是 pending」—— 于是它们无法被批准、也无法被拒绝。
+--
+-- 后果是一个死锁,而且正是本次裁定要避免的那个:
+--   队列被派生候选填满 → 熔断 → 但这些候选**转不到终态** → 队列永远清不空
+--   → 熔断永远无法恢复。攻击者塞满队列即达成永久 DoS。
+--
+-- ★ 教训:CHECK 是**行级**的,它在 INSERT 与 UPDATE 上同样生效 ——
+--   想表达「入库时的初始状态」必须用 BEFORE INSERT 触发器,
+--   把它写进 CHECK 等于顺手禁掉了一切后续状态转移。
+-- =====================================================================
+ALTER TABLE mem.pending_review DROP CONSTRAINT IF EXISTS pr_derived_forced_pending;
+
+-- CHECK 只保留【与状态无关】的那一半:派生来源的置信度封顶
+ALTER TABLE mem.pending_review ADD CONSTRAINT pr_derived_conf_cap CHECK (
+  provenance IN ('user_typed','user_voice_asr')
+  OR source_confidence IS NULL
+  OR source_confidence <= 0.4);
+
+-- 「必须停在待审」改由 BEFORE INSERT 强制 —— 只管入队那一刻
+CREATE OR REPLACE FUNCTION mem.tg_pending_initial_state() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.provenance NOT IN ('user_typed','user_voice_asr')
+     AND NEW.status IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION
+      '派生来源(%)的候选必须以 pending 入队,不得直接以 % 入库 —— '
+      '§4.4.2 第四档:它们要停下来等人逐条确认,而不是自己给自己盖章。',
+      NEW.provenance, NEW.status
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_pending_initial_state ON mem.pending_review;
+CREATE TRIGGER trg_pending_initial_state BEFORE INSERT ON mem.pending_review
+  FOR EACH ROW EXECUTE FUNCTION mem.tg_pending_initial_state();
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    GRANT EXECUTE ON FUNCTION mem.tg_pending_initial_state() TO ai_mem_local;
+  END IF;
+END $$;
