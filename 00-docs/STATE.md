@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-28 04:30
+> 更新时间: 2026-07-28 13:45
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
 >
@@ -9,13 +9,13 @@
 
 ---
 
-## 当前阶段:**P2 核心链路 · 接近完成**
+## 当前阶段:**P2 核心链路 · ✅ 完成**(2026-07-28)
 
 | 阶段 | 状态 |
 |---|---|
 | **P0 地基** | ✅ 验收通过(2026-07-26) |
 | **P1 基准测试** | ✅ **完成 17/17 全部实测**(2026-07-27) |
-| **P2 核心链路** | 🔵 **进行中** —— 见下方清单,剩 2 项需你操作 |
+| **P2 核心链路** | ✅ **完成** —— 全链路实测:Open WebUI → 网关 → 8B,112 tok/s |
 | P3a 记忆系统 | ⏸ 未开始(前置:P2) |
 
 ---
@@ -32,8 +32,8 @@
 | **E1 入口凭证检测器** | ✅ | 6 类 + 校验和 · 扫整个载荷 · 流式亦拦 · 带内解除 · 审计不泄露 |
 | `secret_ref` 登记表 | ✅ | 随 schema 建,整表 S2,远程角色 SELECT 抛权限错 |
 | 网关调用方身份校验(D30) | ✅ | 端口→PID→WMI GetOwner,拒 ai-asset/ai-exec |
-| embedding / rerank(CPU :18084) | 🟡 **代码+模型实测可用,服务未注册** | 1024 维 + rerank 语义正确。**注册需你跑一条命令**(见下) |
-| 首版界面 Open WebUI | 🟡 **已装 + 启动实测,首个账户未注册** | DB 落 `state\openwebui` · 指向网关 · **注册账户是你的事** |
+| embedding / rerank(CPU :18084) | ✅ | 服务 Running · `.i-mem` · 自启 · 仅回环 · 1024 维 · rerank 语义正确 |
+| 首版界面 Open WebUI | ✅ | admin 已注册 · 经网关对话实测通过 · 仅回环 · 关注册 · 关遥测 |
 | 剪贴板状态复检 | ⬜ 未做 | P0 时测过一次(均已关闭),需复检 |
 | 无 Broker 期显存过渡措施 | ⬜ 未做 | |
 | WebAuthn 设备身份 | ⬜ **未做**(D28 决定:本机走 OS 信任,远程才需要) | 现远程一律 401 |
@@ -49,21 +49,19 @@
 
 ---
 
-## 下一步(需要你操作的两项)
+## 下一步
 
-1. **注册 Embedding 服务**(管理员 PowerShell,约 2 分钟)
-   ```
-   powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90-ops\install-embedding.ps1"
-   ```
-   > 不带 `-DownloadOnly`。它会重置 ai-mem 密码并**同步所有 ai-mem 服务**(已修:早期版本只同步 pg-mem,会打死 Qdrant)。
-   > Claude 不代跑 —— 改系统安全设置属其红线。
+**P2 已完成,可以进 P3a(记忆系统单机版)** —— 这是项目的核心里程碑。
 
-2. **启动 Open WebUI 并注册第一个账户**(它即 admin)
-   ```
-   powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90-ops\install-openwebui.ps1"
-   ```
-   > 首启跑几十条数据库迁移需 1–3 分钟。浏览器开 `http://127.0.0.1:8081` 注册。
-   > 注册完账户后 `ENABLE_SIGNUP` 已设为 false(防同机其他账户自助注册)。
+日常使用:数据库四件套是 Windows 服务(开机自启,不用管);**llama 后端与网关不是服务**
+(按设计由 P4 的 GPU Broker 按需装载),用之前先跑:
+
+```
+powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90-ops\start-stack.ps1"
+```
+然后 Open WebUI 在 http://127.0.0.1:8081(另起:`install-openwebui.ps1`)。
+
+**P3a 之前必须先解决的**:活数据库的备份方式(见「阻塞」)—— §8.5 铁律「没演练过的备份不算备份」。
 
 ---
 
@@ -178,3 +176,4 @@ vram_budget  =  15.92 − desktop_floor − 0.8      ← 导出值,不单独设
 - `/health` 与 `/v1/models` **不做身份校验**(信息量低,但与其他端点不一致)
 - 身份解析是**同步阻塞调用**跑在 async 端点里(WMI ~250ms 会卡事件循环)
 - schema 中标 `[推断]` 的列是设计发明,待 P3a 最终化
+- 审计日志 `session_id` 恒为 `unknown` —— Open WebUI 不发 `X-Session-Id`,凭证命中记录无法关联到具体对话
