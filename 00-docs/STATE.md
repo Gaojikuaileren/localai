@@ -65,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 ```
 然后 Open WebUI 在 http://127.0.0.1:8081(另起:`install-openwebui.ps1`)。
 
-**P3a 之前必须先解决的**:活数据库的备份方式(见「阻塞」)—— §8.5 铁律「没演练过的备份不算备份」。
+~~**P3a 之前必须先解决的**:活数据库的备份方式~~ → ✅ **2026-07-28 已完成**。剩:无 Broker 期显存闸(建议先做,防 OOM)。
 
 ---
 
@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 
 | 事项 | 阻塞什么 | 需要什么才能解 |
 |---|---|---|
-| **活数据库的备份方式** | **P3a 的恢复演练** | §8.5.5:PG 走 `pg_dump`、Qdrant 走 snapshot API。**backup.ps1 目前仍会文件级复制活库**,P3a 前必须改(设计已写在 `memory-backbone-design.md` §8) |
+| ~~活数据库的备份方式~~ | ~~P3a~~ | ✅ **2026-07-28 已解除**:逻辑转储落地 + 每次备份自证可恢复 + 金丝雀演练 PASS + 真机备份跑通(G:)。Qdrant 恢复的三个 Windows 坑已实测并写进恢复文档 |
 | 上行带宽未测 | P3b 手机端体验预期 | FRITZ!Box 连接信息页(5 分钟) |
 
 > P1 阶段的全部阻塞(语音栈选型 · C4 语料 · llama.cpp · 桌面基线)**均已解除**。
@@ -84,9 +84,9 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 
 | 阶段 | 前置条件 | 当前 |
 |---|---|---|
-| **P3a** | 跑通一次完整恢复演练(§8.5 铁律 3) | 🟡 code+state 已演练(2026-07-26);**记忆库的恢复演练需在 P3a 内重做** |
+| **P3a** | 跑通一次完整恢复演练(§8.5 铁律 3) | ✅ **记忆库演练已做**(2026-07-28 金丝雀 PASS);Qdrant 启动期恢复亦实测跑通 |
 | **P3a** | 备份目标可用 | ✅ G: 可用(加密要求已由 D21/D22 取消) |
-| **P3a** | **活数据库备份方式落地** | ❌ 未做 —— 见 §8.5.5 |
+| **P3a** | **活数据库备份方式落地** | ✅ **已做**(2026-07-28,真机验证) |
 | **P3b** | P3a 验收通过 | ❌ |
 
 ---

@@ -70,6 +70,7 @@ $qdrantJobs = @(
   @{ Name='mem_s2';   Cfg=(Get-Path 'qdrant_s2_config'); Port=[int](Get-Path 'qdrant_s2_http_port'); Snap=(Get-Path 'qdrant_s2_snapshots') }
 )
 $snapTotal = 0
+$madeSnaps = @()          # ★ 只记【本次产出】的快照,避免把历史快照一并塞进备份集
 foreach ($j in $qdrantJobs) {
   $key = Get-ApiKey $j.Cfg
   if (-not $key) { return (Fail "读不到 $($j.Name) 的 api_key: $($j.Cfg)") }
@@ -110,6 +111,19 @@ foreach ($j in $qdrantJobs) {
       if ($magic -ne 'ustar') { return (Fail "$($j.Name)/$n 快照不是合法 tar(magic='$magic')—— 可能已损坏") }
     } catch { return (Fail "$($j.Name)/$n 快照读取失败:$_") }
     Write-Host ("           └ 完整性 ✓ tar 结构正常")
+    $madeSnaps += [pscustomobject]@{ Inst = $j.Name; Coll = $n; File = $sf }
+
+    # ★ 清掉该 collection 的【历史】快照:Qdrant 会一直留着旧快照,不清的话
+    #   ① 每次备份体积翻倍(实测一次备份里出现同一 collection 的 3 个 386MB 快照)
+    #   ② 活盘上的 snapshots 目录无限增长
+    try {
+      $all = (Invoke-RestMethod "http://127.0.0.1:$($j.Port)/collections/$n/snapshots" -Headers $h).result
+      foreach ($old in @($all | Where-Object { $_.name -ne $res.result.name })) {
+        Invoke-RestMethod "http://127.0.0.1:$($j.Port)/collections/$n/snapshots/$($old.name)" -Method Delete -Headers $h -EA SilentlyContinue | Out-Null
+      }
+      $cleaned = @($all).Count - 1
+      if ($cleaned -gt 0) { Write-Host ("           └ 已清理 {0} 个历史快照" -f $cleaned) }
+    } catch { Write-Host "           └ (历史快照清理失败,不阻断备份)" -ForegroundColor DarkGray }
   }
 }
 if ($snapTotal -eq 0) { return (Fail "一个 Qdrant 快照都没产出") }
@@ -131,13 +145,12 @@ if ($DestDir) {
   New-Item -ItemType Directory -Force $pgOut, $qdOut | Out-Null
   foreach ($f in $pgFiles) { Copy-Item $f.FullName $pgOut -Force }
   Copy-Item (Join-Path $Stage 'QDRANT_VERSION.txt') $qdOut -Force
-  foreach ($j in $qdrantJobs) {
-    if (-not (Test-Path $j.Snap)) { continue }
-    $sub = Join-Path $qdOut $j.Name
+  # ★ 只复制【本次产出】的快照 —— 按 *.snapshot 通配会把历史快照一并复制,
+  #   实测导致同一 collection 的 3 个 386MB 快照进了同一个备份集(每备份一次多 ~750MB)。
+  foreach ($m in $madeSnaps) {
+    $sub = Join-Path $qdOut $m.Inst
     New-Item -ItemType Directory -Force $sub | Out-Null
-    # 只复制快照【文件】(它们不是活库,复制安全)
-    Get-ChildItem $j.Snap -Recurse -File -Filter '*.snapshot' -EA SilentlyContinue |
-      ForEach-Object { Copy-Item $_.FullName (Join-Path $sub $_.Name) -Force }
+    Copy-Item $m.File (Join-Path $sub (Split-Path $m.File -Leaf)) -Force
   }
   $n = (Get-ChildItem (Join-Path $DestDir 'memory-db') -Recurse -File).Count
   Write-Host ("  已写入备份集: memory-db\ ({0} 个文件)" -f $n)
