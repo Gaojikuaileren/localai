@@ -15,6 +15,7 @@ return (args.Length == 0 ? "" : args[0]) switch
 {
     "selftest" => Selftest1(),
     "selftest2" => Selftest2(),
+    "selftest3" => Selftest3(),
     "init" => Init(),
     "status" => Status(),
     "list-devices" => ListDevices(),
@@ -24,7 +25,7 @@ return (args.Length == 0 ? "" : args[0]) switch
 
 static int Usage()
 {
-    Console.WriteLine("usage: localai-identity <selftest|selftest2|init|status|list-devices|revoke-device <id>>");
+    Console.WriteLine("usage: localai-identity <selftest|selftest2|selftest3|init|status|list-devices|revoke-device <id>>");
     return 2;
 }
 
@@ -198,4 +199,125 @@ static int RevokeDevice(string? deviceId)
     s.Save(idDir);
     Console.WriteLine($"revoked {deviceId}; generation now {s.IdentityGeneration}");
     return 0;
+}
+
+// ---------------------------------------------------------------- S2.3 pairing selftest (scratch)
+static int Selftest3()
+{
+    int pass = 0, fail = 0;
+    void Assert(bool c, string m) { if (c) { pass++; Console.WriteLine("  PASS  " + m); } else { fail++; Console.WriteLine("  FAIL  " + m); } }
+    byte[] R(int n) => RandomNumberGenerator.GetBytes(n);
+
+    var root = Path.Combine(Path.GetTempPath(), "localai-pairing-selftest-" + Guid.NewGuid().ToString("N")[..8]);
+    var idDir = Path.Combine(root, "identity");
+    var secDir = Path.Combine(root, "secrets");
+    var prov = new CngProvider(Ca.TpmProvider);
+    string? caKey = null, srvKey = null, clientKeyName = null;
+    try
+    {
+        var hub = Identity.Init(idDir, secDir);
+        caKey = hub.CaKeyName; srvKey = hub.ServerKeyName;
+        var pairing = new Pairing(idDir, secDir);
+        var caPub = X509CertificateLoader.LoadCertificate(File.ReadAllBytes(Path.Combine(idDir, "ca.cer")));
+
+        // SAS determinism + tamper sensitivity
+        var t = pairing.BuildTranscript(1, R(32), R(32), R(32), R(16), R(32));
+        var d1 = Sas.Derive(t);
+        Assert(d1.words.Length == 6, "SAS is six words");
+        Assert(d1.words.SequenceEqual(Sas.Derive(t).words), "SAS is deterministic (same transcript -> same words)");
+        Assert(!Sas.Derive(t with { ServerNonce = R(32) }).words.SequenceEqual(d1.words), "changing a transcript field changes the SAS");
+        Assert(d1.indices.All(i => i is >= 0 and < 2048), "SAS indices in [0,2048)");
+
+        // client key (TPM) + CSR + claim secret
+        clientKeyName = "localai-selftest-pairclient-" + Convert.ToHexString(R(4)).ToLowerInvariant();
+        var ckp = new CngKeyCreationParameters { Provider = prov, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing };
+        using var clientEcdsa = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, clientKeyName, ckp));
+        var csrDer = new CertificateRequest("CN=client", clientEcdsa, HashAlgorithmName.SHA256).CreateSigningRequest();
+        var clientCsrSpkiSha = SHA256.HashData(clientEcdsa.ExportSubjectPublicKeyInfo());
+        var claimSecret = R(32);
+        var claimSecretHash = SHA256.HashData(claimSecret);
+        var clientNonce = R(32);
+
+        // window closed -> enroll rejected
+        bool closed = false;
+        try { pairing.Enroll(csrDer, clientNonce, claimSecretHash, 1, "dev"); } catch (InvalidOperationException) { closed = true; }
+        Assert(closed, "enroll rejected while the pairing window is closed");
+
+        pairing.OpenWindow(TimeSpan.FromMinutes(5));
+        var en = pairing.Enroll(csrDer, clientNonce, claimSecretHash, 1, "Zori 的笔记本");
+        Assert(en.RequestId.Length == 32, "enroll returns a 128-bit request id");
+
+        // client independently derives the same SAS; a MITM server-leaf swap makes it differ
+        var clientSas = Sas.Derive(pairing.BuildTranscript(1, claimSecretHash, clientNonce, en.ServerNonce,
+                                    Convert.FromHexString(en.RequestId), clientCsrSpkiSha));
+        Assert(clientSas.words.SequenceEqual(en.Sas), "client and host derive the identical six-word SAS");
+        var mitm = pairing.BuildTranscript(1, claimSecretHash, clientNonce, en.ServerNonce,
+                                    Convert.FromHexString(en.RequestId), clientCsrSpkiSha) with { ServerLeafSha256 = R(32) };
+        Assert(!Sas.Derive(mitm).words.SequenceEqual(en.Sas), "MITM server-leaf swap makes the SAS differ (client would catch it)");
+
+        // approve (host)
+        pairing.Approve(en.RequestId);
+        Assert(pairing.StatusOf(en.RequestId) == "approved", "approve -> approved");
+        var afterApprove = Store.LoadOrEmpty(idDir);
+        Assert(afterApprove.Devices is [{ Status: "provisioning" }], "approve created exactly one provisioning device");
+        Assert(afterApprove.IdentityGeneration == 0, "a candidate before complete does NOT bump the generation");
+        var deviceId = afterApprove.Devices[0].DeviceId;
+
+        // status: wrong secret rejected; right secret returns the challenge
+        bool badSecret = false;
+        try { pairing.Status(en.RequestId, R(32)); } catch (UnauthorizedAccessException) { badSecret = true; }
+        Assert(badSecret, "status with the wrong claim secret is rejected");
+        var st = pairing.Status(en.RequestId, claimSecret);
+        Assert(st is { Status: "approved", ClaimNonce: not null, CandidateSha256: not null }, "status returns claim nonce + candidate hash");
+
+        // claim: challenge signed by the CSR key
+        var challenge = Pairing.BuildChallenge(Convert.FromHexString(en.RequestId), st.ClaimNonce!, Convert.FromHexString(st.CandidateSha256!));
+        var sig = clientEcdsa.SignData(challenge, HashAlgorithmName.SHA256);
+        using var cand = pairing.Claim(en.RequestId, claimSecret, sig);
+        Assert(Ca.VerifyChainAndEku(cand, caPub, Ca.OidClientAuth), "claim returns a candidate chaining to CA + clientAuth EKU");
+        Assert(Ca.HasUriSan(cand, "urn:localai:device:" + deviceId), "candidate URI SAN matches the issued device id");
+        using var cand2 = pairing.Claim(en.RequestId, claimSecret, sig);
+        Assert(cand.Thumbprint == cand2.Thumbprint, "claim is idempotent (same candidate on retry)");
+        bool badSig = false;
+        try { pairing.Claim(en.RequestId, claimSecret, R(64)); } catch (UnauthorizedAccessException) { badSig = true; }
+        Assert(badSig, "claim with an invalid challenge signature is rejected");
+
+        // complete -> active, generation bumps
+        pairing.Complete(en.RequestId);
+        Assert(pairing.StatusOf(en.RequestId) == "active", "complete -> active");
+        var final = Store.LoadOrEmpty(idDir);
+        Assert(final.IdentityGeneration == 1, "complete/activate bumped the generation to 1");
+        Assert(final.IsActive(st.CandidateSha256!), "the activated device+cert is active in the store");
+
+        // single approve: re-approving a non-pending request is refused
+        bool reappr = false;
+        try { pairing.Approve(en.RequestId); } catch (InvalidOperationException) { reappr = true; }
+        Assert(reappr, "re-approving a non-pending request is refused (no bulk/re-approve)");
+
+        // queue cap: MaxPending
+        for (int i = 0; i < Pairing.MaxPending; i++)
+        {
+            using var k = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var c = new CertificateRequest("CN=q", k, HashAlgorithmName.SHA256).CreateSigningRequest();
+            pairing.Enroll(c, R(32), SHA256.HashData(R(32)), 1, "q" + i);
+        }
+        bool full = false;
+        try
+        {
+            using var k = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var c = new CertificateRequest("CN=q", k, HashAlgorithmName.SHA256).CreateSigningRequest();
+            pairing.Enroll(c, R(32), SHA256.HashData(R(32)), 1, "overflow");
+        }
+        catch (InvalidOperationException) { full = true; }
+        Assert(full, "pending queue is capped at " + Pairing.MaxPending);
+    }
+    finally
+    {
+        if (caKey is not null) Ca.DeleteKey(caKey);
+        if (srvKey is not null) Ca.DeleteKey(srvKey);
+        if (clientKeyName is not null) { try { if (CngKey.Exists(clientKeyName, prov)) CngKey.Open(clientKeyName, prov).Delete(); } catch { } }
+        try { Directory.Delete(root, true); } catch { }
+    }
+    Console.WriteLine($"\nS2.3 pairing selftest: PASS={pass} FAIL={fail}");
+    return fail > 0 ? 1 : 0;
 }
