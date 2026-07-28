@@ -69,9 +69,14 @@ if ($DownloadOnly) {
 $DataDir = Join-Path (Split-Path (Get-Path 'db') -Parent) 'openwebui'
 New-Item -ItemType Directory -Force $DataDir | Out-Null
 $env:DATA_DIR = $DataDir
-# ★ 密钥落 DATA_DIR,不落 venv(实测默认会写进 Scripts\.webui_secret_key —— 秘密不该散在代码目录)
-$env:WEBUI_SECRET_KEY_FILE = Join-Path $DataDir '.webui_secret_key'
 $env:WEBUI_URL = "http://127.0.0.1:8081"
+# ★★ 关掉 PersistentConfig(2026-07-28 实测踩到):Open WebUI 默认把环境变量【只在首启读一次】
+#    然后固化进数据库,之后改环境变量【完全无效】。结果:某次没带全变量的启动创建了库,
+#    RAG 就永久用回默认的 sentence-transformers(还白下 793MB),再怎么设 RAG_* 都不生效。
+#    设为 false 后每次启动都以环境变量为准 —— 部署可复现,也符合「配置在版本控制里」。
+$env:ENABLE_PERSISTENT_CONFIG = "false"
+# ★ CORS 默认 '*';本项目只从回环访问,收紧掉
+$env:CORS_ALLOW_ORIGIN = "http://127.0.0.1:8081"
 # ★ 指向【网关】,而不是直连 llama —— 这样 E1/别名/契约回写/审计全生效
 $env:OPENAI_API_BASE_URL = "http://127.0.0.1:8080/v1"
 $env:OPENAI_API_KEY = "localai"          # 网关本机不校验 key(走 OS 身份);占位即可
@@ -96,6 +101,9 @@ Say "    ★ 浏览器开 http://127.0.0.1:8081 注册第一个账户 —— 它
 # ★ 入口是 Scripts\open-webui.exe;`python -m open_webui` 不可用(包内无 __main__,实测确认)
 $OwExe = Join-Path (Split-Path $VPy -Parent) 'open-webui.exe'
 if (-not (Test-Path $OwExe)) { Say "  X 找不到 $OwExe"; exit 1 }
+# ★ 切到 DATA_DIR 再启动:Open WebUI 把 .webui_secret_key(会话签名密钥)写在【当前工作目录】。
+#   不切的话它会落在你运行命令的地方(实测落到了用户主目录)—— 密钥应与数据同处并受同一 ACL。
+Set-Location $DataDir
 # ★★ 必须显式 --host 127.0.0.1:Open WebUI 默认绑 0.0.0.0,会把界面暴露到整个局域网
 #    (本项目全链路只监听回环;一个开放注册的 Web 界面暴露出去 = 任何同网设备可注册并对话)。
 & $OwExe serve --host 127.0.0.1 --port 8081
