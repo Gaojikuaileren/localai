@@ -847,7 +847,7 @@ DB 口令纳入 Credential Manager/DPAPI(不落明文配置);mem_s2 双实例若
 ## 2026-07-28 · D31 · ai-mem 服务如何读到自己的代码(部署边界)
 
 **背景**
-网关 / embedding / 将来的 memory-service 都以 `.i-mem` 运行,但代码在 `E:\...-core\`(git 仓库)。
+网关 / embedding / 将来的 memory-service 都以 `.\ai-mem` 运行,但代码在 `E:\...\b-core\`(git 仓库)。
 ai-mem 不在 Users 组,默认可能读不到代码根 → 服务起不来。此前网关是以【管理员】身份测的,
 未暴露这个问题;上生产(ai-mem)前必须解决。
 
