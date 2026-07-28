@@ -64,8 +64,17 @@ Say "pg_dumpall --globals-only"
 $rcG = $LASTEXITCODE
 
 # 2) memory 库本体(自定义格式:压缩 + 可选择性恢复)
-Say "pg_dump -Fc -d memory"
-& (Join-Path $PgBin 'pg_dump.exe') -h 127.0.0.1 -p $PgPort -U postgres -Fc -d memory -f $dump 2>&1 | Add-Content $log
+#    ★★ 排除 mem.quarantine 表的【数据】(M26,2026-07-28 用户裁定「排除,倾向隐私」)。
+#       它装的是 redact/删除掉的记忆正文完整快照,随整库进备份会在不加密的 G: 盘上
+#       明文存活最多 12 代(约半年,D22 无 crypto-shredding)。与 §8.5.3 对文件系统
+#       隔离区的排除对齐。用 --exclude-table-data 而非 --exclude-table:保留表结构
+#       (恢复后 quarantine 表在、只是空的),否则 redact 的 INSERT 目标会不存在。
+#    ★ 诚实边界(必须写下来):这【只删掉副本】。被 tombstone 的 l3_fact 行本身
+#       (append-only,statement 列仍是明文)照进备份 —— 真正的擦除需要 crypto-shredding,
+#       而 D22 取消了加密。所以这条是"减一份暴露",不是"删除进了备份"。
+Say "pg_dump -Fc -d memory (--exclude-table-data mem.quarantine)"
+& (Join-Path $PgBin 'pg_dump.exe') -h 127.0.0.1 -p $PgPort -U postgres -Fc `
+    --exclude-table-data 'mem.quarantine' -d memory -f $dump 2>&1 | Add-Content $log
 $rcD = $LASTEXITCODE
 
 # 3) 恢复所需的溯源信息 —— 没有它,恢复现场不知道该用什么参数建空集群
@@ -94,13 +103,27 @@ $psql       = Join-Path $PgBin 'psql.exe'
 $pgrestore  = Join-Path $PgBin 'pg_restore.exe'
 $TestDb     = 'memory_restore_test'
 $rehearseOk = $false
+# ★★ 指纹用【精确 count】而非 n_live_tup 估计值(M27,2026-07-28)。
+#    此前源用 n_live_tup(pg_stat 估计,且源侧未 ANALYZE、目的侧 ANALYZE 过 ——
+#    两边统计口径不同,可能误判不一致),且空库守卫只挡表数=0 不挡行数=0。
+#    改精确 count 后:两侧同口径,行数=0 也纳入守卫。
+#    ★ quarantine 排除数据后源有行、目的为空,会造成假不一致 —— 指纹计算里也排除它,
+#      与 pg_dump 的 --exclude-table-data 保持一致。
+$SIG_SQL = @"
+SELECT (SELECT count(*) FROM information_schema.tables
+          WHERE table_schema='mem' AND table_type='BASE TABLE')
+    || '/' ||
+       (SELECT coalesce(sum(cnt),0) FROM (
+          SELECT (xpath('/row/c/text()',
+                  query_to_xml(format('SELECT count(*) c FROM mem.%I', tablename),
+                               false, true, '')))[1]::text::bigint AS cnt
+            FROM pg_tables
+           WHERE schemaname='mem' AND tablename <> 'quarantine'
+       ) s)
+"@
 if ($okD) {
-  Say "自证可恢复:恢复进 $TestDb 并比对"
-  # 源库指纹:各表行数之和 + 表数量
-  $srcSig = (& $psql -h 127.0.0.1 -p $PgPort -U postgres -d memory -tAc @"
-SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='mem' AND table_type='BASE TABLE')
-    || '/' || (SELECT coalesce(sum(n_live_tup),0) FROM pg_stat_user_tables WHERE schemaname='mem')
-"@ 2>&1 | Out-String).Trim()
+  Say "自证可恢复:恢复进 $TestDb 并比对(精确 count,排除 quarantine)"
+  $srcSig = (& $psql -h 127.0.0.1 -p $PgPort -U postgres -d memory -tAc $SIG_SQL 2>&1 | Out-String).Trim()
   Say "  源库指纹(表数/行数) = $srcSig"
 
   & $psql -h 127.0.0.1 -p $PgPort -U postgres -d postgres -c "DROP DATABASE IF EXISTS $TestDb" 2>&1 | Add-Content $log
@@ -108,12 +131,8 @@ SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='mem' 
   if ($LASTEXITCODE -eq 0) {
     & $pgrestore -h 127.0.0.1 -p $PgPort -U postgres -d $TestDb $dump 2>&1 | Add-Content $log
     $rcR = $LASTEXITCODE
-    # 恢复后立刻 ANALYZE,否则 n_live_tup 还是 0(统计信息未更新)——否则会误判成丢数据
-    & $psql -h 127.0.0.1 -p $PgPort -U postgres -d $TestDb -c 'ANALYZE' 2>&1 | Add-Content $log
-    $dstSig = (& $psql -h 127.0.0.1 -p $PgPort -U postgres -d $TestDb -tAc @"
-SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='mem' AND table_type='BASE TABLE')
-    || '/' || (SELECT coalesce(sum(n_live_tup),0) FROM pg_stat_user_tables WHERE schemaname='mem')
-"@ 2>&1 | Out-String).Trim()
+    # 精确 count 不依赖统计信息,不必 ANALYZE;两侧用同一条 $SIG_SQL 保证同口径
+    $dstSig = (& $psql -h 127.0.0.1 -p $PgPort -U postgres -d $TestDb -tAc $SIG_SQL 2>&1 | Out-String).Trim()
     Say "  恢复库指纹(表数/行数) = $dstSig  (pg_restore rc=$rcR)"
     $rehearseOk = ($rcR -eq 0) -and ($srcSig -eq $dstSig) -and ($srcSig -notmatch '^0/')
     if (-not $rehearseOk) { Say "  ✗ 指纹不一致或恢复报错 —— 这个转储【恢复不出原样】" }
