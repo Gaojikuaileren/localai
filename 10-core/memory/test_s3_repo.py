@@ -4,7 +4,7 @@ import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 import repo
 from repo import PendingWrite
-from tainted import seal, unseal_for_client
+from tainted import seal, unseal_for_client, CallerTier
 
 p = f = 0
 def ck(n, c, x=''):
@@ -62,7 +62,7 @@ ck('熔断计数 +1', repo.count_pending(conn) == base + 1)
 
 row = repo.get_pending(conn, pid)
 ck('读回且正文密封', row is not None and not isinstance(row.body, str))
-ck('正文正确', 'S3SMOKE' in unseal_for_client(row.body, caller='trusted-local'))
+ck('正文正确', 'S3SMOKE' in unseal_for_client(row.body, caller=CallerTier.TRUSTED_LOCAL))
 ck('有 TTL', row.expires_at is not None)
 ck('有溯源', 'created_at' in row.trace())
 ck('出现在待审列表里', any(r.id == pid for r in repo.list_pending(conn)))

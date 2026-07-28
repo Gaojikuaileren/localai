@@ -15,7 +15,7 @@ import track_vector
 import vectors
 from repo import EpisodeWrite
 from route import Route
-from tainted import TaintedText, seal, unseal_for_client
+from tainted import TaintedText, seal, unseal_for_client, CallerTier
 
 _p = _f = 0
 TAG = "s2acc"
@@ -153,7 +153,7 @@ try:
         top = passages[0]
         check("★★ 首条就是金标(灯光那条)", top.episode_id == ids[GOLD],
               f"实得 episode_id={top.episode_id}")
-        body = unseal_for_client(top.body, caller="trusted-local")
+        body = unseal_for_client(top.body, caller=CallerTier.TRUSTED_LOCAL)
         check("首条正文确实讲灯光", "灯光" in body, body[:40])
         check("★ 返回的正文是密封的", isinstance(top.body, TaintedText))
         check("带溯源", "write_seq" in top.trace and "event_at" in top.trace)
@@ -169,7 +169,7 @@ try:
     ]
     for q2, want in probes:
         ps = track_vector.search(conn, q2, sensitivity="S0")
-        top_body = unseal_for_client(ps[0].body, caller="trusted-local") if ps else ""
+        top_body = unseal_for_client(ps[0].body, caller=CallerTier.TRUSTED_LOCAL) if ps else ""
         check(f"「{q2}」→ 首条含「{want}」", want in top_body, f"实得 {top_body[:34]}")
     ps = track_vector.search(conn, "我妹妹在哪读书", sensitivity="S0")
     check("★ 且此时首条不是灯光那条", ps and ps[0].episode_id != ids[GOLD])

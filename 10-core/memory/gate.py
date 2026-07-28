@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tainted import TaintedText, seal, safe_meta
+from tainted import TaintedText, seal, safe_meta, CallerTier
 import repo
 import sensitivity as sens
 from repo import FactWrite, RepoError, USER_DIRECT, _ALLOWED_PROVENANCE
@@ -500,4 +500,4 @@ def clear_backlog_breaker(conn, *, ticket_id: str, session_id: str) -> None:
 def unseal_for_prompt_free(t: TaintedText) -> str:
     """确认流程内部取正文 —— 走具名解封点(会记账)。"""
     from tainted import unseal_for_client
-    return unseal_for_client(t, caller="trusted-local")
+    return unseal_for_client(t, caller=CallerTier.TRUSTED_LOCAL)

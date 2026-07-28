@@ -60,12 +60,26 @@ BEGIN
         USING ERRCODE = 'check_violation';
     END IF;
 
+    -- ★★ 消息里【不得出现值】(2026-07-28 规格提取实证的一条泄露路径)。
+    --
+    -- 原消息把新旧值各截 40 字符拼进来。而:
+    --   · install-postgres.ps1 开了 logging_collector = on
+    --   · log_min_messages 默认 WARNING ⇒ ERROR 级消息一律写进 PG 服务器日志
+    --   · repo._sanitize 只净化 **Python 侧**的异常传播,
+    --     对 PG 自己已经写在磁盘上的那一行**无能为力**
+    -- ⇒ 每一次被 append-only 拒绝的 UPDATE,都会把一段记忆正文写进
+    --   {state}/memory/pg/18/data/log/ —— 直接违反 §9.2「永不记录:记忆库内容」
+    --   与 §6.9.10⑤「PG 日志不含输入串」。
+    --
+    -- 排查所需的信息一条不少:哪张表、哪一列、哪一行。**值不是排查必需品** ——
+    -- 知道「l3_fact 的 id=42 的 statement 列被试图改写」已经足够定位,
+    -- 而知道它被改成了什么,只对攻击者有用。
     RAISE EXCEPTION
-      '记忆内容不可覆盖(§4.5):表 %.% 的列 % 试图从 % 改为 %。'
+      '记忆内容不可覆盖(§4.5):表 %.% 的第 % 行,列 % 试图被改写。'
       '冲突处理必须【新增一行并把旧行 superseded_by 指向它】,不是改写。'
-      '删除请用 redacted_at(D33②:tombstone + 隔离区)。',
-      TG_TABLE_SCHEMA, TG_TABLE_NAME, col,
-      coalesce(left(oldv, 40), 'NULL'), coalesce(left(newv, 40), 'NULL')
+      '删除请用 redacted_at(D33②:tombstone + 隔离区)。'
+      '(本消息刻意不含新旧值 —— 它会被写进 PG 服务器日志,见 §9.2)',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id, col
       USING ERRCODE = 'check_violation';
   END LOOP;
   RETURN NEW;

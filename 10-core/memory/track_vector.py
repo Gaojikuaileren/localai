@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import repo
 import vectors
-from tainted import TaintedText, unseal_for_client
+from tainted import TaintedText, unseal_for_client, CallerTier
 
 TOP_K = 50          # ANN 粗召回
 TOP_N = 8           # rerank 后返回
@@ -68,7 +68,7 @@ def search(conn, query: str, *, sensitivity: str = "S0",
 
     # rerank 需要明文文档 —— 经具名解封点(会记账)
     ordered_ids = [i for i in ids if i in rows]
-    docs = [unseal_for_client(rows[i].body, caller="trusted-local") for i in ordered_ids]
+    docs = [unseal_for_client(rows[i].body, caller=CallerTier.TRUSTED_LOCAL) for i in ordered_ids]
     ranked = vectors.rerank(query, docs, top_n=min(top_n * 2, len(docs)))
 
     out: List[Passage] = []

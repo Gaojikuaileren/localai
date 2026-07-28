@@ -33,12 +33,15 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 __all__ = [
     "TaintedText", "seal", "MemoryLeakError",
+    "CallerTier", "Backend",
     "unseal_for_storage", "unseal_for_embedding",
     "unseal_for_client", "unseal_for_prompt",
+    "equals_plaintext",
     "UnsealLedger", "current_ledger",
 ]
 
@@ -140,13 +143,32 @@ class TaintedText:
         return len(_VAULT.get(self._handle, ""))
 
     def __eq__(self, other: Any) -> bool:
-        # 只允许与同类比较,且比的是内容 —— 但不暴露内容
+        """★★ 比的是【句柄】,不是内容(2026-07-28 修正)。
+
+        原实现比 `_VAULT` 里的两段明文,注释写着「比的是内容 —— 但不暴露内容」。
+        **那个推理是错的**:逐条比较内容**就是**在暴露内容,一次一个比特,
+        而且不经任何解封点、不写任何账目。
+
+        实测(规格提取时确认):
+            seal('我妹妹叫小雨','S0') == seal('我妹妹叫小雨','S2')  →  True
+            ledger 增量                                          →  0
+
+        ⇒ 这是一个**猜测-确认预言机**:任何能调到 seal 的代码都能在不留痕迹的情况下
+          逐条确认记忆内容。住址、生日、健康状况这类**低熵、可枚举**的内容尤其危险 ——
+          攻击者不需要读出正文,只需要不断猜、看哪次返回 True。
+          而本模块的承诺是「取值只能经四个具名解封函数之一」。
+
+        改为句柄相等:两个密封对象相等 ⇔ 它们是同一次密封。
+        真要比内容,用 `equals_plaintext()` —— 它会记账。
+        """
         if not isinstance(other, TaintedText):
             return NotImplemented
-        return _VAULT.get(self._handle) == _VAULT.get(other._handle)
+        return self._handle == other._handle
 
     def __hash__(self) -> int:
-        return hash(_VAULT.get(self._handle, ""))
+        # ★ 同理:以明文为输入的 hash 会把内容泄进任何一个字典/集合的桶分布里,
+        #   而且 hash 碰撞本身就能被当成一个更弱的预言机。
+        return hash(self._handle)
 
     def __setattr__(self, k, v):
         raise MemoryLeakError("TaintedText 不可变(防止把句柄换成别的正文)")
@@ -163,6 +185,43 @@ def seal(text: str, *, sensitivity: str, source: str) -> TaintedText:
     handle = secrets.token_urlsafe(16)
     _VAULT[handle] = text
     return TaintedText(handle, sensitivity, source)
+
+
+# ── 调用方档位与后端契约:两个都不能是裸字符串 ────────────────────
+class CallerTier(str, Enum):
+    """谁在取这段正文。
+
+    ★★ 必须是枚举而不是 str。原实现 `unseal_for_client(t, caller="trusted-local")`
+       收的是裸字符串,判据写成 `if sensitivity=="S2" and caller!="trusted-local"` ——
+       **denylist 形状**:将来新增一档(局域网设备 / 外联桥),它默认落在**放行**一侧。
+       这与 provenance denylist、E1 override 是同一族缺陷:判据写成放行优先,
+       新增的东西默认自由。
+    """
+    TRUSTED_LOCAL = "trusted-local"        # 本机 OS 会话信任(D28)
+    LAN_DEVICE = "lan-device"              # 已配对的局域网客户端(P3b)
+    CHANNEL_RELAY = "channel-relay"        # 外联通道的桥(P3d)—— 全系统最低信任档
+    REMOTE_UNAUTH = "remote-unauthenticated"
+
+
+# ★ allowlist:键是敏感度,值是**允许**取用的档位。
+#   新增一个档位而不在这里登记 ⇒ 它对任何敏感度都取不到正文(fail-closed)。
+_ALLOWED_CALLERS = {
+    "S0": frozenset({CallerTier.TRUSTED_LOCAL, CallerTier.LAN_DEVICE}),
+    "S1": frozenset({CallerTier.TRUSTED_LOCAL, CallerTier.LAN_DEVICE}),
+    "S2": frozenset({CallerTier.TRUSTED_LOCAL}),      # §4.11.4 结构性隔离,无提级路径
+}
+
+
+@dataclass(frozen=True)
+class Backend:
+    """生成后端的契约。★ `egress` 是必填的,没有默认值。
+
+    §4.6.1 类型层的原文判据是 `backend.egress == true 时抛 MemoryExportViolation`
+    —— 判的是**后端是否出境**,与 sensitivity 无关:
+    一条 S0 记忆送进云端后端,同样违反 §5.6.2 的 L5「记忆库内容,永久禁止」。
+    """
+    name: str
+    egress: bool
 
 
 # ── 四个具名解封点 ────────────────────────────────────────────────
@@ -193,29 +252,67 @@ def unseal_for_embedding(t: TaintedText, *, endpoint: str = "127.0.0.1:18084") -
     return _unseal(t, "embedding", f"http://{endpoint}")
 
 
-def unseal_for_client(t: TaintedText, *, caller: str) -> str:
+def unseal_for_client(t: TaintedText, *, caller: CallerTier) -> str:
     """③ 回客户端:MEMORY 平面把正文以 JSON 交给本地面板/检索。
 
     ★ 这是设计里【被漏掉】的那个出口(核验指出)。它必然存在 —— 记忆面板要显示正文、
       溯源展开要给出原文片段。给它名字、让它记账,好过假装它不存在。
-    ★ caller 必须是本机可信调用方;远程只能经 v_memory_nons2 拿非 S2 内容(D30)。
+
+    ★★ `caller` 必须是 CallerTier 枚举,不接受字符串 ——
+       让「传一个新字符串进来」在类型上不可能(见 CallerTier 的注释)。
+       判据是 **allowlist**:档位不在该敏感度的允许集合里就拒,默认拒绝。
     """
-    if t.sensitivity == "S2" and caller != "trusted-local":
+    if not isinstance(caller, CallerTier):
+        raise TypeError(
+            f"caller 必须是 CallerTier 枚举,收到 {type(caller).__name__}。"
+            "裸字符串会让判据退化成 denylist —— 新增档位默认放行。")
+    allowed = _ALLOWED_CALLERS.get(t.sensitivity, frozenset())
+    if caller not in allowed:
         raise MemoryLeakError(
-            f"S2 内容不得交给 {caller}(§4.11.4 结构性隔离)。"
-        )
-    return _unseal(t, "client", f"client:{caller}")
+            f"{t.sensitivity} 内容不得交给 {caller.value}(§4.11.4 结构性隔离)。"
+            f"该敏感度允许的档位:{sorted(c.value for c in allowed) or '无'}")
+    return _unseal(t, "client", f"client:{caller.value}")
 
 
-def unseal_for_prompt(t: TaintedText, *, backend: str) -> str:
+def unseal_for_prompt(t: TaintedText, *, backend: Backend) -> str:
     """④ 进 prompt:唯一**朝模型去**的出口。出境闸门挂在这里(§4.6.3)。
 
-    ★ 渲染层的最终强制点不在这里,而在**已组装完成的 prompt 字符串**上 ——
-      因为拼接之后类型信息就没了。本函数只负责:标明用途、记账、拦住已知的出境后端。
+    ★★ 判据是 `backend.egress`,不是 sensitivity(2026-07-28 修正)。
+       原实现只写了 `if t.sensitivity == "S2": raise` —— 那是 §6.9.3 的要求,
+       不是 §4.6.1 的。§4.6.1 的原文判据是 **`backend.egress == true 时抛**,
+       与 sensitivity 无关:一条 S0 记忆送进云端后端,同样违反 §5.6.2 的 L5
+       「记忆库内容,永久禁止(出境)」。
+       后果是 `unseal_for_prompt(seal(记忆,'S0'), backend='escalate.cloud')`
+       **静默成功** —— 而 test_tainted.py 当时把它断言为「正常拿到正文」。
+
+    ★ 诚实边界:渲染层的最终强制点**不在这里**,而在【已组装完成的 prompt 字符串】上
+      —— 拼接之后类型信息就没了(§4.6.1 渲染层 = §6.9.4 的 E4,同一个点)。
+      那一层目前**尚未实现**,本函数只是类型层的这一半。
     """
+    if not isinstance(backend, Backend):
+        raise TypeError(
+            f"backend 必须是 Backend(name, egress),收到 {type(backend).__name__}。"
+            "传字符串会让出境判据无从做起 —— egress 必须由调用方显式声明。")
+    if backend.egress:
+        raise MemoryLeakError(
+            f"记忆正文不得进入出境后端 {backend.name}(§4.6.1 类型层 · §5.6.2 L5)。"
+            "与敏感度无关 —— S0 记忆送出去同样是出境。")
     if t.sensitivity == "S2":
         raise MemoryLeakError("S2 内容永不进 prompt(§6.9.3)。")
-    return _unseal(t, "prompt", f"backend:{backend}")
+    return _unseal(t, "prompt", f"backend:{backend.name}")
+
+
+def equals_plaintext(a: TaintedText, b: TaintedText, *, reason: str) -> bool:
+    """需要真的比较两段正文时用这个 —— 它**记账**。
+
+    ★ `__eq__` 已改为比句柄(见其注释:内容比较是一个不留痕迹的猜测-确认预言机)。
+      去重、幂等这类场景确实需要内容比较,那就走这里:留下"谁、为什么、比了两条"的账。
+    """
+    if not (isinstance(a, TaintedText) and isinstance(b, TaintedText)):
+        raise TypeError("equals_plaintext 只接受两个 TaintedText")
+    _LEDGER.note(a._handle, "compare", f"compare:{reason}")
+    _LEDGER.note(b._handle, "compare", f"compare:{reason}")
+    return _VAULT.get(a._handle) == _VAULT.get(b._handle)
 
 
 # ── 给日志/序列化用的安全转换 ────────────────────────────────────

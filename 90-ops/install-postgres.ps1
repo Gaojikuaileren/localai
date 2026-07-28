@@ -176,6 +176,20 @@ port = $PgPort
 password_encryption = scram-sha-256
 logging_collector = on
 log_directory = 'log'
+# ★★ 承重的默认值,必须显式钉死(2026-07-28 实测)
+#
+# PostgreSQL 在 ERROR 时会把【失败的语句】写进服务器日志。对参数化查询,
+# 参数是否一并记录由 log_parameter_max_length_on_error 决定:
+#   0(默认)= 出错时不记录绑定参数  ← 生产路径(repo.py 全用 %s)因此安全
+#   >0     = 记录参数(截断到 N 字节)← 会把记忆正文写进日志,违反 §9.2
+#
+# 默认值会随版本变,而这一条是承重的:repo._sanitize 只净化 Python 侧的异常传播,
+# 对 PG 自己已经写在磁盘上的那一行无能为力。故显式写死,并由 verify.sql 持续断言。
+#
+# ★ 剩余暴露面(配置挡不住,只能靠纪律):**手写字面量的 SQL**
+#   —— psql / 迁移脚本 / 临时排查里 `SET statement='正文'` 这种写法,
+#   正文是语句文本的一部分,一定会进日志。实测确认。
+log_parameter_max_length_on_error = 0
 log_filename = 'pg-%Y-%m-%d.log'
 $endm
 "@

@@ -174,6 +174,21 @@ BEGIN
 END $$;
 DELETE FROM mem.l3_fact WHERE statement LIKE 'B7 越权探针%';
 
+-- B8 ★★ PG 服务器日志不得记录绑定参数(§9.2「永不记录:记忆库内容」)
+--
+-- PostgreSQL 在 ERROR 时会把失败的语句写进服务器日志。参数化查询的参数
+-- 是否一并记录,由 log_parameter_max_length_on_error 决定 —— 默认 0(不记录),
+-- 而生产路径(repo.py 全用 %s)的安全性**完全依赖这个默认值**。
+-- 默认值会随版本变,故此处持续断言。
+--
+-- ★ repo._sanitize 只净化 Python 侧的异常传播;PG 自己写在磁盘上的那一行,
+--   应用层无论如何都够不着 —— 这条只能在配置层守。
+SELECT CASE WHEN current_setting('log_parameter_max_length_on_error') = '0'
+            THEN 'PASS — 出错时不记录绑定参数'
+            ELSE 'FAIL — ★记忆正文会随失败语句进 PG 服务器日志(当前值 '
+                 || current_setting('log_parameter_max_length_on_error') || ')' END
+       AS b8_pg_log_no_params;
+
 \echo '======================================================================'
 \echo ' C. ★★ S2 隔离 — 核心否定用例(核验指出原版缺失,此处补齐)'
 \echo '======================================================================'

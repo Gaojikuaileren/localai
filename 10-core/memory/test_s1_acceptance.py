@@ -18,7 +18,7 @@ from gate import CandidateIn
 #   那不是 bug,是双存储被【响亮地】暴露出来 —— 注入式设计要的正是这个效果。
 from repo import issue_ticket
 from route import Route
-from tainted import TaintedText, unseal_for_client
+from tainted import TaintedText, unseal_for_client, CallerTier
 
 _p = _f = 0
 SUBJ, PRED, NAME = "s1acc_我", "妹妹", "小雨"
@@ -71,7 +71,7 @@ try:
     check("查到 1 条", len(rows) == 1, f"{len(rows)}")
     row = rows[0]
     check("★ 返回的正文是密封的(不是裸 str)", isinstance(row.statement, TaintedText))
-    answer = unseal_for_client(row.object_text, caller="trusted-local")
+    answer = unseal_for_client(row.object_text, caller=CallerTier.TRUSTED_LOCAL)
     check(f"★★ 答案就是「{NAME}」", answer == NAME, f"→ {answer!r}")
 
     print("=== ④ 溯源六件套(§4.5:缺一项多设备下可解释性就残缺)===")
@@ -94,7 +94,7 @@ try:
     conn.commit()
     rows2 = repo.find_facts(conn, SUBJ, PRED)
     check("检索只返回新值", len(rows2) == 1 and
-          unseal_for_client(rows2[0].object_text, caller="trusted-local") == "小雪",
+          unseal_for_client(rows2[0].object_text, caller=CallerTier.TRUSTED_LOCAL) == "小雪",
           f"{len(rows2)} 条")
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM mem.l3_fact WHERE subject_norm=%s", (SUBJ,))

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import repo
 from repo import RepoError, _sanitize, FactWrite
-from tainted import seal, TaintedText, MemoryLeakError
+from tainted import seal, TaintedText, MemoryLeakError, unseal_for_client, CallerTier
 
 _p = _f = _s = 0
 SECRET = "我妹妹叫小雨CANARY7Q4X"
@@ -183,8 +183,11 @@ if conn:
         if rows:
             row = rows[0]
             check("★ 返回的正文是密封的", isinstance(row.statement, TaintedText))
+            # ★ 不能再用 `==` 比内容 —— TaintedText.__eq__ 已改为比句柄
+            #   (内容比较是一个不留痕迹的猜测-确认预言机,见 tainted.py)。
+            #   要比内容就显式解封,让它记账。
             check("★ object 取的是 object 列不是 subject_norm",
-                  row.object_text == seal("小雨", sensitivity="S0", source="user_typed"))
+                  unseal_for_client(row.object_text, caller=CallerTier.TRUSTED_LOCAL) == "小雨")
             tr = row.trace()
             check("溯源六件套齐全",
                   all(k in tr for k in ("asserted_at", "confidence", "source_ref",

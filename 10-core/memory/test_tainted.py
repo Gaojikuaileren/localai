@@ -11,8 +11,10 @@ import sys
 
 from tainted import (
     TaintedText, seal, MemoryLeakError, safe_meta, current_ledger,
+    CallerTier, Backend, equals_plaintext,
     unseal_for_storage, unseal_for_embedding, unseal_for_client, unseal_for_prompt,
 )
+from tainted import _ALLOWED_CALLERS   # 测试要断言 allowlist 的形状
 
 SECRET = "我妹妹叫小雨CANARY7Q4X"
 _p = _f = 0
@@ -27,15 +29,17 @@ def check(name, cond, extra=""):
         print(f"  FAIL: {name} {extra}")
 
 
-def blocks(fn, name):
-    """断言某个操作会被拦下,且异常消息里不含正文。"""
+def blocks(fn, name, expect=None):
+    """断言某个操作会被拦下,且异常消息里不含正文。
+    expect 给定时,还要求异常类型正好是它(用于区分「类型不对」与「被策略拒」)。"""
     try:
         r = fn()
         check(name, False, f"→ 没拦住,得到 {r!r}")
-    except MemoryLeakError as e:
-        check(name, SECRET not in str(e), "异常消息里带了正文!")
-    except (TypeError, AttributeError) as e:
-        check(name, SECRET not in str(e), "异常消息里带了正文!")
+    except (MemoryLeakError, TypeError, AttributeError) as e:
+        ok = SECRET not in str(e)
+        if expect is not None:
+            ok = ok and isinstance(e, expect)
+        check(name, ok, f"{type(e).__name__}: {str(e)[:60]}")
 
 
 t = seal(SECRET, sensitivity="S0", source="user_typed")
@@ -103,9 +107,10 @@ v1 = unseal_for_storage(t, table="l3_fact")
 check("① 写库解封拿到正文", v1 == SECRET)
 v2 = unseal_for_embedding(t)
 check("② 向量化解封拿到正文", v2 == SECRET)
-v3 = unseal_for_client(t, caller="trusted-local")
+v3 = unseal_for_client(t, caller=CallerTier.TRUSTED_LOCAL)
 check("③ 回客户端解封拿到正文", v3 == SECRET)
-v4 = unseal_for_prompt(t, backend="assistant.fast")
+LOCAL_BACKEND = Backend(name="assistant.fast", egress=False)
+v4 = unseal_for_prompt(t, backend=LOCAL_BACKEND)
 check("④ 进 prompt 解封拿到正文", v4 == SECRET)
 check("★ 四次都记了账", len(current_ledger()) == led0 + 4, f"{len(current_ledger())-led0}")
 check("账目含四种用途",
@@ -114,10 +119,57 @@ check("★ 不存在通用 unseal()", not hasattr(sys.modules["tainted"], "unsea
 
 print("=== 7. S2 内容的结构性隔离 ===")
 s2 = seal("IBAN DE89370400440532013000", sensitivity="S2", source="user_typed")
-blocks(lambda: unseal_for_prompt(s2, backend="assistant.fast"), "★ S2 永不进 prompt")
-blocks(lambda: unseal_for_client(s2, caller="mobile-remote"),   "★ S2 不交给远程调用方")
+blocks(lambda: unseal_for_prompt(s2, backend=LOCAL_BACKEND), "★ S2 永不进 prompt")
+blocks(lambda: unseal_for_client(s2, caller=CallerTier.CHANNEL_RELAY),
+       "★ S2 不交给外联通道")
+blocks(lambda: unseal_for_client(s2, caller=CallerTier.LAN_DEVICE),
+       "★ S2 不交给局域网设备(无提级路径)")
 check("S2 可交给本机可信调用方(面板要显示)",
-      unseal_for_client(s2, caller="trusted-local").startswith("IBAN"))
+      unseal_for_client(s2, caller=CallerTier.TRUSTED_LOCAL).startswith("IBAN"))
+
+print("=== 7b. ★★ 出境判据是 backend.egress,与 sensitivity 无关 ===")
+# 2026-07-28 修正:原实现只判 `if t.sensitivity == "S2"`,那是 §6.9.3 的要求;
+# §4.6.1 的原文判据是 `backend.egress == true 时抛`。后果是
+#   unseal_for_prompt(seal(记忆,'S0'), backend='escalate.cloud') **静默成功**
+# —— 而本文件当时把它断言为「正常拿到正文」。一条 S0 记忆送进云端,
+# 同样违反 §5.6.2 的 L5「记忆库内容,永久禁止(出境)」。
+CLOUD = Backend(name="escalate.cloud", egress=True)
+blocks(lambda: unseal_for_prompt(t, backend=CLOUD),
+       "★★ S0 记忆也不得进出境后端(与敏感度无关)")
+blocks(lambda: unseal_for_prompt(s2, backend=CLOUD), "★ S2 更不行")
+check("本地后端仍然放行(别把好人也挡了)",
+      unseal_for_prompt(t, backend=LOCAL_BACKEND) == SECRET)
+
+print("=== 7c. ★ 档位与后端都不能是裸字符串 ===")
+# 裸字符串会让判据退化成 denylist:新增一档默认落在放行一侧。
+# 与 provenance denylist、E1 override 是同一族缺陷。
+blocks(lambda: unseal_for_client(t, caller="trusted-local"),
+       "★ caller 传字符串必须报错", TypeError)
+blocks(lambda: unseal_for_prompt(t, backend="assistant.fast"),
+       "★ backend 传字符串必须报错", TypeError)
+check("★ 新增档位默认无权(allowlist 形状)",
+      all(tier not in _ALLOWED_CALLERS.get("S2", frozenset())
+          for tier in (CallerTier.LAN_DEVICE, CallerTier.CHANNEL_RELAY,
+                       CallerTier.REMOTE_UNAUTH)))
+
+print("=== 7d. ★★ __eq__ 不得成为猜测-确认预言机 ===")
+# 原实现比 _VAULT 里的两段明文,不经解封点、不记账、不看 sensitivity。
+# 实测:seal('X','S0') == seal('X','S2') 为 True 且 ledger 增量为 0
+# ⇒ 任何能调到 seal 的代码都能不留痕迹地逐条确认记忆内容,
+#   住址/生日/健康这类低熵可枚举的内容尤其危险。
+a = seal("我妹妹叫小雨", sensitivity="S0", source="user_typed")
+b = seal("我妹妹叫小雨", sensitivity="S2", source="user_typed")
+led_before = len(current_ledger())
+check("★★ 同内容不同对象不再相等(预言机已关闭)", a != b)
+check("★ 比较不产生任何账目变化(因为它压根没读内容)",
+      len(current_ledger()) == led_before)
+check("同一个对象仍然等于自己", a == a)
+check("★ hash 不以明文为输入", hash(a) != hash(b))
+# 真要比内容 → 走具名函数,它记账
+same = equals_plaintext(a, b, reason="dedup-test")
+check("equals_plaintext 能比出内容相同", same)
+check("★ 而且它记了账", len(current_ledger()) == led_before + 2,
+      f"{len(current_ledger()) - led_before}")
 
 print("=== 8. embedding 端点必须是回环(将来改云端要走出境闸门)===")
 blocks(lambda: unseal_for_embedding(t, endpoint="api.openai.com"), "★ 非回环 embedding 被拒")
@@ -141,11 +193,16 @@ except TypeError:
     check("非 str 应拒", True)
 check("seal(None) → 空", seal(None, sensitivity="S0", source="x").length == 0)
 
-print("=== 12. 相等性可用但不泄露 ===")
-a = seal("同样的内容", sensitivity="S0", source="x")
-b = seal("同样的内容", sensitivity="S0", source="y")
-check("同内容相等", a == b)
-check("与 str 比较不相等也不崩", (a == "同样的内容") is False or (a == "同样的内容") is NotImplemented)
+print("=== 12. 相等性:比句柄,不比内容(见第 7d 节)===")
+# ★ 本节 2026-07-28 改写。原来断言的是「同内容相等」——
+#   那正是被判定为预言机的那个行为,测试当时把它当成了正确性质。
+c1 = seal("同样的内容", sensitivity="S0", source="x")
+c2 = seal("同样的内容", sensitivity="S0", source="y")
+check("★ 同内容的两次密封【不相等】(相等会泄露内容)", c1 != c2)
+check("与 str 比较不相等也不崩",
+      (c1 == "同样的内容") is False or (c1 == "同样的内容") is NotImplemented)
+check("可安全放进 set/dict(hash 基于句柄,不基于明文)",
+      len({c1, c2}) == 2 and len({c1, c1}) == 1)
 
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)
