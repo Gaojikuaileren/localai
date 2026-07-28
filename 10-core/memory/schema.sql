@@ -72,8 +72,26 @@ END $$;
 -- 用户/自动事实判定(DB 层 backstop;权威判定在应用层 §4.4.2 服务端可验证信号)
 CREATE OR REPLACE FUNCTION mem.is_user_fact(p mem.provenance, sc numeric)
   RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
-  SELECT p IN ('user_typed','user_voice_asr') AND coalesce(sc,0) >= 1.0;
+  -- ★★ 判据只看【来源】,不看置信度。sc 保留在签名里但【故意不参与判断】。
+  --
+  -- 这里曾经写作 `... AND coalesce(sc,0) >= 1.0`,与 §4.4.2 正面冲突:
+  --   §4.4.2 规定 1.0 必须有 panel_ticket 背书
+  --   ⇒ 正常渠道写入的用户话语一律 < 1.0
+  --   ⇒ 它们统统不算"用户事实"
+  --   ⇒ §4.5 铁律实际上【一条用户事实都没保护住】,任何 tool_result/web_content
+  --      都能悄悄覆盖用户亲口说的话,而且不报错。
+  -- 2026-07-28 实测发现:此前 verify.sql 的 B5 用例因夹具写 1.0 插不进去、
+  -- UPDATE 匹配 0 行而"没有报错",于是这个洞一直伪装成通过。
+  --
+  -- 概念上的错误在于把两件事混为一谈:
+  --   置信度  = 这条内容有多可信
+  --   来源    = 这话是谁说的
+  -- 「能否被自动流程覆盖」取决于后者。用户说错了话仍然是用户说的,
+  -- 纠正它的正当路径是用户再说一次、或走面板确认 —— 而不是让管线自行改写。
+  SELECT p IN ('user_typed','user_voice_asr');
 $$;
+COMMENT ON FUNCTION mem.is_user_fact(mem.provenance, numeric) IS
+  '§4.5:是否属于"用户亲口所述"。只看 provenance;第二参数保留仅为签名兼容,不参与判断';
 
 -- 铁律: 自动事实不得 supersede 用户事实(§4.5)。superseded_by 由 NULL→值 时校验。
 CREATE OR REPLACE FUNCTION mem.tg_block_auto_supersede_user() RETURNS trigger

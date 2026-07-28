@@ -41,15 +41,32 @@ BEGIN
     IF col = ANY(allowed) THEN CONTINUE; END IF;
     EXECUTE format('SELECT ($1).%I::text, ($2).%I::text', col, col)
       INTO oldv, newv USING OLD, NEW;
-    IF oldv IS DISTINCT FROM newv THEN
+    IF oldv IS NOT DISTINCT FROM newv THEN CONTINUE; END IF;
+
+    -- ★ vector_point_id 是【索引指针】,不是记忆内容 —— 但也不是随便可写:
+    --     NULL → 值    建索引        ✓
+    --     值   → NULL  下架(D33② tombstone 删完向量后清指针) ✓
+    --     值   → 另一个值            ✗ 「重指」
+    --   为什么禁重指:这个指针唯一的用途就是删除时定位向量点。指错了,
+    --   tombstone 会删掉别人的点、而本行的向量【留在库里继续被检索命中】——
+    --   正文已删、向量还在,是最难发现的一类删除失败(§4.5 / D33②)。
+    IF col = 'vector_point_id' THEN
+      IF oldv IS NULL OR newv IS NULL THEN CONTINUE; END IF;
       RAISE EXCEPTION
-        '记忆内容不可覆盖(§4.5):表 %.% 的列 % 试图从 % 改为 %。'
-        '冲突处理必须【新增一行并把旧行 superseded_by 指向它】,不是改写。'
-        '删除请用 redacted_at(D33②:tombstone + 隔离区)。',
-        TG_TABLE_SCHEMA, TG_TABLE_NAME, col,
-        coalesce(left(oldv, 40), 'NULL'), coalesce(left(newv, 40), 'NULL')
+        '向量指针不得重指(%.% 列 %):% → %。'
+        '该指针是 tombstone 删除时定位向量点的唯一依据,改指会让删除删错点 ——'
+        '正文没了、向量还在库里继续被检索命中。要换点请先置 NULL 再设新值。',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME, col, oldv, newv
         USING ERRCODE = 'check_violation';
     END IF;
+
+    RAISE EXCEPTION
+      '记忆内容不可覆盖(§4.5):表 %.% 的列 % 试图从 % 改为 %。'
+      '冲突处理必须【新增一行并把旧行 superseded_by 指向它】,不是改写。'
+      '删除请用 redacted_at(D33②:tombstone + 隔离区)。',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, col,
+      coalesce(left(oldv, 40), 'NULL'), coalesce(left(newv, 40), 'NULL')
+      USING ERRCODE = 'check_violation';
   END LOOP;
   RETURN NEW;
 END $$;
@@ -77,6 +94,26 @@ BEGIN
   IF NEW.superseded_by IS NOT NULL AND NEW.superseded_by = NEW.id THEN
     RAISE EXCEPTION '自指的 superseded_by(%.% id=%)会让历史链成环。',
       TG_TABLE_SCHEMA, TG_TABLE_NAME, NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- ★★ redacted_at 同样只能单向(NULL → 非NULL)。
+  --   「悄悄撤销删除」与「悄悄复活旧值」是同一个失效模式的两副面孔:
+  --   用户删掉的东西被一条 UPDATE 弄回检索结果里,而历史上看不出发生过什么。
+  --   D33② 规定的撤销路径是【从隔离区新增一行】(append-only),不是清标志位 ——
+  --   那样至少留下了「它曾被删除、又被重新写入」这条可审计的痕迹。
+  IF OLD.redacted_at IS NOT NULL AND NEW.redacted_at IS NULL THEN
+    RAISE EXCEPTION
+      '不得撤销 tombstone(%.% id=%):redacted_at 只能 NULL→非NULL。'
+      '要恢复请从隔离区【新增一行】(D33②),这样历史里留得下痕迹;'
+      '清标志位会让"删过又回来了"完全不可见。',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD.redacted_at IS NOT NULL AND NEW.redacted_at IS DISTINCT FROM OLD.redacted_at THEN
+    RAISE EXCEPTION
+      '不得改写已存在的 redacted_at(%.% id=%):删除时刻是审计事实。',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id
       USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
@@ -173,13 +210,78 @@ BEGIN
 END $$;
 
 -- =====================================================================
--- 6) 绑触发器(记忆内容表 + pending_review)
+-- 5b) §4.5 铁律守卫升级:把「面板批准」纳入人类权威
+--
+-- schema.sql 里的 mem.is_user_fact 已修正为只看 provenance(原先要求
+-- source_confidence ≥ 1.0,与 §4.4.2「1.0 必须有票据」冲突,导致铁律形同虚设)。
+-- 这里再补一件 schema.sql 做不到的事:attestation_kind 列是本文件 §5 才加的,
+-- 所以「面板批准的条目也算人类权威」只能在这一层实现。
+--
+-- ★ 为什么 panel_ticket 要算权威:它的含义就是【用户在记忆面板上逐条点了确认】。
+--   用户在面板上纠正自己说过的话,是纠错的正当路径;若连它都挡,
+--   用户就【永远无法修改自己的记忆】,只能不断追加相互矛盾的条目。
+-- ★ 反过来,provenance=tool_result 且无票据的条目仍然一律挡住 —— 那是管线自作主张。
+-- =====================================================================
+CREATE OR REPLACE FUNCTION mem.tg_block_auto_supersede_user() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+  np      mem.provenance;
+  nsc     numeric;
+  natt    mem.attestation_kind;
+  old_auth boolean;
+  new_auth boolean;
+BEGIN
+  IF NEW.superseded_by IS NULL
+     OR OLD.superseded_by IS NOT DISTINCT FROM NEW.superseded_by THEN
+    RETURN NEW;
+  END IF;
+
+  EXECUTE format(
+    'SELECT provenance, source_confidence, attestation_kind FROM %I.%I WHERE id = $1',
+    TG_TABLE_SCHEMA, TG_TABLE_NAME)
+    INTO np, nsc, natt USING NEW.superseded_by;
+
+  -- OLD = 被取代的既有行;NEW.superseded_by 指向取代它的新行
+  old_auth := mem.is_user_fact(OLD.provenance, OLD.source_confidence)
+              OR OLD.attestation_kind IS NOT DISTINCT FROM 'panel_ticket'::mem.attestation_kind;
+  new_auth := mem.is_user_fact(np, nsc)
+              OR natt IS NOT DISTINCT FROM 'panel_ticket'::mem.attestation_kind;
+
+  IF old_auth AND NOT new_auth THEN
+    RAISE EXCEPTION
+      '自动事实(id=%,来源=%)不得 supersede 用户事实(id=%,来源=%) — §4.5 铁律。'
+      '要纠正用户说过的话,正当路径是【用户再说一次】或【在记忆面板上逐条确认】'
+      '(attestation_kind=panel_ticket),而不是让管线自行改写。',
+      NEW.superseded_by, np, OLD.id, OLD.provenance
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- =====================================================================
+-- 6) 绑触发器(不可覆盖的记忆内容表)
+--
+-- ★★ 本清单【不含 l1_session_summary】,这是有意的(2026-07-28 实测后修正):
+--    L1 是滚动压缩的会话摘要 —— 它按设计【就要被反复改写】,且只存续数天、
+--    可由对话重算。把 append-only 绑上去,这张表直接不可用:任何一次滚动压缩
+--    都会被拒,而拒绝时给出的建议「新增一行并把旧行 superseded_by 指向它」
+--    在这张表上根本无法执行 —— 它没有 superseded_by 列。
+--    §4.5「记忆内容不可覆盖」管的是【会被当作事实检索出去】的 L2/L3/实体图谱,
+--    不是工作缓冲。
+--
+-- ★ 本清单的每张表都必须同时具备 superseded_by 与 redacted_at:
+--   两个触发器分别静态读了这两列,绑到缺列的表上会在【触发时】报
+--   "record OLD has no field" —— 响亮,但要等到有人真去 UPDATE 才暴露。
 -- =====================================================================
 DO $$
 DECLARE t text;
 BEGIN
+  -- 清掉此前误绑在 L1 上的两个触发器(旧版本 schema-p3a 绑过)
+  DROP TRIGGER IF EXISTS trg_append_only   ON mem.l1_session_summary;
+  DROP TRIGGER IF EXISTS trg_supersede_dir ON mem.l1_session_summary;
+
   FOREACH t IN ARRAY ARRAY[
-    'l1_session_summary','l2_episode','l3_fact',
+    'l2_episode','l3_fact',
     'entity_person','entity_event','entity_preference','entity_project',
     'entity_device','entity_place','entity_thing'] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS trg_append_only ON mem.%I', t);
@@ -221,11 +323,33 @@ CREATE TRIGGER trg_no_bulk_review
   FOR EACH STATEMENT EXECUTE FUNCTION mem.tg_no_bulk_review();
 
 -- =====================================================================
+-- 7b) 编码指纹登记(S2 向量轨)
+--     向量只有在【同一套编码参数下产生】时才可比。改了模型/前缀/维度之后,
+--     老向量与新查询就不在同一个空间里 —— 检索**不报错,只悄悄变差**。
+--     故把参数存这里,启动时双向比对,不一致即拒绝启动(§12.3 禁止静默降级)。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS mem.vector_space (
+  space_id   text PRIMARY KEY,
+  digest     text        NOT NULL,
+  params     jsonb       NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE mem.vector_space IS
+  '编码指纹。digest 变了 ⇒ 全部向量必须重建,否则检索静默劣化';
+
+-- L2 情节:向量点 id 与正文的关联(载荷不存正文,故需要这条回指)
+ALTER TABLE mem.l2_episode ADD COLUMN IF NOT EXISTS vector_point_id bigint;
+CREATE INDEX IF NOT EXISTS idx_l2_active ON mem.l2_episode (id)
+  WHERE superseded_by IS NULL AND redacted_at IS NULL;
+
+-- =====================================================================
 -- 8) 权限:隔离区与新列跟随既有角色二分
 -- =====================================================================
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='ai_mem_local') THEN
     GRANT SELECT, INSERT, UPDATE ON mem.quarantine TO ai_mem_local;
+    GRANT SELECT, INSERT, UPDATE ON mem.vector_space TO ai_mem_local;
+    REVOKE ALL ON mem.vector_space FROM ai_mem_remote;
     -- 隔离区可能含 S2 正文 → 远程绝不可读(与 secret_ref 同等对待)
     REVOKE ALL ON mem.quarantine FROM ai_mem_remote;
 

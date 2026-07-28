@@ -225,6 +225,104 @@ class FactRow:
         }
 
 
+@dataclass
+class EpisodeWrite:
+    """一条待写入的 L2 情节(带时间戳的事件)。向量轨检索的就是它。"""
+    body: TaintedText
+    event_at: datetime
+    provenance: str
+    source_confidence: float
+    sensitivity_domain: str
+    attestation_kind: Optional[str] = None
+    origin_device_id: str = "workstation"
+    source_ref: Optional[Dict[str, Any]] = None
+
+
+def insert_episode(conn: psycopg.Connection, w: EpisodeWrite) -> int:
+    """写一条 L2 情节。返回新行 id。
+
+    ★ event_at 由服务端裁剪:客户端时钟不可信(§4.11.3),且不得晚于现在。
+    """
+    if not isinstance(w.body, TaintedText):
+        raise TypeError("正文必须是 TaintedText")
+    if w.provenance not in _ALLOWED_PROVENANCE:
+        raise RepoError("22P02", f"provenance 不在封闭枚举内: {w.provenance!r}")
+    body = unseal_for_storage(w.body, table="l2_episode")
+    now = _server_now()
+    event_at = min(w.event_at, now) if w.event_at else now   # ★ 不接受"未来"的事件
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO mem.l2_episode
+                  (body, event_at, provenance, source_confidence, sensitivity_domain,
+                   attestation_kind, origin_device_id, source_ref, asserted_at, confidence,
+                   qdrant_collection)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (body, event_at, w.provenance, w.source_confidence, w.sensitivity_domain,
+                  w.attestation_kind, w.origin_device_id,
+                  psycopg.types.json.Jsonb(w.source_ref) if w.source_ref else None,
+                  now, w.source_confidence,
+                  "mem_s2" if w.sensitivity_domain == "S2" else "mem_main"))
+            return cur.fetchone()[0]
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+def set_episode_vector(conn: psycopg.Connection, episode_id: int, point_id: int) -> None:
+    """登记向量点 id。★ 固定顺序:先 PG 后 Qdrant —— 崩在中间时,
+    留下的是「有正文无向量」(检索少一条,可重建),而不是「有向量无正文」(悬空指针)。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE mem.l2_episode SET vector_point_id=%s WHERE id=%s",
+                        (point_id, episode_id))
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
+@dataclass
+class EpisodeRow:
+    id: int
+    body: TaintedText
+    event_at: datetime
+    provenance: str
+    source_confidence: Optional[float]
+    sensitivity_domain: str
+    asserted_at: datetime
+    origin_device_id: Optional[str]
+    write_seq: int
+    source_ref: Optional[Dict[str, Any]]
+
+    def trace(self) -> Dict[str, Any]:
+        return {"asserted_at": self.asserted_at.isoformat(), "event_at": self.event_at.isoformat(),
+                "confidence": self.source_confidence, "source_ref": self.source_ref,
+                "origin_device_id": self.origin_device_id, "write_seq": self.write_seq,
+                "provenance": self.provenance}
+
+
+def get_episodes(conn: psycopg.Connection, ids: List[int]) -> Dict[int, EpisodeRow]:
+    """按 id 批量取情节正文。★ 向量库只存指针,正文永远从这里取 ——
+    于是正文必然经过 seal,天然是 TaintedText。"""
+    if not ids:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, body, event_at, provenance, source_confidence, sensitivity_domain,
+                       asserted_at, origin_device_id, write_seq, source_ref
+                  FROM mem.l2_episode
+                 WHERE id = ANY(%s) AND superseded_by IS NULL AND redacted_at IS NULL
+            """, (list(ids),))
+            rows = cur.fetchall()
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return {r[0]: EpisodeRow(
+        id=r[0], body=seal(r[1] or "", sensitivity=r[5], source=r[3]),
+        event_at=r[2], provenance=r[3],
+        source_confidence=float(r[4]) if r[4] is not None else None,
+        sensitivity_domain=r[5], asserted_at=r[6], origin_device_id=r[7],
+        write_seq=r[8], source_ref=r[9]) for r in rows}
+
+
 def find_facts(conn: psycopg.Connection, subject_norm: str, predicate_norm: str,
                limit: int = 5) -> List[FactRow]:
     """结构化轨的精确查询 —— 「我妹妹叫什么名字」走这条。

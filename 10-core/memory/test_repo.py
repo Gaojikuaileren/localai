@@ -123,8 +123,14 @@ check("insert 用 _server_now()", "_server_now()" in src)
 
 print("=== 6. 写路径里不存在改内容列的函数(§4.5)===")
 upd = re.findall(r"UPDATE\s+mem\.\w+\s+SET\s+([^\n]+)", src, re.IGNORECASE)
-bad_updates = [u for u in upd if not re.match(r"^\s*(superseded_by|redacted_at)\s*=", u)]
-check("★ 所有 UPDATE 只动 superseded_by / redacted_at", not bad_updates, f"→ {bad_updates}")
+# 白名单里的列都不是记忆内容:
+#   superseded_by / redacted_at —— 冲突处理与 tombstone(两者在 DB 层均为单向)
+#   vector_point_id            —— 索引指针;DB 层禁止「非空→另一个非空」的重指,
+#                                 因为它是 tombstone 删向量时定位点的唯一依据
+bad_updates = [u for u in upd
+               if not re.match(r"^\s*(superseded_by|redacted_at|vector_point_id)\s*=", u)]
+check("★ 所有 UPDATE 只动 superseded_by / redacted_at / vector_point_id",
+      not bad_updates, f"→ {bad_updates}")
 check("有 supersede 函数", hasattr(repo, "supersede"))
 check("有 redact(tombstone)函数", hasattr(repo, "redact"))
 check("★ 没有任何名字像 update_fact/edit_fact 的函数",

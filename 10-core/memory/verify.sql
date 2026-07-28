@@ -54,21 +54,65 @@ SELECT CASE WHEN count(*)=0 THEN 'PASS' ELSE 'FAIL — crypto_tier 被建成 NOT
 INSERT INTO mem.l3_fact (statement, provenance) VALUES ('忘了定级的事实','user_typed');
 
 -- B4 ★否定用例:客户端自报 write_seq 必须被服务端覆写(客户端不参与,§4.11.3)
+-- ★ 这里用 0.9 而不是 1.0:本用例测的是 write_seq,不是分级。
+--   曾经写 1.0 —— 后来 S0 加固补上「1.0 必须有 panel_ticket 背书」的 CHECK,
+--   这些夹具就插不进去了,C 段的金丝雀行随之消失,于是隔离断言报出
+--   「远程连非 S2 都读不到」—— 看起来像视图坏了,其实是夹具没落地。见下方 C0。
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain, write_seq)
-VALUES ('客户端谎报 write_seq','user_typed',1.0,'S0', 999999999);
+VALUES ('客户端谎报 write_seq','user_typed',0.9,'S0', 999999999);
 SELECT CASE WHEN write_seq <> 999999999 THEN 'PASS' ELSE 'FAIL — 客户端自报值被采纳' END AS b4_writeseq_override,
        write_seq
   FROM mem.l3_fact WHERE statement='客户端谎报 write_seq';
 
 -- B5 ★否定用例:自动事实不得 supersede 用户事实(§4.5 铁律)
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
-VALUES ('用户亲口说的事实','user_typed',1.0,'S0');
+VALUES ('用户亲口说的事实','user_typed',0.9,'S0');
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
 VALUES ('工具推断的事实','tool_result',0.4,'S0');
 \echo '-- B5 期望: ERROR (check_violation 自动事实不得 supersede 用户事实) --'
 UPDATE mem.l3_fact SET superseded_by =
          (SELECT id FROM mem.l3_fact WHERE statement='工具推断的事实')
  WHERE statement='用户亲口说的事实';
+-- ★ B5 曾长期"通过"却什么也没测:夹具写 source_confidence=1.0,S0 加固后插不进去,
+--   UPDATE 匹配 0 行 ⇒ 不报错 ⇒ 看起来像通过。改夹具为 0.9 后才暴露出
+--   mem.is_user_fact 要求 sc≥1.0、而 §4.4.2 又规定 1.0 必须有票据 ——
+--   两条规则相乘,铁律实际保护范围为空。下面三条把正反面都钉死:
+
+-- B5b 对照:用户事实【可以】被另一条用户事实取代(否则用户无法纠正自己)
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
+VALUES ('用户改口后的事实','user_typed',0.9,'S0');
+UPDATE mem.l3_fact SET superseded_by =
+         (SELECT id FROM mem.l3_fact WHERE statement='用户改口后的事实')
+ WHERE statement='用户亲口说的事实';
+SELECT CASE WHEN superseded_by IS NOT NULL THEN 'PASS' ELSE 'FAIL — 用户改口被挡住了' END
+         AS b5b_user_supersedes_user
+  FROM mem.l3_fact WHERE statement='用户亲口说的事实';
+
+-- B5c 对照:面板逐条确认过的条目(panel_ticket)也算人类权威,可取代用户事实
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
+VALUES ('另一条用户事实','user_typed',0.9,'S0');
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain, attestation_kind)
+VALUES ('面板确认过的更正','tool_result',0.4,'S0','panel_ticket');
+UPDATE mem.l3_fact SET superseded_by =
+         (SELECT id FROM mem.l3_fact WHERE statement='面板确认过的更正')
+ WHERE statement='另一条用户事实';
+SELECT CASE WHEN superseded_by IS NOT NULL THEN 'PASS'
+            ELSE 'FAIL — 面板确认过的更正也被挡了,用户将无法修改自己的记忆' END
+         AS b5c_panel_ticket_has_authority
+  FROM mem.l3_fact WHERE statement='另一条用户事实';
+
+-- B6 ★★ 满分置信必须有票据背书(§4.4.2)。
+--    这条曾经【看着有防护、实际全放行】:CHECK 原本写 `attestation_kind = 'panel_ticket'`,
+--    而 SQL 是三值逻辑 —— attestation_kind 为 NULL 时求值为 NULL,CHECK 只拒绝 FALSE,
+--    于是「不填」的写入一律通过。现改用 IS NOT DISTINCT FROM。正反两面都要测:
+\echo '-- B6 期望: ERROR (check_violation 1.0 不带 panel_ticket) --'
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
+VALUES ('满分但无票据','user_typed',1.0,'S0');
+-- B6b 对照:带票据的 1.0 必须能写(否则是把满分整个封死,不是分级)
+INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain, attestation_kind)
+VALUES ('满分且有票据','user_typed',1.0,'S0','panel_ticket');
+SELECT CASE WHEN count(*)=1 THEN 'PASS' ELSE 'FAIL — 带票据的 1.0 也被挡了' END AS b6b_ticketed_ok
+  FROM mem.l3_fact WHERE statement='满分且有票据';
 
 \echo '======================================================================'
 \echo ' C. ★★ S2 隔离 — 核心否定用例(核验指出原版缺失,此处补齐)'
@@ -76,16 +120,26 @@ UPDATE mem.l3_fact SET superseded_by =
 
 -- 埋一行 S2 记忆内容(不是整表 S2,是混表里的行级 S2 —— 最容易漏的那种)
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
-VALUES ('S2机密内容_KANARIE_7Q4X','user_typed',1.0,'S2')
+VALUES ('S2机密内容_KANARIE_7Q4X','user_typed',0.9,'S2')
 ON CONFLICT DO NOTHING;
 -- 再埋一行非 S2 作对照(证明视图确实在工作,不是把什么都挡了)
 INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
-VALUES ('普通内容_KANARIE_OK','user_typed',1.0,'S0')
+VALUES ('普通内容_KANARIE_OK','user_typed',0.9,'S0')
 ON CONFLICT DO NOTHING;
 -- 一条 S2 凭证句柄
 INSERT INTO mem.secret_ref (ref, value_kind, issuer, last4, sensitivity_domain)
 VALUES ('bank.de.testkonto.iban','string','TestBank','9999','S2')
 ON CONFLICT DO NOTHING;
+
+-- C0 ★★ 夹具就位断言 —— 必须在任何隔离断言【之前】。
+--    本文件到处是 `-- 期望: ERROR --`,真错误混在预期错误里看不出来。
+--    2026-07-28 实际发生过:夹具因新 CHECK 插不进去,C7 就报「远程连非 S2 都读不到」,
+--    读起来像视图/授权坏了 —— 一个安全告警,其实是测试自己烂了。
+--    有了 C0,这两种失败长得不一样:夹具没落地 → C0 FAIL 且 C 段其余结论作废。
+SELECT CASE WHEN count(*)=2 THEN 'PASS — 金丝雀夹具已就位'
+            ELSE 'FAIL — ★夹具没插进去,C 段以下所有结论一律作废(不是隔离坏了)' END AS c0_fixtures_present,
+       count(*) AS canaries
+  FROM mem.l3_fact WHERE statement LIKE '%KANARIE%';
 
 -- C1 视图自身必须滤掉 S2 行(以属主身份看)
 SELECT CASE WHEN count(*)=0 THEN 'PASS' ELSE 'FAIL — S2 行出现在视图里' END AS c1_view_filters_s2
@@ -142,10 +196,15 @@ SELECT current_user AS back_to;
 \echo ' D. 清理测试数据'
 \echo '======================================================================'
 DELETE FROM mem.secret_ref WHERE ref='bank.de.testkonto.iban';
-UPDATE mem.l3_fact SET superseded_by=NULL WHERE statement LIKE '%KANARIE%' OR statement LIKE '%事实%' OR statement LIKE '%谎报%';
+-- ★ 不能再用 `UPDATE ... SET superseded_by=NULL` 来解开链子后逐条删:
+--   superseded_by 现在是单向的(非NULL→NULL 会被 tg_supersede_direction 拒绝,
+--   那正是「悄悄复活旧值」的手法)。改为【一条 DELETE 覆盖全部相关行】——
+--   FK 是 NO ACTION,引用检查排到语句末尾才做,那时两端都已删除,自然通过。
 DELETE FROM mem.l3_fact
  WHERE statement LIKE '%KANARIE%' OR statement IN
-       ('用户亲口说的事实','工具推断的事实','客户端谎报 write_seq');
+       ('用户亲口说的事实','工具推断的事实','客户端谎报 write_seq',
+        '满分但无票据','满分且有票据',
+        '用户改口后的事实','另一条用户事实','面板确认过的更正');
 SELECT CASE WHEN count(*)=0 THEN 'PASS — 测试数据已清' ELSE 'WARN — 有残留' END AS d1_cleanup,
        count(*) AS leftover
   FROM mem.l3_fact WHERE statement LIKE '%KANARIE%';
