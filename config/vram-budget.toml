@@ -1,0 +1,107 @@
+# =============================================================================
+#  vram-budget.toml — 显存预算与组件表(唯一数据源)
+#  对应方案书 v2.2 §8.1 / §8.1.2 · 决议 D24(弃核显)· D25(勾选式组件选择器)
+#
+#  ★ 组件 peak 一律用 P1 实测值。改这里就改了闸的判据 —— 别在代码里散落数字。
+#  ★ `cap` 这个词已全文废止(D24):降它一个字节都腾不出来,因为桌面占用不从里面扣。
+#     真正可调的是 desktop_floor(给桌面至少留多少),vram_budget 是它的导出值。
+# =============================================================================
+
+schema_version = 1
+plan_version   = "v2.2"
+updated        = "2026-07-28"
+
+[budget]
+# RTX 5080 可用显存(实测 16303 MiB ≈ 15.92 GiB)
+total_vram    = 15.92
+# ★ 你设的「至少给桌面留多少」。P1-A7 实测桌面重负载上界 6.53 → 定 6.6。
+#   跨会话持久,不是逐请求参数。改它需要哈希绑定批准(与「新增 rw 权限区域」同级)。
+desktop_floor = 6.6
+# 安全余量:动态闸要求申请后仍剩这么多
+safety_margin = 0.8
+# 标定状态:A7 已实测,但只覆盖「一般工作情景」,故 partial 而非 true
+calibrated    = "partial"
+# 导出值(不单独设):vram_budget = total_vram - desktop_floor - safety_margin = 8.52
+
+# =============================================================================
+#  组件表 —— peak 为【实测】值(§8.1.2,2026-07-27 P1 收官后更新)
+#  kind: llm(单选组)/ speech / vlm / image
+#  port: 无 Broker 期由 start-stack.ps1 静态启动时使用;null 表示不由它管
+# =============================================================================
+[components."llm.assistant.8b@16k"]
+peak = 5.92
+kind = "llm"
+port = 18081
+note = "日常主力。P1-A2 实测(q8_0 KV;F16 下是 6.97)"
+
+[components."llm.assistant.8b@32k"]
+peak = 7.19
+kind = "llm"
+port = 18081
+note = "长上下文。q8_0 省 2.04,使 32K 从「日常用不了」变可用(B3b 零质量损失)"
+
+[components."llm.assistant.8b@8k"]
+peak = 5.0
+kind = "llm"
+port = 18081
+note = "语音场景(assistant.voice 契约)"
+
+[components."llm.assistant.30b-a3b@32k"]
+peak = 11.9
+kind = "llm"
+port = 18082
+note = "深度模式。ngl30 · 38% offload · 57.5 tok/s(MoE 只 3B 活跃,offload 几乎免费)"
+
+[components."speech.lite"]
+peak = 2.07
+kind = "speech"
+port = 18085
+note = "turbo ASR 2.07 GPU + Piper CPU TTS 0(原估 1.4 偏低)"
+
+[components."speech.full"]
+peak = 4.05
+kind = "speech"
+port = 18085
+note = "large-v3 ASR + Piper CPU TTS"
+
+[components."vlm.small"]
+peak = 4.35
+kind = "vlm"
+port = 18083
+note = "Qwen2.5-VL-3B。★ 实测比原估 2.5 重 74% —— 原估漏算 mmproj f16 1.25"
+
+[components."comfyui.sdxl"]
+peak = 8.14
+kind = "image"
+port = 0
+note = "P1-D1 实测 1024²(原估 11.0 偏高)。JOB 平面,不由 start-stack 管"
+
+[components."comfyui.sdxl.lowvram"]
+peak = 7.8
+kind = "image"
+port = 0
+note = "低显存模式"
+
+# =============================================================================
+#  推荐组合(D25 侧栏)—— 100% 由实测 peak 组成,无估算项
+#  ★ 一键套用是一次【普通的】集合变更,走完全相同的三道闸,不走捷径。
+# =============================================================================
+[presets.daily]
+label      = "日常"
+components = ["llm.assistant.8b@16k", "speech.lite"]
+note       = "7.99 ≤ 8.52 ✓ 余 0.53"
+
+[presets.long_context]
+label      = "长上下文"
+components = ["llm.assistant.8b@32k"]
+note       = "7.19 ≤ 8.52 ✓ 余 1.33。★ 加 speech.lite 就超(9.26),这正是闸存在的意义"
+
+[presets.deep]
+label      = "深度模式"
+components = ["llm.assistant.30b-a3b@32k"]
+note       = "11.9 > 8.52 ✗ —— 在 desktop_floor=6.6 下【装不下】。要用它必须先降桌面预留"
+
+[presets.vision]
+label      = "视觉"
+components = ["llm.assistant.8b@16k", "vlm.small"]
+note       = "10.27 > 8.52 ✗ —— 同上,vlm.small 实测比估算重 74% 后这组变紧了"

@@ -15,7 +15,9 @@
 # =============================================================================
 param(
   [int]$Ctx = 16384,
-  [switch]$NoBackend
+  [switch]$NoBackend,
+  [switch]$WithSpeech,          # 一并计入 speech.lite(暂不真启动,只让闸算进去)
+  [switch]$Force                # 明知超预算仍要起(会打印被绕过的是哪道闸)
 )
 $ErrorActionPreference = 'Continue'
 
@@ -38,11 +40,45 @@ function Stop-All {
   Write-Host "`n  已停止后端与网关。数据库服务不受影响(它们是 Windows 服务)。" -ForegroundColor Yellow
 }
 
-# ---- 后端 ----
+# ============================================================================
+#  ★ 显存闸(§8.1 三层检查)—— 无 Broker 期的过渡措施
+#
+#  P4 的 GPU Broker 之前,没有任何东西阻止你把显存装爆。而 OOM 在这里不是
+#  「干净失败」:sysmem fallback 关掉后是硬失败,没关则静默溢出到内存慢到不可用
+#  —— 两种都违反 §12.3「失败可见,不静默降级」。
+#  故:起任何后端【之前】先过闸。判定内核是 10-core/gpu-broker/vram_gate.py,
+#  P4 的 Broker 会直接复用同一段代码(§8.1「预览与准入必须是同一段代码」)。
+# ============================================================================
 if (-not $NoBackend) {
+  # ctx → 组件 id(peak 随上下文长度变,必须用对应那一档的实测值)
+  $comp = switch ($Ctx) {
+    { $_ -le 8192  } { 'llm.assistant.8b@8k';  break }
+    { $_ -le 16384 } { 'llm.assistant.8b@16k'; break }
+    default          { 'llm.assistant.8b@32k' }
+  }
+  $wanted = @($comp)
+  if ($WithSpeech) { $wanted += 'speech.lite' }
+
+  $gate = Join-Path (Split-Path $PSScriptRoot -Parent) '10-core\gpu-broker\vram_gate.py'
+  $py = Join-Path $AiRoot 'venvs\gateway\Scripts\python.exe'
+  if (-not (Test-Path $py)) { $py = 'python' }
+  Write-Host "[0] 显存闸(§8.1 三层检查)…"
+  $gateOut = & $py $gate @wanted 2>&1
+  $gateOk = ($LASTEXITCODE -eq 0)
+  $gateOut | ForEach-Object { "    $_" }
+  if (-not $gateOk) {
+    if ($Force) {
+      Write-Host "  ! -Force:明知被上面那道闸拒绝仍继续。OOM 后果自负。" -ForegroundColor Yellow
+    } else {
+      Write-Host "  拒绝启动 —— 按上面的归因处理(它已经告诉你该改预留还是该关程序)。" -ForegroundColor Red
+      Write-Host "  确实要强行起:加 -Force" -ForegroundColor DarkGray
+      exit 1
+    }
+  }
+
   if (-not (Test-Path $Llama))   { Write-Host "  X 找不到 $Llama" -ForegroundColor Red; exit 1 }
   if (-not (Test-Path $Model8B)) { Write-Host "  X 找不到 $Model8B" -ForegroundColor Red; exit 1 }
-  Write-Host ("[1] 起 llama 后端 assistant.fast(8B · ctx {0} · q8_0 KV)…" -f $Ctx)
+  Write-Host ("[1] 起 llama 后端 assistant.fast({0} · ctx {1} · q8_0 KV)…" -f $comp, $Ctx)
   $procs += Start-Process -FilePath $Llama -PassThru -NoNewWindow -ArgumentList @(
     '-m', $Model8B, '-ngl', '99', '-c', "$Ctx",
     '--host', '127.0.0.1', '--port', '18081',
