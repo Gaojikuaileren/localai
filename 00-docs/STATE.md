@@ -1,136 +1,129 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-28 02:45
+> 更新时间: 2026-07-28 04:30
 > 方案书版本: **v2.2**(v2.1 已归档)
 > 格式定义: v2.2 §12.1 记录协议
+>
+> ★ 2026-07-28 重写:此前本文件累积了三段互相矛盾的 P1 状态、已解决却仍列着的阻塞项、
+>   以及两处断裂表格(P2 收尾审查发现)。本版只写**当前为真**的状态。
 
 ---
 
-## ⚠ 方案书刚从 v2.1 升到 v2.2,以下是影响执行顺序的三条
+## 当前阶段:**P2 核心链路 · 接近完成**
 
-| # | 变更 | 对下一步的影响 |
+| 阶段 | 状态 |
+|---|---|
+| **P0 地基** | ✅ 验收通过(2026-07-26) |
+| **P1 基准测试** | ✅ **完成 17/17 全部实测**(2026-07-27) |
+| **P2 核心链路** | 🔵 **进行中** —— 见下方清单,剩 2 项需你操作 |
+| P3a 记忆系统 | ⏸ 未开始(前置:P2) |
+
+---
+
+## P2 清单(§14)
+
+| 项 | 状态 | 证据 |
 |---|---|---|
-| **1** | **RP ID 必须在 P2 之前定死** | P2 第一项改为「命名决定:定死 tailnet 名与机器名」(0.2 天)。WebAuthn 的 RP ID 不可更改,用 `localhost` 会让 P3b 时本机 credential 全部作废 |
-| **2** | **P3 拆为 P3a(单机)/ P3b(多设备)** | P3b 前置为 P3a 验收通过。不拆的话 P3 是 23 项 / 3–4 个月,而「记忆好不好用」这个唯一验证会被推到最后 |
-| **3** | **账户隔离从 P3 提前到 P2** | PostgreSQL/Qdrant 在 P2 就装,ComfyUI 与记忆栈同账户是一条绕过网关的读全库路径 |
+| 命名决定(RP ID 前置) | ✅ | tailnet `tail71cfd7.ts.net` 永久锁定 · 机器名 `HONGKONGPINGPON`(D14a) |
+| 统一入口网关 + 别名层 | ✅ | 自写非 LiteLLM(D29)。**验收①②实测通过**(见下) |
+| 账户隔离 ai-mem/ai-asset/ai-exec | ✅ | 三账户 + memory 目录 Deny ACL,`Get-Acl` 确认真 Deny ACE |
+| PostgreSQL + Qdrant | ✅ | PG18 SSPI · Qdrant×2(6333 mem_main / 6335 mem_s2)· 全 ai-mem · 全回环 |
+| PG schema(含 sensitivity_domain/crypto_tier) | ✅ | 24 表 · 2 角色 · `v_memory_nons2` · **否定用例 20/20**(含行级 S2 实攻) |
+| **E1 入口凭证检测器** | ✅ | 6 类 + 校验和 · 扫整个载荷 · 流式亦拦 · 带内解除 · 审计不泄露 |
+| `secret_ref` 登记表 | ✅ | 随 schema 建,整表 S2,远程角色 SELECT 抛权限错 |
+| 网关调用方身份校验(D30) | ✅ | 端口→PID→WMI GetOwner,拒 ai-asset/ai-exec |
+| embedding / rerank(CPU :18084) | 🟡 **代码+模型实测可用,服务未注册** | 1024 维 + rerank 语义正确。**注册需你跑一条命令**(见下) |
+| 首版界面 Open WebUI | 🟡 **已装 + 启动实测,首个账户未注册** | DB 落 `state\openwebui` · 指向网关 · **注册账户是你的事** |
+| 剪贴板状态复检 | ⬜ 未做 | P0 时测过一次(均已关闭),需复检 |
+| 无 Broker 期显存过渡措施 | ⬜ 未做 | |
+| WebAuthn 设备身份 | ⬜ **未做**(D28 决定:本机走 OS 信任,远程才需要) | 现远程一律 401 |
+| 权限档位(六元组) | ⬜ 未做 | §6.3,P6 主体 |
 
----
+### §14 P2 验收标准逐条
 
-## 当前阶段
-
-**P0 · 地基 — ✅ 验收通过**
-
-P0 验收标准三项全部满足:
-
-| 验收项 | 状态 |
+| 标准 | 结果 |
 |---|---|
-| 改 `paths.toml` 单点即可切换全部路径 | ✅ |
-| C: 待迁内容已核实并处理 | ✅ 释放 15.3 GB |
-| 备份策略成文且首次备份成功 | ✅ **含恢复演练** |
-
-> **P0-4(显示器改接核显)永久取消** —— **D24(2026-07-26)彻底放弃核显方案**,
-> 连 P1 的插拔对照测量也一并取消。D8 的决定不变(保持接独显),其推翻条件已作废。
+| 本机可用别名对话 | ✅ `assistant.fast` → 「德国的首都是柏林。」· 契约头 · 流式均通 |
+| 换别名映射,客户端零改动 | ✅ 客户端代码逐字未动,契约 `8b`→`8b-remapped`,对话照常 |
+| 非授权账户连接记忆库被拒**且告警** | 🟡 **部分**:被拒✅(三层实攻);**「告警」仅落审计文件**,无托盘/通知 —— §9.3 告警通道待 P5 桌面壳 |
 
 ---
 
-## 已完成
+## 下一步(需要你操作的两项)
 
-| # | 任务 | 完成日 | 备注 |
-|---|---|---|---|
-| P0-1 | 核实 C: 现存内容 | 2026-07-26 | **F1 结案**。15.71GB 确为 HF 缓存,内容即 v1 所列那批模型 —— 两处描述指同一批数据,v1 没记错 |
-| P0-2 | HF 缓存处理 | 2026-07-26 | SHA256 逐文件比对确认与 `ComfyUI\models` 完全重复(6/6,无对应 0)。已清除,释放 C: 15.3GB |
-| P0-3 | 接网线 | 2026-07-26 | **1 Gbps 全双工 · 延迟 <1ms · 抖动 0 · 丢包 0/30**。原插蓝色 WAN 口只有 100Mbps,换 LAN1 后正常 |
-| P0-5 | 目录结构 + `paths.toml` + pre-commit | 2026-07-26 | 钩子**已实测**:违规文件被拒(退出码 1,精确到行) |
-| P0-6 | CUDA Toolkit **13.2** | 2026-07-26 | nvcc V13.2.51 · **真编译并运行 `-arch=sm_120` kernel** · 驱动顺带升级 596.36→610.62 · ComfyUI cu128 回归通过 |
-| P0-7 | git 初始化 + 三份记录文件 | 2026-07-26 | `main`;`core.hooksPath=.githooks` |
-| P0-8 | 备份 + **恢复演练** | 2026-07-26 | G: SanDisk Extreme(Disk 2,独立盘)· `sha256sum -c` 全通过 · **恢复后 HEAD tree 哈希与原仓库一致** |
+1. **注册 Embedding 服务**(管理员 PowerShell,约 2 分钟)
+   ```
+   powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90-ops\install-embedding.ps1"
+   ```
+   > 不带 `-DownloadOnly`。它会重置 ai-mem 密码并**同步所有 ai-mem 服务**(已修:早期版本只同步 pg-mem,会打死 Qdrant)。
+   > Claude 不代跑 —— 改系统安全设置属其红线。
 
-**额外交付**(不在 v2.1 P0 清单里):
-
-| 项 | 说明 |
-|---|---|
-| `90-ops/devshell.ps1` | 构建环境封装。dot-source 后备齐 MSVC + CUDA + CMake + Ninja 并逐项校验。用 vswhere 定位 VS,不硬编码路径 |
-| cmake / ninja 入 PATH | VS2022 自带 cmake 3.31.6 + ninja 1.12.1(原 PATH 已备份) |
-| 关闭 NVIDIA App / ShadowPlay | `NvContainerLocalSystem` 已禁用,`NVIDIA App SelfUpdate` 任务已禁用。**驱动核心服务保留** |
-| `cache/hf` GC 例外 | 已确认并写回方案书 **§8.4.1** |
-
----
-
-## 进行中
-
-（无）
-
----
-
-## 下一步（不超过三项）
-
-1. **P1 基准测试** —— ✅ **阈值表已定稿**(17 项 · 按草稿全部采纳 · **审定即冻结**)。
-   执行顺序见 **`P1-runbook.md`**。三个要点:
-   - **关键路径是下载不是测量** —— 27 GB / 约 42 分钟,必须最先在后台启动
-   - **最大的前置是 llama.cpp**(17 项里 10 项)。另有两项:**语音栈/VLM 选型**(硬阻塞,挡第 3 步)· ~~桌面基线采集~~(✅ 已解决)
-   - **A7 排在第 2 步而不是最后** —— 它定 `desktop_floor`,而 `vram_budget` 由它导出
-2. **P2 之前的命名落地** —— 机器名已定(D14a),**tailnet 名待注册 Tailscale 时确定并绝不更改**
-3. **(可选)上行带宽实测** —— FRITZ!Box 连接信息页,5 分钟。影响 P3b 手机端的体验预期
-
-> ~~P0-4 显示器改接核显~~ —— **D24 已彻底放弃核显**,对照测量一并取消。
-> ~~BitLocker 加密~~ —— 已由 **D21 + D22** 全部取消,不再是待办。
+2. **启动 Open WebUI 并注册第一个账户**(它即 admin)
+   ```
+   powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90-ops\install-openwebui.ps1"
+   ```
+   > 首启跑几十条数据库迁移需 1–3 分钟。浏览器开 `http://127.0.0.1:8081` 注册。
+   > 注册完账户后 `ENABLE_SIGNUP` 已设为 false(防同机其他账户自助注册)。
 
 ---
 
 ## 阻塞
 
-| 事项 | 阻塞了什么 | 需要什么才能解 |
+| 事项 | 阻塞什么 | 需要什么才能解 |
 |---|---|---|
-| ~~G: 未加密~~ | ~~P3a~~ | ✅ **已解除(D21)** |
-| ~~C: 未加密~~ | ~~D9~~ | ✅ **已解除(D22)**:D9 作废,C: 是否加密与本项目无关 |
-| ~~D2/D9 是否仍成立~~ | — | ✅ **已确认(D22)**:全都不加密,记忆库用普通文件夹 |
-| **活数据库的备份方式** | **P3a 的恢复演练** | §8.5.5:PostgreSQL 走 `pg_dump`,Qdrant 走 snapshot API。**不能对活库做文件级复制**。P3a 实现时落地,当前不阻塞(记忆库尚不存在) |
-| ~~命名决定~~ | ~~P2~~ | ✅ **已决(D14a)**:机器名沿用 `HongKongPingPong`;RP ID 取 `<tailnet>.ts.net` |
-| **★ 语音栈/VLM 未选型** | **P1 的 A2/A5/C4/A8 四项** | **半小时联合决策**,指定待测候选(不是选型定稿) |
-| ~~桌面显存基线采集方式~~ | ~~A 组~~ | ✅ **2026-07-26 已实测解决**:总量用 `nvidia-smi memory.used`;逐进程仅排序不求和 |
-| ~~llama.cpp 未装~~ | ~~17 项里 10 项~~ | ✅ **2026-07-26 解除**。b10107 cuda-13.3 预编译,**sm_120 断言通过**,不需自编译 |
+| **活数据库的备份方式** | **P3a 的恢复演练** | §8.5.5:PG 走 `pg_dump`、Qdrant 走 snapshot API。**backup.ps1 目前仍会文件级复制活库**,P3a 前必须改(设计已写在 `memory-backbone-design.md` §8) |
 | 上行带宽未测 | P3b 手机端体验预期 | FRITZ!Box 连接信息页(5 分钟) |
-| ~~tailnet 名未定~~ | ~~P2 的 RP ID~~ | ✅ **已定(2026-07-27)**:`tail71cfd7.ts.net`(免费版随机名,自定义要付费/自有域名)。RP ID = 它,永久锁定 |
+
+> P1 阶段的全部阻塞(语音栈选型 · C4 语料 · llama.cpp · 桌面基线)**均已解除**。
 
 ---
 
-## 硬性前置（不满足则不得启动）
+## 硬性前置(不满足则不得启动)
 
 | 阶段 | 前置条件 | 当前 |
 |---|---|---|
-| **P3a 记忆系统** | 跑通一次完整恢复演练（§8.5 铁律 3） | ✅ **2026-07-26 已完成**(仅 code+state;**记忆库的恢复演练需在 P3a 内重做**) |
-| **P3a 记忆系统** | 备份目标可用 | ✅ G: 可用。**加密要求已由 D21/D22 取消** |
-| **P3a 记忆系统** | **活数据库的备份方式落地**(`pg_dump` + Qdrant snapshot) | ❌ 未做 —— 见 §8.5.5 |
-| **P3b 多设备** | P3a 验收通过 | ❌ |
-| P1 之后才可定稿显存模式 | P1 实测表 + 逐项「接受/换方案」结论 | ❌ 未开始 |
+| **P3a** | 跑通一次完整恢复演练(§8.5 铁律 3) | 🟡 code+state 已演练(2026-07-26);**记忆库的恢复演练需在 P3a 内重做** |
+| **P3a** | 备份目标可用 | ✅ G: 可用(加密要求已由 D21/D22 取消) |
+| **P3a** | **活数据库备份方式落地** | ❌ 未做 —— 见 §8.5.5 |
+| **P3b** | P3a 验收通过 | ❌ |
 
 ---
 
-## 环境事实（变更即更新）
+## P1 实测结论(17/17 · 2026-07-27 收官)
 
-| 项 | 值 | 核实日期 |
+**五个改变架构的发现:**
+
+1. **q8_0 KV 转正**(A2+B1+B3b 三重证明,零质量损失)→ 省 1–2 GiB,**32K 上下文解锁**
+2. **30B-A3B 深度模式活了且飞快**(11.88 GiB · 57.5 tok/s,MoE offload 几乎免费)→ 推翻「出局」预期,`assistant.deep` 已改绑
+3. **Piper CPU TTS 83ms / 0 显存 / 多语言** → XTTS 推 P9(D27 修订);A5 顺带解决(TTS 在 CPU,不合并)
+4. **`desktop_floor` = 6.6**(A7 实测 6.53)→ AI 侧上限 **8.52**;日常常驻 `8b@16k` + `speech.lite`
+5. **vlm.small 比估算重 74%**(漏算 mmproj,实测 4.35)→ 视觉组合更紧
+
+| 组 | 项 | 结果 |
 |---|---|---|
-| **物理盘** | Disk 0 = 1TB → C: ／ **Disk 1 = 2TB → D: + E:（同一块盘）** ／ Disk 2 = USB SSD → G: | 2026-07-26 |
-| 剩余空间 | C: 391.9 GB ／ D: 578.7 GB ／ E: 467.1 GB ／ G: 461.8 GB | 2026-07-26 |
-| **备份介质** | G: SanDisk Extreme 55AE · USB · 931 GB · exFAT · **不加密(D21,预期行为)** | 2026-07-26 |
-| **网络** | **有线 1 Gbps 全双工**(Realtek 2.5GbE → FRITZ!Box **LAN1**)· 延迟 <1ms · 抖动 0 | 2026-07-26 |
-| 网络备注 | ★ **已修正**:HF 下载实测 **29 MiB/s ≈ 232 Mbps**(两次一致:8B 29.2 / 4B 28.6)。~~之前「~11 MB/s,瓶颈在接入侧」~~ **是错的** —— 那次是 NVIDIA CDN 单连接限速,不是宽带上限 | 2026-07-26 |
-| GPU | RTX 5080 · **驱动 610.62** · 16303 MiB · **84 SM** · 桌面占用 691–1085 MiB | 2026-07-26 |
-| **显存占用构成** | **全是 GUI 程序**:dwm.exe · explorer · SearchHost · LGHUB · EdgeWebView · RadeonSoftware。因显示器接独显,所有 GUI 渲染都落在独显 —— 但 D8 已决定保持接独显 | 2026-07-26 |
-| **CUDA Toolkit** | **13.2 (nvcc V13.2.51)** · `CUDA_PATH` 已注册 · 4.1 GB · smoke test sm_120 编译+运行通过 | 2026-07-26 |
-| 编译工具链 | cl **19.38.33145** · link 14.38.33145 · cmake **3.31.6** · ninja **1.12.1** —— 经 `devshell.ps1` 校验 | 2026-07-26 |
-| Python / git / node / ffmpeg | 3.12.10 ／ 2.54.0 ／ v24.16.0 ／ 8.1.1 | 2026-07-26 |
-| **ComfyUI 的 torch** | **2.11.0+cu128** · cuDNN 9.19 · arch list 含 **sm_120** · capability (12,0) · 新驱动下回归通过 | 2026-07-26 |
-| `HF_HOME` / `TORCH_HOME` | `D:\AI\cache\hf` / `D:\AI\cache\torch`（用户级,重启后已验证） | 2026-07-26 |
-| ComfyUI | `D:\ComfyUI` · models 61 files / 16.92 GB · **`extra_model_paths.yaml` 未配置** | 2026-07-26 |
-| NVIDIA 常驻 | **已关闭**。`NvContainerLocalSystem` Disabled · SelfUpdate 任务 Disabled · 驱动核心服务保留 | 2026-07-26 |
-| **记忆库形态** | **普通文件夹 D:\AI\state\memory\,不加密(D22)**。P3a 创建 | 2026-07-26 |
-| **剪贴板** | **历史与跨设备同步均已关闭**(实测 `IsHistoryEnabled()=False` / `IsRoamingEnabled()=False`)。⚠ 策略层未配置 —— 这是用户设置,可被任何以你身份运行的程序重新打开 | 2026-07-26 |
-| 主板 | ASUS PRIME X870-P WIFI · 尚有 2 个空 M.2 插槽 | 2026-07-26 |
+| A | A7 | `desktop_floor` **6.6** · AI 上限 8.52 |
+| A | A1 | CUDA ctx **227 MiB**/进程,线性可加 |
+| A | A2 | 可加性差 **0 MiB** · 挖出 KV 2 倍浪费 · vlm.small 4.35 |
+| A | A3 | 30B-A3B ngl30 → **11.88 GiB** / 38% offload |
+| A | A5/A8 | ASR 实时率 **0.385** · TTS **83ms**(Piper CPU) |
+| B | B1 | q8_0 KV 达标 / F16 超标 |
+| B | B2 | 冷启动 prefill 超阈 → **必须开 prompt cache** |
+| B | B3 | 长上下文衰减 52%(仍可用)· **B3b q8_0 零质量损失** |
+| C | C1 | 150 tok/s(5×) |
+| C | C3 | 30B-A3B **57.5 tok/s** |
+| C | C4 | WER lite vs full **+0.4pp**(≪3pp)→ speech.lite 安全 |
+| D | D1/D2 | SDXL 峰值 **8.14 GiB** · 单图 **5.6s** |
+| E | E5 | Vigil **零显存** ✓ · 脉冲 2s |
+
+**语音栈定稿(D27 修订)**:ASR faster-whisper large-v3(full)/ turbo(lite)· TTS **Piper 全档** · VLM Qwen2.5-VL-3B。
+speech 三档:cpu 0 · lite 2.07 · full 4.05。
+
+**C2b**(含网关+别名 TTFT)—— P2 交付物,C2a 裸 server 已测 33ms。
+测量证据归档在 `00-docs/p1-data/`。
 
 ---
 
-## 显存分配模型(2026-07-26 两次改动)
+## 显存分配模型
 
 | | |
 |---|---|
@@ -144,90 +137,44 @@ vram_budget  =  15.92 − desktop_floor − 0.8      ← 导出值,不单独设
 ```
 
 **★ `cap` 这个词已全文废止** —— D24 已把它与「降它能腾显存」的误解永久绑定。
-
-**尚未定稿**:§8.1.3 在 **P1-A2** 出结果前不定稿 —— 预览 = 把组件 peak 加起来,
-而 A2 要验证的正是**可加性**。不可加则预览的实现方式要推翻重来。
+§8.1.3 已随 P1-A2 实测定稿(可加性成立,差 0 MiB)。
 
 ---
 
-## P1 进度 · ✅✅ **完成 17/17 全部实测**(含 C4 WER)
+## 环境事实(变更即更新)
 
-**五个改变架构的实测发现:**
-1. **q8_0 KV 转正**(A2+B1+B3b 三重证明,零质量损失)→ 32K 上下文解锁
-2. **30B-A3B 深度模式活了且飞快**(57.5 tok/s,MoE offload 几乎免费)→ `assistant.deep` 改绑
-3. **Piper CPU TTS 83ms/0显存/多语言** → XTTS 推 P9(D27 修订),A5 顺带解决(TTS在CPU不合并)
-4. **desktop_floor = 6.6**(A7)→ 日常 `8b@16k`+`speech.lite`
-5. **推荐组合 100% 实测**(无估算项)
-
-**语音栈定稿(D27 修订)**:ASR faster-whisper large-v3(full)/turbo(lite)· TTS **Piper 全档** · VLM Qwen2.5-VL-3B。
-speech 三档:cpu 0 · lite 2.07 · full 4.05(均 Piper TTS)。
-
-**两处诚实延后(有结论,非跳过)**:
-- **C2b**(含网关+别名 TTFT)—— P2 交付物才存在。C2a 裸 server 已测 33ms
-- ~~C4 的 WER~~ ✅ **已测**(35 句你本人语料):lite vs full +0.4pp≪3pp → speech.lite 安全
-
-**环境**:speech venv 建于 `D:\AIenvs\speech`(faster-whisper + Piper + CUDA12 运行时)。
-测量证据 `00-docs/p1-data/`。
-
-**P2 进行中**:✅ **命名决定完成**(tailnet `tail71cfd7.ts.net` · 机器名 `hongkongpingpong` · RP ID `tail71cfd7.ts.net` · D28 本机走 OS 信任)。Tailscale 客户端已装并登录(GitHub)。
-**P2 进度**:✅ 命名决定 · ✅ **统一入口网关**(别名层,自写非 LiteLLM,D29)—— 端到端测通:
-`assistant.fast`→8B 后端、契约回写、503带缺口、404。安全层 STUB 标注未实装。
-**P2 进度续**:✅ **PostgreSQL 18**(SSPI)· ✅ **Qdrant×2**(mem_main/mem_s2 · key 隔离)· ✅ **PG schema**(24 表/2 角色/v_memory_nons2 · 否定用例 20/20 全通过,含行级 S2 实攻)· ✅ **E1 入口凭证检测器**(6 类 + 校验和 · 41+12 测试全过 · 审计不泄露)· ✅ **网关调用方 SID 校验**(D30 · WMI GetOwner 拒隔离账户 · 6+11 测试)· ✅ **embedding/rerank 实测通过**(1024 维 · rerank 语义正确 · 模型已下)—— 下一步:注册 ai-mem 服务(管理员)· Open WebUI 配置首启。原下一步:PostgreSQL+Qdrant(记忆骨架,P3a 前提)· ✅ **账户隔离**(ai-mem/asset/exec 建成 + memory 目录 Deny ACL,核验通过)· E1 凭证检测器 · secret_ref 建表 · embedding/rerank(CPU)· Open WebUI。
-
-|---|---|
-| A | **A7** | `desktop_floor` **6.6** · AI 上限 8.52 |
-| A | **A1** | CUDA ctx **227 MiB**/进程,线性可加 |
-| A | **A2** | 可加性差 0 · **KV 2 倍浪费** · vlm.small 实测 **4.35**(估 2.5,漏 mmproj)|
-| A | **A3** | ★ **30B-A3B 活了**:ngl 30 → 11.88 GiB / 38% offload |
-| B | **B1** | q8_0 KV 达标 / F16 超标 |
-| B | **B2** | 冷启动 prefill 超阈 → **必须开 prompt cache** |
-| B | **B3** | 衰减 52%(仍可用)· ★ **B3b:q8_0 零质量损失→转正** |
-| C | **C1** | 150 tok/s(5×) |
-| C | **C3** | ★ **30B-A3B 57.5 tok/s**(MoE offload 几乎免费) |
-| D | **D1/D2** | SDXL 峰值 8.14 GiB · 单图 5.6s |
-| E | **E5** | Vigil 零显存 ✓ · 脉冲 2s |
-
-**四条改变架构的发现**:
-1. **q8_0 KV 转正**(A2+B1+B3b 三重证明)→ 省 1–2 GiB,**32K 上下文解锁**
-2. **30B-A3B 深度模式活了且飞快**(A3+C3)→ 推翻「出局」预期,`assistant.deep` 已改绑
-3. `desktop_floor` = 6.6(A7)→ 日常常驻 `8b@16k`+`speech.lite`
-4. vlm.small 比估算重 74%(漏算 mmproj)→ 视觉组合更紧
-
-**剩 4 项全部有明确阻塞**:
-- **A5 · A8 · C4** —— 等你:①定语音栈(ASR/TTS 框架)②录你的语料(C4 的 WER)
-- **C2** —— P2 的网关才存在(已定拆 C2a/C2b)
-
----|---|
-| ✅ **A7** 桌面重负载上界 | **6.53 GiB** → 🔄 换方案 · `desktop_floor` **6.6**(`calibrated: partial`)· AI 侧上限 **8.52** |
-| ✅ **A1** 每进程 CUDA context | **227 MiB** → ✅ 接受(阈值 512)。⚠ 是裸 context 下界,不能拿去改 §8.1.2 |
-| ✅ **A2** 逐组件 peak + 可加性 | 🔄 **换配置**(不是换模型)· **可加性完美成立(差 0 MiB)**· 挖出 KV 2 倍浪费 |
-| 🟡 **E5**(一半) | 零显存断言 **0.0 MiB** ✓ D12 成立。脉冲耗时与日累计核心秒未测 |
-
-**★ A2 的核心发现**:§8.1.2 的 KV 公式按 **FP8(1 B)** 计,而 llama.cpp **默认 F16(2 B)**
-—— 每个上下文吃 2 倍。开 `q8_0` 实测省 **1.05 GiB(16K)/ 2.04 GiB(32K)**,
-**足以让 32K 从「日常用不了」变成「可用」**。但精度代价无人测过 → 已给 **B3** 加测项。
-
-**现在就能测(10 项,约 2.5–3 小时)**:A3 · A4 · B1 · B2 · B3 · C1 · C3 · D1 · D2 · E5
-**等语音栈/VLM 选型(4 项)**:A5 · A8 · C4 · A2 的剩余 3 行
-**⚠ C2 测不完整**:网关与别名层是 **P2** 的交付物 —— 倾向拆成 C2a(P1)/ C2b(P2),待裁决
-
-**日常常驻组成**:`8b@16k` + `speech.lite`。
-⚠ `speech.full`(4.6)在日常工作负载下**买不起**;出图(11.0)与 UE5 工作**不能同时**。
-
-**测量证据**归档在 `00-docs/p1-data/`。
-
-**★ B3b/A3/C3/E5/VLM 三次无人尝试均产出坏数据(全是 harness bug),已作废,须交互式重测。**
-诊断与修法见 worklog 2026-07「过夜无人测量三次尝试」。教训:这几项有微妙正确性要求
-(推理模型输出格式、30B 分层 offload、CPU 脉冲计时),**不在场无法当场发现 bug,必须交互测**。
-`desktop_floor` = 6.6 与 q8_0 省显存等已提交结论不受影响。
+| 项 | 值 | 核实日期 |
+|---|---|---|
+| **物理盘** | Disk 0 = 1TB → C: ／ **Disk 1 = 2TB → D: + E:(同一块盘)** ／ Disk 2 = USB SSD → G: | 2026-07-26 |
+| **备份介质** | G: SanDisk Extreme · USB · 931 GB · exFAT · **不加密(D21,预期行为)** | 2026-07-26 |
+| **网络** | 有线 **1 Gbps** 全双工 · 延迟 <1ms。HF 下载实测 **29 MiB/s ≈ 232 Mbps** | 2026-07-26 |
+| GPU | RTX 5080 · 驱动 **610.62** · 16303 MiB · 84 SM · 桌面占用 691–1085 MiB | 2026-07-26 |
+| **CUDA Toolkit** | **13.2**(nvcc V13.2.51)· sm_120 编译+运行通过 | 2026-07-26 |
+| Python / git / node / ffmpeg | 3.12.10 ／ 2.54.0 ／ v24.16.0 ／ 8.1.1 | 2026-07-26 |
+| **PostgreSQL** | **18.4-2** · 服务 `pg-mem` · `.\ai-mem` · 仅 127.0.0.1:5432 · SSPI(无 DB 口令) | 2026-07-27 |
+| **Qdrant** | **v1.18.3**(pin)· `Qdrant` 6333/6334 + `Qdrant-s2` 6335/6336 · 均 `.\ai-mem` · 各自 api_key | 2026-07-27 |
+| **embedding** | bge-m3(1024 维)+ bge-reranker-v2-m3 · venv `D:\AI\venvs\embedding` · **transformers 钉 <5** | 2026-07-28 |
+| **Open WebUI** | 0.11.0 · venv `D:\AI\venvs\openwebui` · DATA_DIR `D:\AI\state\openwebui` | 2026-07-28 |
+| speech venv | `D:\AI\venvs\speech`(faster-whisper + Piper + CUDA12 运行时) | 2026-07-27 |
+| **记忆库** | `D:\AI\state\memory\` · **不加密(D22)** · ACL:ai-mem+SYSTEM+Admins FullControl / ai-asset+ai-exec **Deny** | 2026-07-27 |
+| **剪贴板** | 历史与跨设备同步均已关闭(P0 实测)。⚠ 策略层未配置,需复检 | 2026-07-26 |
+| ComfyUI | `D:\ComfyUI` · **`extra_model_paths.yaml` 未配置** | 2026-07-26 |
 
 ---
 
 ## 待决事项
 
-| 事项 | 阻塞什么 | 谁来解 |
-|---|---|---|
-| **★ 语音栈与 VLM 的待测候选** | **P1 第 3 步**(A2 三行 · A5 整项 · C4 · A8 —— 17 项里 4 项) | **你我半小时联合决策**。见 `P1-runbook.md` §7 |
-| C4 的 WER 语料与口径 | C4 | **只有你能做**(15 分钟) |
+（无 —— D1–D31 全部已决）
 
-> **不阻塞 P1 第 1、2 步。** 硬期限是进第 3 步之前。
+---
+
+## 已知技术债(2026-07-28 P2 收尾审查 · 57 条发现)
+
+严重项已修完(见 worklog 与 `00-docs/p2-audit-backlog.md`)。**未修的记在 backlog 文件里**,
+不在此重复。要点:
+
+- `require_trusted_local`(fail-closed)**当前无人调用** —— 前瞻脚手架,不是已生效的防护
+- 后端 llama-server **无鉴权** —— 网关不是唯一咽喉,同机进程可直连 18081 绕过 E1/审计
+- `/health` 与 `/v1/models` **不做身份校验**(信息量低,但与其他端点不一致)
+- 身份解析是**同步阻塞调用**跑在 async 端点里(WMI ~250ms 会卡事件循环)
+- schema 中标 `[推断]` 的列是设计发明,待 P3a 最终化
