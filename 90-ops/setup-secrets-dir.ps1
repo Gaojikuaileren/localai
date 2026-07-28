@@ -116,8 +116,14 @@ if (-not (Test-Path $readme) -and $PSCmdlet.ShouldProcess($readme, '写入说明
 # ---- 核对 --------------------------------------------------------------------
 Say ''
 Say '=== 核对 ===' 'Cyan'
-Say '  ACL:'
-(& icacls $secretsDir) | Select-Object -SkipLast 1 | ForEach-Object { "    $_" }
+if (Test-Path $secretsDir) {
+    Say '  ACL:'
+    (& icacls $secretsDir) | Select-Object -SkipLast 1 | ForEach-Object { "    $_" }
+} else {
+    # -WhatIf 下目录并未真的建出来,此时跑 icacls 只会报「找不到文件」,
+    # 那是演练的正常结果,不该长得像故障。
+    Say '  (演练模式:目录尚未建立,跳过 ACL 核对)' 'DarkGray'
+}
 
 Say ''
 Say '  备份排除(应当能在 backup.ps1 的 $excludeAbs 里看到这个路径):'
