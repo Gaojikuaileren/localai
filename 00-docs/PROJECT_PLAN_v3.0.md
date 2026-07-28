@@ -2148,28 +2148,44 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
 
 **验收**:eval 通过率达标;两条例句都对(均已跑通);每条可溯源;恢复演练成功。
 
-### P3b · 局域网身份与准入(取代原「多设备」)
+### P3b · 局域网身份与准入(取代原「多设备」)· 精简优先(D43)
 
-- [ ] **★ 第一项决定:LAN 命名 + 证书方案**(地位等同当年的"命名决定"之于 P2)
-      —— 同时裁定 D34 待决项 1(Tailscale 去留)
-- [ ] **★★ 网关绑 LAN 与 LAN 上有 TLS 必须是同一个不可分割的交付项**
-      在 `90-ops` 加断言脚本:未带 `--ssl-certfile` 则**拒绝绑非回环接口**(fail-closed,非文档约定)
-      > 审查确认全仓库零 TLS 资产,`install-qdrant.ps1` 明写 `enable_tls: false`;
-      > 而 WPA2-PSK 无前向保密 —— 裸 HTTP over 共享密钥无线 = 加密层被删掉而无替代。
-      > **做不出 TLS 之前,正确形态是继续只绑回环。**
-- [ ] 主机后端管理端骨架:CA · 成员表 · 待批队列(D36)
-- [ ] 客户端密钥对生成(CNG/TPM)+ 配对申请 + **带外指纹比对**(D35)
-- [ ] 签发 / **单条吊销**(吊销后立即 401)+ 禁批量批准
-- [ ] `caller_identity` 对**非回环 client_ip 直接 raise**(而非 return None)——
-      让误接线变成崩溃而非静默放行;局域网与外联各走独立 fail-closed 分支
-- [ ] 路由级 `Depends(require_trusted_local)` 默认拒绝 + 白名单例外 + 遍历 `app.routes` 的元测试
-      —— **必须在网关第一次绑非回环接口之前完成**
-- [ ] `/health` 与 `/v1/models` 收窄并纳入身份校验
-- [ ] 后端 llama-server 加 `--api-key`(使桥与其他进程结构上无法直连 18081 绕过网关)
-- [ ] 否定用例套件:未授权设备 · 已吊销设备 · 伪造 device_id · 批量批准 · 待批队列刷屏
+> **方向=精简优先(D43 S0.10):** 先交付 load-bearing 的核心六件开 LAN,重度纵深防御推迟 P3b.2。
+> **S0–S7 一次一节;S1–S4 回环门禁全过前禁止任何非回环监听或 LAN 开放。** Tailscale 已移除(D43 S0.4)。
 
-**验收**:未授权 LAN 设备被拒**且告警**;吊销一台后该台立即 401 而其余不受影响;
-拔掉 WAN 后局域网路径完全不受影响。
+- [x] **S0 · 先写决议不改运行态** —— **D43 已落**(废 WebAuthn/RP ID · D32 收窄 · D34 改写 · 移除 Tailscale ·
+      新增 LAN_EDGE · 覆盖 D36 防火墙 · D38 CA 落 CNG/TPM · identity 排备份 · 审计硬化三条 · 精简优先)
+- [ ] **S1 · 回环技术 Spike**(全程只绑回环,不改防火墙):Kestrel AllowCertificate+自定义根 · CNG/TPM CSR 不可导出 ·
+      服务账户/named-pipe DACL/PID-SID 双验 · 应用专属根信任+主机名验证+禁代理/禁重定向 · 流式 ·
+      DNS-SD 注册发现解析闭环 · ConnectionContext 索引+撤销断流+generation/freshness fail-closed ·
+      ServerCertificateSelector 热切/换证 · 匿名 TLS/header/body/并发/超时资源边界。**任一不过不得开 LAN**
+- [ ] **S2 · PKI 与身份存储**:hub_id · CA(**私钥落 CNG/TPM**,D43 S0.7)· 服务器叶证书 ·
+      devices/device_certificates/全局 generation · 待批队列+ACL · 最小 host-admin CLI · 最小 client-transport CLI ·
+      独立 bootstrap handler + 完整 transcript **双向六词 SAS 配对** · enroll/status/claim/complete 幂等状态机 ·
+      **单条批准/单条吊销**/限流 · `${state}/identity/` 排备份+fail-closed 守护(D43 S0.8)
+- [ ] **S3 · 网关先加固(LAN 监听前必须完成)**:
+      · `caller_identity` 对非回环地址**直接抛错**(不 return None 后继续)
+      · 记忆端点用 `require_trusted_local`/指纹正向映射取代 `classify_caller` 兜底(**代码已备 `gateway.py:216-227`**)
+      · 路由默认挂认证依赖 + 遍历 `app.routes` 元测试(新路由未归类=测试失败)· 匿名 `/pair/*` 只在 LAN Edge,网关无配对例外
+      · `/health` 收窄、`/v1/models` 认证 · llama-server 加 `--api-key`(存储/轮换/排备份 → backlog)
+      · 新增 `LAN_EDGE` 传输身份;身份头丢弃/重建 + 本机 edge 进程验证 · 按叶证书指纹+active+generation 映射 `LAN_DEVICE`
+      · **P3a `LAN_DEVICE` 权限回归**
+- [ ] **S4 · LAN Edge(仍不开放 LAN)**:独立低权限服务 · 只代理固定回环网关 · 匿名配对路由组只调 registry 受限 IPC ·
+      Kestrel 资源上限 · Windows Event Log+结构化审计+告警限流 · 否定用例全在 loopback/synthetic 通过
+- [ ] **S5 · 可恢复地开放 LAN**:activation 精简(启动对账+不满足即回环;**7 步持久 saga 推迟 P3b.2**)·
+      防火墙窄化(**选定网卡+Private+LocalSubnet**,D43 S0.6)· 冲突规则扫描 · 先启用规则再绑监听(无"已监听未就绪"窗口)
+- [ ] **S6 · 第二台 Windows PC 实机验收**(Q4=有):初次配对 · 换 DHCP 免重配 · 拔 WAN(只断互联网)冷启动仍可用 +
+      未配对设备仍能配 · 单台吊销 · 流式中吊销 · 非授权扫描 · Private+选定网卡约束 · mDNS 闭环及被阻断时 dial_ip 回退 ·
+      权限回归 · 拒绝且告警
+- [ ] **S7 · 串行更新中央文档**(DECISIONS/PLAN/STATE/worklog,唯一由主 Claude 一次性写)
+
+**推迟 P3b.2(不丢核心安全属性)**:三服务分权(edge/registry/signer named-pipe SID 互验)· 双证书**自动**轮换状态机 ·
+7 步持久 activation saga · DNS-SD 自动发现(先静态配置对端)。
+
+**★★ 铁律**:网关绑 LAN 与 LAN 上有 TLS 是**同一个不可分割交付项** —— 在 `90-ops` 加断言:未带 TLS 则**拒绝绑非回环**(fail-closed)。
+全仓库零 TLS 资产、WPA2-PSK 无前向保密;**做不出 TLS 之前继续只绑回环。**
+
+**验收**:未授权 LAN 设备被拒**且告警**;吊销一台后该台立即 401 而其余不受影响;拔 WAN 后局域网路径完全不受影响。
 
 ### P3c · 统一客户端 v1(原 P7 前移,升级为唯一入口)
 

@@ -1752,3 +1752,89 @@ Codex 交付《P3b 局域网身份与准入:架构决策包》(2026-07-28),原�
 先答 §12 四问 → 我方审计 → 用户明确说"可以开始" → 才动手;按 **S0–S7 一次一节**,每节记
 目标/改动/测试证据/失败项/回滚/提交号/下一节;**S1–S4 回环门禁全过前,禁止任何非回环监听或 LAN 开放**;
 **不借 P3b 放宽 P3a 的 `LAN_DEVICE` 权限**;不顺手做 P3c/P4/P6/P9。
+
+---
+
+## 2026-07-28 · D43 · P3b S0:局域网身份与准入正式决议(采纳 Codex 决策包 · 精简优先)
+
+**背景:** Codex《P3b 决策包》评审通过 —— 四问已答(Q1 可以 / Q2 不会 / Q3 可以 / Q4 有第二台 PC);
+我方对抗审计 14 agent / 30 发现,**无存活的高/中安全缺口**(最高危"网关 fail-open"经核对代码
+`gateway.py:216-227` 确认 `require_trusted_local` fail-closed 原语已备、修正排在 S3;详见 worklog)。
+本条为决策包 §10 **S0「先写决议、不改运行态」**,一次性固化;运行态改动自 S1 起。方向=**精简优先**(S0.10)。
+
+### S0.1 废止 WebAuthn/tailnet RP ID 对 P3b 的约束
+D14/D14a 的 WebAuthn RP ID 与 `*.ts.net` 不再是 LAN 身份根(非本机设备上不再有浏览器,RP ID 陷阱整类消失);
+局域网身份改走**应用自有 mTLS**。与 STATE:59 已作废一致。
+
+### S0.2 D32 收窄 + 认证选型落定
+D32 只保留"离线 LAN 必须可用";其"两条并行远程路径"框架收窄为"LAN 必需 + Tailscale 已移除(S0.4)"。
+认证选型 = **应用自有 mTLS**(恒定设备身份),兑现 D32 遗留的"待 P3b 选型";弃 token、弃第二 RP ID。
+
+### S0.3 D34 改写(Q1=可以):完整客户端形态 ≠ 主机管理员
+D34 表(:986)原写 LAN 全功能端"全部…含 L4",与已验收 P3a 代码抵触。正式改写为:
+> 已配对 LAN Windows PC 拥有完整客户端**形态与运行时能力**;但**数据敏感度、记忆写操作、L4 与主机管理仍按身份分层**。
+
+| 能力 | 主机本地 TRUSTED_LOCAL | 已配对 LAN_DEVICE |
+|---|---:|---:|
+| 聊天/语音/宠物/普通模型调用 · 翻译工作室 · PPT"生成+另存" | 是 | 是 |
+| 读 S0/S1 记忆 | 是 | 是 |
+| 读 S2 · 编辑/删除/标密/确认记忆 | 是 | 否 |
+| L4 提议/批准/执行 | 是 | 否 |
+| CA/成员批准吊销/备份 · 联网搜索放行 · PPT AI 直接落盘 · 电脑操控直接模式 | 是 | 否 |
+| 运行时状态查看与已授权操作 | 是 | 是(受 P4 六元组约束,P4 落地前不放行全局模型切换) |
+
+P3b 只把已验证证书映射为 principal,**不得借机放宽 P3a**。
+
+### S0.4 移除 Tailscale(Q2=不会)
+用户明确不会带 Windows 笔记本外出用全功能 ⇒ **待决事项 1 裁定为移除**。
+LocalAI 的命名/发现/CA/配对/撤销/策略/可用性一律不依赖 Tailscale;决策包 §9 的 Tailscale transport 整段作废。
+客户端软件可留在机器上供其他用途。外联仅走 Signal(D38/D39,已定)。
+
+### S0.5 修正 D30 + 新增 LAN_EDGE 低信任传输档
+- 新增传输档 `LAN_EDGE`:只证明"请求来自边缘代理",**永不落入兜底 trusted-local**,非业务 caller tier。
+- 网关对非回环地址的 `caller_identity` 必须**直接抛错**、阻止启动/请求,绝不 return None 后继续。
+- 记忆相关端点由 chat 路径的宽松 `classify_caller` 切到 fail-closed 的 `require_trusted_local` / 指纹正向映射
+  (`require_trusted_local` 已实装于 `gateway.py:216-227`)—— **必须在网关第一次绑非回环之前完成(S3 门)**。
+
+### S0.6 覆盖 D36 防火墙(Q3=可以)
+正式推翻 D36 的 `Profile Any + LocalSubnet`,改为:
+> 默认只在用户选定的家庭物理网卡、Private profile、LocalSubnet 上开放 `8443/TCP`。
+
+监听选定网卡当前地址(不 `0.0.0.0`/`[::]`);`EdgeTraversal=Block`;无端口映射/UPnP/公网。
+"家庭网被 Windows 判为 Public" → 由 host-admin CLI 显式提示可修复,**不靠 Profile Any 静默兜底**。
+(承认代价:失去 D36"误判也能静默工作"的便利,换取 fail-closed。)
+
+### S0.7 修订 D38:CA 私钥落 CNG/TPM
+- CA 私钥常驻主机 CNG/TPM 容器,仅 identity-signer 账户有使用权;服务器叶密钥同样 CNG/TPM 不可导出。
+- `${state}/secrets` 只保留 CNG key-container 引用、CA/服务器公共证书、thumbprint、key-ACL 配置,**不放可导出私钥**。
+- 客户端密钥进 CNG/TPM(D35 已定)不变;迁移语义(换主机/TPM 清除/CA 丢失/换主板/重装 = 新 Hub、全量重配)不变。
+- 这是对 `setup-secrets-dir.ps1`"CA 私钥作为文件"的正式修订(实现在 S2)。
+
+### S0.8 identity 目录排除备份(fail-closed 守护)
+`${state}/identity/` 整体排除普通备份,套用 secrets 那套 **fail-closed 守护(paths.toml 缺登记即 throw)** + 测试冻结。
+identity 缺失/损坏/尝试从备份恢复 → LAN fail-closed,进入"新 hub_id + 新 CA + 全量重配",不沿用旧 CA 猜测重建。
+(理由:旧成员表 + 存活 TPM CA 一起恢复 → identity_generation 回滚 → 已吊销设备复活。承 M26/M27。)
+
+### S0.9 审计硬化三条(采纳前置残留项)
+1. 快照 freshness 上限 **F ≤ 撤销 SLO(≤1s)**,写成冻结门;发布队列溢出 = **断订阅触发 outbox 回放**,禁静默丢弃。
+2. 撤销"1 秒内 401"是**在途流中止的顺风路径上限**;新请求撤销经每请求 active+generation 复核保持即时。
+   声明取代 D35 字面"每次请求查白名单";D35"短寿命证书"分支弃用。
+3. **离线时钟信任模型**:证书有效期与 freshness 用主机挂钟仅作可用性检查;主机时钟篡改 = 本机管理员,out-of-scope;
+   回滚向量由 generation 水位 + 备份排除覆盖,不靠可信时间(TPM 无 RTC 保证)。
+
+### S0.10 ★ 实施方向 = 精简优先(Q4=有第二台 PC)
+决策包为 2 台 PC 承载了偏企业级机制。取**最小充分子集先开 LAN,重度纵深防御推迟 P3b.2**:
+
+**P3b 核心(开 LAN 前必须,S1–S6):**
+① S3 网关加固(最便宜,多为现有 Python)② 应用 mTLS + CNG/TPM 不可导出 ③ 成员表 + 每请求 active/generation 复核
+④ 防火墙窄化 ⑤ 六词 SAS 双向配对 ⑥ 单条吊销即时生效 + 禁批量。
+
+**推迟 P3b.2(不丢核心安全属性):**
+三服务分权(edge/registry/signer 的 named-pipe SID 互验)· 双证书**自动**轮换状态机 · 7 步持久 activation saga ·
+DNS-SD 自动发现(先静态配置对端)。理由:被推迟的多是防"拿到机器=可读全部"的在机攻击者,而该边界 D22 已让渡;
+先交付 load-bearing 的 ①–⑥ 即可安全开 LAN,且都能独立回归验证。
+
+### 执行纪律(承 Codex 交接 8 条)
+S0→S7 一次一节,每节记 目标/改动/测试证据/失败项/回滚/提交号/下一节;
+**S1–S4 回环门禁全过前禁止任何非回环监听或 LAN 开放**;不借 P3b 放宽 P3a;不顺手做 P3c/P4/P6/P9。
+每次继续前重读 DECISIONS/PLAN/STATE/worklog/决策包,避免压缩后偏移。
