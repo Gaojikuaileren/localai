@@ -228,5 +228,19 @@ DO $$ BEGIN
     GRANT SELECT, INSERT, UPDATE ON mem.quarantine TO ai_mem_local;
     -- 隔离区可能含 S2 正文 → 远程绝不可读(与 secret_ref 同等对待)
     REVOKE ALL ON mem.quarantine FROM ai_mem_remote;
+
+    -- ★★ 触发器守卫函数必须显式授 EXECUTE 给 ai_mem_local(2026-07-28 实测修正)。
+    --   roles.sql 里 `REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mem FROM PUBLIC` 之后,
+    --   这些函数对 ai_mem_local 就没有 EXECUTE 了。
+    --   ★ 我此前在 roles.sql 注释里断言「PG 在 CREATE TRIGGER 时检查 EXECUTE,
+    --     触发时不再检查」—— **实测证明这是错的**:supersede 时报
+    --     `42501 permission denied for function mem.tg_block_auto_supersede_user`。
+    --     (INSERT 没报错是因为 tg_set_write_seq 是 SECURITY DEFINER,以属主身份跑。)
+    --   授 EXECUTE 是安全的:它们 RETURNS trigger,脱离触发器上下文直接调用会失败。
+    GRANT EXECUTE ON FUNCTION mem.tg_append_only()               TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_supersede_direction()       TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_no_bulk_review()            TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.tg_block_auto_supersede_user() TO ai_mem_local;
+    GRANT EXECUTE ON FUNCTION mem.is_user_fact(mem.provenance, numeric) TO ai_mem_local;
   END IF;
 END $$;

@@ -24,7 +24,13 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA mem TO ai_mem_local;
 --     PostgreSQL 新建函数默认 GRANT EXECUTE TO PUBLIC —— 只 REVOKE ... FROM ai_mem_remote
 --     根本无效(它撤的是并不存在的直接授权,PUBLIC 那条还在),远程仍可调用
 --     SECURITY DEFINER 的 next_write_seq() 空耗全局序列。必须从 PUBLIC 撤。
---     (触发器函数不受影响:PG 在 CREATE TRIGGER 时检查 EXECUTE,触发时不再检查。)
+--
+--     ★★ 订正(2026-07-28 实测):此处原写「触发器函数不受影响:PG 在 CREATE TRIGGER 时
+--        检查 EXECUTE,触发时不再检查」——**这是错的**。实测 supersede 时报
+--        `42501 permission denied for function mem.tg_block_auto_supersede_user`。
+--        非 SECURITY DEFINER 的触发器函数以【调用者】身份运行,撤了 PUBLIC 就得显式授回。
+--        (INSERT 当时没报错,只是因为 tg_set_write_seq 恰好是 SECURITY DEFINER。)
+--        授回动作在 schema-p3a.sql 第 8 节。
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mem FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION mem.next_write_seq() TO ai_mem_local;
 
