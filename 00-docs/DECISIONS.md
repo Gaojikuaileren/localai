@@ -869,3 +869,24 @@ gateway 已实装但当时以 admin 测,上 ai-mem 服务时补授。
 secret_ref 的值本就不在库、api_key 在 ACL 配置、DB 走 SSPI —— 现状满足。将来若引入含密文件,必须放强 ACL 目录。
 
 **推翻条件**:若将来多用户或需要「代码也隔离」,改 deploy-copy 到 ai-mem 专属 ACL 目录。
+
+---
+
+## 2026-07-28 · D30 补记 · 网关调用方身份用 WMI GetOwner,不是令牌读取
+
+**背景**:补 D30 的混淆代理修正(网关拒隔离账户经它触达记忆)。原直觉:从 TCP 连接
+反查调用方令牌的用户 SID。**实测 + Windows 安全模型证否**:
+
+- 标准用户的主令牌 DACL 只授【本人 + SYSTEM】TOKEN_QUERY。低权限网关(ai-mem)
+  **读不到另一个低权限账户(ai-asset)的令牌** —— 对正是要拦的调用方返回 None;
+  且对可信人类账户的令牌也读不到(admin 令牌更严)→ **两者都 None,无法区分**。令牌法作废。
+- **改用 WMI Win32_Process.GetOwner**:WMI 服务以 SYSTEM 执行,任意进程 owner 可得;
+  本地 Authenticated Users 有 Execute-Methods 权 → 低权限网关也能调。实测对 ai-asset 进程
+  正确返回 `ai-asset`。端口→PID 仍用 GetExtendedTcpTable(低权限可用)。令牌法仅留同用户快路径。
+
+**决定**:`caller_identity.py` = 端口→PID(ctypes)→ owner(令牌快路径→WMI 跨用户,按 PID 15s 缓存)。
+网关 `classify_caller` 拒 ai-asset/ai-exec;`require_trusted_local`(fail-closed)留给将来记忆代理端点。
+
+**fail 策略**:chat 路径解析不到身份 fail-open(不泄露记忆);记忆代理路径必须 fail-closed。
+**局限(诚实)**:WMI 子进程 ~100ms(已缓存);PID 复用有 15s 窗口(短 TTL 压之);人类账户当前
+只区分「非隔离账户」不区分具体是谁(单用户机可接受)。

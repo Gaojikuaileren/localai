@@ -55,11 +55,27 @@ LiteLLM 将来可作**内部库**用于 `escalate.cloud` 归一化云端 provide
 ★ **诚实边界(§4.6.2)**:E1 拦得住【意外】,拦不住【坚持】。它把「手滑贴凭证」变成
   「必须显式点继续」,**不是**「记忆零外发」的证明,也拦不住手动复制粘贴。
 
+## 调用方身份校验(D30 混淆代理修正 · 已实装)
+
+`caller_identity.py` —— 本机调用方从 TCP 连接反查真实 OS 账户,拒绝隔离服务账户
+(`ai-asset` / `ai-exec`),防止它们经网关触达记忆(混淆代理)。
+
+- **端口 → PID**:`GetExtendedTcpTable`(ctypes,低权限可用,快)
+- **PID → owner**:令牌读取(同用户快路径)→ **WMI GetOwner**(跨用户,SYSTEM 代理)。
+  ★★ **关键发现(实测 + Windows 安全模型)**:令牌读取【跨用户失败】—— 标准用户令牌 DACL 只授本人 + SYSTEM,
+  低权限网关(ai-mem)读不到另一个低权限账户(ai-asset)的令牌,且连人类账户的也读不到(两者都 None → 无法区分)。
+  ∴ 跨用户身份**必须走 WMI GetOwner**(已实测:对 ai-asset 进程返回 `HONGKONGPINGPON\ai-asset`)。按 PID 短缓存(15s)。
+- **策略**:`classify_caller` —— 隔离账户 → `denied-account`(403 + 审计 `denied_access.jsonl`);人类/ai-mem → trusted-local。
+- **fail 策略**:解析不到身份时,**chat 路径 fail-open**(现在只转发 chat,放行身份不明的本机调用不泄露记忆);
+  **★ 一旦网关代理记忆/Qdrant,必须改用 `require_trusted_local`(fail-closed:解析不到即拒)**。
+- 测试:`test_caller_identity.py`(6:真实自连接解析 owner)· `test_caller_policy.py`(11:拒隔离账户/放行人类/
+  fail-open-chat vs fail-closed-memory/大小写/远程)。
+
 ## ★ 明确未实装(P2 后续 · 代码里以 STUB 标注,不假装有)
 
 | 层 | 现状 | 依据 |
 |---|---|---|
-| **认证** | 只按 loopback 近似(本机放行 / 远程 401)。**OS 信任的真实校验(登录用户身份)未做** | D28 |
+| **认证** | ✅ 调用方身份校验已实装(见上,拒隔离账户)。**远程 WebAuthn 未做**(现远程一律 401);人类账户当前不校验具体是哪个人(单用户机可接受) | D28/D30 |
 | 权限六元组 + 工具池 | 未做 | §6.3 |
 | 出境闸门 | 未做(`escalate.cloud` 才需要) | §4.6 |
 | 审计 | 未做 | §9 |

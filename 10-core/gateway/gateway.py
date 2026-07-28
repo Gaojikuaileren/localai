@@ -25,6 +25,10 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import e1_detector as e1
+import caller_identity
+
+# §6.8 隔离服务账户 —— 绝不允许经网关触达记忆(D30 混淆代理防护)
+LOCAL_DENY_ACCOUNTS = {"ai-asset", "ai-exec"}
 
 REGISTRY_PATH = Path(__file__).with_name("registry.toml")
 PATHS_TOML = Path(__file__).resolve().parents[2] / "config" / "paths.toml"
@@ -86,15 +90,51 @@ _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
 
 
 # ────────────────────────────────────────────────────────────
-# STUB · 认证(D28)—— 当前未实装,先记录调用来源供审计接线
-# 本机(loopback + 登录用户)→ trusted-local;远程 → WebAuthn。
-# 现在放行所有 loopback,拒绝非 loopback,并把这个决定显式记下来。
+# 认证(D28)+ 调用方 OS 身份(D30 混淆代理修正)
+# 本机(loopback)→ 解析调用方账户(port→PID→WMI GetOwner)→ 隔离服务账户(ai-asset/ai-exec)拒绝,
+# 其余(人类 / ai-mem)trusted-local。远程 → WebAuthn(P2 后续,当前 401)。
+#
+# ★ fail 策略(重要):解析不到账户时,当前 fail-open 为 trusted-local —— 因为网关【现在只转发
+#   chat,不代理记忆】,放行一个身份不明的本机调用方不构成记忆泄露。
+#   ★★ 一旦网关开始代理记忆/Qdrant(注入 api_key / 连 PG),那条路径【必须改用 require_trusted_local
+#   即 fail-closed】:必须 positively 解析到非隔离账户,否则拒。见下。
 # ────────────────────────────────────────────────────────────
 def classify_caller(request: Request) -> str:
     host = request.client.host if request.client else ""
-    if host in ("127.0.0.1", "::1"):
-        return "trusted-local"          # D28:本机走 OS 信任(此处仅按 loopback 近似)
-    return "remote-unauthenticated"     # 远程须走 WebAuthn —— P2 后续
+    if host not in ("127.0.0.1", "::1"):
+        return "remote-unauthenticated"       # 远程须走 WebAuthn —— P2 后续
+    ident = caller_identity.account_from_request(request)
+    if ident and ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
+        return "denied-account"               # ai-asset / ai-exec 绝不放行(§6.8)
+    return "trusted-local"                    # 人类 / ai-mem / 解析不到 → 放行(见 fail 策略)
+
+
+def require_trusted_local(request: Request):
+    """记忆敏感路径专用 · fail-closed。必须 positively 解析到【非隔离】本机账户,否则返回 None(拒)。
+    chat 路径用宽松的 classify_caller;此函数留给将来代理 Qdrant/PG 的记忆端点。"""
+    host = request.client.host if request.client else ""
+    if host not in ("127.0.0.1", "::1"):
+        return None
+    ident = caller_identity.account_from_request(request)
+    if not ident:                             # 解析不到 = 不能确认身份 → 拒(fail-closed)
+        return None
+    if ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
+        return None
+    return ident
+
+
+def log_denied_access(account: str, session_id: str) -> None:
+    """§6.8:非授权本机账户触达网关 → 写审计(现落文件,待接 §9.3 告警)。账户名非凭证,可记。"""
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "account": account, "session_id": session_id or "unknown",
+           "reason": "isolated-service-account-denied"}
+    try:
+        d = _logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "denied_access.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 @app.get("/health")
@@ -118,13 +158,22 @@ async def chat_completions(request: Request):
     body = await request.json()
     alias = body.get("model", "")
 
-    # ---- STUB 认证(D28):当前只按 loopback 近似,记来源 ----
+    # ---- 认证(D28)+ 调用方身份(D30)----
     caller = classify_caller(request)
     if caller == "remote-unauthenticated":
         return JSONResponse(
             status_code=401,
             content={"error": {"message": "远程访问需 WebAuthn(P2 后续);本机请走 loopback",
                                "type": "unauthenticated", "code": "webauthn_required"}},
+        )
+    if caller == "denied-account":
+        ident = caller_identity.account_from_request(request)
+        acct = ident[0] if ident else "unknown"
+        log_denied_access(acct, request.headers.get("x-session-id", ""))
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"message": "隔离服务账户不得经网关访问(§6.8)",
+                               "type": "denied_account"}},
         )
 
     # ---- E1 入口凭证检测(§6.9.0 · 在组装/转发之前 · 不信任前端)----
