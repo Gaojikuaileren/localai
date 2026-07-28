@@ -2156,14 +2156,17 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
 
 - [x] **S0 · 先写决议不改运行态** —— **D43 已落**(废 WebAuthn/RP ID · D32 收窄 · D34 改写 · 移除 Tailscale ·
       新增 LAN_EDGE · 覆盖 D36 防火墙 · D38 CA 落 CNG/TPM · identity 排备份 · 审计硬化三条 · 精简优先)
-- [ ] **S1 · 回环技术 Spike**(全程只绑回环,不改防火墙):Kestrel AllowCertificate+自定义根 · CNG/TPM CSR 不可导出 ·
-      服务账户/named-pipe DACL/PID-SID 双验 · 应用专属根信任+主机名验证+禁代理/禁重定向 · 流式 ·
-      DNS-SD 注册发现解析闭环 · ConnectionContext 索引+撤销断流+generation/freshness fail-closed ·
-      ServerCertificateSelector 热切/换证 · 匿名 TLS/header/body/并发/超时资源边界。**任一不过不得开 LAN**
-- [ ] **S2 · PKI 与身份存储**:hub_id · CA(**私钥落 CNG/TPM**,D43 S0.7)· 服务器叶证书 ·
-      devices/device_certificates/全局 generation · 待批队列+ACL · 最小 host-admin CLI · 最小 client-transport CLI ·
-      独立 bootstrap handler + 完整 transcript **双向六词 SAS 配对** · enroll/status/claim/complete 幂等状态机 ·
-      **单条批准/单条吊销**/限流 · `${state}/identity/` 排备份+fail-closed 守护(D43 S0.8)
+- [x] **S1 · 回环技术 Spike ✅**(全程回环、未开 LAN;8 spike 全绿,见 worklog 2026-07-29):
+      TPM 不可导出密钥 9/9 · Kestrel AllowCertificate+自定义根 mTLS 6/6 · 流式 6/6 ·
+      撤销断流(13ms)+generation/freshness fail-closed 6/6 · ServerCertificateSelector 热切 4/4 ·
+      匿名资源边界 3/3 · 命名管道 PID/SID 互认+DACL 5/5。**推迟 P3b.2**:DNS-SD 自动发现 · 服务账户三服务分权
+- [ ] **S2 · PKI 与身份存储**(🔵 S2.1 已过 · S2.2/S2.3 待建):
+      - [x] **S2.1** CA + 证书签发核心(`10-core/identity/`,.NET):CA 私钥落 TPM 不可导出 · 服务器/客户端叶签发 ·
+        **扩展全部服务端生成(CSR 注入被忽略)** · CSR PoP 校验 · selftest 11/11(D43 S0.7)
+      - [ ] **S2.2** `init` 命令(铸真 hub_id+CA)· JSON 成员表(devices/device_certificates/generation)·
+        最小 host-admin CLI + client-transport CLI · `${state}/identity/` 排备份+fail-closed 守护(D43 S0.8)
+      - [ ] **S2.3** 独立 bootstrap handler + 完整 transcript **双向六词 SAS 配对** ·
+        enroll/status/claim/complete 幂等状态机 · **单条批准/单条吊销**/限流
 - [ ] **S3 · 网关先加固(LAN 监听前必须完成)**:
       · `caller_identity` 对非回环地址**直接抛错**(不 return None 后继续)
       · 记忆端点用 `require_trusted_local`/指纹正向映射取代 `classify_caller` 兜底(**代码已备 `gateway.py:216-227`**)
