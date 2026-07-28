@@ -912,3 +912,28 @@ BEGIN
     GRANT EXECUTE ON FUNCTION mem.tg_sensitivity_ratchet() TO ai_mem_local;
   END IF;
 END $$;
+
+-- =====================================================================
+--  S6 · 冷启动"只跑一次"的持久标记
+--
+-- ★ "只跑一次"必须是 fail-closed 且【持久】:进程内存态的 done 标志重启即复位,
+--   等于没有 —— 与 S3 熔断落库同一教训。用一张单行/键的系统状态表。
+-- ★ 为什么重跑危险:冷启动错过没有第二次,且直写分支"记下 supersedes 却不 supersede"
+--   会让重跑静默复制并列行(§4.5 破防)。默认可重入 = 放行优先族缺陷,故做成显式拒绝。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS mem.system_state (
+  key         text PRIMARY KEY,
+  value       jsonb NOT NULL,
+  set_at      timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE mem.system_state IS
+  '系统级一次性标记与配置(如 cold_start_completed)。持久,重启不复位';
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    -- ★ 只给 SELECT + INSERT,【不给 UPDATE/DELETE】:一次性标记一旦置位就不可翻转,
+    --   否则"只跑一次"可被一条 UPDATE 抹掉重开 —— 与 tombstone 单向、supersede 单向同理。
+    GRANT SELECT, INSERT ON mem.system_state TO ai_mem_local;
+  END IF;
+END $$;

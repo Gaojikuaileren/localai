@@ -233,6 +233,27 @@ def redact(conn: psycopg.Connection, ref, reason: str, *, table: str = "l3_fact"
         raise _sanitize(e) from None
 
 
+def get_system_state(conn: psycopg.Connection, key: str) -> Optional[Dict[str, Any]]:
+    """读系统状态标记(如 cold_start_completed)。不存在则 None。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM mem.system_state WHERE key=%s", (key,))
+            r = cur.fetchone()
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+    return r[0] if r else None
+
+
+def set_system_state_once(conn: psycopg.Connection, key: str, value: Dict[str, Any]) -> None:
+    """置一次性系统标记。★ 表只授了 INSERT(无 UPDATE),已存在会抛 —— 一次性由 DB 保证。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO mem.system_state (key, value) VALUES (%s, %s)",
+                        (key, psycopg.types.json.Jsonb(value)))
+    except psycopg.Error as e:
+        raise _sanitize(e) from None
+
+
 def set_sensitivity(conn: psycopg.Connection, row_id: int, level: str,
                     *, table: str = "l3_fact") -> None:
     """手动标记敏感度(§4.11.4 的第二个 S2 生产者)。
