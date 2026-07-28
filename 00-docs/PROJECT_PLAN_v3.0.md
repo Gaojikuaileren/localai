@@ -2169,13 +2169,13 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
       - [x] **S2.3** **双向六词 SAS**(自写确定性 CBOR→SHA256→HKDF→66bit→6 词;MITM 换服务器叶即被抓)·
         enroll/status/claim/complete 幂等状态机 · 窗口门 + 队列封顶 8 · **单条批准**(拒 re-approve/批量)· **22/22**
       - [ ] **推迟 S4/P3b.2**:HTTP `/pair/*` 路由(LAN Edge)· 续期状态机 · **curated SAS 词表(B16,现 v0 占位)** · client-transport CLI
-- [ ] **S3 · 网关先加固(LAN 监听前必须完成)**:
-      · `caller_identity` 对非回环地址**直接抛错**(不 return None 后继续)
-      · 记忆端点用 `require_trusted_local`/指纹正向映射取代 `classify_caller` 兜底(**代码已备 `gateway.py:216-227`**)
-      · 路由默认挂认证依赖 + 遍历 `app.routes` 元测试(新路由未归类=测试失败)· 匿名 `/pair/*` 只在 LAN Edge,网关无配对例外
-      · `/health` 收窄、`/v1/models` 认证 · llama-server 加 `--api-key`(存储/轮换/排备份 → backlog)
-      · 新增 `LAN_EDGE` 传输身份;身份头丢弃/重建 + 本机 edge 进程验证 · 按叶证书指纹+active+generation 映射 `LAN_DEVICE`
-      · **P3a `LAN_DEVICE` 权限回归**
+- [x] **S3 · 网关先加固 ✅**(LAN 监听前必须完成 · 10/10 + 全回归:caller_policy 15 · gateway_e1 36 · e1 50 · egress 12):
+      · ★ 带证书指纹头→查 S2 成员表→**封顶 `LAN_DEVICE`**;即便 classify_caller fail-open 成 trusted-local,
+        带指纹请求也拿不到 trusted-local 能力(尤其**解不了 E1**);本机进程伪设此头只会降权;主体只来自成员表,不认自报 device_id
+      · 路由归类元测试(`ROUTE_TIERS`+`unclassified_routes`,新路由未归类=失败)· 关掉 /docs·/redoc·/openapi.json
+      · `/health` 收窄(不泄别名)· `/v1/models` 认证 · 新增 `LAN_EDGE` 档(纵深防御,永不落 trusted-local)
+      · `require_trusted_local` 仍备(记忆端点将用)· **P3a caller-policy + E1 契约回归全过**
+      · 剩(不阻塞开 LAN 的门):llama-server `--api-key`(防绕过直连 18081)→ 随 start-stack/secrets
 - [ ] **S4 · LAN Edge(仍不开放 LAN)**:独立低权限服务 · 只代理固定回环网关 · 匿名配对路由组只调 registry 受限 IPC ·
       Kestrel 资源上限 · Windows Event Log+结构化审计+告警限流 · 否定用例全在 loopback/synthetic 通过
 - [ ] **S5 · 可恢复地开放 LAN**:activation 精简(启动对账+不满足即回环;**7 步持久 saga 推迟 P3b.2**)·
