@@ -59,5 +59,15 @@ set_ident(("X\\whoever", "whoever"))
 check("非回环 → remote-unauthenticated", gateway.classify_caller(Req("100.64.0.5")) == "remote-unauthenticated")
 check("远程 require_trusted_local → None", gateway.require_trusted_local(Req("100.64.0.5")) is None)
 
+# ★ IPv6 回环旁路回归(2026-07-28 审查发现):曾把 ::1 当可信回环,而身份解析只查 IPv4 表
+#   → 对 ::1 恒解析不到 → fail-open 成 trusted-local,等于对 IPv6 整体关掉 D30 且无日志。
+print("=== ::1 不得被当作可信回环(身份不可解析 → 必须 fail-closed)===")
+set_ident(None)                                   # 模拟:IPv6 调用方解析不到身份
+check("::1 不是 trusted-local", gateway.classify_caller(Req("::1")) != "trusted-local")
+check("::1 → remote-unauthenticated", gateway.classify_caller(Req("::1")) == "remote-unauthenticated")
+check("::1 require_trusted_local → None", gateway.require_trusted_local(Req("::1")) is None)
+set_ident(("X\\ai-asset", "ai-asset"))            # 即使能解析出隔离账户也不该走 ::1 放行路径
+check("::1 + ai-asset 仍不放行", gateway.classify_caller(Req("::1")) != "trusted-local")
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

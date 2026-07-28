@@ -70,7 +70,20 @@ def _addr(dw: int) -> str:
     return socket.inet_ntoa(struct.pack("<L", dw & 0xFFFFFFFF))
 
 
+MIB_TCP_STATE_ESTAB = 5
+
+
 def _tcp_rows():
+    """返回 [(state, laddr, lport, pid)] —— **值拷贝**。
+
+    ★★ 绝不可返回指向 buf 的 ctypes 视图(2026-07-28 审查发现的 use-after-free):
+    `C.cast(整数地址, ...)` 【不会】建立 keepalive 引用(实测 `cast(int)._objects is None`,
+    而 `cast(对象)._objects` 是 dict)。函数一返回,局部 buf 引用计数归零、内存被释放,
+    返回的数组即成悬垂指针 —— 实测同尺寸缓冲再分配 50/50 落回同一地址,精确复刻该形状后
+    返回值立刻被写坏。后果是安全性的:PID 读错 → 归到别的账户 → ai-asset 可能被判成
+    可信账户【静默放行】(classify_caller 只在肯定解析到隔离账户时才拒)。
+    改用 from_buffer(它会正确设置 _objects,且自带越界检查)并把值拷出来,彻底摆脱生命周期问题。
+    """
     size = W.DWORD(0)
     _iphlp.GetExtendedTcpTable(None, C.byref(size), False, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
     if size.value == 0:
@@ -79,18 +92,25 @@ def _tcp_rows():
     if _iphlp.GetExtendedTcpTable(buf, C.byref(size), False, AF_INET,
                                   TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR:
         return []
-    n = C.cast(buf, C.POINTER(W.DWORD))[0]                    # dwNumEntries
-    rows_at = C.addressof(buf) + C.sizeof(W.DWORD)            # 数组紧跟计数(DWORD 对齐,无填充)
-    arr = (_MIB_TCPROW_OWNER_PID * n)
-    return C.cast(rows_at, C.POINTER(arr))[0]
+    n = W.DWORD.from_buffer(buf, 0).value                     # dwNumEntries
+    if n == 0:
+        return []
+    arr = (_MIB_TCPROW_OWNER_PID * n).from_buffer(buf, C.sizeof(W.DWORD))
+    return [(r.dwState, r.dwLocalAddr, r.dwLocalPort, r.dwOwningPid) for r in arr]
 
 
 def resolve_peer_pid(client_ip: str, client_port: int) -> Optional[int]:
-    """回环上,拥有 local==client_ip:client_port 那个 socket 的进程 = 调用方。
-    本地端点(ip:port)对单个 socket 唯一,故只匹配 local 即足够精确。"""
-    for row in _tcp_rows():
-        if _port(row.dwLocalPort) == client_port and _addr(row.dwLocalAddr) == client_ip:
-            return row.dwOwningPid
+    """回环上,拥有 local==client_ip:client_port 那个【已建立】socket 的进程 = 调用方。
+
+    ★ 必须按 state 过滤:表里有大量 TIME_WAIT 残留行且 owner PID=0(本机实测数百行)。
+      临时端口被系统回收再分配时,若旧 TIME_WAIT 行还在,只按 ip:port 匹配会先命中 PID=0
+      那行 → pid_to_account(0) 失败 → 返回 None → chat 路径 fail-open。这是独立于 UAF 的
+      第二条 fail-open 路径。
+    """
+    for state, laddr, lport, pid in _tcp_rows():
+        if (state == MIB_TCP_STATE_ESTAB and pid
+                and _port(lport) == client_port and _addr(laddr) == client_ip):
+            return pid
     return None
 
 

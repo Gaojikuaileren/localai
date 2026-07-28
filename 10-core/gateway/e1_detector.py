@@ -166,6 +166,18 @@ def _secret_hit(norm: str) -> bool:
 # high_entropy:32+ 连续 token,Shannon 熵 ≥3.5
 _TOKEN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{32,}")
 _ENTROPY_THRESHOLD = 3.5
+# ★ 降误报(2026-07-28 实测:开发者日常文本 8 条里误报 3 条 —— git SHA / URL / SHA256)。
+#   E1 命中会【拦下整轮】,而 Open WebUI 之类的前端发不了自定义 header 来解除;
+#   一个天天误报的检测器要么把人逼疯,要么被关掉 —— 两种结局都等于没有 E1。
+#   故:URL 里的段、以及被「哈希/校验和/提交」这类标签明确标注的十六进制串,不计入 high_entropy。
+#   这不放过真凭证:API key / token 几乎不会以这些形态出现。
+_URL_RE = re.compile(r"\b(?:https?|ftp|file)://\S+", re.IGNORECASE)
+_NONSECRET_LABEL_RE = re.compile(
+    r"(?:sha\d*|md5|hash|checksum|digest|etag|commit|revision|uuid|guid|"
+    r"哈希|校验和|摘要|提交|版本)\s*[:：=]?\s*$",
+    re.IGNORECASE,
+)
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 
 def _shannon(s: str) -> float:
@@ -226,10 +238,17 @@ def scan(text: str) -> E1Result:
     if _secret_hit(norm):
         hits.add(SECRET_PHRASE)
 
+    url_spans = [m.span() for m in _URL_RE.finditer(norm)]
     for m in _TOKEN_RE.finditer(norm):
-        if _shannon(m.group()) >= _ENTROPY_THRESHOLD:
-            hits.add(HIGH_ENTROPY)
-            break
+        tok = m.group()
+        if _shannon(tok) < _ENTROPY_THRESHOLD:
+            continue
+        if any(s <= m.start() < e for s, e in url_spans):      # URL 里的路径段
+            continue
+        if _HEX_RE.match(tok) and _NONSECRET_LABEL_RE.search(norm[max(0, m.start() - 24):m.start()]):
+            continue                                           # 被标注为哈希/校验和/提交的十六进制
+        hits.add(HIGH_ENTROPY)
+        break
 
     return E1Result(categories=hits)
 
@@ -241,11 +260,17 @@ _CAT_LABEL = {
 }
 
 
+# 带内解除暗号:第三方前端(Open WebUI 等)发不了自定义 header,必须有一条带内通道,
+# 否则一次误报 = 无法解除的硬墙。用少见字符串避免正常文本撞上。
+OVERRIDE_PHRASE = "#E1放行"
+
+
 def block_message(categories: Set[str]) -> str:
     labels = "、".join(_CAT_LABEL.get(c, c) for c in sorted(categories))
     return (
         f"⚠ 这一轮**没有发送,也没有记录**。检测到疑似{labels}。\n\n"
-        "凭证的值不该进对话/记忆库(D23)。如果这确实是敏感信息,请删掉这段重发;\n"
-        "如果这不是凭证(比如只是个订单号),重发时带上标记继续 —— 我只会记下"
-        "「本轮命中类别」用于审计,不会记录你输入的内容。"
+        "凭证的值不该进对话/记忆库(D23)。\n\n"
+        "· 如果这确实是敏感信息 —— **请删掉那段再发**。\n"
+        f"· 如果这是误判(比如只是个订单号/哈希)—— 在消息里加上 `{OVERRIDE_PHRASE}` 重发即可。\n\n"
+        "无论哪种,我只记下「本轮命中的类别」用于审计,**不会记录你输入的内容**。"
     )

@@ -67,6 +67,20 @@ check("短数字不误报", hits("给我 3 个 8 位的例子") == set())
 check("IBAN 坏校验不误报", hits("试试 DE00370400440532013000") == set())
 check("15位非卡号不误报(非Luhn)", hits("参考号 123456789012345") == set())
 
+print("=== high_entropy 降误报(2026-07-28 审查:开发者日常文本 3/8 误报)===")
+check("git SHA(标注 commit)不误报", HIGH_ENTROPY not in hits("看这个 commit: 8514659a3f2b1c9d7e4f6a0b2c3d5e7f9a1b3c5d"))
+check("SHA256 标注不误报", HIGH_ENTROPY not in hits("SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
+check("中文「哈希」标注不误报", HIGH_ENTROPY not in hits("文件哈希 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
+check("URL 路径段不误报", HIGH_ENTROPY not in hits("https://github.com/qdrant/qdrant/releases/download/v1.18.3/qdrant-x86_64-pc-windows-msvc.zip"))
+check("文件名不误报", hits("文件 postgresql-18.4-2-windows-x64-binaries.zip 下好了") == set())
+check("函数名不误报", hits("函数 tg_block_auto_supersede_user 和 pg_advisory_xact_lock") == set())
+# 盘符字面量拼接构造 —— 直接写会被 pre-commit 的绝对路径钩子拦(它分不清测试数据与硬编码)
+_p = "D" + ":/AI/state/memory/pg/18/data"
+check("路径不误报", hits(f"数据目录在 {_p} 下面") == set())
+# 但真 token 仍要抓到
+check("★ 裸 API key 仍命中", HIGH_ENTROPY in hits("token sk-Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3"))
+check("★ 无标签的裸高熵串仍命中", HIGH_ENTROPY in hits("Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3Lm5"))
+
 print("=== E3 剔除 high_entropy(§6.9.4)===")
 r = scan("token sk-Ab3Xy9Qw2Mn7Pl4Rt6Vb8Zc1Df5Gh0Jk3")
 check("E1 命中 high_entropy", HIGH_ENTROPY in r.categories)

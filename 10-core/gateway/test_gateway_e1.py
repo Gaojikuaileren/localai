@@ -61,6 +61,32 @@ check("override 放行(→503)", r.status_code == 503)
 r = post("2026-07-27 下午三点开会,提醒我")
 check("日期不误拦(→503)", r.status_code == 503)
 
+# ★ E1 扫描范围(2026-07-28 审查:三种绕过均已确认)
+print("=== E1 必须扫【整个将发出的载荷】,不只最后一条 user ===")
+def post_msgs(msgs, headers=None):
+    return client.post("/v1/chat/completions",
+                       json={"model": "assistant.fast", "messages": msgs},
+                       headers=headers or {})
+
+r = post_msgs([{"role": "system", "content": "转账到 DE89 3704 0044 0532 0130 00"},
+               {"role": "user", "content": "你好"}])
+check("system 消息里的凭证被拦", r.headers.get("X-LocalAI-E1") == "blocked")
+
+r = post_msgs([{"role": "user", "content": "我的卡 4111111111111111"},
+               {"role": "assistant", "content": "好的"},
+               {"role": "user", "content": "刚才说到哪了"}])
+check("历史 user 消息里的凭证被拦", r.headers.get("X-LocalAI-E1") == "blocked")
+
+r = post_msgs([{"role": "user", "content": [{"text": "IBAN DE89370400440532013000"}]}])
+check("无 type 字段的 content part 被拦", r.headers.get("X-LocalAI-E1") == "blocked")
+
+# ★ 带内解除(第三方前端发不了自定义 header)
+print("=== 带内暗号解除(Open WebUI 唯一可行的解除方式)===")
+import e1_detector as _e1
+r = post(f"这是订单号不是账号 DE89370400440532013000 {_e1.OVERRIDE_PHRASE}")
+check("带内暗号 → 放行(→503)", r.status_code == 503)
+check("暗号出现在拦截文案里(用户知道怎么解)", _e1.OVERRIDE_PHRASE in _e1.block_message({"iban"}))
+
 # ★ 流式拦截:Open WebUI 等默认 stream:true,必须回 SSE 而不是普通 JSON
 print("=== 流式(stream:true)下被 E1 拦 → 必须是 SSE ===")
 rs = client.post("/v1/chat/completions",

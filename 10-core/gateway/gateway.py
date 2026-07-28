@@ -35,12 +35,18 @@ PATHS_TOML = Path(__file__).resolve().parents[2] / "config" / "paths.toml"
 
 
 def _logs_dir() -> Path:
-    """从 paths.toml 读 [state] logs(§11.1 不硬编码路径)。读不到则退回本目录。"""
+    """从 paths.toml 读 [state] logs(§11.1 不硬编码路径)。
+
+    ★ 退路【绝不能】落在 10-core 代码树内(2026-07-28 审查):那是 git 跟踪目录,且按 D31
+      对 ai-asset 可读 —— 审计日志(命中类别/被拒账户)写进去既进版本历史又对资产侧可见。
+      读不到配置就退到系统临时目录,并在日志里留痕,不静默写进仓库。
+    """
     try:
         with open(PATHS_TOML, "rb") as f:
             return Path(tomllib.load(f)["state"]["logs"])
     except Exception:
-        return Path(__file__).with_name("_logs")
+        import tempfile
+        return Path(tempfile.gettempdir()) / "localai-hub-logs-FALLBACK"
 
 
 def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
@@ -62,19 +68,33 @@ def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
         pass  # 审计落盘失败不阻断拦截本身
 
 
-def _last_user_text(messages) -> str:
-    """取本轮最后一条 user 消息文本(E1 只扫新输入,历史进来时已扫过)。"""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user":
-            c = m.get("content")
-            if isinstance(c, str):
-                return c
-            if isinstance(c, list):   # 多模态 content parts
-                return " ".join(
-                    p.get("text", "") for p in c
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-    return ""
+def _scannable_text(messages) -> str:
+    """取本轮【将要发给后端】的全部人类可写文本,供 E1 扫描。
+
+    ★ 早期版本只扫「最后一条 user 消息的 type=='text' 部分」,理由是「历史进来时已扫过」——
+      这对一个【无状态网关 + 第三方前端】不成立(2026-07-28 审查发现,三种绕过均已确认):
+        · 凭证放在 system 消息里 → 从不被扫
+        · 凭证在上一轮 user 消息里(前端把历史整包重发)→ 从不被扫
+        · content part 没有 type 字段 → 被过滤掉
+      E1 的职责是「不让凭证进入发往模型的 prompt」,那就必须扫【整个将发出的载荷】。
+      assistant 角色也扫:第三方前端可以伪造它,而我们不信任前端。
+    """
+    parts = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            parts.append(c)
+        elif isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict):
+                    t = p.get("text")
+                    if isinstance(t, str):      # 不再要求 type=='text';有 text 就扫
+                        parts.append(t)
+                elif isinstance(p, str):
+                    parts.append(p)
+    return "\n".join(parts)
 
 
 def load_registry() -> dict:
@@ -99,10 +119,19 @@ _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
 #   ★★ 一旦网关开始代理记忆/Qdrant(注入 api_key / 连 PG),那条路径【必须改用 require_trusted_local
 #   即 fail-closed】:必须 positively 解析到非隔离账户,否则拒。见下。
 # ────────────────────────────────────────────────────────────
+# ★ 只认 IPv4 回环。绝不能把 ::1 也当可信(2026-07-28 审查发现):
+#   caller_identity 只查 AF_INET(IPv4)表,对 ::1 调用方【永远解析不到身份】→ 恒 fail-open
+#   成 trusted-local,等于对 IPv6 回环整体关掉 D30 隔离账户拒绝,且不留任何日志痕迹。
+#   网关按 README 绑 127.0.0.1,故 ::1 本不该出现;真出现就说明绑定被改过 —— 此时必须
+#   fail-closed(拒),而不是无声放行。要支持 ::1 须先在 caller_identity 里补 AF_INET6 表
+#   (结构体字段顺序与 IPv4 不同,不能复用同一 Structure)。
+TRUSTED_LOOPBACK = {"127.0.0.1"}
+
+
 def classify_caller(request: Request) -> str:
     host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1"):
-        return "remote-unauthenticated"       # 远程须走 WebAuthn —— P2 后续
+    if host not in TRUSTED_LOOPBACK:
+        return "remote-unauthenticated"       # 含 ::1:身份不可解析 → 按远程处理(fail-closed)
     ident = caller_identity.account_from_request(request)
     if ident and ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
         return "denied-account"               # ai-asset / ai-exec 绝不放行(§6.8)
@@ -113,7 +142,7 @@ def require_trusted_local(request: Request):
     """记忆敏感路径专用 · fail-closed。必须 positively 解析到【非隔离】本机账户,否则返回 None(拒)。
     chat 路径用宽松的 classify_caller;此函数留给将来代理 Qdrant/PG 的记忆端点。"""
     host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1"):
+    if host not in TRUSTED_LOOPBACK:          # ::1 同样不认(身份不可解析,见上)
         return None
     ident = caller_identity.account_from_request(request)
     if not ident:                             # 解析不到 = 不能确认身份 → 拒(fail-closed)
@@ -179,8 +208,14 @@ async def chat_completions(request: Request):
     # ---- E1 入口凭证检测(§6.9.0 · 在组装/转发之前 · 不信任前端)----
     # 命中即拦下本轮:不转发后端、不落 L0、不记正文;只记类别(§6.9.8)。
     session_id = request.headers.get("x-session-id", "")
-    override = request.headers.get("x-localai-e1-override", "").lower() == "continue"
-    e1r = e1.scan(_last_user_text(body.get("messages")))
+    scan_text = _scannable_text(body.get("messages"))
+    # 「这不是凭证,继续」的两条通道:
+    #   ① header —— 给程序化客户端
+    #   ② ★ 带内暗号 —— 第三方前端(Open WebUI)发不了自定义 header,没有带内通道的话
+    #      一次误报就是【无法解除的硬墙】,用户只能关掉 E1(等于没有 E1)。拦截文案会告诉他怎么写。
+    override = (request.headers.get("x-localai-e1-override", "").lower() == "continue"
+                or e1.OVERRIDE_PHRASE in scan_text)
+    e1r = e1.scan(scan_text)
     if e1r.blocked:
         if override:
             # 用户显式「这不是凭证,继续」—— 记类别(不记值),放行本轮
@@ -243,32 +278,60 @@ async def chat_completions(request: Request):
     upstream_url = backend.rstrip("/") + "/v1/chat/completions"
     stream = bool(body.get("stream", False))
 
+    hdrs = {"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias}
     try:
         if stream:
+            # ★★ 必须【先建立连接、拿到状态码】再返回 StreamingResponse。
+            #    原写法 `return StreamingResponse(gen(), ...)` 会立即返回 —— gen() 尚未执行,
+            #    后端连不上时异常发生在 return 之后、响应头(200)已发出 → 客户端收到
+            #    「200 + 空 body」,正是 §8.1.4 明令禁止的静默降级(实测复现)。
+            req = _client.build_request("POST", upstream_url, json=fwd)
+            r = await _client.send(req, stream=True)
+            if r.status_code >= 400:                     # 上游错误:读完转发真实状态码,不吞
+                raw = await r.aread()
+                await r.aclose()
+                return JSONResponse(
+                    status_code=r.status_code, headers=hdrs,
+                    content={"error": {"message": f"后端返回 {r.status_code}",
+                                       "type": "backend_error",
+                                       "alias": alias, "backend": backend,
+                                       "detail": raw.decode("utf-8", "replace")[:500]}},
+                )
+
             async def gen():
-                async with _client.stream("POST", upstream_url, json=fwd) as r:
+                try:
                     async for chunk in r.aiter_raw():
                         yield chunk
-            return StreamingResponse(
-                gen(), media_type="text/event-stream",
-                headers={"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias},
-            )
+                finally:
+                    await r.aclose()
+            return StreamingResponse(gen(), media_type="text/event-stream",
+                                     status_code=r.status_code, headers=hdrs)
         else:
             r = await _client.post(upstream_url, json=fwd)
-            data = r.json()
+            try:
+                data = r.json()
+            except Exception:                            # 上游返回非 JSON/空体:不静默变成 200
+                return JSONResponse(
+                    status_code=502, headers=hdrs,
+                    content={"error": {"message": "后端返回的不是合法 JSON",
+                                       "type": "bad_upstream_response",
+                                       "alias": alias, "backend": backend,
+                                       "detail": r.text[:500]}},
+                )
             # 契约回写(§8.1.4):响应 model 字段回写真实契约
-            data["model"] = f"{alias}({contract})"
-            return JSONResponse(
-                content=data, status_code=r.status_code,
-                headers={"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias},
-            )
-    except httpx.ConnectError:
-        # 后端未起来 —— §8.1.4:503 带缺口,不静默降级
+            if isinstance(data, dict):
+                data["model"] = f"{alias}({contract})"
+            return JSONResponse(content=data, status_code=r.status_code, headers=hdrs)
+    except httpx.RequestError as e:
+        # ★ 用 RequestError 而非 ConnectError:ConnectTimeout / ReadTimeout /
+        #   RemoteProtocolError 等都【不是】ConnectError 的子类,原来会裸奔成 500。
+        #   §8.1.4:503 带缺口,不静默降级。
         return JSONResponse(
-            status_code=503,
+            status_code=503, headers=hdrs,
             content={"error": {"message": f"别名 '{alias}' 的后端 {backend} 未响应"
                                           f"(无 Broker 期需先静态启动该后端)",
                                "type": "backend_unavailable",
+                               "reason": type(e).__name__,
                                "alias": alias, "backend": backend,
                                "fallback": entry.get("fallback")}},
         )

@@ -50,6 +50,13 @@ function Invoke-AsAiMem([string]$Body,[string]$Password) {
   $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c "' + $cmdFile + '"')
   Register-ScheduledTask -TaskName $tn -Action $action -User "$Machine\ai-mem" -Password $Password -RunLevel Limited -Force | Out-Null
   Start-ScheduledTask -TaskName $tn
+  # ★ 先等它真的进入 Running,再等它结束。否则 Start-ScheduledTask 与状态轮询抢跑:
+  #   任务还没起来时 State 已经是 Ready,循环立刻退出 → 拿到上一次的 LastTaskResult
+  #   (常见是 267011「从未运行」),并把仍在跑的任务 Unregister 掉。
+  for ($i = 0; $i -lt 30; $i++) {
+    if ((Get-ScheduledTask -TaskName $tn).State -eq 'Running') { break }
+    Start-Sleep -Milliseconds 300
+  }
   while ((Get-ScheduledTask -TaskName $tn).State -eq 'Running') { Start-Sleep -Seconds 1 }
   $rc = (Get-ScheduledTaskInfo -TaskName $tn).LastTaskResult
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false

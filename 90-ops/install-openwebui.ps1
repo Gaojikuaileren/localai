@@ -77,6 +77,9 @@ $env:OPENAI_API_BASE_URL = "http://127.0.0.1:8080/v1"
 $env:OPENAI_API_KEY = "localai"          # 网关本机不校验 key(走 OS 身份);占位即可
 $env:ENABLE_OLLAMA_API = "false"
 $env:WEBUI_AUTH = "true"                 # 首个注册的账户即 admin(你自己注册,脚本不代劳)
+# ★ 注册完第一个账户后必须关掉:默认开放注册 + 绑回环虽不出网,但同机任何账户(含 ai-asset)
+#   都能自助注册一个账号进而经网关对话。首个账户建好后本值应保持 false。
+$env:ENABLE_SIGNUP = "false"
 $env:ANONYMIZED_TELEMETRY = "false"      # 关遥测
 $env:SCARF_NO_ANALYTICS = "true"
 $env:DO_NOT_TRACK = "true"
@@ -93,4 +96,6 @@ Say "    ★ 浏览器开 http://127.0.0.1:8081 注册第一个账户 —— 它
 # ★ 入口是 Scripts\open-webui.exe;`python -m open_webui` 不可用(包内无 __main__,实测确认)
 $OwExe = Join-Path (Split-Path $VPy -Parent) 'open-webui.exe'
 if (-not (Test-Path $OwExe)) { Say "  X 找不到 $OwExe"; exit 1 }
-& $OwExe serve --port 8081
+# ★★ 必须显式 --host 127.0.0.1:Open WebUI 默认绑 0.0.0.0,会把界面暴露到整个局域网
+#    (本项目全链路只监听回环;一个开放注册的 Web 界面暴露出去 = 任何同网设备可注册并对话)。
+& $OwExe serve --host 127.0.0.1 --port 8081

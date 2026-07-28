@@ -101,10 +101,18 @@ $Nssm = Join-Path (Get-Path 'qdrant_bin') 'nssm.exe'   # 复用 Qdrant 装的 ns
 if (-not (Test-Path $Nssm)) { Say "  X 没找到 nssm($Nssm)。先跑 install-qdrant.ps1。"; exit 1 }
 $httpPort = 18084
 
-Say "[5] 授 ai-mem 读服务代码 + venv + HF 缓存(D31)…"
+Say "[5] 授 ai-mem 读服务代码 + venv + HF 缓存,并【拒绝资产侧写入】(D31)…"
+# ★★ 只 /grant RX 是【收紧不了任何东西】的(2026-07-28 审查):grant 只增不减。
+#    这三处都是 Embedding 服务(以 ai-mem 运行)【要加载执行】的内容 —— 代码、venv 里的
+#    .pyd/.dll、模型权重。若 ai-asset / ai-exec 能写,它们改一个文件就能在 ai-mem 身份下
+#    拿到代码执行 = 一跳打穿 D30/§6.8 的账户隔离。故必须显式 Deny 写。
 foreach ($d in @($SvcDir, $Venv, $HfHome)) {
   & icacls $d /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
   if ($LASTEXITCODE -ne 0) { Say "  X icacls 授权失败: $d"; exit 1 }
+  # 拒绝写/改/删(保留读:代码非机密,D31;要挡的是【写】这条提权路径)
+  & icacls $d /deny "ai-asset:(OI)(CI)(W,D,WDAC,WO)" "ai-exec:(OI)(CI)(W,D,WDAC,WO)" | Out-Null
+  if ($LASTEXITCODE -ne 0) { Say "  X icacls 拒绝写入失败: $d"; exit 1 }
+  Say "      $d -> ai-mem RX · ai-asset/ai-exec 拒写"
 }
 
 Say "[6] 重置 ai-mem 密码 + 同步已有 ai-mem 服务(否则它们下次 1069)…"

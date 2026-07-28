@@ -64,6 +64,12 @@ function Invoke-AsAiMem([string]$Body,[string]$Password) {
   $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c "' + $cmdFile + '"')
   Register-ScheduledTask -TaskName $tn -Action $action -User "$Machine\ai-mem" -Password $Password -RunLevel Limited -Force | Out-Null
   Start-ScheduledTask -TaskName $tn
+  # ★ 先等它真的进入 Running(见 apply-schema.ps1 同处注释):否则与状态轮询抢跑,
+  #   会拿到上次的 LastTaskResult 并把仍在跑的任务拆掉。
+  for ($i = 0; $i -lt 30; $i++) {
+    if ((Get-ScheduledTask -TaskName $tn).State -eq 'Running') { break }
+    Start-Sleep -Milliseconds 300
+  }
   while ((Get-ScheduledTask -TaskName $tn).State -eq 'Running') { Start-Sleep -Seconds 1 }
   $rc = (Get-ScheduledTaskInfo -TaskName $tn).LastTaskResult
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false
@@ -117,7 +123,23 @@ $pw = New-SafePassword
 Set-LocalUser -Name 'ai-mem' -Password (ConvertTo-SecureString $pw -AsPlainText -Force)
 Grant-UserRight 'ai-mem' 'SeServiceLogonRight'   # 服务登录(缺 -> 1069)
 Grant-UserRight 'ai-mem' 'SeBatchLogonRight'     # 计划任务批处理登录
-Write-Host "  [3] ai-mem 密码重置 + SeServiceLogonRight/SeBatchLogonRight OK"
+# ★★ 重跑安全:重置 ai-mem 密码会作废【所有】以它运行的服务的存储凭据(不止 pg-mem)。
+#    早期版本只在下方同步 pg-mem,重跑就把 Qdrant / Qdrant-s2 / Embedding 全部打成 1069。
+#    此处统一同步所有 StartName 指向 ai-mem 的服务(不用字符串字面量匹配,按 SID 判定)。
+$aiMemSid = (New-Object System.Security.Principal.NTAccount('ai-mem')).Translate(
+              [System.Security.Principal.SecurityIdentifier]).Value
+foreach ($s in (Get-WmiObject Win32_Service)) {
+  if (-not $s.StartName) { continue }
+  try {
+    $sid = (New-Object System.Security.Principal.NTAccount($s.StartName.TrimStart('.','\'))
+           ).Translate([System.Security.Principal.SecurityIdentifier]).Value
+  } catch { continue }
+  if ($sid -ne $aiMemSid) { continue }
+  $r = $s.Change($null,$null,$null,$null,$null,$null,".\ai-mem",$pw,$null,$null,$null)
+  if ($r.ReturnValue -ne 0) { Write-Host "  X 同步服务 $($s.Name) 凭据失败 RV=$($r.ReturnValue)" -ForegroundColor Red; exit 1 }
+  Write-Host "      (已同步既有 ai-mem 服务: $($s.Name))"
+}
+Write-Host "  [3] ai-mem 密码重置 + SeServiceLogonRight/SeBatchLogonRight + 同步既有服务 OK"
 
 # ============================ 4 · initdb(以 ai-mem)============================
 if (Test-Path (Join-Path $PgData 'PG_VERSION')) {
@@ -158,18 +180,27 @@ log_filename = 'pg-%Y-%m-%d.log'
 $endm
 "@
 Write-NoBom $conf ($confText.TrimEnd() + "`r`n" + $confAdd + "`r`n")
-Write-NoBom $hba @"
+# ★ 重跑安全:pg_hba / pg_ident 只在【首次】写入基线。无条件覆写会抹掉 apply-schema.ps1
+#   追加的 ai_mem_local / ai_mem_remote 映射 —— 重跑一次 PG 安装,记忆库的两个角色就连不上了。
+if (Select-String -Path $hba -Pattern 'LocalAI Hub' -Quiet -EA SilentlyContinue) {
+  Write-Host "  [5] pg_hba/pg_ident 已是本项目基线,保留现状(含 schema 追加的角色映射)"
+} else {
+  Write-NoBom $hba @"
 # LocalAI Hub — 仅本机回环 · SSPI 绑 Windows SID(D30 · §6.8)
+# ★ 本文件由 install-postgres.ps1 建立基线;apply-schema.ps1 会在末尾【追加】
+#   ai_mem_local / ai_mem_remote 两行。重跑安装不会覆写本文件(见脚本 [5] 的守卫)。
 # TYPE  DATABASE  USER      ADDRESS         METHOD
 host    all       postgres  127.0.0.1/32    sspi  map=mem  include_realm=0
 host    memory    mem_rw    127.0.0.1/32    sspi  map=mem  include_realm=0
 "@
-Write-NoBom $ident @"
+  Write-NoBom $ident @"
 # MAPNAME  SYSTEM-USERNAME  PG-USERNAME
+# ★ apply-schema.ps1 会追加 ai_mem_local / ai_mem_remote 两行,勿手工覆写本文件。
 mem        ai-mem           postgres
 mem        ai-mem           mem_rw
 "@
-Write-Host "  [5] postgresql.conf / pg_hba.conf(sspi) / pg_ident.conf 已写(无 BOM)OK"
+  Write-Host "  [5] postgresql.conf / pg_hba.conf(sspi) / pg_ident.conf 已写(无 BOM)OK"
+}
 
 # ============================ 6 · 注册并启动服务 ============================
 if (-not (Get-Service -Name 'pg-mem' -EA SilentlyContinue)) {
