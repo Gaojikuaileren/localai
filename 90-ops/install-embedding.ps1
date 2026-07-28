@@ -101,19 +101,38 @@ $Nssm = Join-Path (Get-Path 'qdrant_bin') 'nssm.exe'   # 复用 Qdrant 装的 ns
 if (-not (Test-Path $Nssm)) { Say "  X 没找到 nssm($Nssm)。先跑 install-qdrant.ps1。"; exit 1 }
 $httpPort = 18084
 
-Say "[5] 授 ai-mem 读服务代码 + venv + HF 缓存,并【拒绝资产侧写入】(D31)…"
+Say "[5] 授 ai-mem 读服务代码 + venv + 基础 Python + HF 缓存,并【拒绝资产侧写入】(D31)…"
 # ★★ 只 /grant RX 是【收紧不了任何东西】的(2026-07-28 审查):grant 只增不减。
-#    这三处都是 Embedding 服务(以 ai-mem 运行)【要加载执行】的内容 —— 代码、venv 里的
+#    这几处都是 Embedding 服务(以 ai-mem 运行)【要加载执行】的内容 —— 代码、venv 里的
 #    .pyd/.dll、模型权重。若 ai-asset / ai-exec 能写,它们改一个文件就能在 ai-mem 身份下
 #    拿到代码执行 = 一跳打穿 D30/§6.8 的账户隔离。故必须显式 Deny 写。
-foreach ($d in @($SvcDir, $Venv, $HfHome)) {
+foreach ($d in @($SvcDir, $Venv)) {
   & icacls $d /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
   if ($LASTEXITCODE -ne 0) { Say "  X icacls 授权失败: $d"; exit 1 }
-  # 拒绝写/改/删(保留读:代码非机密,D31;要挡的是【写】这条提权路径)
   & icacls $d /deny "ai-asset:(OI)(CI)(W,D,WDAC,WO)" "ai-exec:(OI)(CI)(W,D,WDAC,WO)" | Out-Null
   if ($LASTEXITCODE -ne 0) { Say "  X icacls 拒绝写入失败: $d"; exit 1 }
-  Say "      $d -> ai-mem RX · ai-asset/ai-exec 拒写"
+  Say "      $d -> ai-mem RX · 资产侧拒写"
 }
+# ★ HF 缓存需要 Modify 而非 RX:huggingface_hub 加载时要写 .locks;只给 RX 会在
+#   服务启动时失败(实测预判)。缓存内容不是机密,给写不违反 D22/D31。
+& icacls $HfHome /grant "ai-mem:(OI)(CI)(M)" | Out-Null
+if ($LASTEXITCODE -ne 0) { Say "  X icacls 授权失败: $HfHome"; exit 1 }
+& icacls $HfHome /deny "ai-asset:(OI)(CI)(W,D,WDAC,WO)" "ai-exec:(OI)(CI)(W,D,WDAC,WO)" | Out-Null
+Say "      $HfHome -> ai-mem Modify(需写 .locks)· 资产侧拒写"
+
+# ★★ 基础 Python:venv 里的 python.exe 只是个壳,要去 pyvenv.cfg 指的基础安装找标准库。
+#    本机 Python 装在【当前用户的配置文件目录】下,ai-mem 无权读 →
+#    服务启动报 "No Python at ..."(2026-07-28 实测)。这影响【所有】以 ai-mem 跑的服务。
+#    路径从 pyvenv.cfg 读,不硬编码(§11.1)。只授只读执行:那里只有解释器与标准库,
+#    没有你的数据 —— 符合 D31「要隔离的是数据不是代码」。
+$cfg = Join-Path $Venv 'pyvenv.cfg'
+$homeLine = Select-String -Path $cfg -Pattern '^\s*home\s*=\s*(.+)$' | Select-Object -First 1
+if (-not $homeLine) { Say "  X 读不到 $cfg 的 home 项"; exit 1 }
+$BasePy = $homeLine.Matches[0].Groups[1].Value.Trim()
+if (-not (Test-Path $BasePy)) { Say "  X 基础 Python 不存在: $BasePy"; exit 1 }
+& icacls $BasePy /grant "ai-mem:(OI)(CI)(RX)" | Out-Null
+if ($LASTEXITCODE -ne 0) { Say "  X 授予 ai-mem 读基础 Python 失败: $BasePy"; exit 1 }
+Say "      基础 Python $BasePy -> ai-mem RX(否则服务报 No Python at ...)"
 
 Say "[6] 重置 ai-mem 密码 + 同步已有 ai-mem 服务(否则它们下次 1069)…"
 $b = New-Object byte[] 30; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
@@ -127,7 +146,14 @@ foreach ($s in (Get-WmiObject Win32_Service | Where-Object { $_.StartName -eq '.
 }
 
 Say "[7] 注册 Embedding 服务(NSSM · ai-mem · :$httpPort)…"
-if (Get-Service Embedding -EA SilentlyContinue) { Stop-Service Embedding -Force -EA SilentlyContinue; & $Nssm remove Embedding confirm | Out-Null; Start-Sleep 1 }
+# ★ 上一次失败可能把服务留在 Paused/StartPending 等状态,Stop-Service 对这些状态无效 →
+#   remove 也会失败 → 新配置写不进去。先无条件 nssm stop 再 remove。
+if (Get-Service Embedding -EA SilentlyContinue) {
+  & $Nssm stop Embedding 2>&1 | Out-Null
+  Start-Sleep 2
+  & $Nssm remove Embedding confirm 2>&1 | Out-Null
+  Start-Sleep 2
+}
 & $Nssm install Embedding $VPy | Out-Null
 & $Nssm set Embedding AppParameters "-m uvicorn embedding_service:app --host 127.0.0.1 --port $httpPort" | Out-Null
 & $Nssm set Embedding AppDirectory $SvcDir | Out-Null
@@ -139,13 +165,31 @@ if (Get-Service Embedding -EA SilentlyContinue) { Stop-Service Embedding -Force 
 $w = Get-WmiObject Win32_Service -Filter "Name='Embedding'"
 $chg = $w.Change($null,$null,$null,$null,$null,$null,".\ai-mem",$pw,$null,$null,$null)
 if ($chg.ReturnValue -ne 0) { Say "  X 设服务账户失败 RV=$($chg.ReturnValue)"; exit 1 }
-Start-Service Embedding
+Start-Service Embedding -EA SilentlyContinue
 $pw = $null; [System.GC]::Collect()
+# ★ 启动失败就【立刻报错并把 stderr 打出来】,不要傻等一个永远不会就绪的服务。
+#   (2026-07-28:Start-Service 已失败,脚本却仍进 [8] 空转 5 分钟,错误线索全被埋掉。)
+Start-Sleep 3
+$st = (Get-Service Embedding -EA SilentlyContinue).Status
+if ($st -ne 'Running') {
+  Say "  X 服务未能启动(状态 $st)。stderr 尾:"
+  if (Test-Path "$LogDir\embedding.err.log") {
+    Get-Content "$LogDir\embedding.err.log" -Tail 15 -Encoding UTF8 | ForEach-Object { Say "      $_" }
+  } else { Say "      (无 stderr 日志 —— 进程根本没起来,多半是账户/权限问题)" }
+  exit 1
+}
 
-Say "[8] 等就绪(首次加载模型较慢)…"
+Say "[8] 等就绪(首次加载模型较慢,约 10–30 秒)…"
 $ready = $false
-for ($i=0; $i -lt 60; $i++) { Start-Sleep 2
-  try { if ((Invoke-WebRequest "http://127.0.0.1:$httpPort/health" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { $ready=$true; break } } catch {} }
+for ($i=0; $i -lt 60; $i++) {
+  Start-Sleep 2
+  if ((Get-Service Embedding -EA SilentlyContinue).Status -ne 'Running') { break }  # 中途崩了就别等了
+  try { if ((Invoke-WebRequest "http://127.0.0.1:$httpPort/health" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { $ready=$true; break } } catch {}
+}
 Say ("  就绪: " + $ready)
-if (-not $ready) { Say "  X 未就绪,见 $LogDir\embedding.err.log"; exit 1 }
+if (-not $ready) {
+  Say "  X 未就绪。stderr 尾:"
+  Get-Content "$LogDir\embedding.err.log" -Tail 20 -Encoding UTF8 -EA SilentlyContinue | ForEach-Object { Say "      $_" }
+  exit 1
+}
 Say "=== 完成 ✓ 跟 Claude 说「embedding 服务起来了」核验(1024 维 + 账户 ai-mem + 回环)。 ==="
