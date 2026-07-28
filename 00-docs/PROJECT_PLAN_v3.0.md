@@ -1970,6 +1970,7 @@ G:\localAI-backup\  ★手动全量(不加密 — D21)· 12 代保留
 | **B13** | **★ 联网搜索(出入网,待定)** | **须先有出入境裁定** | D42.5:更新知识库+搜索,内置非单独界面。出站碰 L5/出境闸,入站是不可信内容须过 E1/走 pending。**主门=每任务手动【放行】按钮**(trusted-local 带外动作、每按一任务、不可被派生内容触发,是 E1 带内解除的正确版)。**预留,不本期做**,方案如 D38/D39 那样先裁定再动手 |
 | **B14** | 课件预设文件的内容与格式 | 做 PPT 工作室时 | D42.3:声明式模板(课程名/听众/版式/章节骨架/术语表/常设指令);用户手管、不进记忆;AI 代改则走 P6 文件区+哈希绑定 |
 | **B15** | **换本地模型时的替换评测** | 未来换模型/换量化时(约 P4 附近) | Codex 交付评测包 `90-ops/localai-model-replacement-eval/`(55 题 + RUBRIC + scorecard + 6 视觉夹具)。★ **五步纪律(别忘)**:①先用当前模型建基线 ②按别名分测 assistant.fast/deep/vision ③依次 smoke→core→safety→full ④**安全硬失败不能被其他高分抵消** ⑤通过后才改语义别名映射。只比模型、不改架构/registry/中央文档;不因接入它打断 P3b |
+| **B16** | **curated 六词 SAS 词表** | P3c UI 落地配对界面时 | 现 `Wordlist.cs` = v0 占位(CVC 生成词);换成 curated 中/英(或 BIP-39)2048 词表,提升人工比对可读性。**只换显示词,不改索引/HKDF/安全性质**;词表须冻结+版本号(与 SAS transcript 同护) |
 
 **复核规则**:每次版本更新时逐条复核;同时复核 `snapshots/` 里的第三方条款是否已变。
 
@@ -2160,13 +2161,14 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
       TPM 不可导出密钥 9/9 · Kestrel AllowCertificate+自定义根 mTLS 6/6 · 流式 6/6 ·
       撤销断流(13ms)+generation/freshness fail-closed 6/6 · ServerCertificateSelector 热切 4/4 ·
       匿名资源边界 3/3 · 命名管道 PID/SID 互认+DACL 5/5。**推迟 P3b.2**:DNS-SD 自动发现 · 服务账户三服务分权
-- [ ] **S2 · PKI 与身份存储**(🔵 S2.1 已过 · S2.2/S2.3 待建):
+- [x] **S2 · PKI 与身份存储 ✅**(48 断言全绿,对 scratch 测;★ production `init` 未运行):
       - [x] **S2.1** CA + 证书签发核心(`10-core/identity/`,.NET):CA 私钥落 TPM 不可导出 · 服务器/客户端叶签发 ·
-        **扩展全部服务端生成(CSR 注入被忽略)** · CSR PoP 校验 · selftest 11/11(D43 S0.7)
-      - [ ] **S2.2** `init` 命令(铸真 hub_id+CA)· JSON 成员表(devices/device_certificates/generation)·
-        最小 host-admin CLI + client-transport CLI · `${state}/identity/` 排备份+fail-closed 守护(D43 S0.8)
-      - [ ] **S2.3** 独立 bootstrap handler + 完整 transcript **双向六词 SAS 配对** ·
-        enroll/status/claim/complete 幂等状态机 · **单条批准/单条吊销**/限流
+        **扩展全部服务端生成(CSR 注入被忽略)** · CSR PoP 校验 · **11/11**(D43 S0.7)
+      - [x] **S2.2** `init`(铸 hub_id+CA)· JSON 成员表(devices/device_certificates/单调 generation,原子写)·
+        host-admin CLI(init/status/list-devices/revoke-device)· `${state}/identity` 根 + 幂等 fail-closed · **15/15**(D43 S0.8)
+      - [x] **S2.3** **双向六词 SAS**(自写确定性 CBOR→SHA256→HKDF→66bit→6 词;MITM 换服务器叶即被抓)·
+        enroll/status/claim/complete 幂等状态机 · 窗口门 + 队列封顶 8 · **单条批准**(拒 re-approve/批量)· **22/22**
+      - [ ] **推迟 S4/P3b.2**:HTTP `/pair/*` 路由(LAN Edge)· 续期状态机 · **curated SAS 词表(B16,现 v0 占位)** · client-transport CLI
 - [ ] **S3 · 网关先加固(LAN 监听前必须完成)**:
       · `caller_identity` 对非回环地址**直接抛错**(不 return None 后继续)
       · 记忆端点用 `require_trusted_local`/指纹正向映射取代 `classify_caller` 兜底(**代码已备 `gateway.py:216-227`**)
