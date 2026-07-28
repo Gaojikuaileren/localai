@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>localai-lan-edge</AssemblyName>
+    <RootNamespace>LocalAI.LanEdge</RootNamespace>
+  </PropertyGroup>
+  <!-- reuse the S2 identity library sources (exclude its CLI entrypoint) -->
+  <ItemGroup>
+    <Compile Include="..\identity\Ca.cs" />
+    <Compile Include="..\identity\Store.cs" />
+    <Compile Include="..\identity\Sas.cs" />
+    <Compile Include="..\identity\Wordlist.cs" />
+    <Compile Include="..\identity\Pairing.cs" />
+    <Compile Include="..\identity\Identity.cs" />
+    <Compile Include="..\identity\Paths.cs" />
+    <Compile Include="..\identity\HubId.cs" />
+  </ItemGroup>
+</Project>
