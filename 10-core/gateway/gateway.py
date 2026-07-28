@@ -68,6 +68,25 @@ def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
         pass  # 审计落盘失败不阻断拦截本身
 
 
+def _current_user_text(messages) -> str:
+    """只取【本轮最后一条 user 消息】的文本。
+
+    ★ 专供「用户说放行」这类**授权信号**判定 —— 授权只能来自用户此刻的表态,
+      不能来自会话历史、更不能来自 assistant 自己说过的话(否则系统能自我授权)。
+      凭证扫描用的是 _scannable_text(整个载荷),两者【不可共用】,原因见调用处注释。
+    """
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                return c
+            if isinstance(c, list):
+                return "\n".join(p.get("text", "") for p in c
+                                 if isinstance(p, dict) and isinstance(p.get("text"), str))
+            return ""
+    return ""
+
+
 def _scannable_text(messages) -> str:
     """取本轮【将要发给后端】的全部人类可写文本,供 E1 扫描。
 
@@ -209,12 +228,17 @@ async def chat_completions(request: Request):
     # 命中即拦下本轮:不转发后端、不落 L0、不记正文;只记类别(§6.9.8)。
     session_id = request.headers.get("x-session-id", "")
     scan_text = _scannable_text(body.get("messages"))
-    # 「这不是凭证,继续」的两条通道:
-    #   ① header —— 给程序化客户端
-    #   ② ★ 带内暗号 —— 第三方前端(Open WebUI)发不了自定义 header,没有带内通道的话
-    #      一次误报就是【无法解除的硬墙】,用户只能关掉 E1(等于没有 E1)。拦截文案会告诉他怎么写。
+    # ★★ 扫凭证看【整个载荷】,但「用户说放行」这个信号只认【本轮用户消息】。
+    #
+    #   2026-07-28 实测过的严重 bug:两者曾共用 scan_text —— 而拦截文案里带着解除暗号,
+    #   且拦截响应是以 role:assistant 返回的正常消息。于是:
+    #     第1轮被拦 → 前端把拦截文案存进历史 → 第2轮整包重发 → 暗号出现在载荷里
+    #     → override 自动为真 → **该会话此后每一轮 E1 全部自动解除,用户零操作**。
+    #   即 E1 在第一次拦截后就把自己永久关掉了 —— 比没有 E1 更糟,因为你以为它在保护你。
+    #
+    #   语义上也只能这样:放行是「我,用户,现在,声明这不是凭证」,不是历史里出现过这串字。
     override = (request.headers.get("x-localai-e1-override", "").lower() == "continue"
-                or e1.OVERRIDE_PHRASE in scan_text)
+                or e1.OVERRIDE_PHRASE in _current_user_text(body.get("messages")))
     e1r = e1.scan(scan_text)
     if e1r.blocked:
         if override:

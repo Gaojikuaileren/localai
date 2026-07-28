@@ -87,6 +87,32 @@ r = post(f"这是订单号不是账号 DE89370400440532013000 {_e1.OVERRIDE_PHRA
 check("带内暗号 → 放行(→503)", r.status_code == 503)
 check("暗号出现在拦截文案里(用户知道怎么解)", _e1.OVERRIDE_PHRASE in _e1.block_message({"iban"}))
 
+# ★★ 回归:E1 曾经会被自己的拦截文案永久解除(2026-07-28 实测复现过)
+#    拦截文案含暗号 → 前端存进历史 → 下轮整包重发 → override 自动为真 → 该会话此后全放行。
+print("=== ★ E1 不得被自己的拦截文案解除(自我关闭回归)===")
+r1 = post("打款到 DE89 3704 0044 0532 0130 00")
+blk = r1.json()["choices"][0]["message"]["content"]
+check("第1轮被拦", r1.headers.get("X-LocalAI-E1") == "blocked")
+check("拦截文案确实含暗号(这是设计,不是 bug)", _e1.OVERRIDE_PHRASE in blk)
+r2 = post_msgs([{"role": "user", "content": "打款到 DE89 3704 0044 0532 0130 00"},
+                {"role": "assistant", "content": blk},          # 拦截文案进历史
+                {"role": "user", "content": "另一个账号 DE89370400440532013000"}])
+check("★ 第2轮仍被拦(E1 没被自己关掉)", r2.headers.get("X-LocalAI-E1") == "blocked")
+# assistant 消息里的暗号不算授权
+r3 = post_msgs([{"role": "assistant", "content": f"你可以用 {_e1.OVERRIDE_PHRASE} 解除"},
+                {"role": "user", "content": "转到 DE89370400440532013000"}])
+check("★ assistant 说的暗号不构成授权", r3.headers.get("X-LocalAI-E1") == "blocked")
+# 历史里的 user 消息带暗号也不算(授权只认本轮)
+r4 = post_msgs([{"role": "user", "content": f"上一轮我说过 {_e1.OVERRIDE_PHRASE}"},
+                {"role": "assistant", "content": "好的"},
+                {"role": "user", "content": "转到 DE89370400440532013000"}])
+check("★ 历史里的暗号不构成本轮授权", r4.headers.get("X-LocalAI-E1") == "blocked")
+# 本轮用户自己写暗号 → 才放行
+r5 = post_msgs([{"role": "user", "content": "旧消息"},
+                {"role": "assistant", "content": "好的"},
+                {"role": "user", "content": f"转到 DE89370400440532013000 {_e1.OVERRIDE_PHRASE}"}])
+check("本轮用户写暗号 → 放行(→503)", r5.status_code == 503)
+
 # ★ 流式拦截:Open WebUI 等默认 stream:true,必须回 SSE 而不是普通 JSON
 print("=== 流式(stream:true)下被 E1 拦 → 必须是 SSE ===")
 rs = client.post("/v1/chat/completions",
