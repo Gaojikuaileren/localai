@@ -187,17 +187,32 @@ async def chat_completions(request: Request):
             log_gate_rejection(session_id, e1r.categories, "continued")
         else:
             log_gate_rejection(session_id, e1r.categories, "blocked")
+            msg = e1.block_message(e1r.categories)
+            hdrs = {"X-LocalAI-E1": "blocked",
+                    "X-LocalAI-E1-Categories": ",".join(sorted(e1r.categories))}
+            # ★ 必须按客户端要的形态回:Open WebUI 等主力客户端默认 stream:true,
+            #   给它一个非流式 JSON 会解析失败 —— 用户看到的是报错,而不是「这一轮没有发送」的说明。
+            if bool(body.get("stream", False)):
+                def sse():
+                    base = {"id": "e1-block", "object": "chat.completion.chunk",
+                            "created": int(time.time()), "model": f"{alias}(e1-blocked)"}
+                    first = dict(base, choices=[{"index": 0, "finish_reason": None,
+                                                 "delta": {"role": "assistant", "content": msg}}])
+                    last = dict(base, choices=[{"index": 0, "finish_reason": "content_filter",
+                                                "delta": {}}])
+                    yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(last, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(sse(), media_type="text/event-stream", headers=hdrs)
             return JSONResponse(
                 status_code=200,   # 对前端是一条正常回复(assistant 说明),不是错误
-                headers={"X-LocalAI-E1": "blocked",
-                         "X-LocalAI-E1-Categories": ",".join(sorted(e1r.categories))},
+                headers=hdrs,
                 content={
                     "id": "e1-block", "object": "chat.completion",
                     "created": int(time.time()), "model": f"{alias}(e1-blocked)",
                     "choices": [{
                         "index": 0, "finish_reason": "content_filter",
-                        "message": {"role": "assistant",
-                                    "content": e1.block_message(e1r.categories)},
+                        "message": {"role": "assistant", "content": msg},
                     }],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     "x_localai_e1": {"blocked": True, "categories": sorted(e1r.categories)},

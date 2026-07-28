@@ -64,26 +64,33 @@ if ($DownloadOnly) {
   exit 0
 }
 
-# ---------- 阶段 4(明天):配置 + 首启 ----------
+# ---------- 阶段 4:配置 + 启动 ----------
 # 数据目录放 state 下(用户账户/对话;非记忆库,但也是本机状态,纳入备份)
-$DataDir = Join-Path (Get-Path 'db') '..\openwebui'
-$DataDir = [System.IO.Path]::GetFullPath($DataDir)
+$DataDir = Join-Path (Split-Path (Get-Path 'db') -Parent) 'openwebui'
 New-Item -ItemType Directory -Force $DataDir | Out-Null
 $env:DATA_DIR = $DataDir
+# ★ 密钥落 DATA_DIR,不落 venv(实测默认会写进 Scripts\.webui_secret_key —— 秘密不该散在代码目录)
+$env:WEBUI_SECRET_KEY_FILE = Join-Path $DataDir '.webui_secret_key'
 $env:WEBUI_URL = "http://127.0.0.1:8081"
-# ★ 指向【网关】,而不是直连 llama —— 这样 E1/别名/审计全生效
+# ★ 指向【网关】,而不是直连 llama —— 这样 E1/别名/契约回写/审计全生效
 $env:OPENAI_API_BASE_URL = "http://127.0.0.1:8080/v1"
 $env:OPENAI_API_KEY = "localai"          # 网关本机不校验 key(走 OS 身份);占位即可
 $env:ENABLE_OLLAMA_API = "false"
-$env:WEBUI_AUTH = "true"                 # 建首个本机 admin 账户
+$env:WEBUI_AUTH = "true"                 # 首个注册的账户即 admin(你自己注册,脚本不代劳)
 $env:ANONYMIZED_TELEMETRY = "false"      # 关遥测
 $env:SCARF_NO_ANALYTICS = "true"
 $env:DO_NOT_TRACK = "true"
-$env:HF_HUB_OFFLINE = "0"
+# RAG 用我们自己的 embedding 服务,避免它另下一套模型(需 Embedding 服务已在 18084)
+$env:RAG_EMBEDDING_ENGINE = "openai"
+$env:RAG_OPENAI_API_BASE_URL = "http://127.0.0.1:18084/v1"
+$env:RAG_OPENAI_API_KEY = "localai"
+$env:RAG_EMBEDDING_MODEL = "bge-m3"
 
-Say "[4] 首启 Open WebUI @ :8081,指向网关 :8080 …"
-Say "    数据目录 $DataDir · 关遥测 · 首个账户即 admin(你注册)"
-Say "    (前台运行;确认能开后,明天再决定要不要做成开机自启服务)"
-Push-Location (Split-Path $VPy -Parent)
-& $VPy -m open_webui serve --port 8081
-Pop-Location
+Say "[4] 启动 Open WebUI @ :8081,指向网关 :8080 …"
+Say "    数据目录 $DataDir · 关遥测 · RAG 走本地 18084"
+Say "    ★ 首次启动要跑几十条数据库迁移,可能 1-3 分钟,属正常(2026-07-28 实测)。"
+Say "    ★ 浏览器开 http://127.0.0.1:8081 注册第一个账户 —— 它即 admin。脚本不代你建账户。"
+# ★ 入口是 Scripts\open-webui.exe;`python -m open_webui` 不可用(包内无 __main__,实测确认)
+$OwExe = Join-Path (Split-Path $VPy -Parent) 'open-webui.exe'
+if (-not (Test-Path $OwExe)) { Say "  X 找不到 $OwExe"; exit 1 }
+& $OwExe serve --port 8081

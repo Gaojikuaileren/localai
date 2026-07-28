@@ -61,5 +61,20 @@ check("override 放行(→503)", r.status_code == 503)
 r = post("2026-07-27 下午三点开会,提醒我")
 check("日期不误拦(→503)", r.status_code == 503)
 
+# ★ 流式拦截:Open WebUI 等默认 stream:true,必须回 SSE 而不是普通 JSON
+print("=== 流式(stream:true)下被 E1 拦 → 必须是 SSE ===")
+rs = client.post("/v1/chat/completions",
+                 json={"model": "assistant.fast", "stream": True,
+                       "messages": [{"role": "user", "content": "打款到 DE89 3704 0044 0532 0130 00"}]})
+check("流式拦截 200", rs.status_code == 200)
+check("流式 content-type 是 SSE", "text/event-stream" in rs.headers.get("content-type", ""))
+check("流式带 E1 头", rs.headers.get("X-LocalAI-E1") == "blocked")
+txt = rs.text
+check("含 data: 帧", txt.startswith("data: "))
+check("含 [DONE]", "[DONE]" in txt)
+check("含 chat.completion.chunk", "chat.completion.chunk" in txt)
+check("含 content_filter", "content_filter" in txt)
+check("流式文案不回显 IBAN", "DE89" not in txt)
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)
