@@ -259,6 +259,70 @@ BEGIN
 END $$;
 
 -- =====================================================================
+-- 5c) ★★ 把 derived 封顶约束从 denylist 翻成 allowlist(2026-07-28 审查后)
+--
+-- 原写法:`provenance NOT IN ('tool_result','web_content','rag_chunk') OR ...`
+-- 缺陷:**将来任何新增枚举值都让 NOT IN 为真 ⇒ 整条 CHECK 恒真 ⇒ 完全不受约束**。
+--   于是"加了 provenance 忘了同步加约束"这个疏漏,后果是【默认自由】而非默认受限,
+--   而且悄无声息。外联通道(WhatsApp/Signal/Discord 之类)若新增一个 provenance,
+--   它会**直接绕过 0.4 封顶与强制 pending**,拿到与用户直述同级的待遇。
+-- 改法:正面列举"什么算用户直述",其余一律封顶 —— 新枚举默认落在受限一侧。
+--
+-- ★ 本文件 §5 的 attestation CHECK 也是同一类教训(NULL 绕过三值逻辑),
+--   两次都指向同一条规矩:**约束要写成拒绝优先,不能写成放行优先**。
+--
+-- 注:schema.sql 里的内联定义已同步改写(供全新安装);此处的 ALTER 供既有库升级 ——
+--   CREATE TABLE IF NOT EXISTS 不会重建已存在表的约束。
+-- =====================================================================
+-- ★ 清理旧约束必须按【定义形状】,不能按名字猜(2026-07-28 实测踩到):
+--   历史命名不一致 —— l2_episode 用短名 `l2_derived_conf_cap`、l3_fact 用 `l3_...`,
+--   而 entity_* 用的是全表名前缀 `entity_person_derived_conf_cap`。
+--   按 `<表名>_derived_conf_cap` 去 DROP IF EXISTS,在 l2/l3 上根本没命中,
+--   结果是**新旧两条并存**。安全上没破(两条 CHECK 是 AND,严的那条仍生效),
+--   但旧的那条会给以后读代码的人错误示范 —— 而它示范的正是刚被判定有害的 denylist 形状。
+DO $$
+DECLARE t text; c record;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'l2_episode','l3_fact',
+    'entity_person','entity_event','entity_preference','entity_project',
+    'entity_device','entity_place','entity_thing'] LOOP
+
+    FOR c IN SELECT conname FROM pg_constraint
+              WHERE conrelid = format('mem.%I', t)::regclass AND contype = 'c'
+                AND pg_get_constraintdef(oid) LIKE '%provenance%'
+                AND pg_get_constraintdef(oid) LIKE '%source_confidence <= 0.4%'
+    LOOP
+      EXECUTE format('ALTER TABLE mem.%I DROP CONSTRAINT %I', t, c.conname);
+    END LOOP;
+
+    EXECUTE format($c$
+      ALTER TABLE mem.%1$I ADD CONSTRAINT %1$s_derived_conf_cap CHECK (
+        provenance IN ('user_typed','user_voice_asr')
+        OR source_confidence IS NULL
+        OR source_confidence <= 0.4)
+    $c$, t);
+  END LOOP;
+END $$;
+
+-- pending_review 的形状不同:它额外强制 status='pending'(必须停在待审队列里)
+DO $$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT conname FROM pg_constraint
+            WHERE conrelid = 'mem.pending_review'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%provenance%'
+              AND pg_get_constraintdef(oid) LIKE '%pending%'
+  LOOP
+    EXECUTE format('ALTER TABLE mem.pending_review DROP CONSTRAINT %I', c.conname);
+  END LOOP;
+END $$;
+ALTER TABLE mem.pending_review ADD CONSTRAINT pr_derived_forced_pending CHECK (
+  provenance IN ('user_typed','user_voice_asr')
+  OR (status = 'pending'
+      AND (source_confidence IS NULL OR source_confidence <= 0.4)));
+
+-- =====================================================================
 -- 6) 绑触发器(不可覆盖的记忆内容表)
 --
 -- ★★ 本清单【不含 l1_session_summary】,这是有意的(2026-07-28 实测后修正):

@@ -44,6 +44,18 @@ tickets      = 'D:\AI\state\tickets'
 quarantine   = 'D:\AI\state\quarantine'   # delete 的替代品,保留 N 天
 memory       = 'D:\AI\state\memory'       # P3a 创建 · 普通文件夹 · PostgreSQL + Qdrant
                                           # ★ D22:不加密。磁盘与备份盘上均为明文,见 §4.6
+secrets      = 'D:\AI\state\secrets'      # ★★ 长期第三方凭据与私钥的唯一落点
+# ★★ secrets 的两条性质缺一不可,少任何一条这个目录就没有意义:
+#   ① 强 ACL(ai-mem FullControl / ai-asset · ai-exec Deny)—— 挡在线读取
+#   ② **排除出备份**(backup.ps1 的 $excludeAbs)—— 挡离线拷贝
+# 为什么必须有 ②:{state} 就是备份根,backup.ps1 原文把它整根复制到 G:
+# (SanDisk · exFAT · **不加密**,D21)。只做强 ACL 的凭据会被逐字复制到一块随身盘上。
+# D22 已经接受了「丢盘 = 可读全部记忆」,但那笔账**只算了记忆**;
+# 把客户端 CA 私钥、外联通道的账号凭据也一起丢出去,后果不是"被读",是**被接管**
+# ——签发新成员、冒充你发消息。这是另一个量级的事,不能沿用 D22 的结论。
+#   (同样的推理此前已用在 qdrant\config 上,那里也是排除出备份、恢复时重新配发。)
+# 恢复语义:这些东西**不在备份里**。换机/恢复后需重新签发、重新配对、重新链接设备
+#   —— 这正是「换主机 = 所有客户端重新配对」那条安全性质的物理载体。
 
 # -----------------------------------------------------------------------------
 #  记忆库骨架 — P2/P3a · 见 00-docs/memory-backbone-design.md · 决议 D30

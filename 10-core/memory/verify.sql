@@ -114,6 +114,46 @@ VALUES ('满分且有票据','user_typed',1.0,'S0','panel_ticket');
 SELECT CASE WHEN count(*)=1 THEN 'PASS' ELSE 'FAIL — 带票据的 1.0 也被挡了' END AS b6b_ticketed_ok
   FROM mem.l3_fact WHERE statement='满分且有票据';
 
+-- B7 ★★ 持续断言:每一个「非用户直述」的 provenance 都必须被某条 CHECK 盖住。
+--
+-- 这条测试的价值在于它**自动覆盖将来新增的枚举值** —— 加了 provenance 忘了加约束,
+-- 这里立刻变红,而不是等到某条外联消息被铸成 0.6 才发现。
+--
+-- ★ 实现上刻意用【行为断言】而不是比对 pg_get_constraintdef 的文本:
+--   文本匹配在本项目里已经栽过三次(把文档字符串算进去、把 True==1.0 算进去)。
+--   这里的做法是:对每个非 user_* 的枚举值,真的去插一条 source_confidence=0.9,
+--   能插进去就是漏了约束。
+DO $$
+DECLARE
+  lbl      text;
+  leaked   text[] := '{}';
+  user_dir text[] := ARRAY['user_typed','user_voice_asr'];   -- 与 repo.USER_DIRECT 同源
+BEGIN
+  FOR lbl IN
+    SELECT e.enumlabel FROM pg_enum e
+      JOIN pg_type t ON t.oid = e.enumtypid
+     WHERE t.typname = 'provenance'
+  LOOP
+    CONTINUE WHEN lbl = ANY(user_dir);
+    BEGIN
+      INSERT INTO mem.l3_fact (statement, provenance, source_confidence, sensitivity_domain)
+      VALUES ('B7 越权探针 ' || lbl, lbl::mem.provenance, 0.9, 'S0');
+      leaked := leaked || lbl;          -- 插进去了 = 这个来源没被封顶
+    EXCEPTION WHEN check_violation THEN
+      NULL;                             -- 被拒 = 正确
+    END;
+  END LOOP;
+
+  IF array_length(leaked, 1) IS NULL THEN
+    RAISE NOTICE 'PASS — 全部非用户直述来源均被 0.4 封顶';
+  ELSE
+    RAISE NOTICE 'FAIL — ★这些 provenance 逃过了封顶约束: %。'
+                 '多半是新增了枚举值却没同步约束 —— 约束必须写成 allowlist 形状,'
+                 '写成 denylist 时新枚举会默认自由。', leaked;
+  END IF;
+END $$;
+DELETE FROM mem.l3_fact WHERE statement LIKE 'B7 越权探针%';
+
 \echo '======================================================================'
 \echo ' C. ★★ S2 隔离 — 核心否定用例(核验指出原版缺失,此处补齐)'
 \echo '======================================================================'

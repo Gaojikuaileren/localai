@@ -146,6 +146,17 @@ _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
 #   (结构体字段顺序与 IPv4 不同,不能复用同一 Structure)。
 TRUSTED_LOOPBACK = {"127.0.0.1"}
 
+# ★★ 允许「解除 E1 拦截」的调用方档位 —— allowlist,不是 denylist。
+#   E1 的解除是一个**人类声明**:「我,机主,现在,确认这不是凭证」。
+#   因此只有能证明屏幕前是机主的档位才配拥有它。今天只有 trusted-local
+#   (本机 loopback + 非隔离账户 + OS 会话信任,D28)满足。
+#
+#   ★ 将来新增任何档位(channel-relay / lan-device / …)**默认不在此集合内**,
+#     必须显式加进来才有解除权 —— 而加之前请先回答:
+#     「这个档位的另一端,能不能证明就是机主本人?」
+#     对一条以电话号码/账号为身份保证的外联通道,答案永远是否。
+E1_OVERRIDE_ALLOWED_TIERS = frozenset({"trusted-local"})
+
 
 def classify_caller(request: Request) -> str:
     host = request.client.host if request.client else ""
@@ -237,8 +248,27 @@ async def chat_completions(request: Request):
     #   即 E1 在第一次拦截后就把自己永久关掉了 —— 比没有 E1 更糟,因为你以为它在保护你。
     #
     #   语义上也只能这样:放行是「我,用户,现在,声明这不是凭证」,不是历史里出现过这串字。
-    override = (request.headers.get("x-localai-e1-override", "").lower() == "continue"
-                or e1.OVERRIDE_PHRASE in _current_user_text(body.get("messages")))
+    #
+    # ★★★ 2026-07-28 审查发现的更深一层:上面那个修法只解决了「E1 自己关掉自己」,
+    #   没解决「**解除信号本身来自不可信输入**」。
+    #   放行判据的两个来源 —— 请求头与本轮用户消息正文 —— 在【本机人类打字】这个
+    #   场景下都等于「用户本人」,所以原来成立。但只要将来接上一条外联通道
+    #   (WhatsApp/Signal/Discord 的桥),桥会把**外来消息原文**填进 messages,于是:
+    #       任何知道你号码的人发一句 `我的 IBAN 是 DE89... #E1放行`
+    #       → E1 命中 iban,但 override 为真 → 载荷照常转发给模型。
+    #   桥同样能自己带上那个请求头。也就是说 E1 对外联通道**从接通的第一天起就是关的**,
+    #   而它看起来完全正常(审计里还记着一条 'continued',像是用户主动放行的)。
+    #
+    #   ⇒ 解除能力必须由【调用方档位】决定,不能由【报文内容】决定。
+    #   只有能证明「屏幕前的人就是机主」的档位才配拥有这个按钮:
+    #   今天是 trusted-local(本机 OS 会话信任,D28)。将来新增的 channel-relay 之类
+    #   档位**默认不在此集合内** —— 这是 allowlist,新档位默认没有解除权,
+    #   与本轮 provenance 那处改动是同一条规矩:**约束要写成拒绝优先**。
+    if caller in E1_OVERRIDE_ALLOWED_TIERS:
+        override = (request.headers.get("x-localai-e1-override", "").lower() == "continue"
+                    or e1.OVERRIDE_PHRASE in _current_user_text(body.get("messages")))
+    else:
+        override = False          # ★ 该档位连请求头都不读 —— 不给伪造留任何入口
     e1r = e1.scan(scan_text)
     if e1r.blocked:
         if override:

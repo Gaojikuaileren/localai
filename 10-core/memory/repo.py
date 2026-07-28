@@ -115,6 +115,19 @@ class FactWrite:
 
 _ALLOWED_PROVENANCE = {"user_typed", "user_voice_asr", "tool_result", "rag_chunk", "web_content"}
 
+# ★★ 「什么算用户直述」的**唯一定义**。DB 层的 CHECK、gate 的定级、§4.5 的 is_user_fact
+#   三处必须共用同一条判据 —— 分开写就会漂移,而漂移的方向永远是放松。
+#
+# 它必须是 **allowlist**:凡不在此集合内的 provenance 一律按 derived 处理
+#   (封顶 0.4 + 强制 pending)。反过来写成 denylist 的后果 2026-07-28 审查已验明:
+#   将来新增任何枚举值都会**自动逃逸全部约束**,且不报错 —— 而最想走这条捷径的
+#   恰恰是将来那条外联通道。
+#
+# ★ 加新 provenance 时不要往这里加,除非它真的等价于「本人当面说的话」。
+#   注意 user_voice_asr 的陷阱:语音消息经 ASR 也长这个样子,
+#   但**它算不算用户直述取决于麦克风在哪台机器上,而不是取决于输入是不是语音**。
+USER_DIRECT = {"user_typed", "user_voice_asr"}
+
 
 def _server_now() -> datetime:
     """★ 时间戳一律以服务端为准(§4.11.3):客户端时钟不可信。"""

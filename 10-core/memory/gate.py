@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from tainted import TaintedText, seal, safe_meta
 import repo
-from repo import FactWrite, RepoError
+from repo import FactWrite, RepoError, USER_DIRECT
 
 # 凭证正则族只有一份实现(§6.9.4:五个强制点调同一个函数,五份拷贝必然漂移)。
 # ★ 技术债:它目前住在 10-core/gateway,memory 这边靠 sys.path 借用。
@@ -169,8 +169,16 @@ def mint_confidence(*, provenance: str, ticket_id: Optional[str],
       助理从对话流推断          0.6   不可自动 supersede
       tool_result/rag/web 派生  0.4   强制 pending
     """
-    derived = {"tool_result", "rag_chunk", "web_content"}
-    if provenance in derived:
+    # ★★ allowlist,不是 denylist(2026-07-28 审查后改写)。
+    #   原写法是 `derived = {"tool_result","rag_chunk","web_content"}` 再判 in ——
+    #   于是**任何新增的 provenance 都不在这个集合里 ⇒ 直接落到最后一行拿 0.6**,
+    #   而 0.6 正好等于 D33③ 给"手机有设备签名"的档位。
+    #   也就是说:将来接一条外联通道(WhatsApp/Signal/Discord),它的消息会被
+    #   自动铸成 0.6 —— 与"经过设备密钥验签的远程写入"同级,而它的身份保证
+    #   实际上只是一个可被 SIM swap / 账号劫持的号码。
+    #   改成正面列举"什么算用户直述",其余一律 derived(0.4 + 强制 pending),
+    #   与 DB 层的 CHECK 形状保持一致 —— 两层用同一条判据,不给漂移留缝。
+    if provenance not in USER_DIRECT:
         return 0.4, "derived"
     if ticket_id and _TICKETS.consume(ticket_id, session_id, candidate):
         return 1.0, "panel_ticket"

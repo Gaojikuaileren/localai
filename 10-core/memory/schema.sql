@@ -155,8 +155,14 @@ CREATE TABLE IF NOT EXISTS mem.l2_episode (
   source_confidence  numeric     CHECK (source_confidence IS NULL OR source_confidence BETWEEN 0 AND 1),
   sensitivity_domain mem.sensitivity_domain NOT NULL,
   crypto_tier        text        NULL DEFAULT NULL,
+  -- ★★ allowlist 形状,不是 denylist(2026-07-28 审查后改写)。
+  --   原写法是 `provenance NOT IN ('tool_result','web_content','rag_chunk') OR ...`,
+  --   于是**将来任何新增的枚举值都会让 NOT IN 为真 ⇒ 整条 CHECK 恒真 ⇒ 不受任何约束**。
+  --   也就是说"加一个 provenance 忘了同步加约束"这个疏漏,后果是【默认自由】而不是默认受限,
+  --   而且不报错。改成正面列举"什么是用户直述",其余一律封顶 0.4。
+  --   同一处教训与 §4.5 铁律那次(NULL 绕过 CHECK)同源:约束要写成拒绝优先。
   CONSTRAINT l2_derived_conf_cap CHECK
-    (provenance NOT IN ('tool_result','web_content','rag_chunk')
+    (provenance IN ('user_typed','user_voice_asr')
      OR source_confidence IS NULL OR source_confidence <= 0.4)
 );
 COMMENT ON COLUMN mem.l2_episode.crypto_tier IS 'D22 已停用加密,本列预留';
@@ -178,8 +184,9 @@ CREATE TABLE IF NOT EXISTS mem.l3_fact (
   source_confidence  numeric     CHECK (source_confidence IS NULL OR source_confidence BETWEEN 0 AND 1),
   sensitivity_domain mem.sensitivity_domain NOT NULL,
   crypto_tier        text        NULL DEFAULT NULL,
+  -- ★★ allowlist 形状(理由同 l2_derived_conf_cap)
   CONSTRAINT l3_derived_conf_cap CHECK
-    (provenance NOT IN ('tool_result','web_content','rag_chunk')
+    (provenance IN ('user_typed','user_voice_asr')
      OR source_confidence IS NULL OR source_confidence <= 0.4)
 );
 COMMENT ON COLUMN mem.l3_fact.crypto_tier IS 'D22 已停用加密,本列预留';
@@ -209,8 +216,9 @@ BEGIN
         source_confidence  numeric CHECK (source_confidence IS NULL OR source_confidence BETWEEN 0 AND 1),
         sensitivity_domain mem.sensitivity_domain NOT NULL,
         crypto_tier        text NULL DEFAULT NULL,
+        -- ★★ allowlist 形状(理由同 l2_derived_conf_cap)
         CONSTRAINT %1$s_derived_conf_cap CHECK
-          (provenance NOT IN ('tool_result','web_content','rag_chunk')
+          (provenance IN ('user_typed','user_voice_asr')
            OR source_confidence IS NULL OR source_confidence <= 0.4)
       )$f$, t);
     EXECUTE format('COMMENT ON COLUMN mem.%I.crypto_tier IS %L', t, 'D22 已停用加密,本列预留');
@@ -285,8 +293,11 @@ CREATE TABLE IF NOT EXISTS mem.pending_review (
   created_at         timestamptz NOT NULL DEFAULT now(),
   sensitivity_domain mem.sensitivity_domain NOT NULL,
   crypto_tier        text        NULL DEFAULT NULL,
+  -- ★★ allowlist 形状(理由同 l2_derived_conf_cap)。
+  --   这一条尤其要紧:它决定"哪些来源必须停在待审队列里"。写成 denylist 时,
+  --   新增来源会**直接跳过人工确认**进库 —— 这正是外联通道最想走的那条捷径。
   CONSTRAINT pr_derived_forced_pending CHECK
-    (provenance NOT IN ('tool_result','web_content','rag_chunk')
+    (provenance IN ('user_typed','user_voice_asr')
      OR (status = 'pending'
          AND (source_confidence IS NULL OR source_confidence <= 0.4)))
 );
