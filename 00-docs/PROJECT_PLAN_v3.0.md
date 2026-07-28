@@ -1971,6 +1971,7 @@ G:\localAI-backup\  ★手动全量(不加密 — D21)· 12 代保留
 | **B14** | 课件预设文件的内容与格式 | 做 PPT 工作室时 | D42.3:声明式模板(课程名/听众/版式/章节骨架/术语表/常设指令);用户手管、不进记忆;AI 代改则走 P6 文件区+哈希绑定 |
 | **B15** | **换本地模型时的替换评测** | 未来换模型/换量化时(约 P4 附近) | Codex 交付评测包 `90-ops/localai-model-replacement-eval/`(55 题 + RUBRIC + scorecard + 6 视觉夹具)。★ **五步纪律(别忘)**:①先用当前模型建基线 ②按别名分测 assistant.fast/deep/vision ③依次 smoke→core→safety→full ④**安全硬失败不能被其他高分抵消** ⑤通过后才改语义别名映射。只比模型、不改架构/registry/中央文档;不因接入它打断 P3b |
 | **B16** | **curated 六词 SAS 词表** | P3c UI 落地配对界面时 | 现 `Wordlist.cs` = v0 占位(CVC 生成词);换成 curated 中/英(或 BIP-39)2048 词表,提升人工比对可读性。**只换显示词,不改索引/HKDF/安全性质**;词表须冻结+版本号(与 SAS transcript 同护) |
+| **B17** | **★★ TPM 密钥 ↔ SChannel/Kestrel TLS 集成(需裁定)** | **开真 LAN(S5)前** | S4 实测:TPM 密钥可**签名**(CA 已证)但**不能用作 TLS 凭据**(Kestrel/SChannel "unexpected EOF")。D35/D43 S0.7 要求密钥落 TPM。三选一:①攻坚 TPM↔SChannel(可能需 LocalMachine keyset/提权/特定 KSP 用法)②TLS 用**不可导出软件 CNG 密钥**、CA 仍 TPM(弱化 D35 的设备-TPM 绑定,需改 D35/D43)③混合。**不自行改写 D35** —— 待用户裁定。Edge 逻辑已用软件密钥证明全对(8/8)|
 
 **复核规则**:每次版本更新时逐条复核;同时复核 `snapshots/` 里的第三方条款是否已变。
 
@@ -2176,8 +2177,10 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
       · `/health` 收窄(不泄别名)· `/v1/models` 认证 · 新增 `LAN_EDGE` 档(纵深防御,永不落 trusted-local)
       · `require_trusted_local` 仍备(记忆端点将用)· **P3a caller-policy + E1 契约回归全过**
       · 剩(不阻塞开 LAN 的门):llama-server `--api-key`(防绕过直连 18081)→ 随 start-stack/secrets
-- [ ] **S4 · LAN Edge(仍不开放 LAN)**:独立低权限服务 · 只代理固定回环网关 · 匿名配对路由组只调 registry 受限 IPC ·
-      Kestrel 资源上限 · Windows Event Log+结构化审计+告警限流 · 否定用例全在 loopback/synthetic 通过
+- [x] **S4 · LAN Edge ✅ 逻辑完成**(`10-core/lan-edge/`,.NET Kestrel · selftest 8/8,回环):
+      mTLS 终止 + 客户端证书验证(链到 CA + clientAuth + **成员表 active**)· 业务代理回环网关(**注入验证过的指纹、
+      剥除客户端自带 X-LocalAI-***)· `/pair/*` 匿名路由接 S2 配对 · Kestrel 资源上限 · 只绑回环。
+      ★★ **开真 LAN 前置 = 先裁定 B17**(SChannel 不能用 TPM 密钥做 TLS 凭据;逻辑已用软件密钥证全对)
 - [ ] **S5 · 可恢复地开放 LAN**:activation 精简(启动对账+不满足即回环;**7 步持久 saga 推迟 P3b.2**)·
       防火墙窄化(**选定网卡+Private+LocalSubnet**,D43 S0.6)· 冲突规则扫描 · 先启用规则再绑监听(无"已监听未就绪"窗口)
 - [ ] **S6 · 第二台 Windows PC 实机验收**(Q4=有):初次配对 · 换 DHCP 免重配 · 拔 WAN(只断互联网)冷启动仍可用 +
