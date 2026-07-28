@@ -116,9 +116,54 @@ def _scannable_text(messages) -> str:
     return "\n".join(parts)
 
 
+class RegistryError(RuntimeError):
+    """注册表不合法 —— 拒绝启动。"""
+
+
 def load_registry() -> dict:
+    """加载别名表。★ 每个别名必须显式声明 `egress`,缺字段则**拒绝启动**。
+
+    §4.6.3 要求「模型别名注册表给每个后端打 egress: true|false」。
+    这里做成 fail-closed 而不是「缺字段视为 false」,理由与本项目其他几处同源:
+
+      缺字段默认「不出境」是 **denylist 形状** —— 将来新增一个云端别名时忘了写,
+      它会被**默认当成本地后端**,记忆正文就跟着上去了,而且不报错。
+      同一族缺陷此前已出现三次:provenance denylist(新枚举逃逸全部约束)、
+      E1 override(新档位默认有解除权)、unseal caller(新档位默认放行)。
+
+    ★ 判据与 sensitivity 无关:一条 S0 记忆送进云端,同样违反 §5.6.2 的 L5。
+    """
     with open(REGISTRY_PATH, "rb") as f:
-        return tomllib.load(f)["aliases"]
+        aliases = tomllib.load(f)["aliases"]
+
+    missing = sorted(n for n, a in aliases.items() if "egress" not in a)
+    if missing:
+        raise RegistryError(
+            f"别名缺少必填的 egress 字段,拒绝启动:{missing}。\n"
+            "  每个后端都必须显式声明它在不在你的控制之内(§4.6.3)。\n"
+            "  这里不设默认值 —— 缺字段默认『不出境』会让新增的云端别名\n"
+            "  被当成本地后端,记忆正文跟着上去而且不报错。")
+    bad = sorted(n for n, a in aliases.items() if not isinstance(a["egress"], bool))
+    if bad:
+        raise RegistryError(f"egress 必须是布尔值,拒绝启动:{bad}")
+    return aliases
+
+
+def backend_of(alias: str):
+    """给 tainted.unseal_for_prompt 用的后端契约。★ 未知别名一律按【出境】处理。"""
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class _B:
+        name: str
+        egress: bool
+
+    entry = REGISTRY.get(alias)
+    if entry is None:
+        # ★ 未知别名 fail-closed:按最坏情况当成出境后端。
+        #   「查不到就放行」会让一个拼错的别名变成一条静默的出境路径。
+        return _B(alias, True)
+    return _B(alias, bool(entry["egress"]))
 
 
 REGISTRY = load_registry()

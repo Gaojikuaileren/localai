@@ -21,6 +21,14 @@ SET search_path = mem, public;
 
 -- =====================================================================
 -- 1) append-only 守卫:内容与元数据列不可变
+--
+-- ★★★ 本函数在文件末尾的 **S4-1 段被重定义**,以那一版为准(CREATE OR REPLACE,
+--      最后一个生效)。下面这一版是 S0 时的原貌,保留是为了让演进过程可读。
+--      两处的实质差异:
+--        · S4 版把 sensitivity_domain 加进可写白名单(手动标记走单向棘轮)
+--        · S4 版的 RAISE 消息**不含新旧值** —— 实测确认带值会把记忆正文
+--          写进 PG 服务器日志(§9.2 永不记录记忆库内容)
+--      ⇒ **改这里没有用**,要改请改 S4-1 段。
 -- =====================================================================
 CREATE OR REPLACE FUNCTION mem.tg_append_only() RETURNS trigger
   LANGUAGE plpgsql AS $$
@@ -791,5 +799,116 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
     GRANT EXECUTE ON FUNCTION mem.tg_pending_initial_state() TO ai_mem_local;
+  END IF;
+END $$;
+
+-- =====================================================================
+-- =====================================================================
+--  S4 · 隐私三层 · 域S2 的第二个生产者:用户手动标记
+-- =====================================================================
+-- =====================================================================
+
+-- =====================================================================
+-- S4-1) ★★ sensitivity_domain 的【单向收紧】通道
+--
+-- 规格(§4.11.4:520)把「用户手动标记」列为域S2 的判据之一,但它对**已存在的行**
+-- 根本执行不了:tg_append_only 的可 UPDATE 白名单里没有 sensitivity_domain,
+-- 于是 `UPDATE ... SET sensitivity_domain='S2'` 抛「记忆内容不可覆盖」。
+-- ⇒ 域S2 的两个合法生产者(写入时定级 / 事后手动标记),第二个在 DB 层是死的。
+--
+-- 裁定:开一条**单向**通道,与 redacted_at / superseded_by / vector_point_id 同一模式。
+--
+--   S0 / S1  →  S2   ✓ 收紧。用户说「这条其实是机密」——安全方向。
+--   S2  →  S0 / S1   ✗ 降级。等价于把机密内容放进 v_memory_nons2、放进 mem_main,
+--                       与 §4.11.4「S2 结构性不可见,**无提级路径**」是同一件事的两面:
+--                       给远程开权限、和把内容降级到远程可见,效果完全一样。
+--   S0  ↔  S1        ✗ 本期不区分(§4.11.4 两级不是三级),不给它留活动空间,
+--                       否则「什么时候开始区分」会变成既成事实而不是显式决定。
+--
+-- ★ 要把一条 S2 降回去,唯一路径是 redact 后重写 —— 那样历史里留得下痕迹。
+-- =====================================================================
+CREATE OR REPLACE FUNCTION mem.tg_sensitivity_ratchet() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.sensitivity_domain IS NOT DISTINCT FROM OLD.sensitivity_domain THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.sensitivity_domain = 'S2' THEN
+    RETURN NEW;                       -- 收紧:放行
+  END IF;
+  RAISE EXCEPTION
+    '敏感度只能收紧,不能放松(%.% id=%):% → %。'
+    '把 S2 降回 S0/S1 等价于让它进入 v_memory_nons2 与 mem_main —— '
+    '与「给远程开权限」是同一件事的两面(§4.11.4 无提级路径)。'
+    '要降级请走 redact 后重写,那样历史里留得下痕迹。',
+    TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id,
+    OLD.sensitivity_domain, NEW.sensitivity_domain
+    USING ERRCODE = 'check_violation';
+END $$;
+
+-- 把 sensitivity_domain 加进 append-only 的可写白名单,并绑棘轮触发器
+CREATE OR REPLACE FUNCTION mem.tg_append_only() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+  col   text;
+  oldv  text;
+  newv  text;
+  -- 允许被 UPDATE 的列(白名单):
+  --   superseded_by      冲突处理的唯一合法写(另有方向约束)
+  --   redacted_at        D33② tombstone 删除(单向)
+  --   review_status /
+  --   reviewed_at        已废弃,仅为不破坏历史行
+  --   sensitivity_domain S4:用户手动标记(**单向收紧**,由 tg_sensitivity_ratchet 守方向)
+  allowed text[] := ARRAY['superseded_by','redacted_at','review_status','reviewed_at',
+                          'sensitivity_domain'];
+BEGIN
+  FOR col IN
+    SELECT a.attname FROM pg_attribute a
+     WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped
+  LOOP
+    IF col = ANY(allowed) THEN CONTINUE; END IF;
+    EXECUTE format('SELECT ($1).%I::text, ($2).%I::text', col, col)
+      INTO oldv, newv USING OLD, NEW;
+    IF oldv IS NOT DISTINCT FROM newv THEN CONTINUE; END IF;
+
+    IF col = 'vector_point_id' THEN
+      IF oldv IS NULL OR newv IS NULL THEN CONTINUE; END IF;
+      RAISE EXCEPTION
+        '向量指针不得重指(%.% 列 %)。该指针是 tombstone 删除时定位向量点的唯一依据,'
+        '改指会让删除删错点 —— 正文没了、向量还在库里继续被检索命中。'
+        '要换点请先置 NULL 再设新值。',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME, col
+        USING ERRCODE = 'check_violation';
+    END IF;
+
+    -- ★★ 消息里不得出现值(见 S4 实测:PG 服务器日志会把 ERROR 消息写到磁盘)
+    RAISE EXCEPTION
+      '记忆内容不可覆盖(§4.5):表 %.% 的第 % 行,列 % 试图被改写。'
+      '冲突处理必须【新增一行并把旧行 superseded_by 指向它】,不是改写。'
+      '删除请用 redacted_at(D33②:tombstone + 隔离区)。'
+      '(本消息刻意不含新旧值 —— 它会被写进 PG 服务器日志,见 §9.2)',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.id, col
+      USING ERRCODE = 'check_violation';
+  END LOOP;
+  RETURN NEW;
+END $$;
+
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'l2_episode','l3_fact',
+    'entity_person','entity_event','entity_preference','entity_project',
+    'entity_device','entity_place','entity_thing'] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS trg_sens_ratchet ON mem.%I', t);
+    EXECUTE format('CREATE TRIGGER trg_sens_ratchet BEFORE UPDATE ON mem.%I
+                    FOR EACH ROW EXECUTE FUNCTION mem.tg_sensitivity_ratchet()', t);
+  END LOOP;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_mem_local') THEN
+    GRANT EXECUTE ON FUNCTION mem.tg_sensitivity_ratchet() TO ai_mem_local;
   END IF;
 END $$;
