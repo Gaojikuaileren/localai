@@ -414,7 +414,9 @@ class PendingWrite:
     session_id: str
     supersedes_ref: Optional[int] = None
     origin_device_id: str = "workstation"
-    ttl_days: int = 14
+    # ★ float 而非 int:expires_at 一经入队即被 DB 冻结(不可延长也不可缩短),
+    #   所以"造一条马上过期的候选"只能在入队时指定,不能事后改 —— 测试因此需要小数。
+    ttl_days: float = 14.0
 
 
 @dataclass
@@ -667,16 +669,39 @@ def log_gate_rejection(conn: psycopg.Connection, categories: List[str],
     """E3 命中的审计。★ 只记 (类别, 时间, 会话) —— 不记 body、不记片段、不记哈希。
 
     §6.9.8:定长 IBAN 的哈希可爆破,所以连哈希都不能记。
-    ★ 必须落库:此前只 append 进进程内存列表,重启即失,§9.3 的告警无从计数。
     每个类别一行(表结构就是每行一个 category 枚举)。
+
+    ★★ 走**独立连接**并立即提交,不用调用方的 conn。
+
+      2026-07-28 实测发现的缺陷:审计原本写在调用方的事务里,而 Gate 命中后
+      立刻 raise —— 调用方 rollback 时**把审计记录一起回滚了**。
+      净效果是:攻击者的每一次被拒尝试都不留痕迹,而 §9.3 的告警正要靠这张表计数。
+      「拒绝要被审计」于是只在"调用方恰好没有回滚"时成立。
+
+      ⇒ 审计必须活在**被审计对象的事务之外**。拒绝是稀有事件(要么是攻击、
+        要么是误操作),多开一条短连接的代价可以忽略,换来的是"回滚抹不掉痕迹"。
+
+    ★ 本函数**永不抛异常**:审计失败不该把主流程的拒绝理由盖掉
+      (那会把"候选含凭证"变成"数据库错误",用户看到的原因就错了)。
+      审计写不进去时只在 stderr 留一行 —— 它本身就是需要被注意到的异常状态。
     """
     if not categories:
         return
+    audit_conn = None
     try:
-        with conn.cursor() as cur:
+        audit_conn = psycopg.connect(_dsn(), autocommit=True)
+        with audit_conn.cursor() as cur:
             for c in sorted(set(categories)):
                 cur.execute("""INSERT INTO mem.gate_rejection
                                  (category, session_id, sensitivity_domain)
                                VALUES (%s, %s, 'S2')""", (c, session_id or "unknown"))
-    except psycopg.Error as e:
-        raise _sanitize(e) from None
+    except Exception as e:                      # noqa: BLE001 —— 见上,审计不得掩盖主因
+        import sys as _sys
+        print(f"[gate_rejection 审计写入失败] {type(e).__name__} —— "
+              f"拒绝本身仍然生效,但这一条没能留痕", file=_sys.stderr)
+    finally:
+        if audit_conn is not None:
+            try:
+                audit_conn.close()
+            except Exception:
+                pass
