@@ -98,7 +98,8 @@ public static class Transport
         await onSas(reqId, sas);   // human compares the six words; host approves out of band
 
         using var cli = Trusted(dial, caPublic, null);
-        JsonElement st; var deadline = Environment.TickCount64 + 60_000;
+        // 3 min: enough for the operator to compare the six words across two screens and type `approve`.
+        JsonElement st; var deadline = Environment.TickCount64 + 180_000;
         while (true)
         {
             st = await Post(cli, edgeUrl + "/pair/status", new { requestId = reqId, claimSecret = Convert.ToBase64String(claimSecret) });

@@ -1,6 +1,6 @@
 # STATE — 本地 AI 中枢
 
-> 更新时间: 2026-07-28 20:10
+> 更新时间: 2026-07-29 14:35
 > 方案书版本: **v3.0**(v2.2 已归档 · 阶段重排见 D34-D41)
 > 格式定义: v3.0 §12.1 记录协议
 >
@@ -17,7 +17,7 @@
 | **P1 基准测试** | ✅ **完成 17/17 全部实测**(2026-07-27) |
 | **P2 核心链路** | ✅ **基本完成** —— 权限档位已移至 P4(D37);WebAuthn 已作废(D34) |
 | **P3a 记忆系统** | ✅ **已验收(2026-07-28)** —— S0–S9 全部完成,四门全绿(见下) |
-| **P3b 身份与准入** | 🔵 **回环可建部分全部完成** —— S0–S4 ✅ · B17(D44)✅ · **独立 client-transport CLI ✅**(5/5,第二台 PC 客户端就绪)。**再无纯回环可建项**。剩三件全需你/物理:① `localai-identity init` 铸真身份 ② `lan-firewall.ps1` 开 LAN(elevated)③ 第二台 PC 按 `S6-acceptance-checklist.md` 验收。全程回环、未开 LAN、未铸真身份 |
+| **P3b 身份与准入** | 🔵 **代码全部就绪 · 实机上线中** —— S0–S4 ✅ · B17(D44)✅ · client-transport CLI ✅(5/5)· **S5 ✅**:Edge LAN 绑定(`run-lan <ip>`)+ **交互式配对控制台**(六词弹屏 + `approve/deny/list`,`Pairing` 已线程安全)+ 客户端批准窗放宽至 3 分钟。**真身份已铸**:hub `ngh745jwd6ouhbmy`(CA 在 TPM,server 软密钥,D:\AI\state\identity)。**第二台 PC 单文件 exe 已产出并冒烟 5/5**(`dist/2nd-pc/`,自包含免装 .NET)。回归全绿:identity 48 + lan-edge 8 + client-e2e 6。剩两件需你/物理:① `lan-firewall.ps1` 开 LAN 端口(elevated,一次性)② 第二台 PC 跑 `pair` + 主机 `approve`,按 `S6-acceptance-checklist.md` 验收 |
 
 ### ★ P3a 验收签字(§14 四门 · 2026-07-28)
 

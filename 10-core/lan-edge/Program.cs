@@ -19,15 +19,115 @@ using System.Text.Json;
 using LocalAI.Identity;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
+try { Console.OutputEncoding = Encoding.UTF8; } catch { /* redirected/legacy console -- ignore */ }
+
 return (args.Length == 0 ? "" : args[0]) switch
 {
     "selftest" => await Selftest(),
     "client-e2e" => await ClientE2E(),
     "run" => await Run(),
+    "run-lan" => await RunLan(args),
     _ => Usage(),
 };
 
-static int Usage() { Console.WriteLine("usage: localai-lan-edge <run|selftest|client-e2e>"); return 2; }
+static int Usage() { Console.WriteLine("usage: localai-lan-edge <run | run-lan <bind-ip> | selftest | client-e2e>"); return 2; }
+
+// S5: open the LAN by binding a selected NIC address (not loopback). The narrow firewall rule
+// (lan-firewall.ps1, run by the user, elevated) must already be in place -- until then the OS default
+// inbound block keeps the port unreachable, so there is no "listening but unprotected" window.
+static async Task<int> RunLan(string[] a)
+{
+    if (a.Length < 2 || !IPAddress.TryParse(a[1], out var ip))
+    { Console.WriteLine("usage: localai-lan-edge run-lan <bind-ip>   (e.g. 192.168.178.61)"); return 2; }
+    var idDir = Paths.IdentityDir();
+    var secDir = Paths.SecretsDir();
+    if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: localai-identity init)"); return 1; }
+    var serverName = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(idDir, "hub.json"))).RootElement.GetProperty("server_name").GetString();
+
+    // Real bring-up needs a human gate: the operator compares the six words shown here against the 2nd PC
+    // screen, then types `approve`. We own the Pairing instance so the console REPL and the HTTP routes
+    // share the same state; OnEnroll pushes each incoming request's SAS to this console.
+    var pairing = new Pairing(idDir, secDir);
+    pairing.OpenWindow(TimeSpan.FromMinutes(30));
+
+    void OnEnroll(EnrollNotice n)
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 新配对请求 =====================================");
+        Console.WriteLine($"  请求 {n.RequestId[..8]}    设备名: {(string.IsNullOrEmpty(n.DisplayName) ? "(未命名)" : n.DisplayName)}");
+        Console.WriteLine($"  六个词:  {string.Join("  ", n.Sas)}");
+        Console.WriteLine($"  -> 在第二台 PC 屏幕上核对这六个词,一致则输入:  approve {n.RequestId[..8]}");
+        Console.WriteLine("===================================================");
+        Console.Write("> ");
+    }
+
+    var app = Edge.Build(new EdgeConfig(idDir, secDir, "http://127.0.0.1:8080", 8443, ip, OnEnroll), pairingOverride: pairing);
+    await app.StartAsync();
+
+    Console.WriteLine($"LAN Edge 已监听 {ip}:8443   ->  上游 127.0.0.1:8080");
+    Console.WriteLine($"  证书名(SAN)   : {serverName}");
+    Console.WriteLine($"  第二台 PC 连接 : https://{serverName}:8443   (拨号 {ip}:8443)");
+    Console.WriteLine($"  配对窗口       : 已开启 30 分钟");
+    Console.WriteLine($"  ★ 端口不可达时,先用 lan-firewall.ps1(管理员)放行");
+    Console.WriteLine();
+    Console.WriteLine("命令:  list | approve <id> | deny <id> | open [分钟] | close | quit");
+    Console.Write("> ");
+
+    while (true)
+    {
+        var line = Console.ReadLine();
+        if (line is null) break;   // stdin closed
+        var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) { Console.Write("> "); continue; }
+        try
+        {
+            switch (parts[0].ToLowerInvariant())
+            {
+                case "list": case "l":
+                    var pend = pairing.ListPending();
+                    if (pend.Count == 0) Console.WriteLine("  (无待处理请求)");
+                    foreach (var p in pend)
+                        Console.WriteLine($"  {p.RequestId[..8]}  [{p.Status,-18}]  {(string.IsNullOrEmpty(p.DisplayName) ? "(未命名)" : p.DisplayName)}   {string.Join(" ", p.Sas)}");
+                    break;
+                case "approve": case "a":
+                    if (parts.Length < 2) { Console.WriteLine("  用法: approve <请求id前几位>"); break; }
+                    var ar = pairing.ResolveByPrefix(parts[1]);
+                    pairing.Approve(ar);
+                    Console.WriteLine($"  已批准 {ar[..8]} — 等待第二台 PC 领证并完成…(稍后 list 应显示 active)");
+                    break;
+                case "deny": case "d":
+                    if (parts.Length < 2) { Console.WriteLine("  用法: deny <请求id前几位>"); break; }
+                    var dr = pairing.ResolveByPrefix(parts[1]);
+                    pairing.Deny(dr);
+                    Console.WriteLine($"  已拒绝 {dr[..8]}");
+                    break;
+                case "open":
+                    var mins = parts.Length >= 2 && int.TryParse(parts[1], out var mm) ? mm : 30;
+                    pairing.OpenWindow(TimeSpan.FromMinutes(mins));
+                    Console.WriteLine($"  配对窗口已开启 {mins} 分钟");
+                    break;
+                case "close":
+                    pairing.CloseWindow();
+                    Console.WriteLine("  配对窗口已关闭(不再接受新请求)");
+                    break;
+                case "help": case "?":
+                    Console.WriteLine("  list | approve <id> | deny <id> | open [分钟] | close | quit");
+                    break;
+                case "quit": case "q": case "exit":
+                    Console.WriteLine("  正在停止 Edge…");
+                    await app.StopAsync();
+                    return 0;
+                default:
+                    Console.WriteLine("  未知命令。输入 help 查看。");
+                    break;
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("  ! " + ex.Message); }
+        Console.Write("> ");
+    }
+    await app.StopAsync();
+    return 0;
+}
 
 // Full client-transport flow over HTTP: enroll -> (host approves) -> status -> claim -> complete (mTLS)
 // -> business call. This is the reference implementation for the standalone client on the 2nd PC.
@@ -294,7 +394,8 @@ static async Task<int> Selftest()
     return fail > 0 ? 1 : 0;
 }
 
-record EdgeConfig(string IdentityDir, string SecretsDir, string UpstreamBase, int ListenPort);
+record EdgeConfig(string IdentityDir, string SecretsDir, string UpstreamBase, int ListenPort, IPAddress? Bind = null, Action<EnrollNotice>? OnEnroll = null);
+record EnrollNotice(string RequestId, string DisplayName, string[] Sas);
 
 static class Edge
 {
@@ -318,7 +419,7 @@ static class Edge
             k.Limits.MaxRequestBodySize = 32 * 1024;
             k.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             k.Limits.MaxRequestLineSize = 4 * 1024;
-            k.Listen(IPAddress.Loopback, cfg.ListenPort, lo => lo.UseHttps(h =>
+            k.Listen(cfg.Bind ?? IPAddress.Loopback, cfg.ListenPort, lo => lo.UseHttps(h =>
             {
                 h.ServerCertificate = serverCert;
                 h.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
@@ -333,12 +434,19 @@ static class Edge
         {
             var d = await JsonDocument.ParseAsync(ctx.Request.Body);
             var r = d.RootElement;
-            var en = pairing.Enroll(
-                Convert.FromBase64String(r.GetProperty("csr").GetString()!),
-                Convert.FromBase64String(r.GetProperty("clientNonce").GetString()!),
-                Convert.FromBase64String(r.GetProperty("claimSecretHash").GetString()!),
-                r.GetProperty("protocolVersion").GetInt32(),
-                r.GetProperty("displayName").GetString() ?? "");
+            EnrollResult en;
+            try
+            {
+                en = pairing.Enroll(
+                    Convert.FromBase64String(r.GetProperty("csr").GetString()!),
+                    Convert.FromBase64String(r.GetProperty("clientNonce").GetString()!),
+                    Convert.FromBase64String(r.GetProperty("claimSecretHash").GetString()!),
+                    r.GetProperty("protocolVersion").GetInt32(),
+                    r.GetProperty("displayName").GetString() ?? "");
+            }
+            catch (InvalidOperationException ex) { return Results.Json(new { error = ex.Message }, statusCode: 403); }
+            // notify the host console (real bring-up) so the operator can compare the six words and approve
+            cfg.OnEnroll?.Invoke(new EnrollNotice(en.RequestId, r.GetProperty("displayName").GetString() ?? "", en.Sas));
             return Results.Json(new
             {
                 requestId = en.RequestId,
