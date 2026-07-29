@@ -173,6 +173,21 @@ public static class Selftest
             Assert(Strings.Get("__no_such_key__").StartsWith("⟦"), "缺失的文案键会显眼报出(不静默回退)");
             Assert(Strings.Get("member.current_is", ("m", "A")) == "当前识别为 A", "占位符替换正常");
 
+            // 实时切换语言(无需重启):界面靠 LanguageChanged 就地重建
+            int langEvents = 0;
+            void OnLang() => langEvents++;
+            Strings.LanguageChanged += OnLang;
+            try
+            {
+                Strings.Language = "en-US";
+                Assert(langEvents == 1, "切换语言会触发 LanguageChanged(界面据此就地重建,不用重启)");
+                Strings.Language = "en-US";
+                Assert(langEvents == 1, "重复设置同一语言不重复触发(避免无谓重建)");
+                Strings.Language = "zh-CN";
+                Assert(langEvents == 2 && Strings.Get("nav.chat") == "聊天", "切回中文后取到的就是中文文案");
+            }
+            finally { Strings.LanguageChanged -= OnLang; }
+
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",

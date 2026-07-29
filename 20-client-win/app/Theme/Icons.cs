@@ -118,13 +118,31 @@ public static class Icons
     /// 造一个图标。foregroundKey 走 DynamicResource,所以换肤时颜色自动跟随;
     /// 形状则由 Rebuild 在换肤时整体重建(见 ThemeManager.SkinChanged)。
     /// </summary>
+    // ★ 图标要在换肤时重画形状,但**不能**让每个图标都 += 到静态事件上 ——
+    //   界面每次重建(导航、换语言)都会造一批新图标,旧的永远挂在事件上 = 内存泄漏,
+    //   而且换肤时会去刷早已不在可视树里的死对象。改用弱引用登记 + 换肤时顺带清理。
+    static readonly List<WeakReference<ContentControl>> Live = new();
+    static bool _hooked;
+
     public static FrameworkElement Make(IconName name, double size = 18, string foregroundKey = "FgSecondary")
     {
         var host = new ContentControl { Width = size, Height = size, Focusable = false };
         host.Tag = (name, foregroundKey);
         Fill(host);
-        ThemeManager.SkinChanged += () => Fill(host);
+
+        if (!_hooked) { _hooked = true; ThemeManager.SkinChanged += RefreshAll; }
+        Live.Add(new WeakReference<ContentControl>(host));
         return host;
+    }
+
+    /// <summary>换肤时重画所有仍存活的图标,并顺手清掉已被回收的登记项。</summary>
+    static void RefreshAll()
+    {
+        for (int i = Live.Count - 1; i >= 0; i--)
+        {
+            if (Live[i].TryGetTarget(out var host)) Fill(host);
+            else Live.RemoveAt(i);
+        }
     }
 
     /// <summary>改图标前景(如导航选中态:墨白是黑底,图标必须转白,否则看不见)。</summary>

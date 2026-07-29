@@ -50,6 +50,11 @@ public partial class MainWindow : Window
         _taskRotate.Tick += (_, _) => { _taskIndex++; RefreshTaskBar(); };
         RefreshTaskBar();
 
+        // 语言切换 -> 【就地重建】文案,不需要重启。
+        // 做法说明:界面是代码构建的,文案在构造时取一次;所以最简洁可靠的方式是重建导航
+        // 并重新进入当前页面(视图本来就是每次导航新建的,重建成本很低)。
+        Strings.LanguageChanged += OnLanguageChanged;
+
         // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
         VramHost.Content = _vram;
         TheApp.Vram.Updated += s => Dispatcher.Invoke(() => _vram.Update(s));
@@ -59,6 +64,21 @@ public partial class MainWindow : Window
     }
 
     readonly VramBar _vram = new();
+
+    void OnLanguageChanged()
+    {
+        var current = _currentKey;
+        var wasCollapsed = _collapsed;
+        Flyout.CloseAll();
+        CloseDrawer();          // 抽屉里的文案也来自旧语言,先收起
+        BuildNav();
+        Navigate(current);      // 重新构建当前页 -> 新语言
+        if (wasCollapsed) { _collapsed = false; OnToggleNav(this, new RoutedEventArgs()); }   // 保持收起状态
+        BuildChromeIcons();
+        RefreshStatus();
+        RefreshMember();
+        RefreshTaskBar();
+    }
 
     // ---------------------------------------------------------------- 底部任务横条
     public void RefreshTaskBar()

@@ -42,10 +42,7 @@ public sealed class SettingsView : UserControl
             if (lang.SelectedItem is ComboBoxItem { Tag: string picked })
             {
                 s.Language = picked; s.Save();
-                Strings.Language = picked;
-                // 已建好的界面不会自动重刷文案,明说需要重开窗口,不假装已切换。
-                MessageBox.Show("语言已保存。重新打开窗口后全部界面生效。", Strings.Get("app.title"),
-                                MessageBoxButton.OK, MessageBoxImage.Information);
+                Strings.Language = picked;   // 触发 LanguageChanged -> 界面就地重建,无需重启
             }
         };
 

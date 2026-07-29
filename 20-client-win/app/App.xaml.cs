@@ -62,6 +62,7 @@ public partial class App : Application
         AppDomain.CurrentDomain.ProcessExit += (_, _) => RunCleanup("process-exit");
 
         SetupTray();
+        Strings.LanguageChanged += () => Dispatcher.Invoke(RebuildTrayMenu);
 
         _main = new MainWindow();
         _main.Closing += OnMainWindowClosing;
@@ -125,6 +126,19 @@ public partial class App : Application
         menu.Items.Add(Strings.Get("tray.exit"), null, (_, _) => Dispatcher.Invoke(() => ExitApplication("tray-menu")));
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ShowMainWindow);
+        UpdateTrayTooltip();
+    }
+
+    /// <summary>语言变更后重建托盘菜单项(菜单文案同样是构造时取的)。</summary>
+    void RebuildTrayMenu()
+    {
+        if (_tray is null) return;
+        var menu = new WinForms.ContextMenuStrip();
+        menu.Items.Add(Strings.Get("tray.open"), null, (_, _) => Dispatcher.Invoke(ShowMainWindow));
+        menu.Items.Add(new WinForms.ToolStripSeparator());
+        menu.Items.Add(Strings.Get("tray.exit"), null, (_, _) => Dispatcher.Invoke(() => ExitApplication("tray-menu")));
+        _tray.ContextMenuStrip?.Dispose();
+        _tray.ContextMenuStrip = menu;
         UpdateTrayTooltip();
     }
 

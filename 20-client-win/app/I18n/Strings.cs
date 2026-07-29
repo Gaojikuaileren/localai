@@ -15,10 +15,19 @@ public static class Strings
     static readonly Dictionary<string, Dictionary<string, string>> Table = Load();
     static string _lang = "zh-CN";
 
+    /// <summary>语言切换时触发。界面据此**就地重建**文案,不需要重启(见 MainWindow / App 的订阅)。</summary>
+    public static event Action? LanguageChanged;
+
     public static string Language
     {
         get => _lang;
-        set => _lang = Languages.Contains(value) ? value : "zh-CN";
+        set
+        {
+            var next = Languages.Contains(value) ? value : "zh-CN";
+            if (next == _lang) return;
+            _lang = next;
+            LanguageChanged?.Invoke();
+        }
     }
 
     static Dictionary<string, Dictionary<string, string>> Load()

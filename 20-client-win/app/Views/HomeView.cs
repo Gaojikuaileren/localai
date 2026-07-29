@@ -196,7 +196,10 @@ public sealed class HomeView : UserControl
         }
 
         Rebuild();
+        // ★ 订阅必须配对退订:主页每次导航/换语言都会新建,不退订的话旧实例永远挂在事件上
+        //   (与 Icons 那处同一类泄漏)。
         TheApp.Projects.Changed += Rebuild;
+        Unloaded += (_, _) => TheApp.Projects.Changed -= Rebuild;
 
         return new ScrollViewer
         {
