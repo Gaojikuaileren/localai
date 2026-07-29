@@ -345,6 +345,7 @@ static class Edge
                 serverNonce = Convert.ToBase64String(en.ServerNonce),
                 sas = en.Sas,
                 caCert = Convert.ToBase64String(caPublic.RawData),
+                hubId = pairing.HubId,
             });
         });
         app.MapPost("/pair/status", async (HttpContext ctx) =>

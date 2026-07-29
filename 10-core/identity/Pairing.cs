@@ -67,6 +67,8 @@ public sealed class Pairing
         _serverLeafSha = SHA256.HashData(serverCert.RawData);
     }
 
+    public string HubId => _hubId;   // clients need it to build the SAS transcript independently
+
     public void OpenWindow(TimeSpan duration) { _windowOpen = true; _windowExpires = DateTimeOffset.UtcNow + duration; }
     public void CloseWindow() => _windowOpen = false;
 

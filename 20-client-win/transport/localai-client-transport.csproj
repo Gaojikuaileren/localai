@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>localai-client-transport</AssemblyName>
+    <RootNamespace>LocalAI.ClientTransport</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\10-core\identity\Ca.cs" />
+    <Compile Include="..\..\10-core\identity\Store.cs" />
+    <Compile Include="..\..\10-core\identity\Sas.cs" />
+    <Compile Include="..\..\10-core\identity\Wordlist.cs" />
+    <Compile Include="..\..\10-core\identity\Pairing.cs" />
+    <Compile Include="..\..\10-core\identity\Identity.cs" />
+    <Compile Include="..\..\10-core\identity\Paths.cs" />
+    <Compile Include="..\..\10-core\identity\HubId.cs" />
+  </ItemGroup>
+</Project>
