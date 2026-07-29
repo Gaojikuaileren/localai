@@ -289,6 +289,23 @@ public static class Selftest
             Assert(Views.CalendarEditor.DefaultDuration == TimeSpan.FromHours(1), "新建日程默认时长 1 小时");
             Views.CalendarData.Events.Clear();
 
+            // ---- 日程数据变更通知(修"开启时日程读不出来")----
+            // 成因:示例数据在窗口构建【之后】才播种,日历读到的是空表;任务与项目有变更通知
+            // 能补刷,日历没有,于是表现为"必须点一下才出现"。加了 Changed 事件后不再依赖时序。
+            Views.CalendarData.Events.Clear();
+            var calNotified = 0;
+            void OnCal() => calNotified++;
+            Views.CalendarData.Changed += OnCal;
+            try
+            {
+                var ev = new Views.CalendarEvent(DateTime.Today.AddHours(9), DateTime.Today.AddHours(10), "x", "我", "家庭");
+                Views.CalendarData.Add(ev);
+                Assert(calNotified == 1, "写入日程会触发变更通知(界面据此自动刷新,不依赖播种早于建窗口)");
+                Views.CalendarData.Remove(ev);
+                Assert(calNotified == 2, "删除日程同样触发变更通知");
+            }
+            finally { Views.CalendarData.Changed -= OnCal; Views.CalendarData.Events.Clear(); }
+
             // ---- 翻页动画的"两个父级"回归 ----
             // 闪退根因:WPF 元素只能有一个父级。翻页动画把仍挂在容器里的旧页直接加进新容器,
             // 抛 InvalidOperationException -> 进程崩。这里用同构的最小场景把规则钉住。

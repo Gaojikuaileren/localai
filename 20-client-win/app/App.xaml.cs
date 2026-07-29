@@ -72,8 +72,6 @@ public partial class App : Application
 
         // 启动即用已保存的档案连一次:配对过就自动连上,不再打扰用户(用户要求 3)。
         _ = Task.Run(async () => { await Hub.ProbeAsync(); Dispatcher.Invoke(UpdateTrayTooltip); });
-
-        SeedDemoTasks();
     }
 
     // 外壳评审期的示例任务。真实任务源要等各工作空间接入(P4/P6/P9),在那之前底部横条

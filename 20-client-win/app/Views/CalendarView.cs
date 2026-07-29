@@ -35,14 +35,13 @@ public sealed class CalendarView : UserControl
     /// </summary>
     public const double PanelHeight = 268;
 
-    const double MonthCellHeight = 30;
-    const double WeekCellHeight = 46;
+    // 收紧日期区,把腾出的纵向空间让给周排布下方的当日日程表(用户裁定)
+    const double MonthCellHeight = 28;
+    const double WeekCellHeight = 32;
 
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
-    /// <summary>用户是否点过日期。★ 启动时不预先展开任何一天的日程(用户裁定:不点就不显示)。</summary>
-    bool _daySelected;
     bool _animating;
 
     readonly TextBlock _label = new();
@@ -122,7 +121,7 @@ public sealed class CalendarView : UserControl
         dayHead.Children.Add(_addButton);
         dayHead.Children.Add(_dayTitle);
 
-        _dayArea = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 8, 0, 0) };
+        _dayArea = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 6, 0, 0) };
         DockPanel.SetDock(dayHead, Dock.Top);
         _dayArea.Children.Add(dayHead);
         _dayArea.Children.Add(_dayScroll);
@@ -134,6 +133,10 @@ public sealed class CalendarView : UserControl
         Content = root;
 
         Rebuild();
+
+        // 日程数据变更 -> 自动重建(不再依赖"播种早于建窗口"的时序)
+        CalendarData.Changed += Rebuild;
+        Unloaded += (_, _) => CalendarData.Changed -= Rebuild;
     }
 
     // ---------------------------------------------------------------- 构建
@@ -170,7 +173,6 @@ public sealed class CalendarView : UserControl
         var today = Btn("回到今日", () =>
         {
             _selected = DateTime.Today;
-            _daySelected = true;
             _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
             Rebuild();
         });
@@ -288,7 +290,7 @@ public sealed class CalendarView : UserControl
 
     static UniformGrid WeekdayHeader()
     {
-        var header = new UniformGrid { Rows = 1, Columns = 7, Margin = new Thickness(0, 0, 0, 2) };
+        var header = new UniformGrid { Rows = 1, Columns = 7, Margin = new Thickness(0, 0, 0, 1) };
         foreach (var d in new[] { "一", "二", "三", "四", "五", "六", "日" })
         {
             var t = new TextBlock { Text = d, HorizontalAlignment = HorizontalAlignment.Center, FontSize = 10.5 };
@@ -365,7 +367,7 @@ public sealed class CalendarView : UserControl
             // ① 背景块:跨全部行,承载高亮与点击(线与圆点浮在它上面)
             var bg = new Border
             {
-                Margin = new Thickness(1.5, 1, 1.5, 1),
+                Margin = new Thickness(1.5, 0.5, 1.5, 0.5),
                 BorderThickness = new Thickness(1),
                 Cursor = System.Windows.Input.Cursors.Hand,
             };
@@ -406,8 +408,8 @@ public sealed class CalendarView : UserControl
             {
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 3),
-                Height = 6,
+                Margin = new Thickness(0, 0, 0, 2),
+                Height = 5,
                 IsHitTestVisible = false,
             };
             foreach (var _ in timed.Take(3))
@@ -450,8 +452,8 @@ public sealed class CalendarView : UserControl
     {
         var bar = new Border
         {
-            Height = 3.5,
-            Margin = new Thickness(2, 2, 2, 2),   // 上下留白:与数字、圆点都拉开距离
+            Height = 3,
+            Margin = new Thickness(2, 1.5, 2, 1.5),   // 与数字、圆点各留一点距离,但不浪费高度
             Opacity = dim ? 0.5 : 1,
             IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
             CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
@@ -464,7 +466,6 @@ public sealed class CalendarView : UserControl
     void OnDayClicked(DateTime day)
     {
         _selected = day;
-        _daySelected = true;
         var wasMonth = _mode == Mode.Month;
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
         Rebuild();
@@ -490,17 +491,8 @@ public sealed class CalendarView : UserControl
     {
         _dayList.Children.Clear();
 
-        // 没点过日期 -> 只给一句提示,不预先摊开今天的日程(用户裁定:不点就不显示)
-        if (!_daySelected)
-        {
-            _dayTitle.Text = "";
-            _addButton.Visibility = Visibility.Collapsed;
-            var hint = new TextBlock { Text = "点某一天查看当天的日程", TextWrapping = TextWrapping.Wrap };
-            hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            hint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            _dayList.Children.Add(hint);
-            return;
-        }
+        // 打开即显示【今天】的日程 —— 之前那道"点了才显示"的门是我误把 bug 报告当成需求加的,
+        // 真正的成因是示例数据晚于窗口构建(见 App.OnStartup 的播种顺序)。
         _addButton.Visibility = Visibility.Visible;
 
         _dayTitle.Text = _selected.ToString("M月d日 dddd", Zh);

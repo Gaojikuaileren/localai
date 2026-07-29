@@ -36,6 +36,17 @@ public static class CalendarData
 {
     public static List<CalendarEvent> Events { get; } = new();
 
+    /// <summary>
+    /// 日程集合变更时触发。★ 有了它,界面就不依赖"播种一定早于建窗口"这种时序假设 ——
+    /// 将来 AI 或编辑器写入日程也能自动刷新(这类时序耦合正是"开启时读不出日程"的成因)。
+    /// </summary>
+    public static event Action? Changed;
+
+    public static void NotifyChanged() => Changed?.Invoke();
+
+    public static void Add(CalendarEvent e) { Events.Add(e); NotifyChanged(); }
+    public static void Remove(CalendarEvent e) { if (Events.Remove(e)) NotifyChanged(); }
+
     /// <summary>iCloud 日历组。接入前给一组占位;接入后由服务端下发真实分组。</summary>
     public static readonly string[] Groups = { "家庭", "个人", "工作", "(未分组)" };
 
