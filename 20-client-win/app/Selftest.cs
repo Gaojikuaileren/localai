@@ -252,6 +252,36 @@ public static class Selftest
                 Assert(!mwStatus.Contains("MemberText.Text"), "移除原左下角登录成员块");
             }
 
+            // token 用量按钮:用 Button(Click)而非 Border(MouseLeftButtonUp),否则会"关一下又弹开"
+            var mwXaml = TryReadSource("MainWindow.xaml");
+            if (mwXaml is not null)
+                Assert(mwXaml.Contains("x:Name=\"StatusBlock\"") && mwXaml.Contains("Click=\"OnOpenUsage\""),
+                       "token 用量块是 Button(Click),不会关了又开");
+            if (mwStatus is not null)
+                Assert(mwStatus.Contains("OnOpenUsage(object sender, RoutedEventArgs"), "OnOpenUsage 用 Click 签名");
+
+            // 系统栏「模型」:存放路径 + 启用模型 + 自动规则(偏好,未接 Broker)
+            Assert(Strings.Get("nav.model") == "模型", "系统组新增「模型」栏");
+            if (mwStatus is not null)
+                Assert(mwStatus.Contains("new NavItem(\"model\""), "模型是系统组导航项");
+            var mdlView = TryReadSource(Path.Combine("Views", "ModelsView.cs"));
+            if (mdlView is not null)
+            {
+                Assert(mdlView.Contains("ModelStorePath"), "模型页可设统一存放路径");
+                Assert(mdlView.Contains("IsModelEnabled") && mdlView.Contains("AutoStartPreset"), "模型页可选启用模型 + 自动启用规则");
+                Assert(mdlView.Contains("model.not_connected"), "模型页顶部诚实标注未接 Broker(不假装加载)");
+            }
+            var msSet = new AppSettings();
+            Assert(msSet.IsModelEnabled("chat.8b"), "模型默认启用");
+            msSet.DisabledModels.Add("chat.8b");
+            Assert(!msSet.IsModelEnabled("chat.8b"), "停用列表里的模型不启用");
+
+            // 扩展拖动把手:用透明命中块,不是拿描边 Path 当命中区
+            var extGrip = TryReadSource(Path.Combine("Views", "ExtensionsView.cs"));
+            if (extGrip is not null)
+                Assert(extGrip.Contains("gripPath") && extGrip.Contains("IsHitTestVisible = false"),
+                       "拖动把手用整块透明命中区(描边 Path 不接管命中)");
+
             var mwSrc2 = TryReadSource("MainWindow.xaml.cs");
             if (mwSrc2 is not null)
             {

@@ -59,7 +59,7 @@ public static class WheelTest
 
         // 图标核对:财务管理(钱包)vs 投资(走势图)要能一眼区分
         var icons = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var ic in new[] { IconName.Finance, IconName.Investment, IconName.Chat, IconName.Assets, IconName.Computer })
+        foreach (var ic in new[] { IconName.Model, IconName.Finance, IconName.Investment, IconName.Assets, IconName.Computer })
         {
             var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
             var el = Icons.Make(ic, 34, "FgPrimary");

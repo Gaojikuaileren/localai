@@ -80,16 +80,26 @@ public sealed class ExtensionsView : UserControl
 
     FrameworkElement WorkspaceRow(Workspaces.Def w, int index)
     {
-        // 行首把手(三横线)—— 只有它起手拖动
-        var grip = new System.Windows.Shapes.Path
+        // 行首把手(三横线)。★ 把手是描边的 Path,只有线上有像素 —— 直接拿它当命中区
+        //   会"只能点在线上才拖得动"(用户反馈)。所以用一个【整块透明命中区】兜住把手,
+        //   拖动判定挂在这块透明区上(与待办圆圈同一手法)。
+        var gripPath = new System.Windows.Shapes.Path
         {
             Data = Geometry.Parse("M2 5 H14 M2 9 H14 M2 13 H14"),
             StrokeThickness = 1.5, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
-            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0),
             Width = 16, Height = 18, Stretch = Stretch.None, Opacity = 0.55,
-            Cursor = Cursors.SizeAll,
+            IsHitTestVisible = false,   // 命中交给外面的透明块
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
-        grip.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
+        gripPath.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
+        var grip = new Border
+        {
+            Child = gripPath,
+            Width = 30, Height = RowH,
+            Background = Brushes.Transparent,   // 整块可命中
+            Cursor = Cursors.SizeAll,
+            Margin = new Thickness(0, 0, 6, 0),
+        };
         grip.PreviewMouseLeftButtonDown += (_, e) => { e.Handled = true; BeginDrag(index, e); };
 
         var ic = Icons.Make(w.Icon, 17, "FgSecondary");

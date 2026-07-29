@@ -75,6 +75,27 @@ public sealed class AppSettings
 
     bool AddHiddenPanel(string key) { HiddenPanels.Add(key); return true; }
 
+    // ---- 模型(在"系统 › 模型"里设置)。★ 这些是【偏好】:接入 GPU Broker(P4)后才真正装载模型。----
+    /// <summary>各模型权重的统一存放目录(接入后中枢按此路径加载)。</summary>
+    public string? ModelStorePath { get; set; }
+    /// <summary>被【停用】的模型 key(存停用项 -> 新模型默认启用)。</summary>
+    public List<string> DisabledModels { get; set; } = new();
+    /// <summary>空闲时自动卸载模型腾显存(接入后由 Broker 执行)。</summary>
+    public bool AutoUnloadIdle { get; set; } = true;
+    /// <summary>开机/连上中枢时自动启用哪一组预设(none/daily/long_context/deep/vision)。</summary>
+    public string AutoStartPreset { get; set; } = "daily";
+
+    public bool IsModelEnabled(string key) => !DisabledModels.Contains(key);
+
+    public void SetModelEnabled(string key, bool enabled)
+    {
+        var changed = enabled ? DisabledModels.Remove(key)
+                              : (!DisabledModels.Contains(key) && AddDisabledModel(key));
+        if (changed) Save();
+    }
+
+    bool AddDisabledModel(string key) { DisabledModels.Add(key); return true; }
+
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
     public static AppSettings Load()

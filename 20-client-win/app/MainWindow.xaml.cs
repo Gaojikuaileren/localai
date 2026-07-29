@@ -344,6 +344,7 @@ public partial class MainWindow : Window
 
         // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
         AddGroupLabel(Strings.Get("nav.system"), NavSystemPanel);
+        AddItem(new NavItem("model", "nav.model", IconName.Model, () => new ModelsView()), NavSystemPanel);
         AddItem(new NavItem("extensions", "nav.extensions", IconName.Extensions, () => new ExtensionsView()), NavSystemPanel);
         AddItem(new NavItem("settings", "nav.settings", IconName.Settings, () => new SettingsView()), NavSystemPanel);
     }
@@ -497,7 +498,7 @@ public partial class MainWindow : Window
     }
 
     // 点状态块 -> 浮窗:今日 / 本周 / 本月 / 累计 的 token 用量表(未接入时全为"—" + 说明)。
-    void OnOpenUsage(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    void OnOpenUsage(object sender, RoutedEventArgs e)
     {
         var table = new StackPanel();
         void Row(string label, long? val)

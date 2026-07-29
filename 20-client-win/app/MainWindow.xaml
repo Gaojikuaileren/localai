@@ -127,16 +127,32 @@
                     ToolTip="收起导航" Click="OnToggleNav"/>
           </Grid>
 
-          <!-- 底部状态块(在显存条上方):本机是否为主机 + 本周 token 用量。点开看日/周/月/总量表。 -->
-          <Border x:Name="StatusBlock" DockPanel.Dock="Bottom" Margin="10,8,10,12" Padding="10,8"
-                  Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}"
-                  Cursor="Hand" MouseLeftButtonUp="OnOpenUsage" ToolTip="查看 token 用量">
+          <!-- 底部状态块(在显存条上方):本机是否为主机 + 本周 token 用量。点开看日/周/月/总量表。
+               ★ 用 Button(Click)而非 Border(MouseLeftButtonUp):浮层开着时,全局 PreviewMouseDown
+                 会吞掉这次按下并关闭浮层;Button 因此收不到按下、不会触发 Click,也就不会"关了又开"。
+                 Border 的 MouseLeftButtonUp 在松手时照样触发,才会出现关一下又弹开的老毛病。 -->
+          <Button x:Name="StatusBlock" DockPanel.Dock="Bottom" Margin="10,8,10,12"
+                  Cursor="Hand" Click="OnOpenUsage" ToolTip="查看 token 用量"
+                  HorizontalContentAlignment="Stretch">
+            <Button.Template>
+              <ControlTemplate TargetType="Button">
+                <Border x:Name="Bd" Padding="10,8" Background="{DynamicResource BgSunken}"
+                        CornerRadius="{DynamicResource RadiusMd}">
+                  <ContentPresenter/>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                  </Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </Button.Template>
             <StackPanel>
               <TextBlock x:Name="HostText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
               <TextBlock x:Name="TokenText" Foreground="{DynamicResource FgMuted}"
                          FontSize="{DynamicResource FontCaption}" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
-          </Border>
+          </Button>
           <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>
 
           <!-- 系统组【贴底】:扩展 / 设置。位于显存条上方、工作空间下方(用户裁定) -->
