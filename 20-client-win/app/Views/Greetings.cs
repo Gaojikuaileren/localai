@@ -11,6 +11,19 @@ namespace LocalAI.Client.Views;
 
 public static class Greetings
 {
+    // 新会话的开场问候。★ 用户裁定:接入模型后由 AI 按上下文生成(标题同理,先用首句)。
+    //   未接入前用本地暖句轮换,不标注"AI 生成"。
+    static readonly string[] ChatOpeners =
+    {
+        "今天想聊点什么?",
+        "有什么我能帮上忙的?",
+        "在忙什么呢?说来听听。",
+        "想从哪儿开始?",
+        "我在,随时开聊。",
+    };
+
+    public static string ChatOpener(DateTime now) => ChatOpeners[(now.DayOfYear * 24 + now.Hour) % ChatOpeners.Length];
+
     /// <summary>按小时给时段主句。</summary>
     public static string TitleFor(int hour) => hour switch
     {

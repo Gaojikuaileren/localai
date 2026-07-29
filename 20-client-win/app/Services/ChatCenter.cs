@@ -30,7 +30,8 @@ public sealed record ChatSession(
     string Title,
     string? ProjectId,     // null = 普通会话
     ProjectScope Scope,
-    DateTime LastActive);
+    DateTime LastActive,
+    bool Pinned = false);
 
 public sealed class ChatCenter
 {
@@ -54,10 +55,34 @@ public sealed class ChatCenter
     public ChatSession? Find(string sessionId) => _sessions.FirstOrDefault(x => x.SessionId == sessionId);
 
     public IEnumerable<ChatSession> NormalSessions()
-        => _sessions.Where(s => s.ProjectId is null).OrderByDescending(s => s.LastActive);
+        => _sessions.Where(s => s.ProjectId is null).OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
 
     public IEnumerable<ChatSession> SessionsOf(string projectId)
-        => _sessions.Where(s => s.ProjectId == projectId).OrderByDescending(s => s.LastActive);
+        => _sessions.Where(s => s.ProjectId == projectId).OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+
+    /// <summary>置顶 / 取消置顶(置顶排在会话列表最前)。</summary>
+    public void TogglePin(string sessionId)
+    {
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i >= 0) { _sessions[i] = _sessions[i] with { Pinned = !_sessions[i].Pinned }; Changed?.Invoke(); }
+    }
+
+    /// <summary>项目被删除时:把它名下的会话【移出】变回普通会话(不丢聊天)。</summary>
+    public void DetachProject(string projectId)
+    {
+        var any = false;
+        for (int i = 0; i < _sessions.Count; i++)
+            if (_sessions[i].ProjectId == projectId) { _sessions[i] = _sessions[i] with { ProjectId = null }; any = true; }
+        if (any) Changed?.Invoke();
+    }
+
+    /// <summary>删除会话(连同它的消息)。</summary>
+    public void Delete(string sessionId)
+    {
+        var removed = _sessions.RemoveAll(x => x.SessionId == sessionId) > 0;
+        _messages.RemoveAll(m => m.SessionId == sessionId);
+        if (removed) Changed?.Invoke();
+    }
 
     public IEnumerable<ChatMessage> MessagesOf(string sessionId)
         => _messages.Where(m => m.SessionId == sessionId).OrderBy(m => m.At);
@@ -97,6 +122,7 @@ public sealed class ChatCenter
             : "AI 模型尚未接入(P4 GPU Broker)。你的消息已记录;接入后这里会给出真实回复。";
         _messages.Add(new ChatMessage(sessionId, ChatRole.System, note, DateTime.Now));
 
+        // ★ 标题:接入模型后由 AI 依会话内容起;未接入前用首条消息(截断)作占位。
         var titleSeed = text.Length > 0 ? text : (hasAtt ? attachments![0].Display : "");
         _sessions[i] = _sessions[i] with
         {

@@ -62,7 +62,7 @@ public static class ProjectUi
 
     /// <summary>项目的下拉菜单(用户裁定:取消右键,改成【三个点】按钮拉出这个菜单)。
     ///   在文件夹打开 · 改状态 · 改 AI 权限 · 编辑项目(重定向路径)。onEdit 打开项目编辑器。</summary>
-    public static ContextMenu BuildMenu(Project p, Action onEdit)
+    public static ContextMenu BuildMenu(Project p, Action onEdit, FrameworkElement? anchor = null)
     {
         var m = new ContextMenu();
 
@@ -100,7 +100,37 @@ public static class ProjectUi
         var edit = new MenuItem { Header = "编辑项目 / 重定向路径…" };
         edit.Click += (_, _) => onEdit();
         m.Items.Add(edit);
+
+        var del = new MenuItem { Header = "删除项目…" };
+        del.Click += (_, _) => ConfirmDelete(p, anchor);
+        m.Items.Add(del);
         return m;
+    }
+
+    // 删除项目的【二次确认】(红色按钮)。★ 只删项目记录,不动磁盘文件夹;会话移出变回普通会话。
+    static void ConfirmDelete(Project p, FrameworkElement? anchor)
+    {
+        var chat = ((LocalAI.Client.App)Application.Current).Chat;
+        void DoDelete() { Overlay.CloseActive(); chat.DetachProject(p.ProjectId); Projects.Delete(p.ProjectId); }
+
+        if (anchor is null)
+        {
+            if (MessageBox.Show($"删除项目「{p.Title}」?\n项目文件夹本身不会被删除;其会话会移出、变回普通会话。",
+                "本地 AI 中枢", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK)
+            { chat.DetachProject(p.ProjectId); Projects.Delete(p.ProjectId); }
+            return;
+        }
+
+        var del = Ui.DangerFilled("删除项目", (_, _) => DoDelete());
+        var cancel = Ui.Secondary("取消", (_, _) => Overlay.CloseActive());
+        var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+        btns.Children.Add(del);
+        btns.Children.Add(new Border { Child = cancel, Margin = new Thickness(10, 0, 0, 0) });
+        var body = Ui.Stack(
+            Ui.Body($"删除项目「{p.Title}」?"),
+            Ui.Caption("项目文件夹本身不会被删除;它名下的会话会移出、变回普通会话。此操作不可撤销。"),
+            btns);
+        Flyout.Show(anchor, "删除项目", body, width: 300);
     }
 
     /// <summary>三个点按钮:左键点开上面的菜单(替代右键)。</summary>
@@ -120,7 +150,7 @@ public static class ProjectUi
         b.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            var menu = BuildMenu(p, onEdit);
+            var menu = BuildMenu(p, onEdit, b);
             menu.PlacementTarget = b;
             menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
             menu.IsOpen = true;

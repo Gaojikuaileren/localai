@@ -95,6 +95,40 @@
     </Style.Triggers>
   </Style>
 
+  <!-- 按钮:统一【圆角】(RadiusSm,随皮肤)。原生 WPF 按钮是方角系统外观(用户反馈:发送按钮没圆角)。
+       用 TemplateBinding 取 Background/BorderBrush/Thickness -> Ui.Primary/Secondary/Danger 各自的配色照常生效;
+       内容对齐走 HorizontalContentAlignment,导航项(靠左)不受影响。hover/按下用透明度反馈。 -->
+  <Style TargetType="Button">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="Bd" CornerRadius="{DynamicResource RadiusSm}"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                              Margin="{TemplateBinding Padding}"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Opacity" Value="0.9"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="Bd" Property="Opacity" Value="0.82"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.5"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- ================= 输入控件 =================
        原生 WPF 的 TextBox/ComboBox/CheckBox 是方角灰边的系统外观,与整体脱节(用户反馈)。
        这里全部换成走令牌的样式:底色 BgSunken · 描边 Border · 圆角 RadiusSm(随皮肤)·

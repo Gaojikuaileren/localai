@@ -328,9 +328,9 @@ public static class Selftest
             var chatSrc = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (chatSrc is not null)
             {
-                Assert(chatSrc.Contains("UpgradeToProject") && chatSrc.Contains("MoveToProject"), "普通会话可升级为项目 / 移动到项目");
+                Assert(chatSrc.Contains("MoveToNewProject") && chatSrc.Contains("MoveToProject"), "普通会话可新建项目并移入 / 移动到项目");
                 Assert(chatSrc.Contains("\"FgOnSelected\""), "会话选中态字色用 FgOnSelected(墨白不再黑底黑字)");
-                Assert(chatSrc.Contains("开始新的对话") && chatSrc.Contains("VerticalAlignment.Center"), "空态输入框竖直居中(像 GPT)");
+                Assert(chatSrc.Contains("ChatOpener") && chatSrc.Contains("VerticalAlignment.Center"), "空态输入框竖直居中(像 GPT)+ 开场问候");
                 Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PasteClipboard") && chatSrc.Contains("PickFile"), "可加附件/图片/剪贴板截图");
             }
 
@@ -344,6 +344,41 @@ public static class Selftest
             var m3 = cc2.MessagesOf(chatSes.SessionId).ToList();
             Assert(m3.Any(x => x.Role == Services.ChatRole.User && x.Attachments is { Count: 1 }), "仅附件也能发送并记下引用");
             Assert(!m3.Any(x => x.Role == Services.ChatRole.Assistant), "带附件发送同样不伪造 AI 回复");
+
+            // 会话:置顶 / 删除 / 项目脱附
+            var cc3 = new Services.ChatCenter();
+            var sa = cc3.NewSession(null);
+            var sb = cc3.NewSession(null);
+            cc3.Send(sa.SessionId, "hi");     // sa 更近
+            cc3.TogglePin(sb.SessionId);
+            Assert(cc3.NormalSessions().First().SessionId == sb.SessionId, "置顶会话排最前(盖过更近的)");
+            cc3.Send(sa.SessionId, "again");
+            var pjS = cc3.NewSession("prjZ");
+            cc3.DetachProject("prjZ");
+            Assert(cc3.NormalSessions().Any(x => x.SessionId == pjS.SessionId), "删项目后其会话变回普通会话(不丢)");
+            cc3.Delete(sa.SessionId);
+            Assert(!cc3.NormalSessions().Any(x => x.SessionId == sa.SessionId) && !cc3.MessagesOf(sa.SessionId).Any(), "删除会话连消息一并删");
+
+            var pcd = new Services.ProjectCenter();
+            var pdel = pcd.Create("待删", Path.Combine(Path.GetTempPath(), "x"), null, Services.ProjectScope.Personal);
+            pcd.Delete(pdel.ProjectId);
+            Assert(pcd.Find(pdel.ProjectId) is null, "删除项目记录(不动磁盘文件夹)");
+
+            // 会话三点菜单(取消右键)+ 项目删除的红色二次确认 + 圆角按钮 + 箭头在右
+            if (chatSrc is not null)
+            {
+                Assert(chatSrc.Contains("SessionDots") && chatSrc.Contains("BuildSessionMenu") && !chatSrc.Contains("host.ContextMenu = "), "会话改用三个点菜单(不再右键)");
+                foreach (var it in new[] { "重命名会话", "置顶会话", "删除会话", "新建项目…(并移入)" })
+                    Assert(chatSrc.Contains(it), $"会话菜单含「{it}」");
+                Assert(chatSrc.Contains("Grid.SetColumn(arrow, 2)"), "项目箭头在会话列表右侧");
+                Assert(chatSrc.Contains("Shake(") && chatSrc.Contains("MessagesOf(s.SessionId).Any()"), "已有空会话则震荡提醒、不重复建(按上下文判定)");
+            }
+            var projUi = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (projUi is not null)
+                Assert(projUi.Contains("删除项目") && projUi.Contains("DangerFilled"), "项目菜单含删除项目 + 红色二次确认");
+            var ctl2 = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+            if (ctl2 is not null)
+                Assert(ctl2.Contains("TargetType=\"Button\""), "按钮有统一圆角样式(发送等按钮不再方角)");
             msSet.DisabledModels.Add("chat.8b");
             Assert(!msSet.IsModelEnabled("chat.8b"), "停用列表里的模型不启用");
 

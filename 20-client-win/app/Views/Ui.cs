@@ -140,6 +140,19 @@ public static class Ui
         return b;
     }
 
+    /// <summary>实心红色危险按钮(删除项目一类的二次确认,标红更醒目)。</summary>
+    public static Button DangerFilled(string text, RoutedEventHandler onClick)
+    {
+        var b = new Button
+        {
+            Content = text, Height = 34, Padding = new Thickness(16, 0, 16, 0),
+            BorderThickness = new Thickness(0), Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        b.Dyn(Button.BackgroundProperty, "RiskDanger").Dyn(Button.ForegroundProperty, "FgOnAccent");
+        b.Click += onClick;
+        return b;
+    }
+
     /// <summary>危险操作按钮(解除设备一类)。风险色跨皮肤恒定,皮肤禁改(设计 §7)。</summary>
     public static Button Danger(string text, RoutedEventHandler onClick)
     {

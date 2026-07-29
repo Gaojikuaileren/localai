@@ -92,6 +92,12 @@ public sealed class ProjectCenter
         if (i >= 0) { _items[i] = p; Changed?.Invoke(); }
     }
 
+    /// <summary>删除项目【记录】。★ 不动磁盘上的文件夹(那是用户的文件,绝不替他删)。会话由调用方移出。</summary>
+    public void Delete(string projectId)
+    {
+        if (_items.RemoveAll(x => x.ProjectId == projectId) > 0) Changed?.Invoke();
+    }
+
     /// <summary>非已完成(准备中 + 进行中),置顶在前、再按最近。主页项目板块用它。</summary>
     public IEnumerable<Project> Ongoing()
         => _items.Where(p => p.Status != ProjectStatus.Done)
