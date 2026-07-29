@@ -248,9 +248,9 @@ public static class Selftest
             Assert(span is >= 8 and <= 26, $"逐小时覆盖的时间跨度保持在半天到一天之间(实得 {span}h)");
 
             // 月历高度必须够 —— 否则最后一两行被裁(用户反馈"按月显示不全")
-            Assert(Views.CalendarView.MonthModeHeight > Views.CalendarView.WeekModeHeight, "月排布高度大于周排布");
-            Assert(Views.CalendarView.MonthModeHeight >= 6 * 32 + 60, "月排布高度容得下 6 行日期 + 表头 + 当日日程行");
-            Assert(Views.CalendarView.HeightFor(Views.CalendarView.Mode.Month) == Views.CalendarView.MonthModeHeight, "HeightFor 返回对应排布的高度");
+            // 周/月排布【同尺寸】(用户裁定),且必须容得下 6 行月历(否则"按月显示不全")
+            Assert(Views.CalendarView.PanelHeight >= 28 + 18 + 6 * 30 + 40,
+                   $"日历面板高度容得下 6 行月历 + 表头 + 当日日程区(实得 {Views.CalendarView.PanelHeight})");
 
             // ---- 项目中心(主页田字格 + 深链)----
             var pc = new ProjectCenter();

@@ -75,14 +75,9 @@ public sealed class HomeView : UserControl
 
         // ② 日历(周横排,固定高)| 待办(窄)
         // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
-        var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.WeekModeHeight };
+        // 周/月排布【共用同一尺寸】(用户裁定),所以高度固定、切换时不变
+        var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
         var calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, 12, 12));
-        // 切到月历时面板要长高,否则月历被裁(用户反馈"按月显示不全");待办同步等高。
-        calView.ModeChanged += m =>
-        {
-            calView.Height = CalendarView.HeightFor(m);
-            _todoPanel.Height = CalendarView.HeightFor(m) + 46;
-        };
         Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
         _root.Children.Add(calPanel);
 
@@ -96,7 +91,7 @@ public sealed class HomeView : UserControl
             }.PassThrough(),
             IconName.Member, new Thickness(0, 0, 0, 12));
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
-        _todoPanel.Height = CalendarView.WeekModeHeight + 46;
+        _todoPanel.Height = CalendarView.PanelHeight + 46;
         Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
         _root.Children.Add(_todoPanel);
 
@@ -107,6 +102,9 @@ public sealed class HomeView : UserControl
         _root.Children.Add(weather);
 
         // ④ 项目方块:占满剩余,平分整宽,可滚动
+        // ★ 顶端对齐 —— 否则 UniformGrid 会把仅有的一行拉伸到整个可用高度,
+        //   方块看起来"纵向居中"。用户要的是【从上到下、从左到右】依次排布。
+        _tiles.VerticalAlignment = VerticalAlignment.Top;
         _tiles.Columns = 4;
         var projects = Ui.Panel(Strings.Get("project.resume"),
             new ScrollViewer

@@ -89,6 +89,36 @@ public partial class App : Application
         Projects.Add(new Project("p2", "(示例)客厅灯光方案", "资产 · 3 张草稿", "assets", ProjectScope.Family, DateTime.Now.AddHours(-2)));
         Projects.Add(new Project("p3", "(示例)日语课件 第 4 讲", "课件草稿 · 8 页", "courses", ProjectScope.Personal, DateTime.Now.AddHours(-5)));
         Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1)));
+
+        SeedDemoEvents();
+    }
+
+    // 日历同理:没有日程就只能看到空的格子,没法评审"有日程标点 / 点日期看当天"这些交互。
+    // ★ 全部标注「(示例)」;数据源(Apple 家庭共享日历)接入后删掉这段。
+    // 覆盖了几种情况:今天多条、明天单条、跨周、周末、下月初 —— 方便验证周/月两种排布。
+    void SeedDemoEvents()
+    {
+        var today = DateTime.Today;
+        void Ev(int dayOffset, int h, int m, int durMin, string title, string owner, string scope)
+            => Views.CalendarData.Events.Add(new Views.CalendarEvent(
+                today.AddDays(dayOffset).AddHours(h).AddMinutes(m),
+                today.AddDays(dayOffset).AddHours(h).AddMinutes(m + durMin),
+                title, owner, scope));
+
+        // 今天:三条,验证"多条日程"的点与列表
+        Ev(0,  9, 30,  60, "(示例)晨会", "我", "家庭");
+        Ev(0, 12, 30,  60, "(示例)午饭 · 和家人", "双方", "家庭");
+        Ev(0, 19,  0,  90, "(示例)日语课", "我", "个人");
+        // 本周其它天
+        Ev(1, 10,  0,  45, "(示例)牙医预约", "对方", "个人");
+        Ev(3, 15,  0, 120, "(示例)超市采购", "双方", "家庭");
+        // 周末
+        Ev(5, 11,  0, 180, "(示例)周末远足", "双方", "家庭");
+        // 下周(验证周排布翻页 / 两周铺开)
+        Ev(8,  9,  0,  60, "(示例)体检", "我", "仅本人");
+        Ev(10, 20, 0,  90, "(示例)家庭电影夜", "双方", "家庭");
+        // 下月初(验证月排布翻月)
+        Ev(32, 14, 0,  60, "(示例)季度复盘", "我", "个人");
     }
 
     void RegisterCleanupSteps()
