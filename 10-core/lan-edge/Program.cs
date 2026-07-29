@@ -32,6 +32,16 @@ return (args.Length == 0 ? "" : args[0]) switch
 
 static int Usage() { Console.WriteLine("usage: localai-lan-edge <run | run-lan <bind-ip> | selftest | client-e2e>"); return 2; }
 
+static bool IsElevated()
+{
+    try
+    {
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+    catch { return false; }
+}
+
 // S5: open the LAN by binding a selected NIC address (not loopback). The narrow firewall rule
 // (lan-firewall.ps1, run by the user, elevated) must already be in place -- until then the OS default
 // inbound block keeps the port unreachable, so there is no "listening but unprotected" window.
@@ -42,6 +52,19 @@ static async Task<int> RunLan(string[] a)
     var idDir = Paths.IdentityDir();
     var secDir = Paths.SecretsDir();
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: localai-identity init)"); return 1; }
+
+    // The identity keys (CA in TPM) live in the user's key-isolation context. A UAC-elevated (high
+    // integrity) process cannot open them -> `approve` fails with "Keyset does not exist" even though
+    // TLS (software key) still works. init runs as the normal user, so the Edge must too. Refuse early
+    // with a clear message rather than let the operator hit the cryptic failure at approve time.
+    if (IsElevated())
+    {
+        Console.WriteLine("✗ 检测到以【管理员】身份运行 —— 本程序不能用管理员跑。");
+        Console.WriteLine("  身份密钥(CA)在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。");
+        Console.WriteLine("  请用【普通】PowerShell,或直接双击  dist\\host\\启动Edge.cmd 。");
+        Console.WriteLine("  (开放端口的 lan-firewall.ps1 才需要管理员,且只需一次,已完成。)");
+        return 3;
+    }
     var serverName = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(idDir, "hub.json"))).RootElement.GetProperty("server_name").GetString();
 
     // Real bring-up needs a human gate: the operator compares the six words shown here against the 2nd PC

@@ -1903,3 +1903,31 @@ P3b 只认证到**设备**;而裁定 2/3 要求按**人**隔离。**P3c 开工�
 ③ **读进来 ≠ 能漏出去**(出网仍走每任务放行 + 出境清洗)。设置内提供可开关的上下文面板。
 
 **不改动的:** D34 能力两档 · D42 六界面 · D43/D44 P3b 身份与准入 —— 本条只在其上加「成员」维度。
+
+---
+
+## 2026-07-29 · D46 · P3b 实机上线:TPM 密钥绑定创建者完整性等级 → 铸与用必须同级
+
+**背景:** 首次把 P3b 拉到两台真 PC 上线(第二台 = SENIORBIRDS)。配对协议、TLS、enroll、六词 SAS
+全部一次跑通,唯独主机 `approve` 反复报 **「密钥集不存在 / Keyset does not exist」**。
+
+**根因:** TPM「Microsoft Platform Crypto Provider」的用户密钥被**绑定在创建它的进程完整性等级**上。
+本次 `localai-identity init` 是经 Claude Code(以**管理员 / High Integrity** 运行)铸的 CA 密钥;而
+用户日常**双击**启动的 Edge 是**普通用户 / Medium Integrity**——Medium 进程打不开 High 铸的 TPM 密钥。
+软件 KSP 的 server 叶密钥**不受**此隔离(同用户即可跨等级用),所以 TLS 一直正常、一度误导排查方向。
+实测佐证:同一把 CA 密钥,High 上下文可 `CngKey.Open`+签名(64B),Medium 报错。
+
+**裁定:身份的铸(init)与用(run-lan/approve)必须在同一完整性等级,且应为普通用户(最小权限)。**
+1. Edge 本就**不需要管理员**(8443 非特权端口、只读身份材料);唯一需提权的是**一次性**开防火墙
+   (`lan-firewall.ps1`)。
+2. **提权护栏**:`run-lan` 启动即检测 High Integrity,命中直接拒绝并提示(不再让人踩到 approve 才暴露
+   的隐晦报错)。见 `10-core/lan-edge/Program.cs::IsElevated`。
+3. **双击启动器**:主机侧一律用 Explorer 双击 `.cmd`(= 普通用户 = 与 init 同级),
+   `重置并铸身份.cmd` / `启动Edge.cmd`,消除「从 system32 打开的 PowerShell 到底提没提权」的歧义。
+   (注:.cmd 必须 CRLF + 无 BOM,否则 cmd.exe 可能跳过末行 `pause` 导致"一闪而过"。)
+4. **通用教训**:凡涉 TPM 持久密钥的工具,**铸与用的运行上下文必须一致**;Claude Code 的运行上下文
+   (可能被提权)≠ 用户日常上下文,故身份类**一次性铸造应由用户在自己上下文里执行**,不要由 agent 代铸。
+
+**实机验收(S6)全绿:** 配对(mTLS+六词SAS)· 成员调用 200+注入已验证指纹 · 吊销后 401 · 重配对新证书 active。
+真 hub = `f6hsduipeesexb6f`(普通用户等级铸)。旧的 `ngh745jwd6ouhbmy`(管理员误铸)已弃置,其孤儿 TPM
+密钥无害滞留(新 hub 用新 key 名,无冲突)。

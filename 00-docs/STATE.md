@@ -9,7 +9,7 @@
 
 ---
 
-## 当前阶段:**P3b 局域网身份与准入 · 🔵 进行中(2026-07-29)· 精简优先(D43)**
+## 当前阶段:**P3b 局域网身份与准入 · ✅ 实机上线完成(2026-07-29)· 精简优先(D43)** → 下一步 P3c(硬前置:身份层「设备 × 成员」D45)
 
 | 阶段 | 状态 |
 |---|---|
@@ -17,7 +17,7 @@
 | **P1 基准测试** | ✅ **完成 17/17 全部实测**(2026-07-27) |
 | **P2 核心链路** | ✅ **基本完成** —— 权限档位已移至 P4(D37);WebAuthn 已作废(D34) |
 | **P3a 记忆系统** | ✅ **已验收(2026-07-28)** —— S0–S9 全部完成,四门全绿(见下) |
-| **P3b 身份与准入** | 🔵 **代码全部就绪 · 实机上线中** —— S0–S4 ✅ · B17(D44)✅ · client-transport CLI ✅(5/5)· **S5 ✅**:Edge LAN 绑定(`run-lan <ip>`)+ **交互式配对控制台**(六词弹屏 + `approve/deny/list`,`Pairing` 已线程安全)+ 客户端批准窗放宽至 3 分钟。**真身份已铸**:hub `ngh745jwd6ouhbmy`(CA 在 TPM,server 软密钥,D:\AI\state\identity)。**第二台 PC 单文件 exe 已产出并冒烟 5/5**(`dist/2nd-pc/`,自包含免装 .NET)。回归全绿:identity 48 + lan-edge 8 + client-e2e 6。剩两件需你/物理:① `lan-firewall.ps1` 开 LAN 端口(elevated,一次性)② 第二台 PC 跑 `pair` + 主机 `approve`,按 `S6-acceptance-checklist.md` 验收 |
+| **P3b 身份与准入** | ✅ **实机上线完成(2026-07-29,两台真 PC)** —— S0–S6 全绿。S5:Edge LAN 绑定(`run-lan <ip>`)+ 交互式配对控制台(六词弹屏 + `approve/deny/list`,`Pairing` 线程安全)+ **提权护栏**(D46)+ 双击启动器。S6 实机验收:**配对**(mTLS+六词SAS,SENIORBIRDS→active/LAN_DEVICE)· **成员调用 200**+Edge 注入已验证指纹(客户端伪造的 X-LocalAI-* 被剥离)· **吊销后 401** · 重配对新证书 active。真 hub = `f6hsduipeesexb6f`(CA 在 TPM,**普通用户等级铸**,见 D46 教训)。回归:identity 48 + lan-edge 8 + client-e2e 6 + client-transport 单文件 5。产物:`dist/2nd-pc/`(第二台 PC 自包含 exe + 配对说明)、`dist/host/`(identity+lan-edge exe + 双击启动器 `启动Edge.cmd`/`重置并铸身份.cmd`)。防火墙:`LocalAI-LAN-Edge` 仅 8443/LocalSubnet/以太网/该程序 |
 
 ### ★ P3a 验收签字(§14 四门 · 2026-07-28)
 
