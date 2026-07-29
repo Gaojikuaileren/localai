@@ -44,7 +44,9 @@ public sealed class HomeView : UserControl
     /// </summary>
     const double WeatherGap = 12;
 
-    readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 22 };
+    readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 30, TextWrapping = TextWrapping.Wrap };
+    readonly TextBlock _greetingSub = new() { FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+    readonly StackPanel _greetingBox = new() { HorizontalAlignment = HorizontalAlignment.Left };
     TextBlock[] _cityTime = Array.Empty<TextBlock>();
     TextBlock[] _cityMeta = Array.Empty<TextBlock>();
     UniformGrid[] _cityHourly = Array.Empty<UniformGrid>();
@@ -66,6 +68,7 @@ public sealed class HomeView : UserControl
     public HomeView()
     {
         _greeting.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        _greetingSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
 
         _root.Margin = new Thickness(24, 14, 24, 18);
         // 用户裁定:日历占【三分之二】,待办占三分之一
@@ -77,10 +80,12 @@ public sealed class HomeView : UserControl
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 天气(固定高)
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 130 }); // 项目(占满剩余)
 
-        // ① 问候
-        _greeting.Margin = new Thickness(2, 0, 0, 10);
-        Grid.SetRow(_greeting, 0); Grid.SetColumnSpan(_greeting, 2);
-        _root.Children.Add(_greeting);
+        // ① 问候:大字号 + 上下更宽的留白 + 一句小助手问候;占约 1/3 宽(左侧)
+        _greetingBox.Margin = new Thickness(2, 16, 0, 24);
+        _greetingBox.Children.Add(_greeting);
+        _greetingBox.Children.Add(_greetingSub);
+        Grid.SetRow(_greetingBox, 0); Grid.SetColumnSpan(_greetingBox, 2);
+        _root.Children.Add(_greetingBox);
 
         // ② 日历(周横排,固定高)| 待办(窄)
         // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
@@ -179,6 +184,8 @@ public sealed class HomeView : UserControl
     void RelayoutContinuous()
     {
         // 日历 2/3、待办 1/3 由 Grid 星号列直接分配,随窗口天然连续,无需手动插值。
+        // 问候块占约 1/3 宽(减去 _root 左右各 24 的外边距)。
+        if (ActualWidth > 0) _greetingBox.Width = Math.Max(200, (ActualWidth - 48) / 3.0);
     }
 
     void RelayoutDiscrete()
@@ -638,7 +645,8 @@ public sealed class HomeView : UserControl
         if (_cityTime.Length != _places.Count) return;
 
         var hour = DateTime.Now.Hour;
-        _greeting.Text = hour < 5 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
+        _greeting.Text = Greetings.TitleFor(hour);
+        _greetingSub.Text = Greetings.SubFor(DateTime.Now);   // 同一小时内稳定,不每秒乱跳
 
         var localOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
         for (int i = 0; i < _places.Count; i++)

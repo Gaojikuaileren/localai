@@ -47,7 +47,17 @@ public static class WheelTest
         panel.Width = 300;
         Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 320);
 
-        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png");
+        // 问候块:大字号主句 + 小助手副句,约 1/3 宽
+        var gbox = new StackPanel { Width = 300 };
+        var gt = new TextBlock { Text = Greetings.TitleFor(9), FontWeight = FontWeights.SemiBold, FontSize = 30, TextWrapping = TextWrapping.Wrap };
+        gt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        var gs = new TextBlock { Text = Greetings.SubFor(new DateTime(2026, 7, 29, 9, 0, 0)), FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+        gs.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        gbox.Children.Add(gt);
+        gbox.Children.Add(gs);
+        Save(Themed(gbox), Path.Combine(outDir, "greeting.png"), 340, 130);
+
+        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png");
         return 0;
     }
 

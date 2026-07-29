@@ -153,6 +153,17 @@ public static class Selftest
             Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 35, 1)) == new TimeSpan(9, 40, 0), "刚过刻度一秒也进到下一格 9:40");
             Assert(Views.WheelPicker.CeilToStep(new TimeSpan(23, 58, 0)) == new TimeSpan(23, 55, 0), "临近午夜夹到 23:55");
 
+            // ---- 问候语:时段主句 + 小助手副句(同一小时内稳定)----
+            Assert(Views.Greetings.TitleFor(3) == "夜深了", "凌晨=夜深了");
+            Assert(Views.Greetings.TitleFor(8) == "早上好", "上午=早上好");
+            Assert(Views.Greetings.TitleFor(12) == "中午好", "中午=中午好");
+            Assert(Views.Greetings.TitleFor(15) == "下午好", "下午=下午好");
+            Assert(Views.Greetings.TitleFor(20) == "晚上好", "晚上=晚上好");
+            var gA = Views.Greetings.SubFor(new DateTime(2026, 7, 29, 9, 15, 0));
+            var gB = Views.Greetings.SubFor(new DateTime(2026, 7, 29, 9, 55, 0));
+            Assert(!string.IsNullOrWhiteSpace(gA), "副句非空");
+            Assert(gA == gB, "副句同一小时内稳定(不每秒乱跳)");
+
             // ---- 待办 / 家务:数据模型 + 排序 + 逾期 ----
             var todos = new Services.TodoCenter();
             var todoChanged = 0;
@@ -208,6 +219,10 @@ public static class Selftest
                 Assert(homeTodo.Contains("OpenTodoArchive"), "右下角有「已完成」入口打开抽屉");
                 Assert(homeTodo.Contains("Todos.Active()"), "主板块只显示进行中(含宽限期)项");
                 Assert(homeTodo.Contains("_todoGrace"), "有 3 秒宽限轮询把已完成项刷走");
+
+                Assert(homeTodo.Contains("Greetings.SubFor"), "问候块显示小助手副句");
+                Assert(homeTodo.Contains("(ActualWidth - 48) / 3.0"), "问候块占约 1/3 宽");
+                Assert(homeTodo.Contains("FontSize = 30"), "问候主句字号更大");
 
                 // 天气拖拽只能从右下角手柄起手,不是整块板块(用户裁定)
                 Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown"), "天气拖拽从右下角手柄区起手");
