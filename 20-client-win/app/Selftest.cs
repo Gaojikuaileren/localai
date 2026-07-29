@@ -152,6 +152,57 @@ public static class Selftest
             }
             finally { System.Globalization.CultureInfo.CurrentCulture = prevCulture; }
 
+            // ---- 响应式布局:全屏到最小窗口都不畸变 ----
+            // 用户提出的三个风险:① 项目方块右侧留白 ② 小窗口天气曲线显示不全 ③ 简报/待办一长一短
+            // 判据都是纯函数,逐尺寸断言。窗口最小值来自 MainWindow(1040×600)。
+            (double w, double h, string name)[] sizes =
+            {
+                (2560, 1440, "4K 全屏"), (1920, 1080, "1080p 全屏"), (1440, 900, "设计基线"),
+                (1280, 720, "备选基线"), (1040, 600, "最小窗口"),
+            };
+            var layoutOk = true; string? layoutBad = null;
+            foreach (var (winW, winH, name) in sizes)
+            {
+                var (w, h) = Views.Layout.ContentSize(winW, winH);   // 密度判据用内容区,不是整窗
+                var d = Views.Layout.For(w, h);
+                var calW = Views.Layout.CalendarWidth(d);
+                var contentW = Math.Max(0, w - calW - 64);
+                var cols = Views.Layout.ProjectColumns(contentW);
+                var curve = Views.Layout.CurveHeight(d);
+                var slots = Views.Layout.HourlySlots(d, contentW / 3);
+                var panelMax = Views.Layout.PanelMaxHeight(d);
+                var tileH = Views.Layout.TileHeight(d);
+
+                // 每个尺寸都必须:列数在界内、方块能真正平分(不留半列)、限高为正、
+                // 曲线要么不显示要么有足够高度(不显示"半截")
+                if (cols < Views.Layout.MinTileColumns || cols > Views.Layout.MaxTileColumns) { layoutOk = false; layoutBad = name + " 列数越界 " + cols; break; }
+                if (contentW / cols < 120) { layoutOk = false; layoutBad = name + " 单块过窄 " + (contentW / cols).ToString("0"); break; }
+                if (panelMax <= 0 || tileH <= 0) { layoutOk = false; layoutBad = name + " 高度非正"; break; }
+                if (curve > 0 && curve < 30) { layoutOk = false; layoutBad = name + " 曲线高度过小会显示不全 " + curve; break; }
+                if (slots < 0 || slots > 6) { layoutOk = false; layoutBad = name + " 逐小时格数异常 " + slots; break; }
+            }
+            Assert(layoutOk, "全屏→最小窗口各档布局判据均成立" + (layoutBad is null ? "" : "  失败于:" + layoutBad));
+
+            // 项目方块:宽度增加时列数单调不减(不能越宽反而越少)
+            var mono = true; int prev = 0;
+            for (double w = 400; w <= 3000; w += 50)
+            {
+                var c = Views.Layout.ProjectColumns(w);
+                if (c < prev) { mono = false; break; }
+                prev = c;
+            }
+            Assert(mono, "可用宽度变大时项目列数单调不减");
+            Assert(Views.Layout.ProjectColumns(0) >= Views.Layout.MinTileColumns, "宽度未知(0/NaN)时回落到最小列数,不会算出 0 列");
+            Assert(Views.Layout.ProjectColumns(double.NaN) >= Views.Layout.MinTileColumns, "NaN 宽度不会导致 0 列");
+
+            // 密度随窗口变小而收紧,且各档取舍单调(不会小窗口反而要更高的曲线)
+            Assert(Views.Layout.For(Views.Layout.ContentSize(1920, 1080).W, Views.Layout.ContentSize(1920, 1080).H) == Views.Density.Comfortable, "全屏 = 舒适密度");
+            Assert(Views.Layout.For(Views.Layout.ContentSize(1040, 600).W, Views.Layout.ContentSize(1040, 600).H) == Views.Density.Tight, "最小窗口(内容区约 800×508)= 紧凑到极致");
+            Assert(Views.Layout.CurveHeight(Views.Density.Tight) == 0, "极小窗口宁可不显示曲线,也不显示半截(用户反馈的畸变)");
+            Assert(Views.Layout.HourlySlots(Views.Density.Tight, 200) == 0, "极小窗口隐藏逐小时行,不把每格挤到看不清");
+            Assert(Views.Layout.CurveHeight(Views.Density.Comfortable) > Views.Layout.CurveHeight(Views.Density.Compact), "曲线高度随密度单调");
+            Assert(Views.Layout.PanelMaxHeight(Views.Density.Comfortable) > Views.Layout.PanelMaxHeight(Views.Density.Tight), "简报/待办限高随密度单调(限高=一长一短也不畸变)");
+
             // ---- 项目中心(主页田字格 + 深链)----
             var pc = new ProjectCenter();
             Assert(pc.Items.Count == 0, "项目中心初始为空");

@@ -47,7 +47,7 @@ public partial class MainWindow : Window
 
         // 底部任务横条:有任务才出现,多任务时自动轮播
         TheApp.Tasks.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
-        _taskRotate.Tick += (_, _) => { _taskIndex++; RefreshTaskBar(); };
+        _taskRotate.Tick += (_, _) => RotateTask();
         RefreshTaskBar();
 
         // 语言切换 -> 【就地重建】文案,不需要重启。
@@ -81,6 +81,12 @@ public partial class MainWindow : Window
     }
 
     // ---------------------------------------------------------------- 底部任务横条
+    // 轮播手感(用户裁定):不是硬切换,而是【向上滑走 -> 换内容 -> 从下方滑入 -> 到位停留】。
+    // 停留时长 = TaskDwell;滑动时长 = TaskSlide。单个任务不轮播(转来转去反而看不清)。
+    static readonly TimeSpan TaskDwell = TimeSpan.FromSeconds(4.5);
+    static readonly TimeSpan TaskSlide = TimeSpan.FromMilliseconds(260);
+    const double SlideDistance = 26;
+
     public void RefreshTaskBar()
     {
         var tasks = TheApp.Tasks.Tasks;
@@ -93,19 +99,48 @@ public partial class MainWindow : Window
         }
 
         TaskBar.Visibility = Visibility.Visible;
-        // 多个任务才轮播;单个任务固定显示(转来转去反而看不清)
+        _taskRotate.Interval = TaskDwell;
+        // 多个任务才轮播;单个固定显示
         if (tasks.Count > 1) { if (!_taskRotate.IsEnabled) _taskRotate.Start(); }
         else { _taskRotate.Stop(); _taskIndex = 0; }
 
-        var t = tasks[_taskIndex % tasks.Count];
+        ShowTask(tasks[_taskIndex % tasks.Count], tasks.Count, animate: false);
+        if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
+    }
+
+    /// <summary>轮到下一条:先把当前这条向上滑走,换完内容再从下方滑入。</summary>
+    void RotateTask()
+    {
+        var tasks = TheApp.Tasks.Tasks;
+        if (tasks.Count <= 1) return;
+
+        var up = new DoubleAnimation(0, -SlideDistance, TaskSlide)
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
+        up.Completed += (_, _) =>
+        {
+            _taskIndex++;
+            var list = TheApp.Tasks.Tasks;
+            if (list.Count == 0) return;
+            ShowTask(list[_taskIndex % list.Count], list.Count, animate: true);
+        };
+        TaskBarSlideT.BeginAnimation(TranslateTransform.YProperty, up);
+    }
+
+    void ShowTask(RunningTask t, int total, bool animate)
+    {
         TaskBarTitle.Text = t.Title;
         TaskBarDetail.Text = t.Detail;
         TaskBarPercent.Text = t.PercentText;
-        TaskBarCount.Text = tasks.Count > 1 ? $"共 {tasks.Count} 个" : "";
-        if (t.Progress < 0) { TaskBarProgress.IsIndeterminate = true; }
+        TaskBarCount.Text = total > 1 ? $"共 {total} 个" : "";
+        if (t.Progress < 0) TaskBarProgress.IsIndeterminate = true;
         else { TaskBarProgress.IsIndeterminate = false; TaskBarProgress.Value = t.Progress; }
 
-        if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
+        if (!animate) { TaskBarSlideT.BeginAnimation(TranslateTransform.YProperty, null); TaskBarSlideT.Y = 0; return; }
+
+        // 从下方滑入并停在原位
+        var down = new DoubleAnimation(SlideDistance, 0, TaskSlide)
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        TaskBarSlideT.BeginAnimation(TranslateTransform.YProperty, down);
     }
 
     // ---------------------------------------------------------------- 全局面板(两个方向)

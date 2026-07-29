@@ -158,8 +158,13 @@
                 Background="{DynamicResource BgSurface}"
                 BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0"
                 Cursor="Hand" MouseLeftButtonUp="OnToggleTaskDrawer">
-          <Grid Margin="24,0,16,0">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Grid Margin="24,0,16,0" ClipToBounds="True">
+            <!-- 轮播用【垂直滑动】而不是硬切换:滑上来 -> 停留几秒 -> 再滑走(用户裁定)。
+                 整体做位移动画,所以外层要 ClipToBounds,滑动中的上一条不会溢出横条。 -->
+            <StackPanel x:Name="TaskBarSlide" Orientation="Horizontal" VerticalAlignment="Center">
+              <StackPanel.RenderTransform>
+                <TranslateTransform x:Name="TaskBarSlideT" Y="0"/>
+              </StackPanel.RenderTransform>
               <ContentControl x:Name="TaskBarIcon" Margin="0,0,10,0" VerticalAlignment="Center" Focusable="False"/>
               <TextBlock x:Name="TaskBarTitle" VerticalAlignment="Center" FontWeight="SemiBold"
                          Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis" MaxWidth="360"/>
