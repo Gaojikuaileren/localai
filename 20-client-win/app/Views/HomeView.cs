@@ -37,6 +37,13 @@ public sealed class HomeView : UserControl
     /// <summary>天气板块固定高度:标题 + 温度行 + 状态两行 + 曲线 + 逐小时,只占所需。</summary>
     const double WeatherHeight = 208;
 
+    /// <summary>
+    /// 天气卡之间的间距。★ 三张卡的外边距必须【完全相同】,否则宽度不等 ——
+    /// UniformGrid 分的是等宽的格,但卡片自身边距不同就会导致实际宽度差一截
+    /// (之前末格没有右边距,于是宽出 12px)。末尾多出的一段由容器的负右边距吸收。
+    /// </summary>
+    const double WeatherGap = 12;
+
     readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 22 };
     TextBlock[] _cityTime = Array.Empty<TextBlock>();
     TextBlock[] _cityMeta = Array.Empty<TextBlock>();
@@ -97,7 +104,7 @@ public sealed class HomeView : UserControl
 
         // ③ 天气:固定高度,只占所需。地点表可拖拽排序(首格锁定)
         _weatherGrid.Height = WeatherHeight;
-        _weatherGrid.Margin = new Thickness(0, 0, 0, 12);
+        _weatherGrid.Margin = new Thickness(0, 0, -WeatherGap, 12);   // 吸收末格多出的右间距
         _places = Places.Load(TheApp.Settings);
         BuildWeather();
         Grid.SetRow(_weatherGrid, 2); Grid.SetColumnSpan(_weatherGrid, 2);
@@ -165,7 +172,7 @@ public sealed class HomeView : UserControl
 
         // 天气卡内可用宽度(减去卡片内边距与卡间距)
         var n = Math.Max(1, _places.Count);
-        var cardW = (w - (n - 1) * 12) / n - 32;
+        var cardW = (w - (n - 1) * WeatherGap) / n - 32;
         var slots = Layout.HourlySlots(cardW, _slots);
         if (slots != _slots)
         {
@@ -264,9 +271,8 @@ public sealed class HomeView : UserControl
         inner.Children.Add(curve);
 
         var title = string.IsNullOrEmpty(tag) ? city : $"{city} · {tag}";
-        // 末格不留右边距(否则整排会偏);角标需要知道这个值才能对齐到同一位置
-        var cardRightMargin = i < _places.Count - 1 ? 12.0 : 0.0;
-        var card = Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, cardRightMargin, 0));
+        // 所有卡片【同一边距】-> 宽度完全相等(末尾多出的一段由容器负边距吸收)
+        var card = Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, WeatherGap, 0));
 
         if (!draggable)
         {
@@ -286,7 +292,7 @@ public sealed class HomeView : UserControl
             // ★ 角标要在【每张卡的同一位置】:卡片自身的右外边距因"是否末格"而不同(12 或 0),
             //   若只对齐外层容器右缘,末格的角标就会偏出 12px(用户反馈位置不统一)。
             //   所以把卡片边距算进来。
-            Margin = new Thickness(0, 0, cardRightMargin + 9, 7),
+            Margin = new Thickness(0, 0, WeatherGap + 9, 7),
             IsHitTestVisible = false,
             Opacity = 0.55,
         };

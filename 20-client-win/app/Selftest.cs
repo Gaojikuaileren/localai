@@ -384,6 +384,17 @@ public static class Selftest
                        "横带的行高不含 Auto(Auto 会随内容有无而变 = 日期区高度浮动)");
                 Assert(bandSrc.Contains("SpanRowsReserved"), "全天线占【固定预留行数】,与实际条数无关");
                 Assert(calSrc.Contains("const int SpanRowsReserved"), "预留行数是编译期常量");
+
+                // 天气三卡必须等宽:所有卡用同一个边距常量,末尾由容器负边距吸收
+                var homeSrc = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                if (homeSrc is not null)
+                {
+                    Assert(homeSrc.Contains("const double WeatherGap"), "天气卡间距是统一常量");
+                    Assert(!homeSrc.Contains("i < _places.Count - 1 ? 12"),
+                           "不再按'是否末格'给不同边距(那会让末格宽出一截)");
+                    Assert(homeSrc.Contains("new Thickness(0, 0, -WeatherGap, 12)"),
+                           "容器用负右边距吸收末格多出的间距,整排右缘仍对齐");
+                }
                 Assert(calSrc.Contains("const int SpanRowsReserved = 1"), "全天线只占【一行】——多条不分行,不会一上一下");
                 Assert(calSrc.Contains("MergeSpans("), "多条全天日程会合并成同一行的连续线段");
                 Assert(calSrc.Contains("const int DotsMaxBeforeTriangle = 4"), "定时日程超过 4 条改用实心三角形(阈值是常量)");
