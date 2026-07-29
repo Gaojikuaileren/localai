@@ -110,10 +110,10 @@ public partial class MainWindow : Window
         MaxWidth = wa.Width;
         MaxHeight = wa.Height;
 
-        if (Width < MinWidth) Width = MinWidth;
-        if (Height < MinHeight) Height = MinHeight;
-        if (Width > MaxWidth) Width = MaxWidth;
-        if (Height > MaxHeight) Height = MaxHeight;
+        // 首次打开用"内容刚好放得下"的建议尺寸 —— 避免一开始就出现滚动条(用户裁定)。
+        // 仍被最小尺寸与工作区夹住,小屏上不会超出。
+        Width = Math.Clamp(Layout.PreferredWindowWidth, MinWidth, MaxWidth);
+        Height = Math.Clamp(Layout.PreferredWindowHeight, MinHeight, MaxHeight);
     }
 
     /// <summary>该元素是否位于某个抽屉内部(抽屉内的点击应照常生效,不被"关闭浮层"吞掉)。</summary>

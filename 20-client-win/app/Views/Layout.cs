@@ -33,6 +33,16 @@ public static class Layout
     public static (double W, double H) MinWindowFor(double screenW, double screenH)
         => (Math.Max(960, Math.Round(screenW / 2)), Math.Max(540, Math.Round(screenH / 2)));
 
+    /// <summary>
+    /// 首次打开的建议窗口尺寸 —— 取"主页内容刚好放得下"的高度,这样【一开始就不出滚动条】(用户裁定)。
+    /// 估算(与 HomeView 的行结构对应):
+    ///   标题栏 38 + 页边距 32 + 问候 ~40 + 日历/待办 ~342 + 天气 ~220 + 项目一行 ~200 ≈ 872,
+    ///   再留一点余量给不同 DPI 下的字体高度差 -> 940。
+    /// 会被工作区与最小尺寸夹住,小屏上不会超出。
+    /// </summary>
+    public const double PreferredWindowWidth = 1480;
+    public const double PreferredWindowHeight = 940;
+
     // ---------------------------------------------------------------- 连续量(不分档,不跳)
     static double Lerp(double a, double b, double t) => a + (b - a) * Math.Clamp(t, 0, 1);
 

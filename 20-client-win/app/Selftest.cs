@@ -184,6 +184,13 @@ public static class Selftest
             // 最小窗口 = 屏幕的四分之一大小(面积四分之一 = 宽高各一半)
             var min2K = Views.Layout.MinWindowFor(2560, 1440);
             Assert(min2K.W == 1280 && min2K.H == 720, $"2K 屏最小窗口 = 1280×720  实得 {min2K.W}×{min2K.H}");
+            // 首屏建议尺寸:必须不小于最小窗口,且在常见屏幕上放得下(否则打开就出滚动条)
+            Assert(Views.Layout.PreferredWindowHeight >= 872,
+                   $"建议高度够放下主页内容(标题栏+页边距+四行 ≈ 872,实得 {Views.Layout.PreferredWindowHeight})");
+            var min2Kw = Views.Layout.MinWindowFor(2560, 1440);
+            Assert(Views.Layout.PreferredWindowHeight >= min2Kw.H && Views.Layout.PreferredWindowWidth >= min2Kw.W,
+                   "建议尺寸不小于 2K 屏的最小窗口(否则会被夹回去,建议值形同虚设)");
+
             var minHD = Views.Layout.MinWindowFor(1920, 1080);
             Assert(minHD.W == 960 && minHD.H == 540, $"HD 屏最小窗口 = 960×540  实得 {minHD.W}×{minHD.H}");
 

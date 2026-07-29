@@ -91,7 +91,9 @@ public sealed class HomeView : UserControl
             }.PassThrough(),
             IconName.Member, new Thickness(0, 0, 0, 12));
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
-        _todoPanel.Height = CalendarView.PanelHeight + 46;
+        // 与日历面板等高:日历面板 = 日历本体 + Ui.Panel 的标题行与内边距(约 62),
+        // 之前按 +46 算,导致两块并排时高度差了十几像素。
+        _todoPanel.Height = CalendarView.PanelHeight + 62;
         Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
         _root.Children.Add(_todoPanel);
 
