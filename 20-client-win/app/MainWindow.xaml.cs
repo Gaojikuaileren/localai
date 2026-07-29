@@ -462,6 +462,7 @@ public partial class MainWindow : Window
         // 分组标题在收起状态没有宽度显示,整条隐藏(上下两个面板都要处理)
         foreach (var c in NavPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
         foreach (var c in NavSystemPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
+        RefreshMember();   // 状态块随收起/展开切换长短文案
     }
 
     public void RefreshStatus()
@@ -478,14 +479,48 @@ public partial class MainWindow : Window
         StatusDot.Fill = (Brush)FindResource(brushKey);
     }
 
+    // 左下角状态块:本机是否为主机 + 本周 token 用量(用户裁定:去掉原来的"当前登录成员"小块)。
     public void RefreshMember()
     {
-        // D45:设备默认成员只是**猜测**,不是认证。文案必须让人一眼能纠正,且不暗示已验明身份。
-        // ★ 显示名只用主机下发后缓存的那份;客户端本地绝不持有"我是谁"的权威值
-        //   (铁律:主体只来自成员表 —— gateway.py:227)。没有则显示占位,不猜。
-        var name = string.IsNullOrWhiteSpace(TheApp.Settings.CachedMemberDisplayName)
-                   ? "—" : TheApp.Settings.CachedMemberDisplayName!;
-        MemberText.Text = Strings.Get("member.current_is", ("m", name));
-        MemberHint.Text = Strings.Get("member.correct");
+        var paired = TheApp.Hub.IsPaired;
+        var isHub = paired && TheApp.Hub.ThisMachineIsHub();
+        if (_collapsed)
+            HostText.Text = !paired ? "—" : isHub ? "主" : "副";   // 收起时只留一个字
+        else
+            HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client");
+
+        // ★ token 用量尚未接入 -> 如实标注"待接入",绝不编数字(见 TokenUsage)。
+        TokenText.Text = TokenUsage.Connected
+            ? $"{Strings.Get("usage.this_week")} {TokenUsage.Week:N0}"
+            : $"{Strings.Get("usage.this_week")} · {Strings.Get("usage.pending")}";
+        TokenText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // 点状态块 -> 浮窗:今日 / 本周 / 本月 / 累计 的 token 用量表(未接入时全为"—" + 说明)。
+    void OnOpenUsage(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var table = new StackPanel();
+        void Row(string label, long? val)
+        {
+            var l = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center };
+            l.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            var v = new TextBlock { Text = val is { } n ? n.ToString("N0") : "—", VerticalAlignment = VerticalAlignment.Center };
+            v.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            var d = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 4, 0, 4) };
+            DockPanel.SetDock(v, Dock.Right);
+            d.Children.Add(v);
+            d.Children.Add(l);
+            table.Children.Add(d);
+        }
+        Row(Strings.Get("usage.day"), TokenUsage.Today);
+        Row(Strings.Get("usage.week"), TokenUsage.Week);
+        Row(Strings.Get("usage.month"), TokenUsage.Month);
+        Row(Strings.Get("usage.total"), TokenUsage.Total);
+        if (!TokenUsage.Connected)
+        {
+            table.Children.Add(new Border { Height = 6 });
+            table.Children.Add(Ui.Caption(Strings.Get("usage.pending_note")));
+        }
+        Flyout.Show((FrameworkElement)sender, Strings.Get("usage.title"), table, width: 240);
     }
 }

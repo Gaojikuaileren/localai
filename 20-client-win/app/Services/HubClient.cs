@@ -30,6 +30,25 @@ public sealed class HubClient
 
     public bool IsPaired => Profile is not null;
 
+    /// <summary>
+    /// 本机是否【就是中枢主机】—— 启发式:配对的拨号地址指向本机(回环或本机某个网卡 IP)。
+    /// 主机端的客户端配对到 127.0.0.1/本机 IP;副机配对到主机的 LAN IP。仅用于状态显示,不做权限判定。
+    /// </summary>
+    public bool ThisMachineIsHub()
+    {
+        var dial = Profile?.Dial;
+        if (string.IsNullOrWhiteSpace(dial)) return false;
+        var host = dial.Split(':')[0].Trim();
+        if (host is "127.0.0.1" or "localhost" or "::1") return true;
+        try
+        {
+            foreach (var a in Dns.GetHostAddresses(Dns.GetHostName()))
+                if (string.Equals(a.ToString(), host, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        catch { /* DNS 解析不出就当不是主机 —— 状态显示而已,保守即可 */ }
+        return false;
+    }
+
     public HubClient() => Reload();
 
     /// <summary>从磁盘读回配对档案(启动时调用)。没有档案 = 从未配对。</summary>

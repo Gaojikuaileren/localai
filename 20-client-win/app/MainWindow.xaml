@@ -127,13 +127,14 @@
                     ToolTip="收起导航" Click="OnToggleNav"/>
           </Grid>
 
-          <!-- 底部:显存条(在"当前成员/纠正"上方) + 当前成员 -->
-          <Border DockPanel.Dock="Bottom" Margin="10,8,10,12" Padding="10,8"
-                  Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}">
+          <!-- 底部状态块(在显存条上方):本机是否为主机 + 本周 token 用量。点开看日/周/月/总量表。 -->
+          <Border x:Name="StatusBlock" DockPanel.Dock="Bottom" Margin="10,8,10,12" Padding="10,8"
+                  Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}"
+                  Cursor="Hand" MouseLeftButtonUp="OnOpenUsage" ToolTip="查看 token 用量">
             <StackPanel>
-              <TextBlock x:Name="MemberText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="MemberHint" Foreground="{DynamicResource FgMuted}"
-                         FontSize="{DynamicResource FontCaption}" TextWrapping="Wrap"/>
+              <TextBlock x:Name="HostText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="TokenText" Foreground="{DynamicResource FgMuted}"
+                         FontSize="{DynamicResource FontCaption}" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
           </Border>
           <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>

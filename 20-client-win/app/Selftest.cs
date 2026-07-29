@@ -239,6 +239,19 @@ public static class Selftest
             Assert(st.IsWorkspaceVisible("finance"), "移出隐藏列表后恢复显示");
             Assert(Views.Layout.PreferredWindowHeight >= 980, "默认窗口更高,一开始不出滚动条");
 
+            // ---- 左下角状态块:本机是否主机 + token 用量(去掉原"当前成员"块)----
+            Assert(!Services.TokenUsage.Connected, "token 用量统计尚未接入(如实,不编数字)");
+            Assert(Services.TokenUsage.Today is null && Services.TokenUsage.Week is null
+                   && Services.TokenUsage.Month is null && Services.TokenUsage.Total is null,
+                   "未接入时四个用量值都为 null(界面显示 —)");
+            var mwStatus = TryReadSource("MainWindow.xaml.cs");
+            if (mwStatus is not null)
+            {
+                Assert(mwStatus.Contains("ThisMachineIsHub"), "状态块显示本机是否为主机");
+                Assert(mwStatus.Contains("OnOpenUsage") && mwStatus.Contains("usage.title"), "点状态块弹出 token 用量表");
+                Assert(!mwStatus.Contains("MemberText.Text"), "移除原左下角登录成员块");
+            }
+
             var mwSrc2 = TryReadSource("MainWindow.xaml.cs");
             if (mwSrc2 is not null)
             {
