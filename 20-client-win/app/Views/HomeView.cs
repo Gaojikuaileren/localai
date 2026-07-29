@@ -179,6 +179,7 @@ public sealed class HomeView : UserControl
     {
         _weatherGrid.Children.Clear();
         _shifts.Clear();
+        _hosts.Clear();
         _weatherGrid.Columns = _places.Count;
         _cityTime = new TextBlock[_places.Count];
         _cityMeta = new TextBlock[_places.Count];
@@ -263,8 +264,9 @@ public sealed class HomeView : UserControl
         inner.Children.Add(curve);
 
         var title = string.IsNullOrEmpty(tag) ? city : $"{city} · {tag}";
-        var card = Ui.Panel(title, inner, IconName.Weather,
-                            new Thickness(0, 0, i < _places.Count - 1 ? 12 : 0, 0));
+        // 末格不留右边距(否则整排会偏);角标需要知道这个值才能对齐到同一位置
+        var cardRightMargin = i < _places.Count - 1 ? 12.0 : 0.0;
+        var card = Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, cardRightMargin, 0));
 
         if (!draggable)
         {
@@ -272,7 +274,7 @@ public sealed class HomeView : UserControl
             return card;
         }
 
-        // 右下角角标:提示这张卡可以拖(用户裁定:不用 ToolTip 提示,靠角标本身表达)
+        // 右下角角标:提示这张卡可以拖(靠角标本身表达,不用 ToolTip)
         var grip = new System.Windows.Shapes.Path
         {
             Data = Geometry.Parse("M1,7 L7,1 M1,11 L11,1 M5,11 L11,5"),
@@ -281,7 +283,10 @@ public sealed class HomeView : UserControl
             StrokeStartLineCap = PenLineCap.Round,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 0, 9, 7),
+            // ★ 角标要在【每张卡的同一位置】:卡片自身的右外边距因"是否末格"而不同(12 或 0),
+            //   若只对齐外层容器右缘,末格的角标就会偏出 12px(用户反馈位置不统一)。
+            //   所以把卡片边距算进来。
+            Margin = new Thickness(0, 0, cardRightMargin + 9, 7),
             IsHitTestVisible = false,
             Opacity = 0.55,
         };
@@ -291,72 +296,108 @@ public sealed class HomeView : UserControl
         host.Children.Add(card);
         host.Children.Add(grip);
 
-        // 卡片自身带位移变换 —— 拖动时用它做"让位"动画
         var shift = new TranslateTransform();
         host.RenderTransform = shift;
+        _hosts[i] = host;
         _shifts[i] = shift;
 
         card.Cursor = System.Windows.Input.Cursors.SizeAll;
-        card.PreviewMouseLeftButtonDown += (_, e) => { _dragFrom = i; _dragStart = e.GetPosition(this); };
-        card.MouseMove += (_, e) =>
-        {
-            if (_dragFrom is null || e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
-            var now = e.GetPosition(this);
-            if (Math.Abs(now.X - _dragStart.X) < 12) return;   // 拖出一段才算拖拽,避免误判点击
-            var from = _dragFrom.Value;
-            _dragFrom = null;
-            _dragging = from;
-            DragDrop.DoDragDrop(card, new DataObject(DragFormat, from), DragDropEffects.Move);
-            _dragging = null;
-            ResetShifts();
-        };
-        card.AllowDrop = true;
-        card.DragOver += (_, e) =>
-        {
-            var ok = e.Data.GetDataPresent(DragFormat);
-            e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
-            if (ok && _dragging is int src) PreviewShift(src, i);   // 实时让位
-            e.Handled = true;
-        };
-        card.DragLeave += (_, _) => ResetShifts();
-        card.Drop += (_, e) =>
-        {
-            ResetShifts();
-            if (e.Data.GetData(DragFormat) is int src) MovePlace(src, i);
-            e.Handled = true;
-        };
+        var index = i;
+        card.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(index, e);
         return host;
     }
 
-    // ---------------------------------------------------------------- 拖拽的"让位"动画
-    // 用户裁定:拖动时要有动画,并且其它卡片要被【挤开】让位,而不是原地不动等着落下。
-    // 做法:把"若放在此处"的结果先用位移动画预演出来 —— 被跨过的卡片朝拖动的反方向平移一格宽度。
+    // ---------------------------------------------------------------- 拖拽排序(手动实现)
+    // ★ 为什么不用 WPF 的 DragDrop.DoDragDrop:那是 OLE 拖放,它【根本不移动元素】,
+    //   只换一个拖放光标 —— 所以"被拖的卡不跟随鼠标"是必然结果(用户反馈)。
+    //   而且让位动画挂在 DragOver 上,该事件持续触发,动画被反复重启,看起来就"很抽"。
+    // 现在改为自己捕获鼠标:
+    //   · 被拖的卡【直接跟手】(逐帧设位移,不加动画,才不会有迟滞感);
+    //   · 其它卡只在【目标位置改变时】才动一次动画(不再每次移动都重启);
+    //   · 松手时提交新顺序。
+    readonly Dictionary<int, Grid> _hosts = new();
     readonly Dictionary<int, TranslateTransform> _shifts = new();
-    int? _dragging;
+    int? _dragIndex;
+    int _dragTarget;
+    Point _dragOrigin;
 
-    void PreviewShift(int from, int over)
+    void BeginDrag(int index, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (from == over) { ResetShifts(); return; }
-        var step = ColumnWidth();
-        for (int k = 1; k < _places.Count; k++)   // 第 0 格锁定,不参与让位
+        _dragIndex = index;
+        _dragTarget = index;
+        _dragOrigin = e.GetPosition(_weatherGrid);
+        if (_hosts.TryGetValue(index, out var host))
         {
-            double target = 0;
-            if (from < over && k > from && k <= over) target = -step;   // 往右拖 -> 中间的左移让位
-            else if (from > over && k >= over && k < from) target = step;   // 往左拖 -> 中间的右移让位
-            if (k == from) target = 0;                                   // 被拖的那张不参与预演
-            Animate(k, target);
+            Panel.SetZIndex(host, 10);          // 拖起来的卡浮在其它卡之上
+            host.Opacity = 0.94;
+        }
+        _weatherGrid.CaptureMouse();
+        _weatherGrid.MouseMove += OnDragMove;
+        _weatherGrid.MouseLeftButtonUp += OnDragEnd;
+        _weatherGrid.LostMouseCapture += OnDragLost;
+    }
+
+    void OnDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_dragIndex is not int from) return;
+        var dx = e.GetPosition(_weatherGrid).X - _dragOrigin.X;
+
+        // 被拖的卡逐帧跟手 —— 不用动画,否则永远追不上鼠标
+        if (_shifts.TryGetValue(from, out var t))
+        {
+            t.BeginAnimation(TranslateTransform.XProperty, null);   // 清掉可能残留的动画
+            t.X = dx;
+        }
+
+        // 目标位置 = 位移换算成整数格;只在【变化时】重排让位,避免动画被反复重启
+        var step = ColumnWidth();
+        var target = Math.Clamp(from + (int)Math.Round(dx / Math.Max(1, step)), 1, _places.Count - 1);
+        if (target == _dragTarget) return;
+        _dragTarget = target;
+        ApplyGaps(from, target, step);
+    }
+
+    /// <summary>把"若放在 target"的结果预演出来:被跨过的卡朝相反方向让开一格。</summary>
+    void ApplyGaps(int from, int target, double step)
+    {
+        for (int k = 1; k < _places.Count; k++)
+        {
+            if (k == from) continue;                       // 被拖的那张由鼠标控制
+            double to = 0;
+            if (from < target && k > from && k <= target) to = -step;
+            else if (from > target && k >= target && k < from) to = step;
+            AnimateShift(k, to);
         }
     }
 
-    void ResetShifts()
+    void OnDragEnd(object? sender, System.Windows.Input.MouseButtonEventArgs e) => FinishDrag(commit: true);
+    void OnDragLost(object? sender, System.Windows.Input.MouseEventArgs e) => FinishDrag(commit: false);
+
+    void FinishDrag(bool commit)
     {
-        for (int k = 0; k < _places.Count; k++) Animate(k, 0);
+        if (_dragIndex is not int from) return;
+        var target = _dragTarget;
+
+        _weatherGrid.MouseMove -= OnDragMove;
+        _weatherGrid.MouseLeftButtonUp -= OnDragEnd;
+        _weatherGrid.LostMouseCapture -= OnDragLost;
+        if (_weatherGrid.IsMouseCaptured) _weatherGrid.ReleaseMouseCapture();
+
+        if (_hosts.TryGetValue(from, out var host)) { Panel.SetZIndex(host, 0); host.Opacity = 1; }
+        _dragIndex = null;
+
+        if (commit && target != from) MovePlace(from, target);   // 会重建天气区,位移随之归零
+        else
+        {
+            // 没换位:所有卡滑回原处(包括被拖的那张)
+            for (int k = 0; k < _places.Count; k++) AnimateShift(k, 0);
+        }
     }
 
-    void Animate(int index, double toX)
+    void AnimateShift(int index, double toX)
     {
         if (!_shifts.TryGetValue(index, out var t)) return;
-        var anim = new DoubleAnimation(toX, TimeSpan.FromMilliseconds(160))
+        var anim = new DoubleAnimation(toX, TimeSpan.FromMilliseconds(170))
         { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
         t.BeginAnimation(TranslateTransform.XProperty, anim);
     }
@@ -366,10 +407,6 @@ public sealed class HomeView : UserControl
         var n = Math.Max(1, _places.Count);
         return _weatherGrid.ActualWidth > 0 ? _weatherGrid.ActualWidth / n : 220;
     }
-
-    const string DragFormat = "localai/weather-place-index";
-    int? _dragFrom;
-    Point _dragStart;
 
     static void SetHourly(UniformGrid grid, int slots)
     {
