@@ -183,23 +183,62 @@
       </DockPanel>
     </Grid>
 
-    <!-- ============ 全局抽屉(覆盖在内容之上,任何界面都能开)============ -->
-    <!-- 遮罩:实色低透明,不是毛玻璃(设计 §7 显存约束) -->
-    <Border x:Name="DrawerScrim" Grid.Row="1" Background="#33000000" Visibility="Collapsed"
+    <!-- ============ 全局面板(两个方向,用户裁定)============
+         日历 = 从【右上角】拉开(锚在顶栏日历按钮下方);
+         任务 = 从【下往上】升起(锚在底部任务横条上方)。
+         都挂在外壳上 -> 任何界面都能开。遮罩用实色低透明,不是毛玻璃(设计 §7 显存约束)。 -->
+    <Border x:Name="DrawerScrim" Grid.Row="0" Grid.RowSpan="2" Panel.ZIndex="50"
+            Background="#28000000" Visibility="Collapsed"
             MouseLeftButtonDown="OnCloseDrawer"/>
-    <Border x:Name="Drawer" Grid.Row="1" Width="420" HorizontalAlignment="Right" Visibility="Collapsed"
+
+    <!-- 日历:右上角下拉 -->
+    <Border x:Name="CalendarDrawer" Grid.Row="1" Panel.ZIndex="60" Width="420" MaxHeight="620"
+            HorizontalAlignment="Right" VerticalAlignment="Top"
+            Margin="0,54,16,0" Visibility="Collapsed"
             Background="{DynamicResource BgSurface}"
-            BorderBrush="{DynamicResource Border}" BorderThickness="1,0,0,0">
+            BorderBrush="{DynamicResource Border}" BorderThickness="1"
+            CornerRadius="{DynamicResource RadiusMd}"
+            RenderTransformOrigin="1,0">
+      <Border.RenderTransform>
+        <ScaleTransform x:Name="CalendarDrawerScale" ScaleY="1"/>
+      </Border.RenderTransform>
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="18" ShadowDepth="3" Direction="270" Opacity="0.18" Color="Black"/>
+      </Border.Effect>
       <DockPanel>
-        <Grid DockPanel.Dock="Top" Height="54" Margin="20,0,12,0">
-          <TextBlock x:Name="DrawerTitle" VerticalAlignment="Center" FontWeight="SemiBold"
+        <Grid DockPanel.Dock="Top" Height="46" Margin="16,0,8,0">
+          <TextBlock Text="日历" VerticalAlignment="Center" FontWeight="SemiBold"
                      FontSize="{DynamicResource FontSubtitle}" Foreground="{DynamicResource FgPrimary}"/>
-          <Button x:Name="DrawerCloseButton" Width="32" Height="32" HorizontalAlignment="Right" Cursor="Hand"
-                  Background="Transparent" BorderThickness="0"
-                  Foreground="{DynamicResource FgMuted}" Click="OnCloseDrawer"/>
+          <Button x:Name="CalendarDrawerClose" Width="30" Height="30" HorizontalAlignment="Right" Cursor="Hand"
+                  Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>
         </Grid>
         <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
-        <ContentControl x:Name="DrawerHost" Margin="20,16,20,20"/>
+        <ContentControl x:Name="CalendarDrawerHost" Margin="16,12,16,16"/>
+      </DockPanel>
+    </Border>
+
+    <!-- 任务:底部升起 -->
+    <Border x:Name="TaskDrawer" Grid.Row="1" Panel.ZIndex="60" MaxHeight="380"
+            VerticalAlignment="Bottom" HorizontalAlignment="Stretch"
+            Margin="0,0,0,0" Visibility="Collapsed"
+            Background="{DynamicResource BgSurface}"
+            BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0"
+            RenderTransformOrigin="0.5,1">
+      <Border.RenderTransform>
+        <TranslateTransform x:Name="TaskDrawerSlide" Y="0"/>
+      </Border.RenderTransform>
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="16" ShadowDepth="-3" Direction="270" Opacity="0.16" Color="Black"/>
+      </Border.Effect>
+      <DockPanel>
+        <Grid DockPanel.Dock="Top" Height="46" Margin="24,0,12,0">
+          <TextBlock Text="正在进行的任务" VerticalAlignment="Center" FontWeight="SemiBold"
+                     FontSize="{DynamicResource FontSubtitle}" Foreground="{DynamicResource FgPrimary}"/>
+          <Button x:Name="TaskDrawerClose" Width="30" Height="30" HorizontalAlignment="Right" Cursor="Hand"
+                  Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>
+        </Grid>
+        <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
+        <ContentControl x:Name="TaskDrawerHost" Margin="24,14,24,18"/>
       </DockPanel>
     </Border>
   </Grid>

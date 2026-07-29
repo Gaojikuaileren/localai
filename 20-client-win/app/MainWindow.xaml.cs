@@ -6,6 +6,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using LocalAI.Client.I18n;
 using LocalAI.Client.Services;
@@ -36,6 +37,8 @@ public partial class MainWindow : Window
         RefreshStatus();
         RefreshMember();
         BuildChromeIcons();
+        // 抽屉打开时按 Esc 也能关(遮罩已接管鼠标,键盘也给一条退路)
+        PreviewKeyDown += (_, ke) => { if (ke.Key == System.Windows.Input.Key.Escape && _drawerKind is not null) { CloseDrawer(); ke.Handled = true; } };
         StateChanged += (_, _) => SyncMaxButton();
         SyncMaxButton();
 
@@ -73,31 +76,44 @@ public partial class MainWindow : Window
         if (t.Progress < 0) { TaskBarProgress.IsIndeterminate = true; }
         else { TaskBarProgress.IsIndeterminate = false; TaskBarProgress.Value = t.Progress; }
 
-        if (_drawerKind == "tasks") DrawerHost.Content = new TaskDrawerView();
+        if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
     }
 
-    // ---------------------------------------------------------------- 全局抽屉
+    // ---------------------------------------------------------------- 全局面板(两个方向)
     // 抽屉挂在外壳上而不是某个视图里 —— 用户要求它在任何界面都能开。
+    // 方向由用户裁定:日历从【右上角】拉开(锚在顶栏日历按钮下);任务从【下往上】升起(锚在底部横条上)。
 
     void OnToggleTaskDrawer(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (_drawerKind == "tasks") CloseDrawer();
-        else OpenDrawer("tasks", "正在进行的任务", new TaskDrawerView());
+        else OpenTaskDrawer();
+    }
+
+    void OpenTaskDrawer()
+    {
+        CloseDrawer();
+        _drawerKind = "tasks";
+        TaskDrawerHost.Content = new TaskDrawerView();
+        DrawerScrim.Visibility = Visibility.Visible;
+        TaskDrawer.Visibility = Visibility.Visible;
+        // 从下往上滑入
+        var anim = new DoubleAnimation(TaskDrawer.MaxHeight, 0, TimeSpan.FromMilliseconds(180))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        TaskDrawerSlide.BeginAnimation(TranslateTransform.YProperty, anim);
     }
 
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
-        if (_drawerKind == "calendar") CloseDrawer();
-        else OpenDrawer("calendar", "日历", new CalendarPanel(compact: false));
-    }
-
-    void OpenDrawer(string kind, string title, UserControl content)
-    {
-        _drawerKind = kind;
-        DrawerTitle.Text = title;
-        DrawerHost.Content = content;
+        if (_drawerKind == "calendar") { CloseDrawer(); return; }
+        CloseDrawer();
+        _drawerKind = "calendar";
+        CalendarDrawerHost.Content = new CalendarPanel(CalendarPanel.Mode.TwoWeeks, expanded: true);
         DrawerScrim.Visibility = Visibility.Visible;
-        Drawer.Visibility = Visibility.Visible;
+        CalendarDrawer.Visibility = Visibility.Visible;
+        // 从右上角向下展开
+        var anim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        CalendarDrawerScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }
 
     void OnCloseDrawer(object sender, RoutedEventArgs e) => CloseDrawer();
@@ -106,9 +122,11 @@ public partial class MainWindow : Window
     void CloseDrawer()
     {
         _drawerKind = null;
-        Drawer.Visibility = Visibility.Collapsed;
+        CalendarDrawer.Visibility = Visibility.Collapsed;
+        TaskDrawer.Visibility = Visibility.Collapsed;
         DrawerScrim.Visibility = Visibility.Collapsed;
-        DrawerHost.Content = null;
+        CalendarDrawerHost.Content = null;
+        TaskDrawerHost.Content = null;
     }
 
     // ---------------------------------------------------------------- 自绘标题栏
@@ -152,7 +170,8 @@ public partial class MainWindow : Window
         CalendarButton.Content = Icons.Make(IconName.Calendar, 17, "FgSecondary");
         TaskBarIcon.Content = Icons.Make(IconName.Tasks, 15, "Accent");
         TaskBarChevron.Content = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
-        DrawerCloseButton.Content = Icons.Make(IconName.Close, 12, "FgMuted");
+        CalendarDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");
+        TaskDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");
     }
 
     // 走正常的 Closing 流程 —— App 会按设置决定「缩到托盘」还是「真退出」,

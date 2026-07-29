@@ -43,20 +43,22 @@ public sealed class HomeView : UserControl
         // 一页布局:两列(主区 * / 日历栏 Auto),四行。行高用星号 -> 随窗口高度按比例伸缩。
         var root = new Grid { Margin = new Thickness(24, 18, 24, 18) };
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(330) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                    // 问候
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 200 });  // 天气(主角)
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                    // 时间(窄条)
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.9, GridUnitType.Star), MinHeight = 130 }); // 项目 / 待办
 
-        // ① 问候
-        var greet = new StackPanel { Margin = new Thickness(0, 0, 16, 12) };
-        greet.Children.Add(_greeting);
-        var brief = Ui.Caption("接入后,应用每天第一次打开时为你生成个人简报(每人每天只主动展示一次)。");
-        brief.Margin = new Thickness(0, 4, 0, 0);
-        greet.Children.Add(brief);
-        Grid.SetRow(greet, 0); Grid.SetColumn(greet, 0);
-        root.Children.Add(greet);
+        // ① 问候 + 今日简报(简报是独立板块,与其它并列板块同格式)
+        var greetWrap = new StackPanel { Margin = new Thickness(0, 0, 16, 0) };
+        _greeting.Margin = new Thickness(2, 0, 0, 10);
+        greetWrap.Children.Add(_greeting);
+        greetWrap.Children.Add(Ui.Panel(Strings.Get("today.briefing"),
+            Ui.Stack(Ui.Body("今天还没有简报。", muted: true),
+                     Ui.Caption("接入后,应用每天第一次打开时生成个人简报(每人每天只主动展示一次;个人简报只给本人,家庭简报只含家庭范围内容)。")),
+            IconName.Chat, new Thickness(0, 0, 0, 12)));
+        Grid.SetRow(greetWrap, 0); Grid.SetColumn(greetWrap, 0);
+        root.Children.Add(greetWrap);
 
         // ② 天气三城(主角:曲线 + 逐小时)
         var weather = new UniformGrid { Rows = 1, Columns = WeatherCities.Length, Margin = new Thickness(0, 0, 16, 12) };
@@ -88,8 +90,8 @@ public sealed class HomeView : UserControl
         root.Children.Add(bottom);
 
         // 右上角:日历(跨全部行,贴右)
-        var cal = Ui.Panel("日历", new CalendarPanel(compact: true), IconName.Calendar, new Thickness(0));
-        cal.VerticalAlignment = VerticalAlignment.Top;
+        var cal = Ui.Panel("日历", new CalendarPanel(CalendarPanel.Mode.TwoWeeks), IconName.Calendar, new Thickness(0));
+        cal.VerticalAlignment = VerticalAlignment.Stretch;   // 占满右栏高度 -> 两周详情放得下
         Grid.SetRow(cal, 0); Grid.SetRowSpan(cal, 4); Grid.SetColumn(cal, 1);
         root.Children.Add(cal);
 
@@ -184,7 +186,7 @@ public sealed class HomeView : UserControl
             city.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             city.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-            _time[i] = new TextBlock { Text = "—", FontSize = 17, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            _time[i] = new TextBlock { Text = "—", FontSize = 15.5, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
             _time[i].SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
 
             _meta[i] = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 1, 0, 0) };
@@ -195,7 +197,20 @@ public sealed class HomeView : UserControl
             grid.Children.Add(row);
         }
 
-        return Ui.Panel("时间", grid, IconName.Clock, new Thickness(0, 0, 16, 0));
+        // 用户裁定:不要"时间"这个标题,只要图标,且图标与信息【在同一列(同一行内)】,整体更扁。
+        var rowAll = new DockPanel { LastChildFill = true };
+        var clockIcon = Icons.Make(IconName.Clock, 16, "FgMuted");
+        clockIcon.Margin = new Thickness(0, 0, 14, 0);
+        clockIcon.VerticalAlignment = VerticalAlignment.Center;
+        DockPanel.SetDock(clockIcon, Dock.Left);
+        rowAll.Children.Add(clockIcon);
+        rowAll.Children.Add(grid);
+
+        var card = new Border { Child = rowAll, Padding = new Thickness(14, 8, 14, 8), Margin = new Thickness(0, 0, 16, 0), BorderThickness = new Thickness(1) };
+        card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+        card.SetResourceReference(Border.BorderBrushProperty, "Border");
+        card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        return card;
     }
 
     void UpdateClocks()
