@@ -25,3 +25,20 @@ public static class Workspaces
         new("investment", "nav.investment", IconName.Investment), // 投资研究(走势图图标)—— 之前误删,现补回为可勾选项
     };
 }
+
+/// <summary>
+/// 主页可显示的板块清单(单一事实来源)。是否显示由用户在"扩展 › 主页板块"里勾选;
+/// HomeView 构建时读取,隐藏的板块不占版面。
+/// </summary>
+public static class HomePanels
+{
+    public sealed record Def(string Key, string Title, IconName Icon);
+
+    public static readonly Def[] All =
+    {
+        new("calendar", "日历", IconName.Calendar),
+        new("todo", "待办事项", IconName.Member),
+        new("weather", "天气", IconName.Weather),
+        new("projects", "正在进行的项目", IconName.Tasks),
+    };
+}

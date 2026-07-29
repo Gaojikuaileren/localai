@@ -52,6 +52,20 @@ public sealed class AppSettings
 
     bool AddHidden(string key) { HiddenWorkspaces.Add(key); return true; }
 
+    /// <summary>主页【隐藏】的板块 key 列表(日历/待办/天气/项目)。在"扩展 › 主页板块"里勾选。同样存"隐藏项"。</summary>
+    public List<string> HiddenPanels { get; set; } = new();
+
+    public bool IsPanelVisible(string key) => !HiddenPanels.Contains(key);
+
+    public void SetPanelVisible(string key, bool visible)
+    {
+        var changed = visible ? HiddenPanels.Remove(key)
+                              : (!HiddenPanels.Contains(key) && AddHiddenPanel(key));
+        if (changed) Save();
+    }
+
+    bool AddHiddenPanel(string key) { HiddenPanels.Add(key); return true; }
+
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
     public static AppSettings Load()

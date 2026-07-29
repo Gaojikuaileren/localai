@@ -264,7 +264,25 @@ public static class Selftest
             }
             var extSrc = TryReadSource(Path.Combine("Views", "ExtensionsView.cs"));
             if (extSrc is not null)
+            {
                 Assert(extSrc.Contains("SetWorkspaceVisible") && extSrc.Contains("RefreshNavRail"), "扩展页勾选即时改左栏");
+                Assert(extSrc.Contains("ext.ws_title") && extSrc.Contains("ext.panels_title"), "扩展分两类:工作空间扩展 + 主页板块扩展");
+                Assert(extSrc.Contains("SetPanelVisible"), "主页板块扩展勾选写入面板显隐");
+                Assert(extSrc.Contains("ext.ws_model_note"), "工作空间扩展注明将决定 AI 模型选择(接入后)");
+            }
+
+            // 主页板块显隐:默认全显示;隐藏后 HomeView 会跳过该板块
+            Assert(Views.HomePanels.All.Length == 4, "主页有 4 个可控板块(日历/待办/天气/项目)");
+            var ps = new AppSettings();
+            Assert(ps.IsPanelVisible("weather"), "板块默认显示");
+            ps.HiddenPanels.Add("weather");
+            Assert(!ps.IsPanelVisible("weather"), "加入隐藏列表后板块不显示");
+            var homeVis = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (homeVis is not null)
+            {
+                Assert(homeVis.Contains("IsPanelVisible(\"weather\")"), "HomeView 读取板块显隐");
+                Assert(homeVis.Contains("_weatherVisible") && homeVis.Contains("_projectsVisible"), "各板块按显隐条件构建");
+            }
             var setSrc = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (setSrc is not null)
                 Assert(setSrc.Contains("new DevicesView(embedded: true)"), "已配对的电脑并入设置页");

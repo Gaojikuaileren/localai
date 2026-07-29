@@ -67,8 +67,16 @@ public sealed class HomeView : UserControl
 
     App TheApp => (App)Application.Current;
 
+    // 主页板块显隐(用户在"扩展 › 主页板块"里勾选)。构建时读取;隐藏的不占版面。
+    readonly bool _calVisible, _todoVisible, _weatherVisible, _projectsVisible;
+
     public HomeView()
     {
+        _calVisible = TheApp.Settings.IsPanelVisible("calendar");
+        _todoVisible = TheApp.Settings.IsPanelVisible("todo");
+        _weatherVisible = TheApp.Settings.IsPanelVisible("weather");
+        _projectsVisible = TheApp.Settings.IsPanelVisible("projects");
+
         _greeting.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         _greetingSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
 
@@ -91,13 +99,17 @@ public sealed class HomeView : UserControl
         Grid.SetRow(_greetingBox, 0); Grid.SetColumnSpan(_greetingBox, 2);
         _root.Children.Add(_greetingBox);
 
-        // ② 日历(周横排,固定高)| 待办(窄)
-        // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
-        // 周/月排布【共用同一尺寸】(用户裁定),所以高度固定、切换时不变
-        var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
-        var calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, 12, 12));
-        Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
-        _root.Children.Add(calPanel);
+        // ② 日历(周横排,固定高)| 待办(窄)。任一隐藏则另一块占满整行;都隐藏则整行塌陷。
+        Border? calPanel = null;
+        if (_calVisible)
+        {
+            // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
+            var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
+            calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12));
+            Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
+            if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
+            _root.Children.Add(calPanel);
+        }
 
         _todoList.Margin = new Thickness(0, 2, 0, 0);
         var todoScroll = new ScrollViewer
@@ -120,50 +132,64 @@ public sealed class HomeView : UserControl
         _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
             headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"));
-        BuildTodos();
-        TheApp.Todos.Changed += BuildTodos;
-        _todoGrace.Tick += (_, _) => SweepExpiredTodos();   // 宽限到点 -> 划出动画,不是整表重建
-        Unloaded += (_, _) => { TheApp.Todos.Changed -= BuildTodos; _todoGrace.Stop(); };
-        // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
-        // 与日历面板等高:日历面板 = 日历本体 + Ui.Panel 的标题行与内边距(约 62),
-        // 之前按 +46 算,导致两块并排时高度差了十几像素。
+        // 与日历等高 —— 两块并排,高度锁死才不会一高一矮(日历本体 + 标题行与内边距 ≈ 62)。
         _todoPanel.Height = CalendarView.PanelHeight + 62;
-        Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
-        _root.Children.Add(_todoPanel);
+        if (_todoVisible)
+        {
+            BuildTodos();
+            TheApp.Todos.Changed += BuildTodos;
+            _todoGrace.Tick += (_, _) => SweepExpiredTodos();   // 宽限到点 -> 划出动画,不是整表重建
+            Unloaded += (_, _) => { TheApp.Todos.Changed -= BuildTodos; _todoGrace.Stop(); };
+            Grid.SetRow(_todoPanel, 1);
+            Grid.SetColumn(_todoPanel, _calVisible ? 1 : 0);
+            if (!_calVisible) Grid.SetColumnSpan(_todoPanel, 2);   // 日历隐藏 -> 待办占满整行
+            _root.Children.Add(_todoPanel);
+        }
 
         // ③ 天气:固定高度,只占所需。地点表可拖拽排序(首格锁定)
-        _weatherGrid.Height = WeatherHeight;
-        _weatherGrid.Margin = new Thickness(0, 0, -WeatherGap, 12);   // 吸收末格多出的右间距
-        _places = Places.Load(TheApp.Settings);
-        BuildWeather();
-        Grid.SetRow(_weatherGrid, 2); Grid.SetColumnSpan(_weatherGrid, 2);
-        _root.Children.Add(_weatherGrid);
+        _places = Places.Load(TheApp.Settings);   // 始终加载(供待办列宽对齐计算),但隐藏时不建 UI
+        if (_weatherVisible)
+        {
+            _weatherGrid.Height = WeatherHeight;
+            _weatherGrid.Margin = new Thickness(0, 0, -WeatherGap, 12);   // 吸收末格多出的右间距
+            BuildWeather();
+            Grid.SetRow(_weatherGrid, 2); Grid.SetColumnSpan(_weatherGrid, 2);
+            _root.Children.Add(_weatherGrid);
+        }
 
-        // ④ 项目方块:占满剩余,平分整宽,可滚动
-        // ★ 顶端对齐 —— 否则 UniformGrid 会把仅有的一行拉伸到整个可用高度,
-        //   方块看起来"纵向居中"。用户要的是【从上到下、从左到右】依次排布。
-        _tiles.VerticalAlignment = VerticalAlignment.Top;
-        _tiles.Columns = 4;
-        var projects = Ui.Panel(Strings.Get("project.resume"),
-            new ScrollViewer
-            {
-                Content = _tiles,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            }.PassThrough(),
-            IconName.Tasks, new Thickness(0));
-        Grid.SetRow(projects, 3); Grid.SetColumnSpan(projects, 2);
-        _root.Children.Add(projects);
+        // ④ 项目方块:占满剩余,平分整宽,可滚动。隐藏则让该行不再占用剩余空间。
+        if (_projectsVisible)
+        {
+            // ★ 顶端对齐 —— 否则 UniformGrid 会把仅有的一行拉伸到整个可用高度,
+            //   方块看起来"纵向居中"。用户要的是【从上到下、从左到右】依次排布。
+            _tiles.VerticalAlignment = VerticalAlignment.Top;
+            _tiles.Columns = 4;
+            var projects = Ui.Panel(Strings.Get("project.resume"),
+                new ScrollViewer
+                {
+                    Content = _tiles,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                }.PassThrough(),
+                IconName.Tasks, new Thickness(0));
+            Grid.SetRow(projects, 3); Grid.SetColumnSpan(projects, 2);
+            _root.Children.Add(projects);
+
+            BuildTiles();
+            TheApp.Projects.Changed += BuildTiles;
+            Unloaded += (_, _) => TheApp.Projects.Changed -= BuildTiles;
+        }
+        else
+        {
+            _root.RowDefinitions[3].Height = GridLength.Auto;   // 项目隐藏 -> 不再吃掉剩余空间
+            _root.RowDefinitions[3].MinHeight = 0;
+        }
 
         // 兜底逃生口:极端尺寸下允许整页纵向滚动 —— 宁可滚动也不裁切内容
         _pageScroll.Content = _root;
         _pageScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         _pageScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
         Content = _pageScroll;
-
-        BuildTiles();
-        TheApp.Projects.Changed += BuildTiles;
-        Unloaded += (_, _) => TheApp.Projects.Changed -= BuildTiles;
 
         SizeChanged += (_, _) => ScheduleRelayout();
         _resizeThrottle.Tick += (_, _) => { _resizeThrottle.Stop(); RelayoutDiscrete(); };
@@ -190,9 +216,14 @@ public sealed class HomeView : UserControl
         if (ActualWidth <= 0) return;
         var contentW = ActualWidth - 48;                       // _root 左右各 24 外边距
         // 待办列 = 一个天气卡宽 ->与下方天气对齐;日历列吃剩余(= 两卡 + 间隔)。
-        var n = Math.Max(1, _places.Count);
-        var cardOuter = (contentW - (n - 1) * WeatherGap) / n;
-        _todoColumn.Width = new GridLength(Math.Max(150, cardOuter));
+        // 待办隐藏时列宽归 0(日历已 colspan 占满整行,列宽无所谓)。
+        if (_todoVisible)
+        {
+            var n = Math.Max(1, _places.Count);
+            var cardOuter = (contentW - (n - 1) * WeatherGap) / n;
+            _todoColumn.Width = new GridLength(Math.Max(150, cardOuter));
+        }
+        else _todoColumn.Width = new GridLength(0);
         // 问候块占约 1/3 宽
         _greetingBox.Width = Math.Max(200, contentW / 3.0);
     }
@@ -205,6 +236,9 @@ public sealed class HomeView : UserControl
         // 列数不超过项目数 —— 否则多出的空列就是右侧一块空白
         var cols = Layout.ProjectColumns(w - 8, _cols, TheApp.Projects.Items.Count);
         if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
+
+        // 天气隐藏时不建卡片(_cityHourly 为空),跳过逐小时重排,避免越界。
+        if (!_weatherVisible || _cityHourly.Length != _places.Count) return;
 
         // 天气卡内可用宽度(减去卡片内边距与卡间距)
         var n = Math.Max(1, _places.Count);
@@ -735,12 +769,13 @@ public sealed class HomeView : UserControl
 
     void UpdateClocks()
     {
-        // 重建天气区时数组会被换掉,长度可能与地点表短暂不一致 -> 取交集,避免越界
-        if (_cityTime.Length != _places.Count) return;
-
+        // ★ 问候语始终要刷(与天气是否显示无关)—— 放在天气早退守卫【之前】。
         var hour = DateTime.Now.Hour;
         _greeting.Text = Greetings.TitleFor(hour);
         _greetingSub.Text = Greetings.SubFor(DateTime.Now);   // 同一小时内稳定,不每秒乱跳
+
+        // 天气隐藏(数组为空)或重建期间长度不一致 -> 跳过城市时钟,避免越界
+        if (!_weatherVisible || _cityTime.Length != _places.Count) return;
 
         var localOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
         for (int i = 0; i < _places.Count; i++)
