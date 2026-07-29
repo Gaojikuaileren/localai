@@ -57,7 +57,21 @@ public static class WheelTest
         gbox.Children.Add(gs);
         Save(Themed(gbox), Path.Combine(outDir, "greeting.png"), 340, 130);
 
-        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png");
+        // 图标核对:财务管理(钱包)vs 投资(走势图)要能一眼区分
+        var icons = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var ic in new[] { IconName.Finance, IconName.Investment, IconName.Chat, IconName.Assets, IconName.Computer })
+        {
+            var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
+            var el = Icons.Make(ic, 34, "FgPrimary");
+            box.Children.Add(el);
+            var lab = new TextBlock { Text = ic.ToString(), TextAlignment = TextAlignment.Center, FontSize = 10 };
+            lab.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            box.Children.Add(lab);
+            icons.Children.Add(box);
+        }
+        Save(Themed(icons), Path.Combine(outDir, "icons.png"), 320, 80);
+
+        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png");
         return 0;
     }
 

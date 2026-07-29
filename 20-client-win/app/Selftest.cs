@@ -220,7 +220,16 @@ public static class Selftest
             Assert(projCenter.Recent().First().ProjectId == "a", "取消置顶后回到按最近排序");
 
             // ---- 工作空间显示开关 + 财务管理 + 系统贴底 + 设备并入设置 ----
-            Assert(Views.Workspaces.All.Any(w => w.Key == "finance"), "新增了「财务管理」工作空间");
+            Assert(Views.Workspaces.All.Any(w => w.Key == "finance"), "有「财务管理」工作空间");
+            Assert(Views.Workspaces.All.Any(w => w.Key == "investment"), "有「投资」工作空间(之前误删已补回)");
+            Assert(Views.Workspaces.All.Single(w => w.Key == "investment").Icon == Theme.IconName.Investment, "投资用走势图图标");
+            Assert(Views.Workspaces.All.Single(w => w.Key == "finance").Icon == Theme.IconName.Finance, "财务管理用钱包图标(与投资区分)");
+            var iconsSrc = TryReadSource(Path.Combine("Theme", "Icons.cs"));
+            if (iconsSrc is not null)
+            {
+                var n = iconsSrc.Split("[IconName.Finance]").Length - 1;
+                Assert(n >= 3, $"Finance 图标三种皮肤都补齐了(实得 {n} 处,需 3)");
+            }
             Assert(Strings.Get("nav.finance") == "财务管理", "财务管理文案就位");
             var st = new AppSettings();
             Assert(st.IsWorkspaceVisible("finance"), "工作空间默认显示");

@@ -21,6 +21,7 @@ public static class Workspaces
         new("translation", "nav.translation", IconName.Translation),
         new("courses", "nav.courses", IconName.Courses),
         new("computer", "nav.computer_control", IconName.Computer),
-        new("finance", "nav.finance", IconName.Investment),
+        new("finance", "nav.finance", IconName.Finance),        // 财务管理(钱包图标)
+        new("investment", "nav.investment", IconName.Investment), // 投资研究(走势图图标)—— 之前误删,现补回为可勾选项
     };
 }
