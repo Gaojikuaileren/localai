@@ -15,6 +15,9 @@ public static class ThemeManager
 
     public static Skin Current { get; private set; } = Skin.Breeze;
 
+    /// <summary>换肤时触发。颜色靠 DynamicResource 自动跟随,但**图标形状**要整套重建(见 Icons)。</summary>
+    public static event Action? SkinChanged;
+
     public static void Apply(Skin skin)
     {
         var dicts = Application.Current.Resources.MergedDictionaries;
@@ -22,6 +25,7 @@ public static class ThemeManager
         if (dicts.Count == 0) dicts.Add(next);
         else dicts[SkinSlot] = next;
         Current = skin;
+        SkinChanged?.Invoke();
     }
 
     /// <summary>启动时装载:皮肤在前(可换),Tokens 在后(常驻,含禁改的风险/范围语义色)。</summary>

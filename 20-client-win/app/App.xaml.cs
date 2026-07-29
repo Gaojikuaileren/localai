@@ -22,6 +22,8 @@ public partial class App : Application
 
     public AppSettings Settings { get; private set; } = new();
     public HubClient Hub { get; private set; } = new();
+    /// <summary>全局任务中心:底部横条与全局抽屉共用同一份状态(用户裁定抽屉是全局的)。</summary>
+    public TaskCenter Tasks { get; } = new();
     // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
     // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
     public ShutdownCoordinator Lifecycle { get; } = new();
@@ -65,6 +67,17 @@ public partial class App : Application
 
         // 启动即用已保存的档案连一次:配对过就自动连上,不再打扰用户(用户要求 3)。
         _ = Task.Run(async () => { await Hub.ProbeAsync(); Dispatcher.Invoke(UpdateTrayTooltip); });
+
+        SeedDemoTasks();
+    }
+
+    // 外壳评审期的示例任务。真实任务源要等各工作空间接入(P4/P6/P9),在那之前底部横条
+    // 永远不会出现、也就没法评审。★ 标题明确标注「示例」——不伪装成真实任务。
+    // 真实任务接入后删掉这段(或改成 Settings 里的开发者开关)。
+    void SeedDemoTasks()
+    {
+        Tasks.Add("(示例)生成课件大纲", "第 3 / 8 页 · 课程与演示", "courses", 0.38);
+        Tasks.Add("(示例)翻译长文", "中 → 日 · 详细解释档", "translation", 0.72);
     }
 
     void RegisterCleanupSteps()

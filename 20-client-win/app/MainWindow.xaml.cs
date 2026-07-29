@@ -6,13 +6,15 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LocalAI.Client.I18n;
 using LocalAI.Client.Services;
+using LocalAI.Client.Theme;
 using LocalAI.Client.Views;
 
 namespace LocalAI.Client;
 
-public sealed record NavItem(string Key, string TitleKey, Func<UserControl> Build);
+public sealed record NavItem(string Key, string TitleKey, IconName Icon, Func<UserControl> Build);
 
 public partial class MainWindow : Window
 {
@@ -22,6 +24,10 @@ public partial class MainWindow : Window
 
     App TheApp => (App)Application.Current;
 
+    readonly DispatcherTimer _taskRotate = new() { Interval = TimeSpan.FromSeconds(4) };
+    int _taskIndex;
+    string? _drawerKind;   // "tasks" | "calendar" | null
+
     public MainWindow()
     {
         InitializeComponent();
@@ -29,30 +35,152 @@ public partial class MainWindow : Window
         Navigate("home");
         RefreshStatus();
         RefreshMember();
+        BuildChromeIcons();
+        StateChanged += (_, _) => SyncMaxButton();
+        SyncMaxButton();
+
+        // 窗口圆角跟随皮肤(暖萌大 / 微风中 / 墨白小)。句柄要等 SourceInitialized 之后才有。
+        SourceInitialized += (_, _) => WindowCorners.Apply(this, TheApp.Settings.Skin);
+
+        // 底部任务横条:有任务才出现,多任务时自动轮播
+        TheApp.Tasks.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
+        _taskRotate.Tick += (_, _) => { _taskIndex++; RefreshTaskBar(); };
+        RefreshTaskBar();
     }
+
+    // ---------------------------------------------------------------- 底部任务横条
+    public void RefreshTaskBar()
+    {
+        var tasks = TheApp.Tasks.Tasks;
+        if (tasks.Count == 0)
+        {
+            TaskBar.Visibility = Visibility.Collapsed;   // 空闲自动隐藏,不留空横条
+            _taskRotate.Stop();
+            if (_drawerKind == "tasks") CloseDrawer();
+            return;
+        }
+
+        TaskBar.Visibility = Visibility.Visible;
+        // 多个任务才轮播;单个任务固定显示(转来转去反而看不清)
+        if (tasks.Count > 1) { if (!_taskRotate.IsEnabled) _taskRotate.Start(); }
+        else { _taskRotate.Stop(); _taskIndex = 0; }
+
+        var t = tasks[_taskIndex % tasks.Count];
+        TaskBarTitle.Text = t.Title;
+        TaskBarDetail.Text = t.Detail;
+        TaskBarPercent.Text = t.PercentText;
+        TaskBarCount.Text = tasks.Count > 1 ? $"共 {tasks.Count} 个" : "";
+        if (t.Progress < 0) { TaskBarProgress.IsIndeterminate = true; }
+        else { TaskBarProgress.IsIndeterminate = false; TaskBarProgress.Value = t.Progress; }
+
+        if (_drawerKind == "tasks") DrawerHost.Content = new TaskDrawerView();
+    }
+
+    // ---------------------------------------------------------------- 全局抽屉
+    // 抽屉挂在外壳上而不是某个视图里 —— 用户要求它在任何界面都能开。
+
+    void OnToggleTaskDrawer(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (_drawerKind == "tasks") CloseDrawer();
+        else OpenDrawer("tasks", "正在进行的任务", new TaskDrawerView());
+    }
+
+    void OnOpenCalendar(object sender, RoutedEventArgs e)
+    {
+        if (_drawerKind == "calendar") CloseDrawer();
+        else OpenDrawer("calendar", "日历", new CalendarPanel(compact: false));
+    }
+
+    void OpenDrawer(string kind, string title, UserControl content)
+    {
+        _drawerKind = kind;
+        DrawerTitle.Text = title;
+        DrawerHost.Content = content;
+        DrawerScrim.Visibility = Visibility.Visible;
+        Drawer.Visibility = Visibility.Visible;
+    }
+
+    void OnCloseDrawer(object sender, RoutedEventArgs e) => CloseDrawer();
+    void OnCloseDrawer(object sender, System.Windows.Input.MouseButtonEventArgs e) => CloseDrawer();
+
+    void CloseDrawer()
+    {
+        _drawerKind = null;
+        Drawer.Visibility = Visibility.Collapsed;
+        DrawerScrim.Visibility = Visibility.Collapsed;
+        DrawerHost.Content = null;
+    }
+
+    // ---------------------------------------------------------------- 自绘标题栏
+    // CaptionHeight=0 意味着系统不再把顶部当标题栏,拖动/双击最大化要自己接。
+
+    void OnTitleBarDrag(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2) { ToggleMaximize(); return; }   // 双击最大化/还原(系统惯例)
+        // 最大化状态下拖动应先还原再跟随鼠标(Windows 的标准手感)
+        if (WindowState == WindowState.Maximized)
+        {
+            var mouseX = e.GetPosition(this).X;
+            var pct = mouseX / ActualWidth;
+            WindowState = WindowState.Normal;
+            Left = Math.Max(0, PointToScreen(e.GetPosition(this)).X - RestoreBounds.Width * pct);
+            Top = 0;
+        }
+        try { DragMove(); } catch { /* 极少数情况下鼠标已抬起,忽略 */ }
+    }
+
+    void OnMinimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+    void OnMaximizeRestore(object sender, RoutedEventArgs e) => ToggleMaximize();
+
+    void ToggleMaximize() =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    void SyncMaxButton()
+    {
+        var max = WindowState == WindowState.Maximized;
+        MaxButton.Content = Icons.Make(max ? IconName.Restore : IconName.Maximize, 13, "FgSecondary");
+        MaxButton.ToolTip = max ? "向下还原" : "最大化";
+    }
+
+    // 标题栏与导航的图标一次性装配(跟随皮肤)
+    void BuildChromeIcons()
+    {
+        MinButton.Content = Icons.Make(IconName.Minimize, 13, "FgSecondary");
+        CloseButton.Content = Icons.Make(IconName.Close, 13, "FgSecondary");
+        CollapseButton.Content = Icons.Make(IconName.Menu, 15, "FgMuted");
+        CalendarButton.Content = Icons.Make(IconName.Calendar, 17, "FgSecondary");
+        TaskBarIcon.Content = Icons.Make(IconName.Tasks, 15, "Accent");
+        TaskBarChevron.Content = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
+        DrawerCloseButton.Content = Icons.Make(IconName.Close, 12, "FgMuted");
+    }
+
+    // 走正常的 Closing 流程 —— App 会按设置决定「缩到托盘」还是「真退出」,
+    // 这样自绘的 × 和系统的 Alt+F4 行为完全一致。
+    void OnCloseClick(object sender, RoutedEventArgs e) => Close();
 
     void BuildNav()
     {
         NavPanel.Children.Clear();
         _nav.Clear();
 
-        AddItem(new NavItem("home", "nav.home", () => new HomeView()));
+        AddItem(new NavItem("home", "nav.home", IconName.Home, () => new HomeView()));
 
         AddGroupLabel(Strings.Get("nav.workspaces"));
-        AddItem(new NavItem("chat", "nav.chat", () => new PlaceholderView("nav.chat")));
-        AddItem(new NavItem("assets", "nav.assets", () => new PlaceholderView("nav.assets")));
-        AddItem(new NavItem("translation", "nav.translation", () => new PlaceholderView("nav.translation")));
-        AddItem(new NavItem("courses", "nav.courses", () => new PlaceholderView("nav.courses")));
-        AddItem(new NavItem("computer", "nav.computer_control", () => new PlaceholderView("nav.computer_control")));
+        AddItem(new NavItem("chat", "nav.chat", IconName.Chat, () => new PlaceholderView("nav.chat")));
+        AddItem(new NavItem("assets", "nav.assets", IconName.Assets, () => new PlaceholderView("nav.assets")));
+        AddItem(new NavItem("translation", "nav.translation", IconName.Translation, () => new PlaceholderView("nav.translation")));
+        AddItem(new NavItem("courses", "nav.courses", IconName.Courses, () => new PlaceholderView("nav.courses")));
+        AddItem(new NavItem("computer", "nav.computer_control", IconName.Computer, () => new PlaceholderView("nav.computer_control")));
         // 投资研究:D42 §7/B4 只做隐藏占位。当前无"指定成员+指定端"配置 -> 整行不渲染。
-        if (ShouldShowInvestment()) AddItem(new NavItem("investment", "nav.investment", () => new PlaceholderView("nav.investment")));
+        if (ShouldShowInvestment()) AddItem(new NavItem("investment", "nav.investment", IconName.Investment, () => new PlaceholderView("nav.investment")));
 
         AddGroupLabel(Strings.Get("nav.system"));
-        AddItem(new NavItem("extensions", "nav.extensions", () => new PlaceholderView("nav.extensions")));
-        AddItem(new NavItem("settings", "nav.settings", () => new SettingsView()));
+        AddItem(new NavItem("extensions", "nav.extensions", IconName.Extensions, () => new PlaceholderView("nav.extensions")));
+        AddItem(new NavItem("settings", "nav.settings", IconName.Settings, () => new SettingsView()));
         // 主机管理 = 配对与设备管理的所在地。副机端也要能配对,所以这里显示的是"连接与设备";
         // 真正的主机专属项(仅主机端 + 管理员)在该视图内部再判定。
-        AddItem(new NavItem("devices", "devices.title", () => new DevicesView()));
+        AddItem(new NavItem("devices", "devices.title", IconName.Devices, () => new DevicesView()));
     }
 
     static bool ShouldShowInvestment() => false;   // P3c 只做隐藏占位:任何人任何端都不显示(D42 §7/B4)
@@ -71,11 +199,20 @@ public partial class MainWindow : Window
 
     void AddItem(NavItem item)
     {
+        // 图标 + 文字。图标形状跟随皮肤(墨白线性 / 苹果线性 / 暖萌可爱),换肤自动重建。
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var icon = Icons.Make(item.Icon, 17, "FgSecondary");
+        icon.Margin = new Thickness(2, 0, 10, 0);
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        var label = new TextBlock { Text = Strings.Get(item.TitleKey), VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(icon);
+        row.Children.Add(label);
+
         var b = new Button
         {
-            Content = Strings.Get(item.TitleKey),
+            Content = row,
             Tag = item.Key,
-            Height = 36,
+            Height = 38,
             HorizontalContentAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(10, 0, 10, 0),
             Margin = new Thickness(0, 1, 0, 1),
@@ -96,28 +233,41 @@ public partial class MainWindow : Window
         _currentKey = key;
         ContentHost.Content = hit.item.Build();
         PageTitle.Text = Strings.Get(hit.item.TitleKey);
+        // 主页右上角已经有日历板块了,顶栏就不再重复放按钮(用户裁定)。
+        CalendarButton.Visibility = key == "home" ? Visibility.Collapsed : Visibility.Visible;
 
         foreach (var (item, btn) in _nav)
         {
             var on = item.Key == key;
             btn.Background = on ? (Brush)FindResource("BgSelected") : Brushes.Transparent;
+            // ★ 选中态前景必须跟着背景走:墨白皮肤的 BgSelected 是近黑色,若前景仍用 FgPrimary(也是黑)
+            //   就会黑底黑字看不清。各皮肤自己声明选中态前景(FgOnSelected)。图标同理。
+            btn.Foreground = (Brush)FindResource(on ? "FgOnSelected" : "FgPrimary");
             btn.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+            if (btn.Content is StackPanel sp && sp.Children.Count > 0 && sp.Children[0] is FrameworkElement ico)
+                Icons.SetForeground(ico, on ? "FgOnSelected" : "FgSecondary");
         }
     }
 
     void OnToggleNav(object sender, RoutedEventArgs e)
     {
         _collapsed = !_collapsed;
-        NavColumn.Width = new GridLength(_collapsed ? 56 : 240);
-        BrandText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
-        CollapseButton.Content = _collapsed ? "»" : "«";
+        NavColumn.Width = new GridLength(_collapsed ? 58 : 240);
+        // 品牌现在在自绘标题栏里(贯通全宽),收起导航不影响它。
         foreach (var (item, btn) in _nav)
         {
-            // 收起时只留首字,保留 ToolTip 说明全名(无障碍:不能只靠视觉)
-            btn.Content = _collapsed ? Strings.Get(item.TitleKey)[..1] : Strings.Get(item.TitleKey);
+            // 收起时只留【图标】(比留首字清楚得多);ToolTip 补全名 —— 无障碍:不能只靠视觉。
+            if (btn.Content is StackPanel sp && sp.Children.Count > 1 && sp.Children[1] is TextBlock lbl)
+            {
+                lbl.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
+                if (sp.Children[0] is FrameworkElement ic)
+                    ic.Margin = _collapsed ? new Thickness(0) : new Thickness(2, 0, 10, 0);
+                sp.HorizontalAlignment = _collapsed ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+            }
             btn.ToolTip = _collapsed ? Strings.Get(item.TitleKey) : null;
             btn.HorizontalContentAlignment = _collapsed ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         }
+        // 分组标题在收起状态没有宽度显示,整条隐藏
         foreach (var c in NavPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
     }
 

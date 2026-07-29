@@ -1,6 +1,7 @@
 <Window x:Class="LocalAI.Client.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="本地 AI 中枢" Height="900" Width="1440" MinHeight="600" MinWidth="1040"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource BgWindow}"
@@ -8,61 +9,198 @@
         FontSize="{DynamicResource FontBody}"
         TextOptions.TextFormattingMode="Ideal"
         UseLayoutRounding="True">
-  <!-- 设计 §3 统一外壳:左导航(可收起)+ 顶栏 + 中央内容区 + 底部任务架(长任务时出现)。
-       ★ 全实色,无毛玻璃/半透明(设计 §7 显存约束)。 -->
+  <!-- 自绘标题栏:用 WindowChrome,而不是 WindowStyle=None + AllowsTransparency。
+       后者会让整窗走 layered window 合成,显存/性能成本比它想替代的毛玻璃还高(设计 §7 显存约束);
+       WindowChrome 则保留系统的拖动、双击最大化、Aero Snap、投影与调整边框。 -->
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="0" ResizeBorderThickness="6" CornerRadius="0" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
+  </shell:WindowChrome.WindowChrome>
+
+  <Window.Resources>
+    <!-- 窗口按钮:方形、无边框、hover 才显底色;关闭键 hover 用恒定风险红(设计 §7 风险语义色皮肤禁改) -->
+    <Style x:Key="CaptionButton" TargetType="Button">
+      <Setter Property="Width" Value="46"/>
+      <Setter Property="Height" Value="38"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource FgSecondary}"/>
+      <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bg" Background="{TemplateBinding Background}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource BgHover}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="CloseButton" TargetType="Button" BasedOn="{StaticResource CaptionButton}">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bg" Background="{TemplateBinding Background}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource RiskDanger}"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
   <Grid>
-    <Grid.ColumnDefinitions>
-      <ColumnDefinition x:Name="NavColumn" Width="240"/>
-      <ColumnDefinition Width="*"/>
-    </Grid.ColumnDefinitions>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="38"/>   <!-- 自绘标题栏(贯通全宽) -->
+      <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
 
-    <!-- 左导航 -->
-    <Border Grid.Column="0" Background="{DynamicResource BgNav}"
-            BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0">
-      <DockPanel>
-        <!-- 品牌 + 收起 -->
-        <Grid DockPanel.Dock="Top" Height="54" Margin="16,0,8,0">
-          <TextBlock x:Name="BrandText" Text="本地 AI 中枢" VerticalAlignment="Center"
-                     FontSize="{DynamicResource FontSubtitle}" FontWeight="SemiBold"
-                     Foreground="{DynamicResource FgPrimary}"/>
-          <Button x:Name="CollapseButton" Content="«" Width="28" Height="28"
-                  HorizontalAlignment="Right" VerticalAlignment="Center"
-                  Background="Transparent" BorderThickness="0"
-                  Foreground="{DynamicResource FgMuted}" Cursor="Hand"
-                  ToolTip="收起导航" Click="OnToggleNav"/>
-        </Grid>
+    <!-- ================= 标题栏 ================= -->
+    <Border Grid.Row="0" Background="{DynamicResource BgNav}"
+            BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
 
-        <StackPanel x:Name="NavPanel" DockPanel.Dock="Top" Margin="8,8,8,0"/>
+        <!-- 品牌 -->
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
+          <Border Width="16" Height="16" CornerRadius="4" Background="{DynamicResource Accent}" Margin="0,0,9,0"/>
+          <TextBlock Text="本地 AI 中枢" FontWeight="SemiBold" FontSize="12.5"
+                     Foreground="{DynamicResource FgPrimary}" VerticalAlignment="Center"/>
+        </StackPanel>
 
-        <!-- 底部:当前成员(D45 成员层的界面出口) -->
-        <Border DockPanel.Dock="Bottom" Margin="8,8,8,12" Padding="10,8"
-                Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}">
-          <StackPanel>
-            <TextBlock x:Name="MemberText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
-            <TextBlock x:Name="MemberHint" Foreground="{DynamicResource FgMuted}"
-                       FontSize="{DynamicResource FontCaption}" TextWrapping="Wrap"/>
-          </StackPanel>
-        </Border>
-        <Grid/>
-      </DockPanel>
+        <!-- 中间空白 = 拖动区(CaptionHeight=0,所以靠 MouseLeftButtonDown 触发 DragMove) -->
+        <Border Grid.Column="1" Background="Transparent" MouseLeftButtonDown="OnTitleBarDrag"/>
+
+        <!-- 窗口按钮:Segoe MDL2 图标 最小化 E921 / 最大化 E922 / 还原 E923 / 关闭 E8BB -->
+        <StackPanel Grid.Column="2" Orientation="Horizontal">
+          <Button x:Name="MinButton" Style="{StaticResource CaptionButton}" ToolTip="最小化" Click="OnMinimize"/>
+          <Button x:Name="MaxButton" Style="{StaticResource CaptionButton}" ToolTip="最大化" Click="OnMaximizeRestore"/>
+          <Button x:Name="CloseButton" Style="{StaticResource CloseButton}" ToolTip="关闭(留在托盘)" Click="OnCloseClick"/>
+        </StackPanel>
+      </Grid>
     </Border>
 
-    <!-- 右侧:顶栏 + 内容 -->
-    <DockPanel Grid.Column="1">
-      <Border DockPanel.Dock="Top" Height="54" Background="{DynamicResource BgSurface}"
-              BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">
-        <Grid Margin="20,0">
-          <TextBlock x:Name="PageTitle" VerticalAlignment="Center"
-                     FontSize="{DynamicResource FontSubtitle}" FontWeight="SemiBold"
-                     Foreground="{DynamicResource FgPrimary}"/>
-          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Ellipse x:Name="StatusDot" Width="9" Height="9" Margin="0,0,8,0" Fill="{DynamicResource FgMuted}"/>
-            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{DynamicResource FgSecondary}"/>
-          </StackPanel>
-        </Grid>
+    <!-- ================= 主体:左导航 + 右内容 ================= -->
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition x:Name="NavColumn" Width="240"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- 左导航 -->
+      <Border Grid.Column="0" Background="{DynamicResource BgNav}"
+              BorderBrush="{DynamicResource Border}" BorderThickness="0,0,1,0">
+        <DockPanel>
+          <!-- 收起按钮 -->
+          <Grid DockPanel.Dock="Top" Height="40" Margin="8,4,8,0">
+            <Button x:Name="CollapseButton" Width="32" Height="32" HorizontalAlignment="Left" VerticalAlignment="Center"
+                    Background="Transparent" BorderThickness="0"
+                    Foreground="{DynamicResource FgMuted}" Cursor="Hand"
+                    ToolTip="收起导航" Click="OnToggleNav"/>
+          </Grid>
+
+          <!-- 底部:当前成员 -->
+          <Border DockPanel.Dock="Bottom" Margin="10,8,10,12" Padding="10,8"
+                  Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}">
+            <StackPanel>
+              <TextBlock x:Name="MemberText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="MemberHint" Foreground="{DynamicResource FgMuted}"
+                         FontSize="{DynamicResource FontCaption}" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel x:Name="NavPanel" Margin="10,0,10,0"/>
+          </ScrollViewer>
+        </DockPanel>
       </Border>
 
-      <ContentControl x:Name="ContentHost" Margin="0"/>
-    </DockPanel>
+      <!-- 右侧:页面顶栏 + 内容 + 底部任务横条 -->
+      <DockPanel Grid.Column="1">
+        <Border DockPanel.Dock="Top" Height="54" Background="{DynamicResource BgSurface}"
+                BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">
+          <Grid Margin="24,0,16,0">
+            <TextBlock x:Name="PageTitle" VerticalAlignment="Center"
+                       FontSize="{DynamicResource FontSubtitle}" FontWeight="SemiBold"
+                       Foreground="{DynamicResource FgPrimary}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <Ellipse x:Name="StatusDot" Width="8" Height="8" Margin="0,0,8,0" Fill="{DynamicResource FgMuted}"/>
+              <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{DynamicResource FgSecondary}"
+                         FontSize="{DynamicResource FontCaption}" Margin="0,0,14,0"/>
+              <!-- 全局日历按钮。★ 主页里【不显示】—— 日历已经在主页右上角了(用户裁定)。 -->
+              <Button x:Name="CalendarButton" Width="34" Height="34" Cursor="Hand"
+                      Background="Transparent" BorderThickness="0"
+                      Foreground="{DynamicResource FgSecondary}" ToolTip="日历" Click="OnOpenCalendar"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- 底部任务横条:有任务才出现,空闲自动隐藏(设计 §3)。只显示简要 + 进度;
+             多个任务随时间自动轮播;点整条打开【全局】任务抽屉。 -->
+        <Border x:Name="TaskBar" DockPanel.Dock="Bottom" Height="48" Visibility="Collapsed"
+                Background="{DynamicResource BgSurface}"
+                BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0"
+                Cursor="Hand" MouseLeftButtonUp="OnToggleTaskDrawer">
+          <Grid Margin="24,0,16,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <ContentControl x:Name="TaskBarIcon" Margin="0,0,10,0" VerticalAlignment="Center" Focusable="False"/>
+              <TextBlock x:Name="TaskBarTitle" VerticalAlignment="Center" FontWeight="SemiBold"
+                         Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis" MaxWidth="360"/>
+              <TextBlock x:Name="TaskBarDetail" VerticalAlignment="Center" Margin="12,0,0,0"
+                         Foreground="{DynamicResource FgMuted}" FontSize="{DynamicResource FontCaption}"
+                         TextTrimming="CharacterEllipsis" MaxWidth="320"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <ProgressBar x:Name="TaskBarProgress" Width="160" Height="4" Minimum="0" Maximum="1"
+                           Foreground="{DynamicResource Accent}" Background="{DynamicResource BgSunken}"
+                           BorderThickness="0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="TaskBarPercent" VerticalAlignment="Center" Margin="10,0,12,0"
+                         Foreground="{DynamicResource FgSecondary}" FontSize="{DynamicResource FontCaption}"/>
+              <TextBlock x:Name="TaskBarCount" VerticalAlignment="Center" Margin="0,0,10,0"
+                         Foreground="{DynamicResource FgMuted}" FontSize="{DynamicResource FontCaption}"/>
+              <ContentControl x:Name="TaskBarChevron" VerticalAlignment="Center" Focusable="False"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <ContentControl x:Name="ContentHost"/>
+      </DockPanel>
+    </Grid>
+
+    <!-- ============ 全局抽屉(覆盖在内容之上,任何界面都能开)============ -->
+    <!-- 遮罩:实色低透明,不是毛玻璃(设计 §7 显存约束) -->
+    <Border x:Name="DrawerScrim" Grid.Row="1" Background="#33000000" Visibility="Collapsed"
+            MouseLeftButtonDown="OnCloseDrawer"/>
+    <Border x:Name="Drawer" Grid.Row="1" Width="420" HorizontalAlignment="Right" Visibility="Collapsed"
+            Background="{DynamicResource BgSurface}"
+            BorderBrush="{DynamicResource Border}" BorderThickness="1,0,0,0">
+      <DockPanel>
+        <Grid DockPanel.Dock="Top" Height="54" Margin="20,0,12,0">
+          <TextBlock x:Name="DrawerTitle" VerticalAlignment="Center" FontWeight="SemiBold"
+                     FontSize="{DynamicResource FontSubtitle}" Foreground="{DynamicResource FgPrimary}"/>
+          <Button x:Name="DrawerCloseButton" Width="32" Height="32" HorizontalAlignment="Right" Cursor="Hand"
+                  Background="Transparent" BorderThickness="0"
+                  Foreground="{DynamicResource FgMuted}" Click="OnCloseDrawer"/>
+        </Grid>
+        <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
+        <ContentControl x:Name="DrawerHost" Margin="20,16,20,20"/>
+      </DockPanel>
+    </Border>
   </Grid>
 </Window>

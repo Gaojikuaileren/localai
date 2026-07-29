@@ -26,18 +26,48 @@ public static class Ui
     public static TextBlock Caption(string text) => new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }
         .Dyn(TextBlock.FontSizeProperty, "FontCaption").Dyn(TextBlock.ForegroundProperty, "FgMuted");
 
+    /// <summary>
+    /// 统一板块容器。★ 用户裁定:相同/并列功能的板块必须**同格式同大小** ——
+    /// 所以所有卡片一律经由这里产出:同样的内边距、同样的圆角令牌(跟随皮肤)、同样的描边。
+    /// 各视图不要再自己 new Border 拼卡片,否则并列板块又会长得不一样。
+    /// </summary>
     public static Border Card(UIElement child, Thickness? margin = null)
     {
         var b = new Border
         {
             Child = child,
-            Padding = new Thickness(20),
+            Padding = new Thickness(16),
             Margin = margin ?? new Thickness(0, 0, 0, 16),
-            CornerRadius = new CornerRadius(8),
             BorderThickness = new Thickness(1),
         };
-        b.Dyn(Border.BackgroundProperty, "BgSurface").Dyn(Border.BorderBrushProperty, "Border");
+        b.Dyn(Border.BackgroundProperty, "BgSurface")
+         .Dyn(Border.BorderBrushProperty, "Border")
+         .Dyn(Border.CornerRadiusProperty, "RadiusMd");
         return b;
+    }
+
+    /// <summary>
+    /// 带标题(可选图标)的统一板块。并列板块用它,标题栏高度与排版完全一致。
+    /// </summary>
+    public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null)
+    {
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        if (icon is { } ic)
+        {
+            var el = Theme.Icons.Make(ic, 16, "FgMuted");
+            el.Margin = new Thickness(0, 0, 8, 0);
+            el.VerticalAlignment = VerticalAlignment.Center;
+            head.Children.Add(el);
+        }
+        var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        t.Dyn(TextBlock.ForegroundProperty, "FgPrimary").Dyn(TextBlock.FontSizeProperty, "FontSubtitle");
+        head.Children.Add(t);
+
+        var dock = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(head, Dock.Top);
+        dock.Children.Add(head);
+        dock.Children.Add(body);
+        return Card(dock, margin);
     }
 
     public static Button Primary(string text, RoutedEventHandler onClick)

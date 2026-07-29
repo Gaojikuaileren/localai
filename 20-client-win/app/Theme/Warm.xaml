@@ -20,4 +20,12 @@
   <SolidColorBrush x:Key="Border"      Color="#E8D8C7"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#D3BBA5"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#E2725B"/>
+
+  <!-- 导航选中态的前景色。必须与 BgSelected 成对定义,否则会出现同色系底+字看不清 -->
+  <SolidColorBrush x:Key="FgOnSelected" Color="#5A2E1E"/>
+
+  <!-- 圆角三档跟随皮肤(用户裁定:暖萌大 / 微风中 / 墨白小)。窗口边框圆角见 WindowCorners.cs -->
+  <CornerRadius x:Key="RadiusSm">10</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">16</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">22</CornerRadius>
 </ResourceDictionary>

@@ -26,9 +26,9 @@
   <!-- 六个词要能一眼看清、逐词比对:等宽 + 大字号 + 宽字距 -->
   <sys:Double x:Key="FontSas">22</sys:Double>
 
-  <CornerRadius x:Key="RadiusSm">4</CornerRadius>
-  <CornerRadius x:Key="RadiusMd">8</CornerRadius>
-  <CornerRadius x:Key="RadiusLg">12</CornerRadius>
+  <!-- 圆角【不在这里定义】:它是皮肤的一部分(暖萌大/微风中/墨白小),各皮肤自己给。
+       注意合并字典顺序 —— 皮肤在 slot0、本文件在 slot1,后者会覆盖前者,
+       所以这里若再定义一份 RadiusSm/Md/Lg,三档圆角就永远出不来。 -->
 
   <!-- 布局常量(设计 §3) -->
   <sys:Double x:Key="NavWidth">240</sys:Double>

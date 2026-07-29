@@ -28,6 +28,8 @@ public sealed class SettingsView : UserControl
             {
                 s.Skin = picked; s.Save();
                 ThemeManager.Apply(picked);   // 即时生效,不需重启
+                // 窗口圆角也是皮肤的一部分(暖萌大 / 微风中 / 墨白小),跟着一起换
+                if (Application.Current.MainWindow is { } w) WindowCorners.Apply(w, picked);
             }
         };
 
