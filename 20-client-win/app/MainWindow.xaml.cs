@@ -37,8 +37,21 @@ public partial class MainWindow : Window
         RefreshStatus();
         RefreshMember();
         BuildChromeIcons();
-        // 抽屉打开时按 Esc 也能关(遮罩已接管鼠标,键盘也给一条退路)
+        // 浮层开着时按 Esc 关闭
         PreviewKeyDown += (_, ke) => { if (ke.Key == System.Windows.Input.Key.Escape && Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; } };
+
+        // ★ 全局拦截(用户裁定):浮层开着时,窗口里【任何】按钮的第一次点击都只负责关闭浮层,
+        //   不触发那个按钮本身。此前是在各个入口按钮里各调一次 ConsumeClick —— 漏一个就穿透,
+        //   而按钮遍布导航/设置/项目方块/任务条,不可能补全。改在窗口层一次拦掉。
+        //   注意:浮窗是独立的 Popup 窗口,它内部的点击不会走到这里,所以浮窗自己的按钮照常可用;
+        //   抽屉在本窗口内,故需放行落在抽屉内部的点击。
+        PreviewMouseDown += (_, me) =>
+        {
+            if (!Overlay.IsOpen) return;
+            if (me.OriginalSource is DependencyObject d && IsInsideDrawer(d)) return;   // 抽屉内部照常操作
+            Overlay.CloseActive();
+            me.Handled = true;   // 吞掉这一次点击,不让它落到按钮上
+        };
         StateChanged += (_, _) => SyncMaxButton();
         SyncMaxButton();
 
@@ -101,6 +114,14 @@ public partial class MainWindow : Window
         if (Height < MinHeight) Height = MinHeight;
         if (Width > MaxWidth) Width = MaxWidth;
         if (Height > MaxHeight) Height = MaxHeight;
+    }
+
+    /// <summary>该元素是否位于某个抽屉内部(抽屉内的点击应照常生效,不被"关闭浮层"吞掉)。</summary>
+    bool IsInsideDrawer(DependencyObject node)
+    {
+        for (var n = node; n is not null; n = System.Windows.Media.VisualTreeHelper.GetParent(n))
+            if (ReferenceEquals(n, CalendarDrawer) || ReferenceEquals(n, TaskDrawer)) return true;
+        return false;
     }
 
     // ---------------------------------------------------------------- 底部任务横条
@@ -191,14 +212,12 @@ public partial class MainWindow : Window
 
     void OnOpenBriefing(object sender, RoutedEventArgs e)
     {
-        if (Overlay.ConsumeClick()) return;   // 有浮窗开着 -> 这一次只关它
         if (_drawerKind == "briefing") { CloseDrawer(); return; }
         OpenRightDrawer("briefing", "消息栏", new BriefingDrawerView());
     }
 
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
-        if (Overlay.ConsumeClick()) return;   // 有浮窗开着 -> 这一次只关它
         if (_drawerKind == "calendar") { CloseDrawer(); return; }
         OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Month));
     }

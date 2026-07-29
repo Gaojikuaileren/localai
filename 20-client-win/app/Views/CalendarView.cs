@@ -97,12 +97,9 @@ public sealed class CalendarView : UserControl
         _labelButton.SetResourceReference(Border.BorderBrushProperty, "Border");
         _labelButton.MouseEnter += (_, _) => _labelButton.SetResourceReference(Border.BackgroundProperty, "BgHover");
         _labelButton.MouseLeave += (_, _) => _labelButton.Background = Brushes.Transparent;
-        _labelButton.MouseLeftButtonUp += (s, _) =>
-        {
-            // 有浮窗开着 -> 这一次点击只负责关掉它(用户裁定)
-            if (Overlay.ConsumeClick()) return;
-            OpenMonthPicker((FrameworkElement)s);
-        };
+        // 浮层开着时的"第一次点击只关闭"由窗口层统一拦截(MainWindow.PreviewMouseDown),
+        // 这里不再各写一遍。
+        _labelButton.MouseLeftButtonUp += (s, _) => OpenMonthPicker((FrameworkElement)s);
 
         // 左:月份标签 +「今日」—— 紧跟标签,不与翻页键混在一起
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -270,7 +267,7 @@ public sealed class CalendarView : UserControl
         };
         b.SetResourceReference(Button.BorderBrushProperty, "Border");
         b.SetResourceReference(Button.ForegroundProperty, "FgSecondary");
-        b.Click += (_, _) => { if (Overlay.ConsumeClick()) return; onClick(); };
+        b.Click += (_, _) => onClick();
         return b;
     }
 
@@ -383,7 +380,6 @@ public sealed class CalendarView : UserControl
         var captured = day.Date;
         cell.MouseLeftButtonUp += (_, _) =>
         {
-            var consumed = Overlay.ConsumeClick();
             _selected = captured;
             var wasMonth = _mode == Mode.Month;
             if (wasMonth && captured.Month != _anchor.Month) _anchor = captured;
@@ -392,7 +388,7 @@ public sealed class CalendarView : UserControl
             //   注意:Rebuild() 已经把刚被点的那个格子换成新对象了,拿它当锚点会定位失败
             //   (这正是"月视图点日期弹不出浮窗"的原因)。锚到本视图 + 在鼠标处弹出。
             // 月排布点日期弹当日浮窗;若已有浮窗开着,这一次点击只负责关掉它
-            if (wasMonth && !consumed) OpenDayFlyout(captured);
+            if (wasMonth) OpenDayFlyout(captured);
         };
         return cell;
     }
@@ -432,19 +428,30 @@ public sealed class CalendarView : UserControl
     /// <summary>一条日程。点它 = 编辑这一条(用户裁定)。</summary>
     Border EventRow(CalendarEvent ev, bool compact)
     {
-        var row = new DockPanel { LastChildFill = true };
-        var time = new TextBlock { Text = ev.Start.ToString("HH:mm"), Width = 44, VerticalAlignment = VerticalAlignment.Center };
+        // ★ 命中区【贴合内容】—— 之前用 DockPanel 填满整行,右侧一大片空白也成了按钮,
+        //   鼠标划过老远就高亮,很不舒服(用户反馈)。改成横向堆叠 + 左对齐。
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var time = new TextBlock { Text = ev.Start.ToString("HH:mm"), Width = 42, VerticalAlignment = VerticalAlignment.Center };
         time.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         time.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        DockPanel.SetDock(time, Dock.Left);
         row.Children.Add(time);
 
-        var t = new TextBlock { Text = ev.Title, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        var t = new TextBlock
+        {
+            Text = ev.Title, TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = compact ? 190 : 220,   // 过长才截断,不占满整行
+        };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         t.SetResourceReference(TextBlock.FontSizeProperty, compact ? "FontCaption" : "FontBody");
         row.Children.Add(t);
 
-        var hit = new Border { Child = row, Padding = new Thickness(4, 3, 4, 3), Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand };
+        var hit = new Border
+        {
+            Child = row, Padding = new Thickness(5, 3, 8, 3),
+            Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
+            HorizontalAlignment = HorizontalAlignment.Left,   // 宽度贴合内容
+        };
         hit.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         hit.MouseEnter += (_, _) => hit.SetResourceReference(Border.BackgroundProperty, "BgHover");
         hit.MouseLeave += (_, _) => hit.Background = Brushes.Transparent;
