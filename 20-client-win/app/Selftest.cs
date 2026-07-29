@@ -182,6 +182,10 @@ public static class Selftest
                 Assert(homeTodo.Contains("Ui.PlusButton"), "待办板块标题栏有 + 新增按钮");
                 Assert(homeTodo.Contains("TodoList.Row("), "待办列表用共享行渲染器(与诊断同一份布局)");
                 Assert(homeTodo.Contains("Todos.Changed += BuildTodos"), "待办变更自动刷新列表(不依赖播种时序)");
+
+                // 天气拖拽只能从右下角手柄起手,不是整块板块(用户裁定)
+                Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown"), "天气拖拽从右下角手柄区起手");
+                Assert(!homeTodo.Contains("card.PreviewMouseLeftButtonDown"), "整块卡片不再作为拖拽起手区");
             }
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
             if (todoEd is not null)

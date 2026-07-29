@@ -294,27 +294,39 @@ public sealed class HomeView : UserControl
             StrokeStartLineCap = PenLineCap.Round,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Bottom,
-            // ★ 角标要在【每张卡的同一位置】:卡片自身的右外边距因"是否末格"而不同(12 或 0),
-            //   若只对齐外层容器右缘,末格的角标就会偏出 12px(用户反馈位置不统一)。
-            //   所以把卡片边距算进来。
-            Margin = new Thickness(0, 0, WeatherGap + 9, 7),
+            Margin = new Thickness(0, 0, 7, 5),
             IsHitTestVisible = false,
             Opacity = 0.55,
         };
         grip.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
 
+        // ★ 只有【右下角这块手柄区】才起手拖动 —— 不是整块板块(用户裁定)。
+        //   角标细、不好点,所以给它一个 30×30 的透明命中区兜住整个角。
+        //   卡片自身的右外边距因"是否末格"而不同(12 或 0),命中区/角标都要把它算进来,
+        //   否则末格的角落会偏出 12px。
+        var gripZone = new Grid
+        {
+            Width = 30,
+            Height = 30,
+            Background = System.Windows.Media.Brushes.Transparent,   // 透明但可命中
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, WeatherGap, 0),
+            Cursor = System.Windows.Input.Cursors.SizeAll,
+        };
+        gripZone.Children.Add(grip);
+
         var host = new Grid();
         host.Children.Add(card);
-        host.Children.Add(grip);
+        host.Children.Add(gripZone);
 
         var shift = new TranslateTransform();
         host.RenderTransform = shift;
         _hosts[i] = host;
         _shifts[i] = shift;
 
-        card.Cursor = System.Windows.Input.Cursors.SizeAll;
         var index = i;
-        card.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(index, e);
+        gripZone.PreviewMouseLeftButtonDown += (_, e) => { e.Handled = true; BeginDrag(index, e); };
         return host;
     }
 
