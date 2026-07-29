@@ -22,11 +22,118 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 return (args.Length == 0 ? "" : args[0]) switch
 {
     "selftest" => await Selftest(),
+    "client-e2e" => await ClientE2E(),
     "run" => await Run(),
     _ => Usage(),
 };
 
-static int Usage() { Console.WriteLine("usage: localai-lan-edge <run|selftest>"); return 2; }
+static int Usage() { Console.WriteLine("usage: localai-lan-edge <run|selftest|client-e2e>"); return 2; }
+
+// Full client-transport flow over HTTP: enroll -> (host approves) -> status -> claim -> complete (mTLS)
+// -> business call. This is the reference implementation for the standalone client on the 2nd PC.
+static async Task<int> ClientE2E()
+{
+    int pass = 0, fail = 0;
+    void Assert(bool c, string m) { if (c) { pass++; Console.WriteLine("  PASS  " + m); } else { fail++; Console.WriteLine("  FAIL  " + m); } }
+    byte[] R(int n) => RandomNumberGenerator.GetBytes(n);
+
+    var root = Path.Combine(Path.GetTempPath(), "localai-cliE2E-" + Guid.NewGuid().ToString("N")[..8]);
+    var idDir = Path.Combine(root, "identity");
+    var secDir = Path.Combine(root, "secrets");
+    var swProv = new CngProvider("Microsoft Software Key Storage Provider");
+    string? caKey = null, srvKey = null, clientKeyName = null, serverThumb = null;
+    WebApplication? edge = null, upstream = null;
+    try
+    {
+        var hub = Identity.Init(idDir, secDir);
+        caKey = hub.CaKeyName; srvKey = hub.ServerKeyName;
+        serverThumb = JsonDocument.Parse(File.ReadAllText(Path.Combine(secDir, "identity-locators.json"))).RootElement.GetProperty("server_thumbprint").GetString();
+        var caPublic = X509CertificateLoader.LoadCertificate(File.ReadAllBytes(Path.Combine(idDir, "ca.cer")));
+        var pairing = new Pairing(idDir, secDir);
+        pairing.OpenWindow(TimeSpan.FromMinutes(30));
+
+        int upPort = 18082; string? seenFp = null;
+        var ub = WebApplication.CreateBuilder(); ub.Logging.ClearProviders();
+        ub.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, upPort));
+        upstream = ub.Build();
+        upstream.Map("/{**r}", (HttpContext c) => { seenFp = c.Request.Headers["X-LocalAI-Cert-Sha256"].ToString(); return Results.Text("up"); });
+        await upstream.StartAsync();
+
+        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upPort}", 18444), pairingOverride: pairing);
+        await edge.StartAsync();
+        var baseUrl = $"https://{hub.ServerName}:18444";
+
+        HttpClient Mk(X509Certificate2? cc)
+        {
+            var h = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false };
+            h.SslOptions.CertificateChainPolicy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck };
+            h.SslOptions.CertificateChainPolicy.CustomTrustStore.Add(caPublic);
+            if (cc is not null) h.SslOptions.ClientCertificates = new X509CertificateCollection { cc };
+            h.ConnectCallback = async (_, ct) => { var s = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true }; await s.ConnectAsync(IPAddress.Loopback, 18444, ct); return new NetworkStream(s, true); };
+            return new HttpClient(h);
+        }
+        async Task<JsonElement> PostJson(HttpClient c, string path, object body)
+        {
+            using var r = await c.PostAsync(baseUrl + path, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+            return JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+        }
+
+        // client material (software key + CSR + claim secret)
+        clientKeyName = "localai-cliE2E-" + Convert.ToHexString(R(4)).ToLowerInvariant();
+        using var clientEcdsa = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, clientKeyName, new CngKeyCreationParameters { Provider = swProv, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
+        var csr = new CertificateRequest("CN=client", clientEcdsa, HashAlgorithmName.SHA256).CreateSigningRequest();
+        var clientCsrSpkiSha = SHA256.HashData(clientEcdsa.ExportSubjectPublicKeyInfo());
+        var claimSecret = R(32); var claimSecretHash = SHA256.HashData(claimSecret); var clientNonce = R(32);
+
+        // 1. enroll (HTTP, anonymous)
+        using var plain = Mk(null);
+        var en = await PostJson(plain, "/pair/enroll", new { csr = Convert.ToBase64String(csr), clientNonce = Convert.ToBase64String(clientNonce), claimSecretHash = Convert.ToBase64String(claimSecretHash), protocolVersion = 1, displayName = "2nd PC" });
+        var reqId = en.GetProperty("requestId").GetString()!;
+        var serverNonce = Convert.FromBase64String(en.GetProperty("serverNonce").GetString()!);
+        var hostSas = en.GetProperty("sas").EnumerateArray().Select(x => x.GetString()!).ToArray();
+        Assert(reqId.Length == 32 && hostSas.Length == 6, "enroll (HTTP) -> request id + six-word SAS");
+
+        // client independently derives the SAS -> must match (this is what the human compares)
+        var clientSas = Sas.Derive(pairing.BuildTranscript(1, claimSecretHash, clientNonce, serverNonce, Convert.FromHexString(reqId), clientCsrSpkiSha)).words;
+        Assert(clientSas.SequenceEqual(hostSas), "client and host six-word SAS match over HTTP");
+
+        // 2. host-admin approves (out of band)
+        pairing.Approve(reqId);
+
+        // 3. status (HTTP)
+        var st = await PostJson(plain, "/pair/status", new { requestId = reqId, claimSecret = Convert.ToBase64String(claimSecret) });
+        Assert(st.GetProperty("status").GetString() == "approved", "status (HTTP) -> approved after host approval");
+        var claimNonce = Convert.FromBase64String(st.GetProperty("claimNonce").GetString()!);
+        var candSha = st.GetProperty("candidateSha256").GetString()!;
+
+        // 4. claim (HTTP) -- challenge signed by the CSR key
+        var challenge = Pairing.BuildChallenge(Convert.FromHexString(reqId), claimNonce, Convert.FromHexString(candSha));
+        var cl = await PostJson(plain, "/pair/claim", new { requestId = reqId, claimSecret = Convert.ToBase64String(claimSecret), challengeSig = Convert.ToBase64String(clientEcdsa.SignData(challenge, HashAlgorithmName.SHA256)) });
+        using var candidate = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(cl.GetProperty("candidateCert").GetString()!));
+        Assert(Ca.VerifyChainAndEku(candidate, caPublic, Ca.OidClientAuth), "claim (HTTP) -> candidate cert chaining to CA + clientAuth");
+
+        // 5. complete (mTLS with the candidate) -- the final PoP; then 6. a business call as an active member
+        using var clientCert = candidate.CopyWithPrivateKey(clientEcdsa);
+        using var mtls = Mk(clientCert);
+        using (var rc = await mtls.PostAsync(baseUrl + "/pair/complete?requestId=" + reqId, new StringContent("")))
+            Assert((int)rc.StatusCode == 200 && (await rc.Content.ReadAsStringAsync()) == "active", "complete (mTLS candidate) -> active (" + (int)rc.StatusCode + ")");
+
+        using (var rb = await mtls.GetAsync(baseUrl + "/v1/models"))
+            Assert((int)rb.StatusCode == 200 && seenFp == Convert.ToHexString(SHA256.HashData(candidate.RawData)), "business call as active member -> proxied with verified fingerprint");
+    }
+    finally
+    {
+        if (edge is not null) await edge.StopAsync();
+        if (upstream is not null) await upstream.StopAsync();
+        if (caKey is not null) Ca.DeleteKey(caKey);
+        if (srvKey is not null) Ca.DeleteKey(srvKey);
+        if (clientKeyName is not null) { try { if (CngKey.Exists(clientKeyName, swProv)) CngKey.Open(clientKeyName, swProv).Delete(); } catch { } }
+        if (serverThumb is not null) { try { using var s = new X509Store(StoreName.My, StoreLocation.CurrentUser); s.Open(OpenFlags.ReadWrite); foreach (var c in s.Certificates.Find(X509FindType.FindByThumbprint, serverThumb, false)) s.Remove(c); } catch { } }
+        try { Directory.Delete(root, true); } catch { }
+    }
+    Console.WriteLine($"\nS4 client-transport E2E (full HTTP pairing): PASS={pass} FAIL={fail}");
+    return fail > 0 ? 1 : 0;
+}
 
 static async Task<int> Run()
 {
@@ -191,7 +298,7 @@ record EdgeConfig(string IdentityDir, string SecretsDir, string UpstreamBase, in
 
 static class Edge
 {
-    public static WebApplication Build(EdgeConfig cfg, X509Certificate2? serverCertOverride = null)
+    public static WebApplication Build(EdgeConfig cfg, X509Certificate2? serverCertOverride = null, Pairing? pairingOverride = null)
     {
         var idDir = cfg.IdentityDir;
         var caPublic = X509CertificateLoader.LoadCertificate(File.ReadAllBytes(Path.Combine(idDir, "ca.cer")));
@@ -200,8 +307,8 @@ static class Edge
         // The self-test passes an SChannel-compatible (non-exportable software CNG) server cert so the
         // Edge's mTLS + membership + proxy + pairing LOGIC is fully exercised regardless of that gap.
         var serverCert = serverCertOverride ?? LoadServerCert(idDir, cfg.SecretsDir);
-        var pairing = new Pairing(idDir, cfg.SecretsDir);
-        pairing.OpenWindow(TimeSpan.FromMinutes(30));   // S4 test convenience; host-admin controls this for real
+        var pairing = pairingOverride ?? new Pairing(idDir, cfg.SecretsDir);
+        if (pairingOverride is null) pairing.OpenWindow(TimeSpan.FromMinutes(30));   // real: host-admin opens the window
         var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
 
         var builder = WebApplication.CreateBuilder();
@@ -215,7 +322,7 @@ static class Edge
             {
                 h.ServerCertificate = serverCert;
                 h.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
-                h.ClientCertificateValidation = (cert, _, __) => ValidateClient(cert, caPublic, idDir);
+                h.ClientCertificateValidation = (cert, _, __) => ValidateClient(cert, caPublic);
             }));
         });
 
@@ -259,36 +366,39 @@ static class Edge
                 Convert.FromBase64String(r.GetProperty("challengeSig").GetString()!));
             return Results.Json(new { candidateCert = Convert.ToBase64String(cand.RawData) });
         });
-        // complete requires the candidate client cert via mTLS (its fingerprint must match).
+        // complete requires the candidate client cert via mTLS -- its fingerprint MUST be the candidate
+        // for this request (the final proof-of-possession). A candidate is not yet an active member, so
+        // this only works because TLS validation is chain+EKU (membership is enforced per-route).
         app.MapPost("/pair/complete", (HttpContext ctx) =>
         {
             var cert = ctx.Connection.ClientCertificate;
             if (cert is null) return Results.StatusCode(401);
-            pairing.Complete(ctx.Request.Query["requestId"].ToString());
+            var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
+            pairing.Complete(ctx.Request.Query["requestId"].ToString(), fp);   // verifies fp == candidate
             return Results.Text("active");
         });
 
-        // everything else = business: requires a validated member cert, proxied to the gateway.
+        // everything else = business: requires an ACTIVE member cert, proxied to the gateway.
         app.MapFallback(async (HttpContext ctx) =>
         {
             var cert = ctx.Connection.ClientCertificate;
             if (cert is null) { ctx.Response.StatusCode = 401; return; }
             var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
+            if (!Store.LoadOrEmpty(idDir).IsActive(fp)) { ctx.Response.StatusCode = 401; return; }  // revoked/candidate -> 401
             await Proxy(ctx, http, cfg.UpstreamBase, fp);
         });
 
         return app;
     }
 
-    static bool ValidateClient(X509Certificate2 cert, X509Certificate2 caPublic, string idDir)
+    static bool ValidateClient(X509Certificate2 cert, X509Certificate2 caPublic)
     {
         try
         {
-            // chain to CA + clientAuth EKU ...
-            if (!Ca.VerifyChainAndEku(cert, caPublic, Ca.OidClientAuth)) return false;
-            // ... AND an active member (device + cert both active). Revoked -> validation fails -> cert absent.
-            var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
-            return Store.LoadOrEmpty(idDir).IsActive(fp);
+            // TLS layer: accept any cert that chains to our CA + carries clientAuth EKU, so the cert is
+            // available to routes. Membership (active member) is enforced on business routes; the candidate
+            // match is enforced on /pair/complete. This lets a not-yet-active candidate complete pairing.
+            return Ca.VerifyChainAndEku(cert, caPublic, Ca.OidClientAuth);
         }
         catch (Exception ex)
         {

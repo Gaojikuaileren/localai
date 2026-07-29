@@ -172,12 +172,16 @@ public sealed class Pairing
         return p.Candidate!;
     }
 
-    // The mTLS PoP on /pair/complete is modelled here as the final activation.
-    public void Complete(string reqId)
+    // The mTLS PoP on /pair/complete: the presented client cert must be this request's candidate.
+    // presentedCertSha256 is null for in-process callers (trusted); the Edge passes the TLS cert's fp.
+    public void Complete(string reqId, string? presentedCertSha256 = null)
     {
         var p = Get(reqId);
         if (p.Status != "certificate_issued")
             throw new InvalidOperationException("claim must succeed before complete");
+        if (presentedCertSha256 is not null &&
+            !string.Equals(presentedCertSha256, p.CandidateSha256, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("presented cert is not the candidate for this request");
         var store = Store.LoadOrEmpty(_idDir);
         store.Activate(p.DeviceId, p.CandidateSha256);   // generation++
         store.Save(_idDir);
