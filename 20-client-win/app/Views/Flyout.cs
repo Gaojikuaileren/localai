@@ -1,13 +1,15 @@
-// P3c -- 浮窗。用户裁定:查看某天时间线、编辑当天日程,都应是【浮窗】而不是弹出独立窗口。
+// P3c -- 浮窗(轻量、贴着触发点弹出的小面板:当日日程、年月选择、日程编辑)。
 //
-// 用 WPF Popup 实现:
-//   · StaysOpen=false -> 点浮窗外面自动关(与抽屉"点外部即关"一致的手感);
-//   · AllowsTransparency=true -> 圆角外必须透明,否则圆角四周会露出弹窗自身的黑底(实测)。
-//     设计 §7 禁的是【整窗大面积】毛玻璃/半透明带来的显存开销;一个小的、临时的浮窗
-//     用 layered 合成代价可忽略,而且不用它就做不出圆角与投影。这是有意的例外。
-//   · Placement 贴着触发元素,超出屏幕时 WPF 自动翻转到另一侧。
+// ★ 它只是【浮层】的一种,与外壳的抽屉共用同一套规则 —— 见 Overlay.cs。
+//   所以这里不再自己维护"同时只开一个",而是登记到 Overlay,由它统一裁决。
 //
-// 同一时刻只保留一个浮窗(CloseAll),避免层层叠叠。
+// 实现要点:
+//   · StaysOpen=false -> 点浮窗外面自动关;
+//   · AllowsTransparency=true -> 圆角外必须透明,否则四角会露出弹窗自身的黑底(实测)。
+//     设计 §7 禁的是【整窗大面积】半透明带来的显存开销;一个小的临时浮窗用 layered 合成
+//     代价可忽略,且不开就做不出圆角与投影 —— 有意的例外。
+//   · 阴影画在【外层容器】而非圆角卡片本身:直接给带 CornerRadius 的 Border 加 Effect,
+//     会在圆角处与描边叠出脏边;外层还要留 Margin 给阴影渲染,否则被弹窗边界裁掉。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -18,34 +20,43 @@ namespace LocalAI.Client.Views;
 
 public static class Flyout
 {
-    static readonly List<Popup> Open = new();
-
-    /// <summary>阴影渲染需要的外圈留白 —— 不留的话阴影会被弹窗边界裁掉。</summary>
+    /// <summary>阴影渲染需要的外圈留白 —— 不留会被弹窗边界裁掉。</summary>
     const double ShadowPad = 14;
     /// <summary>浮窗与鼠标之间的间距。贴着光标会挡住刚点的内容,也显得局促。</summary>
     const double MouseGap = 18;
 
+    static Popup? _current;
+
+    public static bool IsOpen => _current is not null;
+
     public static void CloseAll()
     {
-        foreach (var p in Open.ToList()) { p.IsOpen = false; }
-        Open.Clear();
+        var p = _current;
+        _current = null;
+        if (p is not null) p.IsOpen = false;
     }
 
     /// <summary>在鼠标位置弹出(点日期格时用)。锚元素只需存活,不要求它还在原位 ——
-    /// 因为点击往往会触发重建,原来的格子已经被换掉了。</summary>
-    public static void ShowAtMouse(FrameworkElement anchor, string title, UIElement body, double width = 320)
-        => Show(anchor, title, body, width, atMouse: true);
+    /// 点击往往会触发重建,原来那个格子已经被换掉了。</summary>
+    public static void ShowAtMouse(FrameworkElement anchor, string title, UIElement body,
+                                   double width = 320, UIElement? headerAction = null)
+        => Show(anchor, title, body, width, atMouse: true, headerAction: headerAction);
 
-    public static void Show(FrameworkElement anchor, string title, UIElement body, double width = 320, bool atMouse = false)
+    /// <param name="headerAction">放在标题行【右侧】的操作(如"新增日程"),与标题同一行。</param>
+    public static void Show(FrameworkElement anchor, string title, UIElement body, double width = 320,
+                            bool atMouse = false, UIElement? headerAction = null)
     {
-        CloseAll();   // 同时只开一个
-
         var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
         var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontSubtitle");
         DockPanel.SetDock(t, Dock.Left);
         head.Children.Add(t);
+        if (headerAction is not null)
+        {
+            DockPanel.SetDock(headerAction, Dock.Right);
+            head.Children.Add(headerAction);
+        }
 
         var content = new StackPanel();
         content.Children.Add(head);
@@ -59,16 +70,12 @@ public static class Flyout
             Padding = new Thickness(16),
             BorderThickness = new Thickness(1),
             SnapsToDevicePixels = true,
-            // 内容不得溢出圆角 —— 否则四角会看到方角的子元素边缘("圆角不干净")
-            ClipToBounds = true,
+            ClipToBounds = true,   // 内容不得溢出圆角,否则四角会露出方角的子元素边缘
         };
         card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
 
-        // ★ 外阴影必须画在【外层容器】上,而不是圆角卡片本身:
-        //   直接给带 CornerRadius 的 Border 加 Effect,阴影会在圆角处与描边叠出脏边。
-        //   外层留出 Margin 给阴影渲染空间,否则会被弹窗边界裁掉。
         var shadowHost = new Border
         {
             Child = card,
@@ -76,7 +83,7 @@ public static class Flyout
             Background = Brushes.Transparent,
             Effect = new System.Windows.Media.Effects.DropShadowEffect
             {
-                BlurRadius = 26,        // 与主页底色接近时,层次全靠这层阴影撑起来
+                BlurRadius = 26,      // 与主页底色接近时,层次全靠这层阴影撑起来
                 ShadowDepth = 6,
                 Direction = 270,
                 Opacity = 0.34,
@@ -90,15 +97,20 @@ public static class Flyout
             Child = shadowHost,
             PlacementTarget = anchor,
             Placement = atMouse ? PlacementMode.MousePoint : PlacementMode.Right,
-            StaysOpen = false,         // 点外面就关
-            AllowsTransparency = true, // 圆角外透明,否则四角露黑底
-            // 离鼠标留出手感距离 —— 贴着光标会挡住刚点的东西,也显得局促
+            StaysOpen = false,
+            AllowsTransparency = true,
             HorizontalOffset = atMouse ? MouseGap : 10,
             VerticalOffset = atMouse ? MouseGap : 0,
             PopupAnimation = PopupAnimation.Fade,
         };
-        popup.Closed += (_, _) => Open.Remove(popup);
-        Open.Add(popup);
+
+        void Close() { _current = null; popup.IsOpen = false; }
+
+        // 点浮窗外面时 WPF 自己会关 -> 通知协调器清账,免得留下一个已失效的关闭回调
+        popup.Closed += (_, _) => { if (ReferenceEquals(_current, popup)) _current = null; Overlay.Unregister(Close); };
+
+        Overlay.Register(Close);   // 登记到统一协调器:会先关掉上一个浮层(抽屉或浮窗)
+        _current = popup;
         popup.IsOpen = true;
     }
 }

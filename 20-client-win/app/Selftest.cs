@@ -261,6 +261,39 @@ public static class Selftest
             pc.Touch("a");
             Assert(pc.Recent().First().ProjectId == "a", "打开项目后它排到最前");
 
+            // ---- 浮层协调(抽屉与浮窗共用一套规则)----
+            // 重构前抽屉与浮窗各写一套规则、互不知情:Esc 关不掉浮窗、抽屉里的浮窗会变孤儿、
+            // "同时只开一个"合起来不成立。现在统一由 Overlay 裁决,这里逐条断言。
+            Views.Overlay.CloseActive();
+            Assert(!Views.Overlay.IsOpen, "初始没有浮层");
+
+            var closedA = 0; var closedB = 0;
+            void CloseA() => closedA++;
+            void CloseB() => closedB++;
+
+            Views.Overlay.Register(CloseA);
+            Assert(Views.Overlay.IsOpen, "登记后有浮层开着");
+
+            Views.Overlay.Register(CloseB);
+            Assert(closedA == 1, "打开新浮层会先关掉旧的(全局同时只有一个)");
+
+            Assert(Views.Overlay.ConsumeClick(), "浮层开着时,入口按钮的这一次点击被消费掉");
+            Assert(closedB == 1 && !Views.Overlay.IsOpen, "被消费的点击只负责关闭当前浮层,不打开新的");
+            Assert(!Views.Overlay.ConsumeClick(), "没有浮层时不消费点击(按钮正常打开自己的浮层)");
+
+            // 浮层自行关闭(如点了浮窗外面)后要清账,否则会留下失效的关闭回调
+            Views.Overlay.Register(CloseA);
+            Views.Overlay.Unregister(CloseA);
+            Assert(!Views.Overlay.IsOpen, "浮层自行关闭后向协调器清账");
+            Assert(!Views.Overlay.ConsumeClick(), "清账后不会再误消费点击");
+
+            // 关闭回调内部若再次触发关闭,不能递归
+            var reentrant = 0;
+            void SelfClosing() { reentrant++; Views.Overlay.CloseActive(); }
+            Views.Overlay.Register(SelfClosing);
+            Views.Overlay.CloseActive();
+            Assert(reentrant == 1, "关闭回调内部再次触发关闭不会递归(只执行一次)");
+
             // ---- 三语文案 ----
             var (keys, missing) = Strings.Audit();
             Assert(keys > 40, $"文案表已装载({keys} 个键)");

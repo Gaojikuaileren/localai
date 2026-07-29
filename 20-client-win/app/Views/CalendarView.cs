@@ -62,6 +62,7 @@ public sealed class CalendarView : UserControl
     readonly ScrollViewer _dayScroll;
     readonly DockPanel _dayArea;
     readonly Button _addButton;
+    readonly TextBlock _dayTitle;
 
     public CalendarView(Mode mode)
     {
@@ -96,7 +97,12 @@ public sealed class CalendarView : UserControl
         _labelButton.SetResourceReference(Border.BorderBrushProperty, "Border");
         _labelButton.MouseEnter += (_, _) => _labelButton.SetResourceReference(Border.BackgroundProperty, "BgHover");
         _labelButton.MouseLeave += (_, _) => _labelButton.Background = Brushes.Transparent;
-        _labelButton.MouseLeftButtonUp += (s, _) => OpenMonthPicker((FrameworkElement)s);
+        _labelButton.MouseLeftButtonUp += (s, _) =>
+        {
+            // 有浮窗开着 -> 这一次点击只负责关掉它(用户裁定)
+            if (Overlay.ConsumeClick()) return;
+            OpenMonthPicker((FrameworkElement)s);
+        };
 
         // 左:月份标签 +「今日」—— 紧跟标签,不与翻页键混在一起
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -114,16 +120,22 @@ public sealed class CalendarView : UserControl
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         }.PassThrough();
 
-        // 周排布下方区域:左边是当日日程列表,右边是"新增日程"—— 二者【并列】(用户裁定),
-        // 而不是把新增按到列表末尾。
-        _dayArea = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 8, 0, 0) };
-        _addButton = Ui.Secondary("+ 新增日程", (_, _) => OpenEditor(_selected, null));
-        _addButton.Height = 26;
-        _addButton.FontSize = 11.5;
-        _addButton.VerticalAlignment = VerticalAlignment.Top;
-        _addButton.Margin = new Thickness(10, 0, 0, 0);
+        // 周排布下方区域:第一行 =「选中日期」+ 右侧「新增日程」(与左侧日期同一行、等高);
+        // 第二行 = 当日日程列表。用户裁定:新增按钮在选择日期的右方,尺寸与左方日期匹配。
+        _dayTitle = new TextBlock { FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        _dayTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        _dayTitle.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        _addButton = CompactAdd(() => OpenEditor(_selected, null));
         DockPanel.SetDock(_addButton, Dock.Right);
-        _dayArea.Children.Add(_addButton);
+
+        var dayHead = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 4) };
+        dayHead.Children.Add(_addButton);
+        dayHead.Children.Add(_dayTitle);
+
+        _dayArea = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 8, 0, 0) };
+        DockPanel.SetDock(dayHead, Dock.Top);
+        _dayArea.Children.Add(dayHead);
         _dayArea.Children.Add(_dayScroll);
 
         var root = new DockPanel { LastChildFill = true };
@@ -246,6 +258,22 @@ public sealed class CalendarView : UserControl
 
     static DateTime StartOfWeek(DateTime d) => d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7));   // 周一起始
 
+    /// <summary>紧凑的「新增日程」按钮 —— 高度与旁边的日期文字行匹配,不喧宾夺主。</summary>
+    static Button CompactAdd(Action onClick)
+    {
+        var b = new Button
+        {
+            Content = "+ 新增日程", Height = 20, Padding = new Thickness(8, 0, 8, 0),
+            Margin = new Thickness(10, 0, 0, 0), Cursor = System.Windows.Input.Cursors.Hand,
+            BorderThickness = new Thickness(1), Background = Brushes.Transparent,
+            FontSize = 10.5, VerticalAlignment = VerticalAlignment.Center,
+        };
+        b.SetResourceReference(Button.BorderBrushProperty, "Border");
+        b.SetResourceReference(Button.ForegroundProperty, "FgSecondary");
+        b.Click += (_, _) => { if (Overlay.ConsumeClick()) return; onClick(); };
+        return b;
+    }
+
     static Button Btn(string text, Action onClick)
     {
         var b = new Button
@@ -355,6 +383,7 @@ public sealed class CalendarView : UserControl
         var captured = day.Date;
         cell.MouseLeftButtonUp += (_, _) =>
         {
+            var consumed = Overlay.ConsumeClick();
             _selected = captured;
             var wasMonth = _mode == Mode.Month;
             if (wasMonth && captured.Month != _anchor.Month) _anchor = captured;
@@ -362,7 +391,8 @@ public sealed class CalendarView : UserControl
             // ★ 月排布没有下方日程区,点日期弹浮窗显示当天日程 + 新增(用户裁定)。
             //   注意:Rebuild() 已经把刚被点的那个格子换成新对象了,拿它当锚点会定位失败
             //   (这正是"月视图点日期弹不出浮窗"的原因)。锚到本视图 + 在鼠标处弹出。
-            if (wasMonth) OpenDayFlyout(captured);
+            // 月排布点日期弹当日浮窗;若已有浮窗开着,这一次点击只负责关掉它
+            if (wasMonth && !consumed) OpenDayFlyout(captured);
         };
         return cell;
     }
@@ -372,22 +402,13 @@ public sealed class CalendarView : UserControl
     {
         var body = new StackPanel();
         var evts = CalendarData.On(day).ToList();
+        foreach (var ev in evts) body.Children.Add(EventRow(ev, compact: false));
 
-        if (evts.Count == 0)
-        {
-            // 没有日程时,浮窗里【只有】新增(用户裁定)——不显示"无日程"之类的空行
-            var addOnly = Ui.Primary("+ 新增日程", (_, _) => { Flyout.CloseAll(); OpenEditor(day, null); });
-            body.Children.Add(addOnly);
-        }
-        else
-        {
-            foreach (var ev in evts) body.Children.Add(EventRow(ev, compact: false));
-            var add = Ui.Secondary("+ 新增日程", (_, _) => { Flyout.CloseAll(); OpenEditor(day, null); });
-            add.Margin = new Thickness(0, 10, 0, 0);
-            body.Children.Add(add);
-        }
+        // 新增按钮放在浮窗【标题行右侧】(日期右方,用户裁定);当天没有日程时浮窗就只剩这一行。
+        var add = CompactAdd(() => { Overlay.CloseActive(); OpenEditor(day, null); });
+        add.Margin = new Thickness(12, 0, 0, 0);
 
-        Flyout.ShowAtMouse(this, day.ToString("M月 d日 dddd", Zh), body, width: 300);
+        Flyout.ShowAtMouse(this, day.ToString("M月 d日 dddd", Zh), body, width: 300, headerAction: add);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出
@@ -395,10 +416,7 @@ public sealed class CalendarView : UserControl
     {
         _dayList.Children.Clear();
 
-        var title = new TextBlock { Text = _selected.ToString("M月d日 dddd", Zh), FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 4) };
-        title.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-        title.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        _dayList.Children.Add(title);
+        _dayTitle.Text = _selected.ToString("M月d日 dddd", Zh);
 
         var evts = CalendarData.On(_selected).ToList();
         if (evts.Count == 0)
@@ -430,7 +448,7 @@ public sealed class CalendarView : UserControl
         hit.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         hit.MouseEnter += (_, _) => hit.SetResourceReference(Border.BackgroundProperty, "BgHover");
         hit.MouseLeave += (_, _) => hit.Background = Brushes.Transparent;
-        hit.MouseLeftButtonUp += (_, _) => { Flyout.CloseAll(); OpenEditor(ev.Start.Date, ev); };
+        hit.MouseLeftButtonUp += (_, _) => { Overlay.CloseActive(); OpenEditor(ev.Start.Date, ev); };
         return hit;
     }
 
@@ -470,7 +488,7 @@ public sealed class CalendarView : UserControl
                     var target = new DateTime(capturedYear, capturedMonth, 1);
                     _anchor = _mode == Mode.Month ? target : StartOfWeek(target);
                     _selected = target;
-                    Flyout.CloseAll();
+                    Overlay.CloseActive();
                     Rebuild();
                 };
                 monthGrid.Children.Add(cell);
@@ -494,6 +512,6 @@ public sealed class CalendarView : UserControl
     void OpenEditor(DateTime day, CalendarEvent? existing)
         => Flyout.ShowAtMouse(this,   // 在鼠标边弹出(用户裁定)
                        day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程"),
-                       CalendarEditor.Build(day, existing, onSaved: () => { Flyout.CloseAll(); Rebuild(); }),
+                       CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); }),
                        width: 340);
 }

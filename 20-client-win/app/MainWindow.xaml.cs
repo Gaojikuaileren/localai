@@ -38,7 +38,7 @@ public partial class MainWindow : Window
         RefreshMember();
         BuildChromeIcons();
         // 抽屉打开时按 Esc 也能关(遮罩已接管鼠标,键盘也给一条退路)
-        PreviewKeyDown += (_, ke) => { if (ke.Key == System.Windows.Input.Key.Escape && _drawerKind is not null) { CloseDrawer(); ke.Handled = true; } };
+        PreviewKeyDown += (_, ke) => { if (ke.Key == System.Windows.Input.Key.Escape && Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; } };
         StateChanged += (_, _) => SyncMaxButton();
         SyncMaxButton();
 
@@ -69,8 +69,7 @@ public partial class MainWindow : Window
     {
         var current = _currentKey;
         var wasCollapsed = _collapsed;
-        Flyout.CloseAll();
-        CloseDrawer();          // 抽屉里的文案也来自旧语言,先收起
+        Overlay.CloseActive();          // 抽屉里的文案也来自旧语言,先收起
         BuildNav();
         Navigate(current);      // 重新构建当前页 -> 新语言
         if (wasCollapsed) { _collapsed = false; OnToggleNav(this, new RoutedEventArgs()); }   // 保持收起状态
@@ -179,7 +178,7 @@ public partial class MainWindow : Window
 
     void OpenTaskDrawer()
     {
-        CloseDrawer();
+        Overlay.Register(CloseDrawer);   // 统一协调:先关掉别的浮层,并让 Esc/点外部也能关它
         _drawerKind = "tasks";
         TaskDrawerHost.Content = new TaskDrawerView();
         DrawerScrim.Visibility = Visibility.Visible;
@@ -192,12 +191,14 @@ public partial class MainWindow : Window
 
     void OnOpenBriefing(object sender, RoutedEventArgs e)
     {
+        if (Overlay.ConsumeClick()) return;   // 有浮窗开着 -> 这一次只关它
         if (_drawerKind == "briefing") { CloseDrawer(); return; }
         OpenRightDrawer("briefing", "消息栏", new BriefingDrawerView());
     }
 
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
+        if (Overlay.ConsumeClick()) return;   // 有浮窗开着 -> 这一次只关它
         if (_drawerKind == "calendar") { CloseDrawer(); return; }
         OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Month));
     }
@@ -205,7 +206,7 @@ public partial class MainWindow : Window
     /// <summary>右上角下拉抽屉(日历 / 消息栏共用一个容器,同时只开一个)。</summary>
     void OpenRightDrawer(string kind, string title, UserControl content)
     {
-        CloseDrawer();
+        Overlay.Register(CloseDrawer);
         _drawerKind = kind;
         RightDrawerTitle.Text = title;
         CalendarDrawerHost.Content = content;
@@ -216,12 +217,14 @@ public partial class MainWindow : Window
         CalendarDrawerScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }
 
-    void OnCloseDrawer(object sender, RoutedEventArgs e) => CloseDrawer();
-    void OnCloseDrawer(object sender, System.Windows.Input.MouseButtonEventArgs e) => CloseDrawer();
+    void OnCloseDrawer(object sender, RoutedEventArgs e) => Overlay.CloseActive();
+    void OnCloseDrawer(object sender, System.Windows.Input.MouseButtonEventArgs e) => Overlay.CloseActive();
 
     void CloseDrawer()
     {
+        if (_drawerKind is null) return;   // 已经关了,避免协调器回调重入
         _drawerKind = null;
+        Overlay.Unregister(CloseDrawer);
         CalendarDrawer.Visibility = Visibility.Collapsed;
         TaskDrawer.Visibility = Visibility.Collapsed;
         DrawerScrim.Visibility = Visibility.Collapsed;
