@@ -345,6 +345,10 @@ public static class Selftest
                 Assert(calSrc.Contains("const int DotsMaxBeforeTriangle = 4"), "定时日程超过 4 条改用实心三角形(阈值是常量)");
                 Assert(calSrc.Contains("clipStart ? 0 : EndInset"), "全天线在真正的起始日内缩,被周界裁断的一端贯通");
                 Assert(calSrc.Contains("clipEnd ? 0 : EndInset"), "全天线在真正的结束日内缩");
+                Assert(calSrc.Contains("ev.AllDay") && calSrc.Contains("\"全天\""),
+                       "全天日程在列表里显示「全天」而不是 00:00");
+                Assert(!calSrc.Contains("Text = ev.Start.ToString(\"HH:mm\")"),
+                       "不再无条件用起始时刻渲染(全天没有起始时刻)");
             }
 
             // ---- 日程数据变更通知(修"开启时日程读不出来")----

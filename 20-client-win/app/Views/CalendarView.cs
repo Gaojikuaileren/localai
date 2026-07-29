@@ -588,7 +588,17 @@ public sealed class CalendarView : UserControl
         // ★ 命中区【贴合内容】—— 之前用 DockPanel 填满整行,右侧一大片空白也成了按钮,
         //   鼠标划过老远就高亮,很不舒服(用户反馈)。改成横向堆叠 + 左对齐。
         var row = new StackPanel { Orientation = Orientation.Horizontal };
-        var time = new TextBlock { Text = ev.Start.ToString("HH:mm"), Width = 42, VerticalAlignment = VerticalAlignment.Center };
+        // 全天日程显示「全天」,而不是 00:00 —— 全天没有起始时刻,显示 00:00 是把
+        // 内部表示当成了用户可见语义(用户裁定)。跨天的再补上天数范围。
+        var timeText = ev.AllDay
+            ? (ev.IsMultiDay ? $"全天 · {ev.DayCount} 天" : "全天")
+            : ev.Start.ToString("HH:mm");
+        var time = new TextBlock
+        {
+            Text = timeText,
+            Width = ev.AllDay && ev.IsMultiDay ? 68 : 42,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
         time.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         time.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         row.Children.Add(time);
