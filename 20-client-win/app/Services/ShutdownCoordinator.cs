@@ -49,7 +49,10 @@ public sealed class ShutdownCoordinator
             if (cts.IsCancellationRequested) { log?.Invoke($"  SKIP {step.Name} (budget exhausted)"); continue; }
             try
             {
-                await step.Run(cts.Token).WaitAsync(cts.Token);
+                // ConfigureAwait(false):善后步骤里的 await 续体绝不回捕获的同步上下文。
+                // 若调用方在 UI 线程上阻塞等待本方法(退出路径就是),续体回 UI 线程会与
+                // 那个阻塞互相死等。调用方另外用 Task.Run 脱离 UI 上下文是主防线,这里是第二道。
+                await step.Run(cts.Token).WaitAsync(cts.Token).ConfigureAwait(false);
                 log?.Invoke($"  ok   {step.Name}");
             }
             catch (OperationCanceledException) { log?.Invoke($"  TIMEOUT {step.Name}"); }

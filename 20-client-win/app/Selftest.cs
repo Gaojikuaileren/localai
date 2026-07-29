@@ -84,6 +84,23 @@ public static class Selftest
             co3.RunOnceAsync("fault-test").GetAwaiter().GetResult();
             Assert(reached, "某一步失败不阻断后续善后步骤(尽力而为)");
 
+            // 死锁回归:退出时善后是 async(含网络调用),若在有同步上下文的线程(WPF UI 线程)上
+            // 直接阻塞等待,续体会想回该线程而与阻塞互相死等。App.RunCleanup 的正解 = Task.Run 脱离
+            // 上下文再等。这里装一个"永不执行 post 的上下文"验证该模式不会 hang(带超时,失败也不卡住自检)。
+            var prevCtx = SynchronizationContext.Current;
+            try
+            {
+                var blocking = new NeverRunsSyncContext();
+                SynchronizationContext.SetSynchronizationContext(blocking);
+                var co4 = new ShutdownCoordinator();
+                var did = false;
+                co4.Register("net-like", async ct => { await Task.Delay(20, ct); did = true; });
+                var finished = Task.Run(() => co4.RunOnceAsync("deadlock-test")).Wait(TimeSpan.FromSeconds(3));
+                Assert(finished && did, "退出善后不会在 UI 同步上下文上死锁(Task.Run 脱离上下文 + ConfigureAwait(false))");
+                Assert(blocking.Posts == 0, "善后续体没有被 post 回会死锁的 UI 上下文");
+            }
+            finally { SynchronizationContext.SetSynchronizationContext(prevCtx); }
+
             // ---- 配对档案:配一次就记住 ----
             var hub = new HubClient();
             Assert(!hub.IsPaired && hub.State == HubState.NotPaired, "没有档案时 = 尚未配对");
@@ -116,9 +133,14 @@ public static class Selftest
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",
                                "BorderStrong", "FocusRing", "BgSunken" };
-            foreach (var skin in new[] { "Breeze", "Ink", "Warm" })
+            // 开发/CI 环境下源码 Theme 目录在旁边,能逐皮肤核对令牌齐全;单文件发布里这些 xaml
+            // 已编进程序集资源(磁盘上没有源码目录),此检查跳过 —— 运行时皮肤从 pack 资源正常加载。
+            var themeDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Theme");
+            if (!Directory.Exists(themeDir))
+                Console.WriteLine("  SKIP  皮肤令牌一致性(发布环境:xaml 已作为 pack 资源编入,非磁盘文件)");
+            else foreach (var skin in new[] { "Breeze", "Ink", "Warm" })
             {
-                var xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Theme", skin + ".xaml"));
+                var xaml = File.ReadAllText(Path.Combine(themeDir, skin + ".xaml"));
                 var miss = need.Where(k => !xaml.Contains("\"" + k + "\"")).ToList();
                 Assert(miss.Count == 0, $"皮肤 {skin} 定义了全部令牌" + (miss.Count > 0 ? " 缺:" + string.Join(",", miss) : ""));
             }
@@ -134,5 +156,14 @@ public static class Selftest
 
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
         return fail > 0 ? 1 : 0;
+    }
+
+    // 模拟被阻塞的 WPF UI 线程:任何 post 进来的续体都不会被执行。若善后代码依赖回到此上下文,
+    // 就会永久卡住 —— 测试用它证明我们的退出路径不依赖它。
+    sealed class NeverRunsSyncContext : SynchronizationContext
+    {
+        public int Posts;
+        public override void Post(SendOrPostCallback d, object? state) => Interlocked.Increment(ref Posts);
+        public override void Send(SendOrPostCallback d, object? state) => Interlocked.Increment(ref Posts);
     }
 }

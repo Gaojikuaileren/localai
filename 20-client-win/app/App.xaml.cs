@@ -22,7 +22,9 @@ public partial class App : Application
 
     public AppSettings Settings { get; private set; } = new();
     public HubClient Hub { get; private set; } = new();
-    public ShutdownCoordinator Shutdown { get; } = new();
+    // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
+    // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
+    public ShutdownCoordinator Lifecycle { get; } = new();
 
     public App(SingleInstance instance, bool startHidden)
     {
@@ -47,9 +49,11 @@ public partial class App : Application
         RegisterCleanupSteps();
 
         // Windows 关机/注销:系统只给有限时间,善后必须有预算上限(见 ShutdownCoordinator)。
-        SessionEnding += (_, args) => Shutdown.RunOnceAsync("session-ending:" + args.ReasonSessionEnding).GetAwaiter().GetResult();
+        // ★ 用 Task.Run 脱离 UI 同步上下文再阻塞等待:善后是 async 且含网络调用,直接在
+        //   UI 线程上 GetResult 会与内部 await 续体死锁。RunCleanup 统一处理。
+        SessionEnding += (_, args) => RunCleanup("session-ending:" + args.ReasonSessionEnding);
         // 兜底:任何路径导致进程退出时,若还没善后过就补一次(强杀除外,那种情况谁也救不了)。
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => Shutdown.RunOnceAsync("process-exit").GetAwaiter().GetResult();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => RunCleanup("process-exit");
 
         SetupTray();
 
@@ -68,17 +72,17 @@ public partial class App : Application
         // ① 结束与中枢的会话 + 请主机释放本客户端占用的显存。
         //    ★ 语义要点:请求的是"释放**本会话**占用",不是"卸载所有模型" ——
         //      副机退出绝不能把另一个人正在用的模型干掉(引用计数归零才真卸载,主机侧负责)。
-        Shutdown.Register("end-session+release-vram", async ct =>
+        Lifecycle.Register("end-session+release-vram", async ct =>
         {
             if (!Hub.IsPaired) return;
             await Hub.EndSessionAsync(ct);
         });
 
         // ② 落盘界面偏好(皮肤/语言/自启开关),避免设置改了没保存。
-        Shutdown.Register("save-settings", () => Settings.Save());
+        Lifecycle.Register("save-settings", () => Settings.Save());
 
         // ③ 收掉托盘图标,否则进程没了图标还赖在任务栏上直到鼠标划过。
-        Shutdown.Register("dispose-tray", () => { _tray?.Dispose(); _tray = null; });
+        Lifecycle.Register("dispose-tray", () => { _tray?.Dispose(); _tray = null; });
     }
 
     void SetupTray()
@@ -128,8 +132,16 @@ public partial class App : Application
     /// <summary>真正退出:善后恰好一次,然后结束进程。</summary>
     public void ExitApplication(string reason)
     {
-        Shutdown.RunOnceAsync(reason).GetAwaiter().GetResult();
+        RunCleanup(reason);
         _instance.Dispose();
         Current.Shutdown();
+    }
+
+    // 在线程池线程上跑善后并阻塞等待。脱离 UI 同步上下文是关键 —— 否则 async 善后里的
+    // await 续体会想回被本调用阻塞着的 UI 线程,互相死等(WPF 退出死锁的经典成因)。
+    void RunCleanup(string reason)
+    {
+        try { Task.Run(() => Lifecycle.RunOnceAsync(reason)).GetAwaiter().GetResult(); }
+        catch { /* 善后已是尽力而为;它自身抛异常也不能挡住退出 */ }
     }
 }
