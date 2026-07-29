@@ -225,14 +225,15 @@ public sealed class CalendarView : UserControl
         host.Children.Add(incoming);
         _body.Content = host;
 
-        var dist = Math.Max(240, ActualWidth > 0 ? ActualWidth : 320);
-        inT.X = dir > 0 ? dist : -dist;
+        // 翻页方向:【上下】滑动(用户裁定)。往后翻 = 旧页上移出、新页自下方升入。
+        var dist = Math.Max(90, _body.ActualHeight > 0 ? _body.ActualHeight : 120);
+        inT.Y = dir > 0 ? dist : -dist;
 
         var dur = TimeSpan.FromMilliseconds(220);
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        outT.BeginAnimation(TranslateTransform.XProperty,
+        outT.BeginAnimation(TranslateTransform.YProperty,
             new DoubleAnimation(0, dir > 0 ? -dist : dist, dur) { EasingFunction = ease });
-        var slideIn = new DoubleAnimation(inT.X, 0, dur) { EasingFunction = ease };
+        var slideIn = new DoubleAnimation(inT.Y, 0, dur) { EasingFunction = ease };
         slideIn.Completed += (_, _) =>
         {
             // 同理:先把 incoming 从 host 摘下来,再挂到 _body,否则又是"两个父级"
@@ -243,7 +244,7 @@ public sealed class CalendarView : UserControl
             _animating = false;
             AfterPage();
         };
-        inT.BeginAnimation(TranslateTransform.XProperty, slideIn);
+        inT.BeginAnimation(TranslateTransform.YProperty, slideIn);
     }
 
     /// <summary>翻页动画收尾:周排布要刷新下方当日日程区。</summary>
@@ -297,80 +298,27 @@ public sealed class CalendarView : UserControl
         return header;
     }
 
-    // ---------------------------------------------------------------- 周排布:两行 × 7 天
+    // ---------------------------------------------------------------- 周 / 月 的横带
+    // ★ 格内垂直顺序(用户裁定):【日期数字】→(留白)→【全天日程的线】→【定时日程的圆点】
+    //   全天线必须在圆点【上方】,而不是压在最底下 —— 否则看起来像脚注,也分不清和圆点的关系。
+    // 实现:一周做成一个 7 列 Grid,行结构 = 数字行 / 每条全天线各一行 / 圆点行。
+    //   全天线用 ColumnSpan 贯穿多格(与日期格同宽);
+    //   每列一个跨全部行的背景块承载"今天/选中"高亮与点击,线与圆点浮在它上面。
+
     UIElement WeekRows()
     {
         var panel = new StackPanel();
         panel.Children.Add(WeekdayHeader());
         // 第一行 = 本周(正常);第二行 = 下周(灰)
         for (int row = 0; row < 2; row++)
-            panel.Children.Add(WeekBand(_anchor.AddDays(row * 7), WeekCellHeight, dim: row == 1));
+        {
+            var start = _anchor.AddDays(row * 7);
+            panel.Children.Add(Band(start, WeekCellHeight, _ => row == 1, showWeekday: false));
+        }
         return panel;
     }
 
-    /// <summary>
-    /// 一周的横带 = 7 个日期格 + 其下的【跨天长条层】。
-    /// 跨天/全天日程用一条贯穿多格、与日期格【同宽】的长条表示(用户裁定),
-    /// 而不是在每一天各画一个点 —— 那样看不出它是同一件事。
-    /// </summary>
-    UIElement WeekBand(DateTime weekStart, double cellHeight, bool dim)
-    {
-        var grid = new Grid();
-        for (int i = 0; i < 7; i++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 日期格
-
-        for (int i = 0; i < 7; i++)
-        {
-            var cell = DayCell(weekStart.AddDays(i), cellHeight, dim);
-            Grid.SetColumn(cell, i);
-            Grid.SetRow(cell, 0);
-            grid.Children.Add(cell);
-        }
-
-        // 跨天长条:每条占一行,互不重叠
-        var spans = CalendarData.SpansIn(weekStart, 7);
-        for (int k = 0; k < spans.Count; k++)
-        {
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var (ev, col, span, clipStart, clipEnd) = spans[k];
-            var bar = SpanBar(ev, clipStart, clipEnd, dim);
-            Grid.SetColumn(bar, col);
-            Grid.SetColumnSpan(bar, span);
-            Grid.SetRow(bar, k + 1);
-            grid.Children.Add(bar);
-        }
-        return grid;
-    }
-
-    /// <summary>
-    /// 跨天长条。★ 【纯展示,不可点击】(用户裁定):
-    ///   它横跨多天,点它无法确定你指的是哪一天,而且会绕过"先选日期"这条统一路径。
-    ///   要编辑全天日程,走与定时日程完全相同的入口 —— 周排布在下方日程列表里点它,
-    ///   月排布在当日浮窗里点它。一条日程只有一个编辑入口,不给第二条捷径。
-    /// 左右端点按是否被区间裁断决定要不要收圆角(续前/续后则平接)。
-    /// </summary>
-    Border SpanBar(CalendarEvent ev, bool clipStart, bool clipEnd, bool dim)
-    {
-        // ★ 只画【线】,不写标题(用户裁定):写了标题就得给 16px 以上的行高,
-        //   两三条全天日程就把周排布顶高,把下方的当日日程挤得显示不全。
-        //   内容改由 —— 月排布的当日浮窗 / 周排布下方的日程列表 —— 负责展示。
-        var bar = new Border
-        {
-            Height = 4,
-            Margin = new Thickness(1.5, 1, 1.5, 1),
-            Opacity = dim ? 0.5 : 1,
-            Cursor = System.Windows.Input.Cursors.Arrow,   // 纯标记,不是按钮
-            // 被裁断的一端不收圆角,视觉上表示"还在继续"
-            CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
-        };
-        bar.SetResourceReference(Border.BackgroundProperty, "Accent");
-        bar.ToolTip = ev.IsMultiDay
-            ? $"{ev.Title}\n{ev.FirstDay:M月d日} – {ev.LastDay:M月d日}(全天)"
-            : $"{ev.Title}(全天)";
-        return bar;
-    }
-
-    // ---------------------------------------------------------------- 月排布
+    /// <summary>月排布:整格月历,按周成带(前后补齐灰日,网格不残缺)。</summary>
     UIElement MonthGrid()
     {
         var panel = new StackPanel();
@@ -382,106 +330,145 @@ public sealed class CalendarView : UserControl
         var gridStart = first.AddDays(-lead);
         var weeks = (int)Math.Ceiling((lead + days) / 7.0);
 
-        // 逐周成带 —— 这样跨天长条可以在每一周里贯穿多格(月历里跨周会在周界自然断开续接)
         for (int w = 0; w < weeks; w++)
-        {
-            var weekStart = gridStart.AddDays(w * 7);
-            panel.Children.Add(MonthWeekBand(weekStart, first, days));
-        }
+            panel.Children.Add(MonthWeekBand(gridStart.AddDays(w * 7), first, days));
         return panel;
     }
 
     /// <summary>月排布里的一周:非本月的日子置灰。</summary>
     UIElement MonthWeekBand(DateTime weekStart, DateTime monthFirst, int daysInMonth)
+        => Band(weekStart, MonthCellHeight,
+                d => d < monthFirst || d >= monthFirst.AddDays(daysInMonth), showWeekday: false);
+
+    /// <summary>一周的分层横带。</summary>
+    UIElement Band(DateTime weekStart, double numberHeight, Func<DateTime, bool> isDim, bool showWeekday)
     {
+        var spans = CalendarData.SpansIn(weekStart, 7);
+
         var grid = new Grid();
-        for (int i = 0; i < 7; i++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        for (int i = 0; i < 7; i++)
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(numberHeight) });   // 0 数字
+        foreach (var _ in spans) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 全天线
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                // 末行 圆点
+        var dotsRow = grid.RowDefinitions.Count - 1;
+        var totalRows = grid.RowDefinitions.Count;
 
         for (int i = 0; i < 7; i++)
         {
             var day = weekStart.AddDays(i);
-            var outside = day < monthFirst || day >= monthFirst.AddDays(daysInMonth);
-            var cell = DayCell(day, MonthCellHeight, dim: outside);
-            Grid.SetColumn(cell, i);
-            Grid.SetRow(cell, 0);
-            grid.Children.Add(cell);
-        }
+            var dim = isDim(day);
+            var isToday = day.Date == DateTime.Today;
+            var isSelected = day.Date == _selected.Date;
 
-        var spans = CalendarData.SpansIn(weekStart, 7);
-        for (int k = 0; k < spans.Count; k++)
-        {
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var (ev, col, span, clipStart, clipEnd) = spans[k];
-            var bar = SpanBar(ev, clipStart, clipEnd, dim: false);
-            Grid.SetColumn(bar, col);
-            Grid.SetColumnSpan(bar, span);
-            Grid.SetRow(bar, k + 1);
-            grid.Children.Add(bar);
-        }
-        return grid;
-    }
-
-    // ---------------------------------------------------------------- 单个日期格
-    Border DayCell(DateTime day, double height, bool dim = false)
-    {
-        var isToday = day.Date == DateTime.Today;
-        var isSelected = day.Date == _selected.Date;
-        // 标点只算【定时】日程 —— 全天/跨天已经由长条画出来了,再点一次是重复
-        var evts = CalendarData.TimedOn(day).ToList();
-
-        var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-
-        var num = new TextBlock
-        {
-            Text = day.Day.ToString(),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            FontSize = height >= 40 ? 14.5 : 12.5,
-            FontWeight = isToday ? FontWeights.Bold : FontWeights.Normal,
-        };
-        num.SetResourceReference(TextBlock.ForegroundProperty,
-            isToday ? "FgOnAccent" : dim ? "FgMuted" : "FgPrimary");
-        stack.Children.Add(num);
-
-        // 有日程标点;无日程放等高透明占位 —— 否则有无日程会导致行高跳动
-        if (evts.Count > 0)
-        {
-            var dots = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 1, 0, 0) };
-            foreach (var _ in evts.Take(3))
+            // ① 背景块:跨全部行,承载高亮与点击(线与圆点浮在它上面)
+            var bg = new Border
             {
-                var d = new System.Windows.Shapes.Ellipse { Width = 3.5, Height = 3.5, Margin = new Thickness(1.2, 0, 1.2, 0), Opacity = dim ? 0.55 : 1 };
+                Margin = new Thickness(1.5, 1, 1.5, 1),
+                BorderThickness = new Thickness(1),
+                Cursor = System.Windows.Input.Cursors.Hand,
+            };
+            bg.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            if (isToday) { bg.SetResourceReference(Border.BackgroundProperty, "Accent"); bg.BorderBrush = Brushes.Transparent; }
+            else if (isSelected) { bg.SetResourceReference(Border.BackgroundProperty, "BgSunken"); bg.SetResourceReference(Border.BorderBrushProperty, "BorderStrong"); }
+            else { bg.Background = Brushes.Transparent; bg.BorderBrush = Brushes.Transparent; }
+            Grid.SetColumn(bg, i); Grid.SetRow(bg, 0); Grid.SetRowSpan(bg, totalRows);
+            Panel.SetZIndex(bg, 0);
+            var captured = day.Date;
+            bg.MouseLeftButtonUp += (_, _) => OnDayClicked(captured);
+            grid.Children.Add(bg);
+
+            // ② 日期数字(必要时带星期)
+            var numStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+            if (showWeekday)
+            {
+                var wk = new TextBlock { Text = day.ToString("ddd", Zh), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 10 };
+                wk.SetResourceReference(TextBlock.ForegroundProperty, isToday ? "FgOnAccent" : "FgMuted");
+                numStack.Children.Add(wk);
+            }
+            var num = new TextBlock
+            {
+                Text = day.Day.ToString(),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                FontSize = numberHeight >= 40 ? 14.5 : 12.5,
+                FontWeight = isToday ? FontWeights.Bold : FontWeights.Normal,
+            };
+            num.SetResourceReference(TextBlock.ForegroundProperty, isToday ? "FgOnAccent" : dim ? "FgMuted" : "FgPrimary");
+            numStack.Children.Add(num);
+            Grid.SetColumn(numStack, i); Grid.SetRow(numStack, 0);
+            Panel.SetZIndex(numStack, 1);
+            grid.Children.Add(numStack);
+
+            // ③ 圆点:只统计【定时】日程(全天已由线表示,再点一次是重复)
+            var timed = CalendarData.TimedOn(day).ToList();
+            var dots = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 3),
+                Height = 6,
+                IsHitTestVisible = false,
+            };
+            foreach (var _ in timed.Take(3))
+            {
+                var d = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 3.5, Height = 3.5, Margin = new Thickness(1.2, 0, 1.2, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Opacity = dim ? 0.55 : 1,
+                };
                 d.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isToday ? "FgOnAccent" : "Accent");
                 dots.Children.Add(d);
             }
-            stack.Children.Add(dots);
+            Grid.SetColumn(dots, i); Grid.SetRow(dots, dotsRow);
+            Panel.SetZIndex(dots, 1);
+            grid.Children.Add(dots);
         }
-        else stack.Children.Add(new Border { Height = 4.5, Margin = new Thickness(0, 1, 0, 0) });
 
-        var cell = new Border
+        // ④ 全天线:在数字与圆点【之间】,贯穿多格
+        for (int k = 0; k < spans.Count; k++)
         {
-            Child = stack, Height = height, Margin = new Thickness(1.5),
-            Cursor = System.Windows.Input.Cursors.Hand, BorderThickness = new Thickness(1),
-        };
-        cell.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        if (isToday) { cell.SetResourceReference(Border.BackgroundProperty, "Accent"); cell.BorderBrush = Brushes.Transparent; }
-        else if (isSelected) { cell.SetResourceReference(Border.BackgroundProperty, "BgSunken"); cell.SetResourceReference(Border.BorderBrushProperty, "BorderStrong"); }
-        else { cell.Background = Brushes.Transparent; cell.BorderBrush = Brushes.Transparent; }
+            var (ev, col, span, clipStart, clipEnd) = spans[k];
+            var dim = isDim(weekStart.AddDays(col));
+            var bar = SpanBar(clipStart, clipEnd, dim);
+            Grid.SetColumn(bar, col); Grid.SetColumnSpan(bar, span); Grid.SetRow(bar, k + 1);
+            Panel.SetZIndex(bar, 1);
+            grid.Children.Add(bar);
+        }
 
-        var captured = day.Date;
-        cell.MouseLeftButtonUp += (_, _) =>
+        return grid;
+    }
+
+    /// <summary>
+    /// 全天/跨天的线。★ 只画线、不写内容(用户裁定)—— 写标题就得给十几像素行高,
+    /// 几条全天日程就把周排布顶高、把下方当日日程挤得显示不全。内容由当日浮窗 / 下方列表展示。
+    /// 不可点击:它横跨多天,点它无从判断指的是哪天,且会绕过"先选日期"这条统一路径。
+    /// 被区间裁断的一端不收圆角,表示"还在继续"。
+    /// </summary>
+    static Border SpanBar(bool clipStart, bool clipEnd, bool dim)
+    {
+        var bar = new Border
         {
-            _selected = captured;
-            _daySelected = true;
-            var wasMonth = _mode == Mode.Month;
-            if (wasMonth && captured.Month != _anchor.Month) _anchor = captured;
-            Rebuild();
-            // ★ 月排布没有下方日程区,点日期弹浮窗显示当天日程 + 新增(用户裁定)。
-            //   注意:Rebuild() 已经把刚被点的那个格子换成新对象了,拿它当锚点会定位失败
-            //   (这正是"月视图点日期弹不出浮窗"的原因)。锚到本视图 + 在鼠标处弹出。
-            // 月排布点日期弹当日浮窗;若已有浮窗开着,这一次点击只负责关掉它
-            if (wasMonth) OpenDayFlyout(captured);
+            Height = 3.5,
+            Margin = new Thickness(2, 2, 2, 2),   // 上下留白:与数字、圆点都拉开距离
+            Opacity = dim ? 0.5 : 1,
+            IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
+            CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
         };
-        return cell;
+        bar.SetResourceReference(Border.BackgroundProperty, "Accent");
+        return bar;
+    }
+
+    /// <summary>点某一天:选中它;月排布另外弹当日浮窗(周排布下方已就地显示)。</summary>
+    void OnDayClicked(DateTime day)
+    {
+        _selected = day;
+        _daySelected = true;
+        var wasMonth = _mode == Mode.Month;
+        // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
+        Rebuild();
+        if (wasMonth) OpenDayFlyout(day);
     }
 
     // ---------------------------------------------------------------- 月排布:当日浮窗

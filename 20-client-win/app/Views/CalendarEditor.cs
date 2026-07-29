@@ -119,13 +119,12 @@ public static class CalendarEditor
                        "接入后:改与对方相关的日程只能发【邀请 / 修改建议】,由对方接受;AI 走同一入口,遵守同样的可见范围规则。")
         );
 
-        // 字段较多,给内部滚动 —— 浮窗自身有高度上限
+        // 装在右侧全高抽屉里,不再需要浮窗时代的高度上限;仍留滚动以应对小窗口。
         return new ScrollViewer
         {
             Content = form,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = 360,
         }.PassThrough();
     }
 

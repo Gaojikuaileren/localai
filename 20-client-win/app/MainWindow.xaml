@@ -217,6 +217,30 @@
       </DockPanel>
     </Border>
 
+    <!-- 编辑抽屉:从【右侧边缘向左】滑入,全高 —— 日程编辑字段多,浮窗放不下,一页显示完(用户裁定) -->
+    <Border x:Name="SideDrawer" Grid.Row="1" Panel.ZIndex="60" Width="430"
+            HorizontalAlignment="Right" VerticalAlignment="Stretch" Visibility="Collapsed"
+            Background="{DynamicResource BgSurface}"
+            BorderBrush="{DynamicResource Border}" BorderThickness="1,0,0,0"
+            RenderTransformOrigin="1,0.5">
+      <Border.RenderTransform>
+        <TranslateTransform x:Name="SideDrawerSlide" X="0"/>
+      </Border.RenderTransform>
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="22" ShadowDepth="-4" Direction="0" Opacity="0.22" Color="Black"/>
+      </Border.Effect>
+      <DockPanel>
+        <Grid DockPanel.Dock="Top" Height="48" Margin="20,0,10,0">
+          <TextBlock x:Name="SideDrawerTitle" VerticalAlignment="Center" FontWeight="SemiBold"
+                     FontSize="{DynamicResource FontSubtitle}" Foreground="{DynamicResource FgPrimary}"/>
+          <Button x:Name="SideDrawerClose" Width="30" Height="30" HorizontalAlignment="Right" Cursor="Hand"
+                  Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>
+        </Grid>
+        <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
+        <ContentControl x:Name="SideDrawerHost" Margin="20,14,20,18"/>
+      </DockPanel>
+    </Border>
+
     <!-- 任务:底部升起 -->
     <Border x:Name="TaskDrawer" Grid.Row="1" Panel.ZIndex="60" MaxHeight="380"
             VerticalAlignment="Bottom" HorizontalAlignment="Stretch"

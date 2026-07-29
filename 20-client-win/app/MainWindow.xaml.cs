@@ -120,7 +120,7 @@ public partial class MainWindow : Window
     bool IsInsideDrawer(DependencyObject node)
     {
         for (var n = node; n is not null; n = System.Windows.Media.VisualTreeHelper.GetParent(n))
-            if (ReferenceEquals(n, CalendarDrawer) || ReferenceEquals(n, TaskDrawer)) return true;
+            if (ReferenceEquals(n, CalendarDrawer) || ReferenceEquals(n, TaskDrawer) || ReferenceEquals(n, SideDrawer)) return true;
         return false;
     }
 
@@ -222,6 +222,23 @@ public partial class MainWindow : Window
         OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Month));
     }
 
+    /// <summary>
+    /// 右侧边缘向左滑入的【全高抽屉】。用于字段多、浮窗放不下的表单(如日程编辑,用户裁定)。
+    /// 走同一个浮层协调器 —— 会自动关掉别的浮层,Esc / 点外部也能关它。
+    /// </summary>
+    public void OpenSideDrawer(string title, UIElement content)
+    {
+        Overlay.Register(CloseDrawer);
+        _drawerKind = "side";
+        SideDrawerTitle.Text = title;
+        SideDrawerHost.Content = content;
+        DrawerScrim.Visibility = Visibility.Visible;
+        SideDrawer.Visibility = Visibility.Visible;
+        var anim = new DoubleAnimation(SideDrawer.Width, 0, TimeSpan.FromMilliseconds(200))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        SideDrawerSlide.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
+
     /// <summary>右上角下拉抽屉(日历 / 消息栏共用一个容器,同时只开一个)。</summary>
     void OpenRightDrawer(string kind, string title, UserControl content)
     {
@@ -246,9 +263,11 @@ public partial class MainWindow : Window
         Overlay.Unregister(CloseDrawer);
         CalendarDrawer.Visibility = Visibility.Collapsed;
         TaskDrawer.Visibility = Visibility.Collapsed;
+        SideDrawer.Visibility = Visibility.Collapsed;
         DrawerScrim.Visibility = Visibility.Collapsed;
         CalendarDrawerHost.Content = null;
         TaskDrawerHost.Content = null;
+        SideDrawerHost.Content = null;
     }
 
     // ---------------------------------------------------------------- 自绘标题栏
@@ -294,6 +313,7 @@ public partial class MainWindow : Window
         TaskBarIcon.Content = Icons.Make(IconName.Tasks, 15, "Accent");
         TaskBarChevron.Content = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
         CalendarDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");
+        SideDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");
         TaskDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");
     }
 
