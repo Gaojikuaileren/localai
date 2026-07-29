@@ -17,6 +17,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using LocalAI.Client.I18n;
 
 namespace LocalAI.Client.Views;
@@ -50,8 +51,10 @@ public sealed class CalendarView : UserControl
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
+    bool _animating;
 
     readonly TextBlock _label = new();
+    readonly Border _labelButton;
     readonly StackPanel _leftActions = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     readonly StackPanel _rightActions = new() { Orientation = Orientation.Horizontal };
     readonly ContentControl _body = new();
@@ -68,14 +71,36 @@ public sealed class CalendarView : UserControl
         _label.FontWeight = FontWeights.SemiBold;
         _label.VerticalAlignment = VerticalAlignment.Center;
         _label.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-        // 点年月标签 -> 直接挑年份/月份(不用一格一格翻)
-        _label.Cursor = System.Windows.Input.Cursors.Hand;
-        _label.ToolTip = "选择年份 / 月份";
-        _label.MouseLeftButtonUp += (s, _) => OpenMonthPicker((FrameworkElement)s);
+
+        // 年月标签要【看起来像按钮】,否则用户不知道能点(用户反馈)。边框 + hover 底色 + 下拉箭头。
+        var caret = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M0,0 L8,0 L4,5 Z"),
+            Margin = new Thickness(7, 2, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        caret.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgMuted");
+        var labelRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        labelRow.Children.Add(_label);
+        labelRow.Children.Add(caret);
+        _labelButton = new Border
+        {
+            Child = labelRow,
+            Padding = new Thickness(8, 3, 8, 3),
+            BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Background = Brushes.Transparent,
+            ToolTip = "选择年份 / 月份",
+        };
+        _labelButton.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        _labelButton.SetResourceReference(Border.BorderBrushProperty, "Border");
+        _labelButton.MouseEnter += (_, _) => _labelButton.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        _labelButton.MouseLeave += (_, _) => _labelButton.Background = Brushes.Transparent;
+        _labelButton.MouseLeftButtonUp += (s, _) => OpenMonthPicker((FrameworkElement)s);
 
         // 左:月份标签 +「今日」—— 紧跟标签,不与翻页键混在一起
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        left.Children.Add(_label);
+        left.Children.Add(_labelButton);
         left.Children.Add(_leftActions);
 
         var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
@@ -115,24 +140,12 @@ public sealed class CalendarView : UserControl
     {
         _label.Text = _mode == Mode.Month ? _anchor.ToString("yyyy年 M月", Zh) : WeekRangeLabel();
 
-        // 左:「今日」紧跟月份标签(仅当视野里看不到今天时出现)
-        _leftActions.Children.Clear();
-        if (!ShowsToday())
-        {
-            var today = Btn("回到今日", () =>
-            {
-                _selected = DateTime.Today;
-                _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
-                Rebuild();
-            });
-            today.Margin = new Thickness(10, 0, 0, 0);
-            _leftActions.Children.Add(today);
-        }
+        RefreshTodayButton();
 
         // 右:翻页 · 周/月切换。位置固定,不随「今日」出现而位移。
         _rightActions.Children.Clear();
-        _rightActions.Children.Add(Btn("‹", () => { Step(-1); Rebuild(); }));
-        _rightActions.Children.Add(Btn("›", () => { Step(1); Rebuild(); }));
+        _rightActions.Children.Add(Btn("‹", () => Page(-1)));
+        _rightActions.Children.Add(Btn("›", () => Page(1)));
         _rightActions.Children.Add(Btn(_mode == Mode.Month ? "周" : "月", () =>
         {
             _mode = _mode == Mode.Month ? Mode.Week : Mode.Month;
@@ -146,6 +159,21 @@ public sealed class CalendarView : UserControl
         // ★ 只有周排布在下方列当日日程;月排布靠点日期弹浮窗(用户裁定)
         _dayArea.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
         if (_mode == Mode.Week) RebuildDayList();
+    }
+
+    /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
+    void RefreshTodayButton()
+    {
+        _leftActions.Children.Clear();
+        if (ShowsToday()) return;
+        var today = Btn("回到今日", () =>
+        {
+            _selected = DateTime.Today;
+            _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
+            Rebuild();
+        });
+        today.Margin = new Thickness(10, 0, 0, 0);
+        _leftActions.Children.Add(today);
     }
 
     string WeekRangeLabel()
@@ -162,6 +190,59 @@ public sealed class CalendarView : UserControl
 
     // 周排布每次走【一周】—— 于是第二行(下周)被提到第一行
     void Step(int dir) => _anchor = _mode == Mode.Month ? _anchor.AddMonths(dir) : _anchor.AddDays(dir * 7);
+
+    /// <summary>
+    /// 翻页 = 【横向滑动】,让人看清前后关系(硬切分不清方向)。
+    /// 性能:只【多建一页】—— 新页与旧页短暂并存,动画结束立刻丢弃旧页。
+    /// 不做多周预加载:日历一页只有几十个轻量元素,构建极快,预加载的收益抵不上常驻内存。
+    /// </summary>
+    void Page(int dir)
+    {
+        if (_animating) return;   // 动画中忽略连点,避免堆出多层残影
+        _animating = true;
+
+        var outgoing = _body.Content as UIElement;
+        Step(dir);
+        _label.Text = _mode == Mode.Month ? _anchor.ToString("yyyy年 M月", Zh) : WeekRangeLabel();
+        RefreshTodayButton();
+        var incoming = _mode == Mode.Week ? WeekRows() : MonthGrid();
+
+        if (outgoing is null) { _body.Content = incoming; _animating = false; AfterPage(); return; }
+
+        var host = new Grid { ClipToBounds = true };
+        var outT = new TranslateTransform();
+        var inT = new TranslateTransform();
+        outgoing.RenderTransform = outT;
+        incoming.RenderTransform = inT;
+        host.Children.Add(outgoing);
+        host.Children.Add(incoming);
+        _body.Content = host;
+
+        var dist = Math.Max(240, ActualWidth > 0 ? ActualWidth : 320);
+        inT.X = dir > 0 ? dist : -dist;
+
+        var dur = TimeSpan.FromMilliseconds(220);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        outT.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(0, dir > 0 ? -dist : dist, dur) { EasingFunction = ease });
+        var slideIn = new DoubleAnimation(inT.X, 0, dur) { EasingFunction = ease };
+        slideIn.Completed += (_, _) =>
+        {
+            host.Children.Clear();          // 丢弃旧页,只留新页
+            incoming.RenderTransform = null;
+            _body.Content = incoming;
+            _animating = false;
+            AfterPage();
+        };
+        inT.BeginAnimation(TranslateTransform.XProperty, slideIn);
+    }
+
+    /// <summary>翻页动画收尾:周排布要刷新下方当日日程区。</summary>
+    void AfterPage()
+    {
+        _dayArea.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
+        if (_mode == Mode.Week) RebuildDayList();
+    }
 
     static DateTime StartOfWeek(DateTime d) => d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7));   // 周一起始
 
@@ -411,7 +492,7 @@ public sealed class CalendarView : UserControl
 
     /// <summary>existing 为 null = 新增;否则 = 编辑那一条。</summary>
     void OpenEditor(DateTime day, CalendarEvent? existing)
-        => Flyout.Show(this,
+        => Flyout.ShowAtMouse(this,   // 在鼠标边弹出(用户裁定)
                        day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程"),
                        CalendarEditor.Build(day, existing, onSaved: () => { Flyout.CloseAll(); Rebuild(); }),
                        width: 340);

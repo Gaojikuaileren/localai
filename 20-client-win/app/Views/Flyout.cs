@@ -20,6 +20,11 @@ public static class Flyout
 {
     static readonly List<Popup> Open = new();
 
+    /// <summary>阴影渲染需要的外圈留白 —— 不留的话阴影会被弹窗边界裁掉。</summary>
+    const double ShadowPad = 14;
+    /// <summary>浮窗与鼠标之间的间距。贴着光标会挡住刚点的内容,也显得局促。</summary>
+    const double MouseGap = 18;
+
     public static void CloseAll()
     {
         foreach (var p in Open.ToList()) { p.IsOpen = false; }
@@ -53,21 +58,43 @@ public static class Flyout
             MaxHeight = 460,
             Padding = new Thickness(16),
             BorderThickness = new Thickness(1),
+            SnapsToDevicePixels = true,
+            // 内容不得溢出圆角 —— 否则四角会看到方角的子元素边缘("圆角不干净")
+            ClipToBounds = true,
         };
         card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-        card.Effect = new System.Windows.Media.Effects.DropShadowEffect
-        { BlurRadius = 16, ShadowDepth = 3, Direction = 270, Opacity = 0.20, Color = Colors.Black };
+
+        // ★ 外阴影必须画在【外层容器】上,而不是圆角卡片本身:
+        //   直接给带 CornerRadius 的 Border 加 Effect,阴影会在圆角处与描边叠出脏边。
+        //   外层留出 Margin 给阴影渲染空间,否则会被弹窗边界裁掉。
+        var shadowHost = new Border
+        {
+            Child = card,
+            Margin = new Thickness(ShadowPad),
+            Background = Brushes.Transparent,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 26,        // 与主页底色接近时,层次全靠这层阴影撑起来
+                ShadowDepth = 6,
+                Direction = 270,
+                Opacity = 0.34,
+                Color = Colors.Black,
+                RenderingBias = System.Windows.Media.Effects.RenderingBias.Quality,
+            },
+        };
 
         var popup = new Popup
         {
-            Child = card,
+            Child = shadowHost,
             PlacementTarget = anchor,
             Placement = atMouse ? PlacementMode.MousePoint : PlacementMode.Right,
             StaysOpen = false,         // 点外面就关
             AllowsTransparency = true, // 圆角外透明,否则四角露黑底
-            HorizontalOffset = 8,
+            // 离鼠标留出手感距离 —— 贴着光标会挡住刚点的东西,也显得局促
+            HorizontalOffset = atMouse ? MouseGap : 10,
+            VerticalOffset = atMouse ? MouseGap : 0,
             PopupAnimation = PopupAnimation.Fade,
         };
         popup.Closed += (_, _) => Open.Remove(popup);
