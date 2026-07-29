@@ -53,6 +53,9 @@ public sealed class CalendarView : UserControl
     /// </summary>
     const int DotsMaxBeforeTriangle = 4;
 
+    /// <summary>全天线在【真正的起止日】那一端内缩的量 —— 让人看出日程从哪天起、到哪天止。</summary>
+    const double EndInset = 9;
+
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
@@ -520,8 +523,11 @@ public sealed class CalendarView : UserControl
         var bar = new Border
         {
             Height = 3,
-            // 贴近日期数字底部(用户裁定):上留白几乎为 0,下方留一点与圆点分开
-            Margin = new Thickness(2, 0, 2, 2),
+            // 贴近日期数字底部(用户裁定):上留白几乎为 0,下方留一点与圆点分开。
+            // ★ 左右内缩(用户裁定):真正的起始日左侧、结束日右侧各缩进一截,
+            //   这样能看出日程从哪天开始、到哪天结束。被周界裁断的一端【不缩】——
+            //   它要贯通到格边,视觉上才表示"还在继续"。
+            Margin = new Thickness(clipStart ? 0 : EndInset, 0, clipEnd ? 0 : EndInset, 2),
             Opacity = dim ? 0.5 : 1,
             IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
             CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),

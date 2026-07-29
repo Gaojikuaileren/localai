@@ -319,6 +319,8 @@ public static class Selftest
                 Assert(calSrc.Contains("const int SpanRowsReserved = 1"), "全天线只占【一行】——多条不分行,不会一上一下");
                 Assert(calSrc.Contains("MergeSpans("), "多条全天日程会合并成同一行的连续线段");
                 Assert(calSrc.Contains("const int DotsMaxBeforeTriangle = 4"), "定时日程超过 4 条改用实心三角形(阈值是常量)");
+                Assert(calSrc.Contains("clipStart ? 0 : EndInset"), "全天线在真正的起始日内缩,被周界裁断的一端贯通");
+                Assert(calSrc.Contains("clipEnd ? 0 : EndInset"), "全天线在真正的结束日内缩");
             }
 
             // ---- 日程数据变更通知(修"开启时日程读不出来")----
