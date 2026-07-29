@@ -49,19 +49,31 @@ public static class Ui
     /// <summary>
     /// 带标题(可选图标)的统一板块。并列板块用它,标题栏高度与排版完全一致。
     /// </summary>
-    public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null, bool compact = false)
+    public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null,
+                               bool compact = false, FrameworkElement? headerAction = null)
     {
-        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, compact ? 6 : 10) };
+        // 标题(图标 + 文字)靠左
+        var titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         if (icon is { } ic)
         {
             var el = Theme.Icons.Make(ic, 16, "FgMuted");
             el.Margin = new Thickness(0, 0, 8, 0);
             el.VerticalAlignment = VerticalAlignment.Center;
-            head.Children.Add(el);
+            titleRow.Children.Add(el);
         }
         var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         t.Dyn(TextBlock.ForegroundProperty, "FgPrimary").Dyn(TextBlock.FontSizeProperty, "FontSubtitle");
-        head.Children.Add(t);
+        titleRow.Children.Add(t);
+
+        // 可选的右侧动作(如"+"新增)—— 标题行用 DockPanel,动作贴右,标题占满其余
+        var head = new DockPanel { Margin = new Thickness(0, 0, 0, compact ? 6 : 10), LastChildFill = true };
+        if (headerAction is not null)
+        {
+            headerAction.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(headerAction, Dock.Right);
+            head.Children.Add(headerAction);
+        }
+        head.Children.Add(titleRow);
 
         var dock = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(head, Dock.Top);
@@ -70,6 +82,33 @@ public static class Ui
         var card = Card(dock, margin);
         if (compact) card.Padding = new Thickness(12, 10, 12, 10);   // 抽屉里的表单卡更紧凑
         return card;
+    }
+
+    /// <summary>
+    /// 板块标题栏右侧的小圆角"+"按钮(新增待办/家务等)。自绘 —— 走强调色、圆角随皮肤,
+    /// 不用系统按钮外观。hover 略微加深。
+    /// </summary>
+    public static FrameworkElement PlusButton(Action onClick, string? tip = null)
+    {
+        var plus = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M8,3.5 L8,12.5 M3.5,8 L12.5,8"),
+            StrokeThickness = 1.7,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+        };
+        plus.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgOnAccent");
+
+        var b = new Border { Width = 24, Height = 24, Cursor = System.Windows.Input.Cursors.Hand, Child = plus };
+        b.Dyn(Border.BackgroundProperty, "Accent").Dyn(Border.CornerRadiusProperty, "RadiusSm");
+        b.MouseEnter += (_, _) => b.Opacity = 0.85;
+        b.MouseLeave += (_, _) => b.Opacity = 1.0;
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        if (tip is not null) b.ToolTip = tip;
+        return b;
     }
 
     public static Button Primary(string text, RoutedEventHandler onClick)

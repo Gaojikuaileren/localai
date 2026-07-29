@@ -153,6 +153,46 @@ public static class Selftest
             Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 35, 1)) == new TimeSpan(9, 40, 0), "刚过刻度一秒也进到下一格 9:40");
             Assert(Views.WheelPicker.CeilToStep(new TimeSpan(23, 58, 0)) == new TimeSpan(23, 55, 0), "临近午夜夹到 23:55");
 
+            // ---- 待办 / 家务:数据模型 + 排序 + 逾期 ----
+            var todos = new Services.TodoCenter();
+            var todoChanged = 0;
+            todos.Changed += () => todoChanged++;
+            var tid = todos.Add(new Services.TodoItem("", "买菜", Services.TodoKind.Chore));
+            Assert(!string.IsNullOrEmpty(tid), "新增自动生成 Id");
+            Assert(todos.Items.Count == 1 && todoChanged == 1, "新增触发 Changed");
+            todos.Toggle(tid);
+            Assert(todos.Items[0].Done && todoChanged == 2, "Toggle 置为完成并触发 Changed");
+            todos.Update(todos.Items[0] with { Title = "买菜和蛋" });
+            Assert(todos.Items[0].Title == "买菜和蛋", "Update 生效");
+            todos.Add(new Services.TodoItem("", "交电费", Services.TodoKind.Personal));
+            var ord = todos.Ordered().ToList();
+            Assert(!ord[0].Done && ord[^1].Done, "排序:未完成在前、已完成沉底");
+            todos.Remove(tid);
+            Assert(todos.Items.All(x => x.Id != tid), "Remove 删除该条");
+
+            var overdue = new Services.TodoItem("x", "逾期", Services.TodoKind.Personal, Due: DateTime.Now.AddMinutes(-5));
+            Assert(overdue.IsOverdue, "有截止、过期、未完成 => 逾期");
+            Assert(!(overdue with { Due = DateTime.Now.AddHours(1) }).IsOverdue, "未来截止不算逾期");
+            Assert(!(overdue with { Done = true }).IsOverdue, "已完成不算逾期");
+
+            // 接线:板块有 + 按钮、用共享行渲染器、变更自动刷新;编辑器当场写库并收起抽屉
+            var homeTodo = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (homeTodo is not null)
+            {
+                Assert(homeTodo.Contains("Ui.PlusButton"), "待办板块标题栏有 + 新增按钮");
+                Assert(homeTodo.Contains("TodoList.Row("), "待办列表用共享行渲染器(与诊断同一份布局)");
+                Assert(homeTodo.Contains("Todos.Changed += BuildTodos"), "待办变更自动刷新列表(不依赖播种时序)");
+            }
+            var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
+            if (todoEd is not null)
+            {
+                Assert(todoEd.Contains("TheApp.Todos.Add") && todoEd.Contains("TheApp.Todos.Update"), "编辑器当场写入 TodoCenter(非伪造)");
+                Assert(todoEd.Contains("Overlay.CloseActive()"), "保存/删除后收起右侧抽屉");
+            }
+            var appTodo = TryReadSource("App.xaml.cs");
+            if (appTodo is not null)
+                Assert(appTodo.Contains("SeedDemoTodos"), "示例待办在建窗口【之前】播种");
+
             // ---- 显存条分段口径 ----
             var vs = new VramSnapshot(16.0, 4.0, 6.0, true);
             Assert(Math.Abs(vs.FreeGiB - 6.0) < 0.001, "显存三段相加等于总量(模型 + 桌面 + 未占用)");

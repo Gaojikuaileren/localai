@@ -28,6 +28,8 @@ public partial class App : Application
     public VramMonitor Vram { get; } = new();
     /// <summary>「正在进行的项目」——主页田字格的数据源;点方块深链到对应工作空间。</summary>
     public ProjectCenter Projects { get; } = new();
+    /// <summary>「待办与家务」——主页待办板块的数据源(中枢自有数据,手动增删改当场生效)。</summary>
+    public TodoCenter Todos { get; } = new();
     // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
     // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
     public ShutdownCoordinator Lifecycle { get; } = new();
@@ -93,6 +95,20 @@ public partial class App : Application
         Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1)));
 
         SeedDemoEvents();
+        SeedDemoTodos();
+    }
+
+    // 待办/家务同理:没有条目就只剩空态,没法评审列表与勾选交互。全部标注「(示例)」。
+    // 覆盖:有时间的家务、带旗标+高优先级的个人待办、无截止的待办、已完成沉底的家务。
+    void SeedDemoTodos()
+    {
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)买菜:西红柿、鸡蛋、牛奶", TodoKind.Chore,
+            Due: DateTime.Today.AddHours(18), DueHasTime: true, Owner: "双方", Scope: "家庭"));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)交电费", TodoKind.Personal,
+            Due: DateTime.Today.AddDays(1), Flagged: true, Priority: TodoPriority.High, Owner: "我", Scope: "个人"));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)预约理发", TodoKind.Personal, Owner: "我", Scope: "个人"));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)倒垃圾", TodoKind.Chore,
+            Done: true, Owner: "我", Scope: "家庭"));
     }
 
     // 日历同理:没有日程就只能看到空的格子,没法评审"有日程标点 / 点日期看当天"这些交互。

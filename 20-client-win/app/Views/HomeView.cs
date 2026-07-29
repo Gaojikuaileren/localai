@@ -54,6 +54,7 @@ public sealed class HomeView : UserControl
     readonly Grid _root = new();
     readonly ColumnDefinition _todoColumn = new();
     readonly UniformGrid _tiles = new();
+    readonly StackPanel _todoList = new();
     readonly Border _todoPanel;
     readonly ScrollViewer _pageScroll = new();
 
@@ -86,15 +87,19 @@ public sealed class HomeView : UserControl
         Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
         _root.Children.Add(calPanel);
 
+        _todoList.Margin = new Thickness(0, 2, 0, 0);
         _todoPanel = Ui.Panel("待办与家务",
             new ScrollViewer
             {
-                Content = Ui.Stack(Ui.Body("还没有待办。", muted: true),
-                                   Ui.Caption("「提醒我…」建个人待办;「提醒我们…」建家庭事务。")),
+                Content = _todoList,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             }.PassThrough(),
-            IconName.Member, new Thickness(0, 0, 0, 12));
+            IconName.Member, new Thickness(0, 0, 0, 12),
+            headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办 / 家务"));
+        BuildTodos();
+        TheApp.Todos.Changed += BuildTodos;
+        Unloaded += (_, _) => TheApp.Todos.Changed -= BuildTodos;
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
         // 与日历面板等高:日历面板 = 日历本体 + Ui.Panel 的标题行与内边距(约 62),
         // 之前按 +46 算,导致两块并排时高度差了十几像素。
@@ -453,6 +458,28 @@ public sealed class HomeView : UserControl
             tp.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             grid.Children.Add(Ui.Stack(hr, ic, tp));
         }
+    }
+
+    // ---------------------------------------------------------------- 待办与家务(仿提醒事项)
+    void OpenTodoEditor(TodoItem? existing)
+    {
+        var body = TodoEditor.Build(existing);
+        (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
+            existing is null ? "新建待办 / 家务" : "编辑待办 / 家务", body, IconName.Member);
+    }
+
+    void BuildTodos()
+    {
+        _todoList.Children.Clear();
+        var items = TheApp.Todos.Ordered().ToList();
+        if (items.Count == 0)
+        {
+            _todoList.Children.Add(Ui.Body("还没有待办。", muted: true));
+            _todoList.Children.Add(Ui.Caption("点右上角 + 新建;或「提醒我…」建个人待办、「提醒我们…」建家庭事务。"));
+            return;
+        }
+        foreach (var t in items)
+            _todoList.Children.Add(TodoList.Row(t, () => TheApp.Todos.Toggle(t.Id), () => OpenTodoEditor(t)));
     }
 
     // ---------------------------------------------------------------- 项目方块

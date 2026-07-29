@@ -8,6 +8,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using LocalAI.Client.Services;
+using LocalAI.Client.Theme;
 using LocalAI.Client.Views;
 
 namespace LocalAI.Client;
@@ -18,18 +20,43 @@ public static class WheelTest
     {
         Directory.CreateDirectory(outDir);
 
+        // 需要一个 Application + 皮肤字典,DynamicResource 才解析得到颜色(圆圈/强调色等)。
+        if (Application.Current is null) { _ = new Application(); ThemeManager.Initialize(Skin.Warm); }
+
         var (timeEl, _) = WheelPicker.Time(new TimeSpan(9, 35, 0), _ => { });
         Save(Frame("非全天:时间转盘", timeEl, 220), Path.Combine(outDir, "wheel-time.png"), 240, 150);
 
-        // 模拟编辑抽屉里的一行:开始日期 + 结束日期 并排,总宽按抽屉可用宽度 ~360
         var dual = new StackPanel { Orientation = Orientation.Horizontal };
         dual.Children.Add(Labeled("开始日期", WheelPicker.Date(new DateTime(2026, 7, 29), _ => { })));
         dual.Children.Add(new Border { Width = 12 });
         dual.Children.Add(Labeled("结束日期", WheelPicker.Date(new DateTime(2026, 8, 2), _ => { })));
         Save(ClipTo(dual, 360), Path.Combine(outDir, "wheel-date-dual.png"), 380, 170);
 
-        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png");
+        // 待办/家务面板(仿提醒事项):四种样子 —— 有时间的家务、旗标+高优先级、无截止、已完成
+        var list = new StackPanel();
+        TodoItem[] demo =
+        {
+            new(TodoCenter.NewId(), "买菜:西红柿、鸡蛋、牛奶", TodoKind.Chore, Due: DateTime.Today.AddHours(18), DueHasTime: true),
+            new(TodoCenter.NewId(), "交电费", TodoKind.Personal, Due: DateTime.Today.AddDays(-1), Flagged: true, Priority: TodoPriority.High),
+            new(TodoCenter.NewId(), "预约理发", TodoKind.Personal),
+            new(TodoCenter.NewId(), "倒垃圾", TodoKind.Chore, Done: true),
+        };
+        foreach (var t in demo) list.Children.Add(TodoList.Row(t, () => { }, () => { }));
+        var panel = Ui.Panel("待办与家务", list, IconName.Member, new Thickness(0),
+            headerAction: Ui.PlusButton(() => { }, "新增"));
+        panel.Width = 300;
+        Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 320);
+
+        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png");
         return 0;
+    }
+
+    // 用皮肤的窗口底色垫一层,还原真实观感(而不是纯白)
+    static FrameworkElement Themed(FrameworkElement body)
+    {
+        var b = new Border { Padding = new Thickness(12), Child = body };
+        b.SetResourceReference(Border.BackgroundProperty, "BgWindow");
+        return b;
     }
 
     static FrameworkElement Labeled(string caption, FrameworkElement body)
