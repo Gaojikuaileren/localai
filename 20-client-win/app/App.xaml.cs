@@ -30,6 +30,8 @@ public partial class App : Application
     public ProjectCenter Projects { get; } = new();
     /// <summary>「待办与家务」——主页待办板块的数据源(中枢自有数据,手动增删改当场生效)。</summary>
     public TodoCenter Todos { get; } = new();
+    /// <summary>聊天:普通会话 + 项目会话。AI 未接入,发送只记录不伪造回复。</summary>
+    public ChatCenter Chat { get; } = new();
     // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
     // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
     public ShutdownCoordinator Lifecycle { get; } = new();
@@ -88,11 +90,16 @@ public partial class App : Application
         Tasks.Add("(示例)生成课件大纲", "第 3 / 8 页 · 课程与演示", "courses", 0.38);
         Tasks.Add("(示例)翻译长文", "中 → 日 · 详细解释档", "translation", 0.72);
 
-        // 项目田字格同理:没有项目就只剩空态,没法评审方块布局。同样明确标注「示例」。
-        Projects.Add(new Project("p1", "(示例)家庭旅行计划", "对话 · 12 条消息", "chat", ProjectScope.Family, DateTime.Now.AddMinutes(-8)));
-        Projects.Add(new Project("p2", "(示例)客厅灯光方案", "资产 · 3 张草稿", "assets", ProjectScope.Family, DateTime.Now.AddHours(-2), Pinned: true));
-        Projects.Add(new Project("p3", "(示例)日语课件 第 4 讲", "课件草稿 · 8 页", "courses", ProjectScope.Personal, DateTime.Now.AddHours(-5)));
-        Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1)));
+        // 项目田字格同理:没有项目就只剩空态,没法评审方块布局。标注「示例」。覆盖三种状态(准备中/进行中/已完成)。
+        Projects.Add(new Project("p1", "(示例)家庭旅行计划", "对话 · 12 条消息", "chat", ProjectScope.Family, DateTime.Now.AddMinutes(-8), Status: ProjectStatus.Active));
+        Projects.Add(new Project("p2", "(示例)客厅灯光方案", "资产 · 3 张草稿", "assets", ProjectScope.Family, DateTime.Now.AddHours(-2), Pinned: true, Status: ProjectStatus.Active, FolderPath: AppContext.BaseDirectory));
+        Projects.Add(new Project("p3", "(示例)日语课件 第 4 讲", "课件草稿 · 8 页", "courses", ProjectScope.Personal, DateTime.Now.AddHours(-5), Status: ProjectStatus.Preparing));
+        Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1), Status: ProjectStatus.Active));
+        Projects.Add(new Project("p5", "(示例)旧网站搬迁", "已收尾归档", "chat", ProjectScope.Personal, DateTime.Now.AddDays(-9), Status: ProjectStatus.Done));
+
+        // 聊天示例:一个普通会话、一个归在"家庭旅行计划"项目下的会话
+        Chat.NewSession(null, ProjectScope.Personal, "(示例)随便问问");
+        Chat.NewSession("p1", ProjectScope.Family, "(示例)行程讨论");
 
         SeedDemoEvents();
         SeedDemoTodos();

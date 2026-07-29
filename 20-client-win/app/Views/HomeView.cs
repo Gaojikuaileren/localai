@@ -164,6 +164,8 @@ public sealed class HomeView : UserControl
             //   方块看起来"纵向居中"。用户要的是【从上到下、从左到右】依次排布。
             _tiles.VerticalAlignment = VerticalAlignment.Top;
             _tiles.Columns = 4;
+            // 右上角:打开【项目库】(已完成项目)
+            var libBtn = ProjectLibraryButton();
             var projects = Ui.Panel(Strings.Get("project.resume"),
                 new ScrollViewer
                 {
@@ -171,7 +173,7 @@ public sealed class HomeView : UserControl
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                     HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 }.PassThrough(),
-                IconName.Tasks, new Thickness(0));
+                IconName.Tasks, new Thickness(0), headerAction: libBtn);
             Grid.SetRow(projects, 3); Grid.SetColumnSpan(projects, 2);
             _root.Children.Add(projects);
 
@@ -693,7 +695,11 @@ public sealed class HomeView : UserControl
         var scopeLabel = new TextBlock { Text = scopeText, VerticalAlignment = VerticalAlignment.Center };
         scopeLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         scopeLabel.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        // 状态(进行中/准备中)小标签 + 可见范围 —— 让"分进行中/准备中"在方块上一眼可辨
+        var statusChip = ProjectUi.StatusChip(p.Status);
+        statusChip.Margin = new Thickness(0, 0, 10, 0);
         var scopeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        scopeRow.Children.Add(statusChip);
         scopeRow.Children.Add(dot); scopeRow.Children.Add(scopeLabel);
 
         // 标题给右上角的置顶按钮留出位置,长标题不会顶到 pin 图标下面
@@ -733,7 +739,49 @@ public sealed class HomeView : UserControl
             (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.WorkspaceKey, p.ProjectId);
         };
         tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}";
+        tile.ContextMenu = TileMenu(p);   // 右键:在文件夹打开 + 改状态
         return tile;
+    }
+
+    ContextMenu TileMenu(Project p)
+    {
+        var m = new ContextMenu();
+        var open = new MenuItem { Header = "在文件夹中打开" };
+        open.Click += (_, _) =>
+        {
+            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
+                System.Windows.MessageBox.Show(string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
+                    "本地 AI 中枢", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+        };
+        m.Items.Add(open);
+        m.Items.Add(new Separator());
+        foreach (var st in new[] { ProjectStatus.Preparing, ProjectStatus.Active, ProjectStatus.Done })
+        {
+            var (label, _) = ProjectUi.Status(st);
+            var mi = new MenuItem { Header = "标记为 " + label, IsChecked = p.Status == st };
+            var captured = st;
+            mi.Click += (_, _) => TheApp.Projects.SetStatus(p.ProjectId, captured);
+            m.Items.Add(mi);
+        }
+        return m;
+    }
+
+    FrameworkElement ProjectLibraryButton()
+    {
+        var t = new TextBlock { Text = "项目库", VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var chev = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
+        chev.VerticalAlignment = VerticalAlignment.Center;
+        chev.Margin = new Thickness(3, 0, 0, 0);
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        row.Children.Add(t); row.Children.Add(chev);
+        var b = new Border { Child = row, Padding = new Thickness(8, 4, 6, 4), Cursor = System.Windows.Input.Cursors.Hand, Background = System.Windows.Media.Brushes.Transparent };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = System.Windows.Media.Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, _) => (Application.Current.MainWindow as MainWindow)?.OpenProjectLibrary();
+        return b;
     }
 
     // 方块右上角的置顶按钮。未置顶=空心 pin,置顶=实心强调色 pin;点击切换。

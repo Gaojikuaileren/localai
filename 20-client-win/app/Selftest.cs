@@ -273,6 +273,55 @@ public static class Selftest
             }
             var msSet = new AppSettings();
             Assert(msSet.IsModelEnabled("chat.8b"), "模型默认启用");
+
+            // ---- 聊天 + 项目 ----
+            var pcx = new Services.ProjectCenter();
+            var nope = Path.Combine(Path.GetTempPath(), "localai-nope-" + Guid.NewGuid().ToString("N")[..6]);
+            var np = pcx.Create("测试项目", nope, null, Services.ProjectScope.Personal);
+            Assert(np.Status == Services.ProjectStatus.Preparing, "新建项目默认【准备中】");
+            Assert(np.Ai == Services.AiPermission.Ask, "新建项目 AI 权限默认【需批准】");
+            pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Active);
+            Assert(pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "进行中的项目出现在 Ongoing()");
+            pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Done);
+            Assert(!pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "已完成的不在 Ongoing()(主页不显示)");
+            Assert(pcx.Completed().Any(x => x.ProjectId == np.ProjectId), "已完成的进 Completed()(项目库)");
+            pcx.SetAiPermission(np.ProjectId, Services.AiPermission.Edit);
+            Assert(pcx.Find(np.ProjectId)!.Ai == Services.AiPermission.Edit, "可设项目 AI 权限");
+            Assert(!Services.ProjectCenter.OpenInExplorer(nope), "路径不存在时打开 Explorer 返回 false(不抛)");
+
+            var cc = new Services.ChatCenter();
+            var ns = cc.NewSession(null, Services.ProjectScope.Personal);
+            Assert(cc.NormalSessions().Any(x => x.SessionId == ns.SessionId), "无项目 = 普通会话");
+            var pj = cc.NewSession("prj-x", Services.ProjectScope.Family);
+            Assert(cc.SessionsOf("prj-x").Any(x => x.SessionId == pj.SessionId), "项目会话归到该项目下");
+            cc.MoveToProject(ns.SessionId, "prj-x");
+            Assert(cc.SessionsOf("prj-x").Any(x => x.SessionId == ns.SessionId) && !cc.NormalSessions().Any(x => x.SessionId == ns.SessionId),
+                   "会话可移动到项目(离开普通列表)");
+            cc.Send(pj.SessionId, "你好");
+            var msgs = cc.MessagesOf(pj.SessionId).ToList();
+            Assert(msgs.Any(m => m.Role == Services.ChatRole.User && m.Text == "你好"), "发送记录用户消息");
+            Assert(msgs.Any(m => m.Role == Services.ChatRole.System), "给出系统说明(模型未接入)");
+            Assert(!msgs.Any(m => m.Role == Services.ChatRole.Assistant), "★ 不伪造 AI 回复(无 Assistant 消息)");
+
+            // 接线
+            if (mwStatus is not null)
+            {
+                Assert(mwStatus.Contains("new ChatView()"), "聊天工作空间接入 ChatView");
+                Assert(mwStatus.Contains("OpenProjectDrawer") && mwStatus.Contains("OpenProjectLibrary") && mwStatus.Contains("OpenProjectInChat"), "项目抽屉/项目库/进项目聊天入口就位");
+            }
+            var homeProj = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (homeProj is not null)
+            {
+                Assert(homeProj.Contains("ProjectLibraryButton"), "主页项目板块右上角有【项目库】按钮");
+                Assert(homeProj.Contains("ProjectUi.StatusChip"), "主页方块显示状态(进行中/准备中)");
+                Assert(homeProj.Contains("OpenInExplorer"), "主页方块右键可在文件夹打开");
+            }
+            var pdrawer = TryReadSource(Path.Combine("Views", "ProjectDrawerView.cs"));
+            if (pdrawer is not null)
+                Assert(pdrawer.Contains("PickFolder") && pdrawer.Contains("SetAiPermission"), "项目抽屉可建项目(选文件夹)并设 AI 权限");
+            var chatSrc = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (chatSrc is not null)
+                Assert(chatSrc.Contains("UpgradeToProject") && chatSrc.Contains("MoveToProject"), "普通会话可升级为项目 / 移动到项目");
             msSet.DisabledModels.Add("chat.8b");
             Assert(!msSet.IsModelEnabled("chat.8b"), "停用列表里的模型不启用");
 

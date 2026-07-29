@@ -339,7 +339,10 @@ public partial class MainWindow : Window
         {
             if (!TheApp.Settings.IsWorkspaceVisible(w.Key)) continue;   // 用户在扩展里关掉的不显示
             var def = w;   // 闭包捕获
-            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, () => new PlaceholderView(def.TitleKey)), NavPanel);
+            Func<UserControl> build = def.Key == "chat"
+                ? () => new ChatView()                       // 聊天工作空间已落地
+                : () => new PlaceholderView(def.TitleKey);   // 其余仍是占位
+            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, build), NavPanel);
         }
 
         // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
@@ -433,7 +436,24 @@ public partial class MainWindow : Window
     public void NavigateToProject(string workspaceKey, string projectId)
     {
         Navigate(workspaceKey);
-        if (ContentHost.Content is PlaceholderView ph) ph.ShowPendingProject(projectId);
+        if (ContentHost.Content is ChatView cv) cv.SelectProject(projectId);
+        else if (ContentHost.Content is PlaceholderView ph) ph.ShowPendingProject(projectId);
+        TheApp.Projects.Touch(projectId);
+    }
+
+    /// <summary>右侧抽屉打开【项目抽屉】(新建/改状态/进项目聊天/项目库入口)。</summary>
+    public void OpenProjectDrawer() => OpenSideDrawer("项目", new ProjectDrawerView(), IconName.Tasks);
+
+    /// <summary>右侧抽屉打开【项目库】(已完成项目)。</summary>
+    public void OpenProjectLibrary() => OpenSideDrawer("项目库", new ProjectLibraryView(), IconName.Tasks);
+
+    /// <summary>从项目抽屉/主页进入某项目的项目聊天:关抽屉 -> 切到聊天 -> 选中该项目上下文。</summary>
+    public void OpenProjectInChat(string projectId)
+    {
+        Overlay.CloseActive();
+        Navigate("chat");
+        if (ContentHost.Content is ChatView cv) cv.SelectProject(projectId);
+        TheApp.Projects.Touch(projectId);
     }
 
     void OnToggleNav(object sender, RoutedEventArgs e)
