@@ -53,7 +53,6 @@ public sealed class HomeView : UserControl
     readonly Border _briefPanel, _todoPanel;
     readonly ScrollViewer _pageScroll = new();
 
-    Density _density = Density.Comfortable;
 
     App TheApp => (App)Application.Current;
 
@@ -63,7 +62,7 @@ public sealed class HomeView : UserControl
 
         _root.Margin = new Thickness(24, 16, 24, 18);
         _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        _calColumn.Width = new GridLength(Layout.CalendarWidth(Density.Comfortable));
+        _calColumn.Width = new GridLength(Layout.CalendarWidth(1200));
         _root.ColumnDefinitions.Add(_calColumn);
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                          // 问候
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                          // 简报 | 待办
@@ -124,11 +123,12 @@ public sealed class HomeView : UserControl
         TheApp.Projects.Changed += BuildTiles;
         Unloaded += (_, _) => TheApp.Projects.Changed -= BuildTiles;
 
-        SizeChanged += (_, _) => Relayout();
+        SizeChanged += (_, _) => ScheduleRelayout();
+        _resizeThrottle.Tick += (_, _) => { _resizeThrottle.Stop(); RelayoutDiscrete(); };
 
         UpdateClocks();
         _timer.Tick += (_, _) => UpdateClocks();
-        Loaded += (_, _) => { _timer.Start(); Relayout(); };
+        Loaded += (_, _) => { _timer.Start(); RelayoutContinuous(); RelayoutDiscrete(); };
         Unloaded += (_, _) => _timer.Stop();
     }
 
@@ -140,40 +140,56 @@ public sealed class HomeView : UserControl
     };
 
     // ---------------------------------------------------------------- 随尺寸重排
-    void Relayout()
+    // 丝滑要点:① 连续量直接跟随尺寸(不分档);② 离散量带迟滞;
+    //          ③ 拖动窗口时【节流】—— 每一像素都重排会卡,尤其逐小时格数变化要重建子元素。
+    readonly DispatcherTimer _resizeThrottle = new() { Interval = TimeSpan.FromMilliseconds(60) };
+    int _cols, _slots;
+
+    void ScheduleRelayout()
     {
-        var w = ActualWidth;
-        var h = ActualHeight;
+        _resizeThrottle.Stop();
+        _resizeThrottle.Start();   // 拖动停下来 60ms 后才真正重排
+        RelayoutContinuous();      // 连续量每帧都跟,视觉上完全跟手
+    }
+
+    /// <summary>连续量:每次尺寸变化都更新,平滑无跳变(不涉及重建子元素,开销极小)。</summary>
+    void RelayoutContinuous()
+    {
+        var w = ActualWidth; var h = ActualHeight;
         if (w <= 0 || h <= 0) return;
 
-        _density = Layout.For(w, h);
-
-        // 日历栏:紧凑时收窄,极窄时整栏隐藏(横向已经不够分)
-        var calW = Layout.CalendarWidth(_density);
+        var calW = Layout.CalendarWidth(w);
         _calColumn.Width = new GridLength(calW);
-        _calendarPanel.Visibility = calW <= 0 ? Visibility.Collapsed : Visibility.Visible;
+        _calendarPanel.Visibility = Visibility.Visible;
 
-        // 简报/待办限高 —— 一长一短时都不会把版面拉变形
-        var panelMax = Layout.PanelMaxHeight(_density);
+        var panelMax = Layout.PanelMaxHeight(h);
         _briefPanel.MaxHeight = panelMax;
         _todoPanel.MaxHeight = panelMax;
 
-        // 天气卡:曲线高度与逐小时格数逐级下调;放不下就整块隐藏,而不是显示半截
-        var contentW = Math.Max(0, w - calW - 64);
-        var cardW = contentW / Cities.Length;
-        var curveH = Layout.CurveHeight(_density);
-        var slots = Layout.HourlySlots(_density, cardW);
-        for (int i = 0; i < Cities.Length; i++)
-        {
-            _cityCurve[i].Height = curveH;
-            _cityCurve[i].Visibility = curveH <= 0 ? Visibility.Collapsed : Visibility.Visible;
-            _cityHourly[i].Visibility = slots <= 0 ? Visibility.Collapsed : Visibility.Visible;
-            if (slots > 0) SetHourly(_cityHourly[i], slots);
-        }
+        var curveH = Layout.CurveHeight(h);
+        var tileH = Layout.TileHeight(h);
+        for (int i = 0; i < Cities.Length; i++) _cityCurve[i].Height = curveH;
+        foreach (var c in _tiles.Children) if (c is FrameworkElement fe) fe.Height = tileH;
+    }
 
-        // 项目方块列数随宽度实时重算 -> UniformGrid 平分,右侧不留空白
-        _tiles.Columns = Layout.ProjectColumns(contentW);
-        foreach (var c in _tiles.Children) if (c is FrameworkElement fe) fe.Height = Layout.TileHeight(_density);
+    /// <summary>离散量:带迟滞,且只在拖动停下后执行(涉及重建子元素)。</summary>
+    void RelayoutDiscrete()
+    {
+        var w = ActualWidth; var h = ActualHeight;
+        if (w <= 0 || h <= 0) return;
+
+        var contentW = Math.Max(0, w - Layout.CalendarWidth(w) - 64);
+
+        var cols = Layout.ProjectColumns(contentW, _cols);
+        if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
+
+        var cardW = contentW / Cities.Length;
+        var slots = Layout.HourlySlots(cardW, _slots);
+        if (slots != _slots)
+        {
+            _slots = slots;
+            for (int i = 0; i < Cities.Length; i++) SetHourly(_cityHourly[i], slots);
+        }
     }
 
     // ---------------------------------------------------------------- 城市卡
@@ -206,7 +222,7 @@ public sealed class HomeView : UserControl
         hl.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
         // 气温曲线(高度由 Relayout 按密度设定;0 = 不显示,不显示半截)
-        _cityCurve[i] = new Grid { Height = Layout.CurveHeight(Density.Comfortable), Margin = new Thickness(0, 8, 0, 0), ClipToBounds = true };
+        _cityCurve[i] = new Grid { Height = Layout.CurveHeight(800), Margin = new Thickness(0, 8, 0, 0), ClipToBounds = true };
         var baseline = new System.Windows.Shapes.Path
         {
             StrokeThickness = 1.5,
@@ -271,7 +287,8 @@ public sealed class HomeView : UserControl
             return;
         }
         foreach (var p in items) _tiles.Children.Add(ProjectTile(p));
-        Relayout();
+        _cols = 0;   // 重建后重新协商列数
+        RelayoutContinuous(); RelayoutDiscrete();
     }
 
     Border ProjectTile(Project p)
@@ -318,7 +335,7 @@ public sealed class HomeView : UserControl
         var tile = new Border
         {
             Child = body,
-            Height = Layout.TileHeight(Density.Comfortable),
+            Height = Layout.TileHeight(800),
             // ★ 不设 Width:由 UniformGrid 平分可用宽度,方块自动拉伸填满,右侧不留空白
             Padding = new Thickness(14),
             Margin = new Thickness(0, 0, 12, 12),

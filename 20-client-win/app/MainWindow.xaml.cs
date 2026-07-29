@@ -43,7 +43,7 @@ public partial class MainWindow : Window
         SyncMaxButton();
 
         // 窗口圆角跟随皮肤(暖萌大 / 微风中 / 墨白小)。句柄要等 SourceInitialized 之后才有。
-        SourceInitialized += (_, _) => WindowCorners.Apply(this, TheApp.Settings.Skin);
+        SourceInitialized += (_, _) => { WindowCorners.Apply(this, TheApp.Settings.Skin); ApplySizeLimits(); };
 
         // 底部任务横条:有任务才出现,多任务时自动轮播
         TheApp.Tasks.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
@@ -78,6 +78,30 @@ public partial class MainWindow : Window
         RefreshStatus();
         RefreshMember();
         RefreshTaskBar();
+    }
+
+    /// <summary>
+    /// 窗口尺寸上下限(用户裁定):最小 = 屏幕的【四分之一大小】(面积四分之一 = 宽高各一半;
+    /// 2K→1280×720,HD→960×540),最大 = 全屏(工作区)。
+    /// 把最小值提到这个量级后,极端紧凑档几乎不会触发,缩放时少了一整类跳变。
+    /// </summary>
+    void ApplySizeLimits()
+    {
+        var wa = SystemParameters.WorkArea;                 // 工作区 = 全屏减任务栏
+        var screenW = SystemParameters.PrimaryScreenWidth;
+        var screenH = SystemParameters.PrimaryScreenHeight;
+
+        var (minW, minH) = Layout.MinWindowFor(screenW, screenH);
+        // 保险:最小值不能超过工作区本身(小屏/缩放比例异常时)
+        MinWidth = Math.Min(minW, wa.Width);
+        MinHeight = Math.Min(minH, wa.Height);
+        MaxWidth = wa.Width;
+        MaxHeight = wa.Height;
+
+        if (Width < MinWidth) Width = MinWidth;
+        if (Height < MinHeight) Height = MinHeight;
+        if (Width > MaxWidth) Width = MaxWidth;
+        if (Height > MaxHeight) Height = MaxHeight;
     }
 
     // ---------------------------------------------------------------- 底部任务横条

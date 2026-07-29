@@ -1,9 +1,10 @@
-// P3c -- 响应式布局度量。用户提出的三个畸变风险都收敛到这里,**做成纯函数**以便自动回归
-// (界面本身我没法肉眼验,但这些决策可以逐尺寸断言):
+// P3c -- 响应式布局度量。做成纯函数以便自动回归(界面本身无法肉眼验,但这些决策可以逐尺寸断言)。
 //
-//   ① 项目方块要【平分横向空间】,不能右侧留一大块空白 -> ProjectColumns()
-//   ② 全屏与最小窗口都不能畸变(实例:窗口过小天气曲线显示不全)-> Density() + 各处按密度取舍
-//   ③ 简报/待办若一长一短,不能一个大片留白、另一个过于紧凑 -> PanelMaxHeight() 限高 + 内部滚动
+// ★ 丝滑的关键(用户反馈"缩放跳来跳去"):
+//   ① 能连续的就【连续插值】,不要分档 —— 曲线高度、日历栏宽度、限高都随尺寸平滑变化;
+//   ② 必须离散的(列数、逐小时格数)加【迟滞】—— 增/减用不同阈值,避免在边界反复横跳;
+//   ③ 窗口最小尺寸提高到【屏幕的四分之一】(2K→1280×720,HD→960×540),
+//      于是极端紧凑档几乎不会触发,少了一整类跳变。
 //
 // 设计基线(§3):适配 1440×900,另备 1280×720 与紧凑密度。
 
@@ -25,73 +26,81 @@ public static class Layout
         => (Math.Max(0, windowW - (navCollapsed ? NavWidthCollapsed : NavWidthExpanded)),
             Math.Max(0, windowH - TitleBarHeight - TopBarHeight));
 
-    /// <summary>方块的理想宽度。实际宽度由 UniformGrid 平分,所以这只是"多宽算一列"的判据。</summary>
+    /// <summary>
+    /// 窗口最小尺寸 = 屏幕的【四分之一大小】(面积的四分之一 = 宽高各一半)。
+    /// 2560×1440 -> 1280×720;1920×1080 -> 960×540。用户裁定;最大值 = 全屏(由工作区给出)。
+    /// </summary>
+    public static (double W, double H) MinWindowFor(double screenW, double screenH)
+        => (Math.Max(960, Math.Round(screenW / 2)), Math.Max(540, Math.Round(screenH / 2)));
+
+    // ---------------------------------------------------------------- 连续量(不分档,不跳)
+    static double Lerp(double a, double b, double t) => a + (b - a) * Math.Clamp(t, 0, 1);
+
+    /// <summary>把一个尺寸映射到 0..1 的"宽裕度"。用它驱动所有连续量。</summary>
+    static double Roominess(double value, double tight, double roomy)
+        => Math.Clamp((value - tight) / Math.Max(1, roomy - tight), 0, 1);
+
+    /// <summary>气温曲线高度:随内容区高度【连续】变化(28→56),不再一跳一跳。</summary>
+    public static double CurveHeight(double contentH)
+        => Math.Round(Lerp(28, 56, Roominess(contentH, 520, 900)));
+
+    /// <summary>右侧日历栏宽度:随内容区宽度【连续】变化(264→352)。</summary>
+    public static double CalendarWidth(double contentW)
+        => Math.Round(Lerp(264, 352, Roominess(contentW, 780, 1500)));
+
+    /// <summary>简报/待办的限高:连续变化(96→168)。限高 + 内部滚动 = 一长一短也不畸变。</summary>
+    public static double PanelMaxHeight(double contentH)
+        => Math.Round(Lerp(96, 168, Roominess(contentH, 520, 950)));
+
+    /// <summary>项目方块高度:连续变化(104→140)。</summary>
+    public static double TileHeight(double contentH)
+        => Math.Round(Lerp(104, 140, Roominess(contentH, 520, 950)));
+
+    // ---------------------------------------------------------------- 离散量(带迟滞,不横跳)
     public const double TileIdealWidth = 210;
     public const int MinTileColumns = 2;
     public const int MaxTileColumns = 8;
 
+    /// <summary>迟滞带宽:要多超出边界这么多像素才肯改变档位,避免在阈值附近反复切换。</summary>
+    public const double Hysteresis = 34;
+
     /// <summary>
-    /// 项目田字格的列数。★ 关键:算出列数后交给 UniformGrid **平分**可用宽度,
-    /// 方块随之拉伸填满 —— 而不是固定宽度靠 WrapPanel 排,那样右侧必然留下一条空白。
+    /// 项目田字格列数。算出后交给 UniformGrid【平分】可用宽度,方块随之拉伸填满。
+    /// current 传入当前列数以启用迟滞:只有明显越过边界才改,拖动时不会来回抖。
     /// </summary>
-    public static int ProjectColumns(double availableWidth)
+    public static int ProjectColumns(double availableWidth, int current = 0)
     {
-        if (double.IsNaN(availableWidth) || availableWidth <= 0) return MinTileColumns;
-        var n = (int)Math.Floor(availableWidth / TileIdealWidth);
-        return Math.Clamp(n, MinTileColumns, MaxTileColumns);
+        if (double.IsNaN(availableWidth) || availableWidth <= 0) return Math.Max(current, MinTileColumns);
+        var raw = Math.Clamp((int)Math.Floor(availableWidth / TileIdealWidth), MinTileColumns, MaxTileColumns);
+        if (current < MinTileColumns || current > MaxTileColumns) return raw;
+        if (raw == current) return current;
+
+        // 变多:要宽到"再多一列还绰绰有余"才升;变少:要窄到明显放不下才降。
+        if (raw > current && availableWidth < (current + 1) * TileIdealWidth + Hysteresis) return current;
+        if (raw < current && availableWidth > current * TileIdealWidth - Hysteresis) return current;
+        return raw;
+    }
+
+    /// <summary>逐小时天气格数,同样带迟滞。窄了少给几格,而不是把每格挤到看不清。</summary>
+    public static int HourlySlots(double cardWidth, int current = 0)
+    {
+        var raw = cardWidth < 210 ? 3 : cardWidth < 270 ? 4 : cardWidth < 340 ? 5 : 6;
+        if (current is < 3 or > 6) return raw;
+        if (raw == current) return current;
+        // 边界附近保持不变(迟滞),避免拖动时格数抖动
+        var bounds = new[] { 210.0, 270.0, 340.0 };
+        foreach (var b in bounds)
+            if (Math.Abs(cardWidth - b) < Hysteresis) return current;
+        return raw;
     }
 
     /// <summary>
-    /// 按内容区尺寸判定密度。高度是主要判据 —— 天气卡里"曲线 + 逐小时"最先被挤掉,
-    /// 用户遇到的"窗口过小曲线显示不全"就是这个。
+    /// 密度仍保留,但只用于极端兜底(窗口最小值已提到屏幕四分之一,正常几乎不会到 Tight)。
     /// </summary>
     public static Density For(double width, double height)
     {
-        if (height < 560 || width < 900) return Density.Tight;
-        if (height < 760 || width < 1150) return Density.Compact;
+        if (height < 480 || width < 760) return Density.Tight;
+        if (height < 700 || width < 1000) return Density.Compact;
         return Density.Comfortable;
     }
-
-    /// <summary>逐小时天气的格数:窄了就少给几格,而不是把每格挤到看不清。</summary>
-    public static int HourlySlots(Density d, double cardWidth) => d switch
-    {
-        Density.Tight => 0,                                   // 极小窗口:整行隐藏(留曲线更有用)
-        Density.Compact => cardWidth < 260 ? 3 : 4,
-        _ => cardWidth < 300 ? 4 : 6,
-    };
-
-    /// <summary>气温曲线区的高度。返回 0 表示这个尺寸下不显示曲线(与其显示不全,不如不显示)。</summary>
-    public static double CurveHeight(Density d) => d switch
-    {
-        Density.Tight => 0,
-        Density.Compact => 34,
-        _ => 48,
-    };
-
-    /// <summary>
-    /// 简报/待办这类并列板块的最大高度。限高 + 内部滚动 = 一侧内容再长也不会
-    /// 把另一侧撑出大片留白,更不会把下面的天气/项目挤变形。
-    /// </summary>
-    public static double PanelMaxHeight(Density d) => d switch
-    {
-        Density.Tight => 92,
-        Density.Compact => 116,
-        _ => 140,
-    };
-
-    /// <summary>右侧日历栏宽度。窄窗口下收窄,极窄时由调用方整栏隐藏。</summary>
-    public static double CalendarWidth(Density d) => d switch
-    {
-        Density.Tight => 0,        // 0 = 不显示(横向已经不够分)
-        Density.Compact => 280,
-        _ => 330,
-    };
-
-    /// <summary>项目方块高度:紧凑时压低,保证一行方块仍完整可见。</summary>
-    public static double TileHeight(Density d) => d switch
-    {
-        Density.Tight => 96,
-        Density.Compact => 116,
-        _ => 132,
-    };
 }
