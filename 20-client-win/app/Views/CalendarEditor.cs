@@ -35,36 +35,40 @@ public static class CalendarEditor
         };
 
         // ---- 时间/日期一律用【竖直滚轮】(用户裁定)----
-        //   非全天:时:分 两列,最小单位 5 分钟,有头有尾不循环;
-        //   全天:年/月/日 三列 —— 与时间滚轮同一外观(此前用原生 DatePicker,风格不统一)。
+        //   非全天:只显示【时:分】两列;勾选全天:只显示【年/月/日】三列。
+        //   两者互斥切换 —— 不该同时出现(用户反馈)。
         var startAt = WheelPicker.Snap(start.TimeOfDay);
         var endAt = WheelPicker.Snap(end.TimeOfDay);
         var startDay = start.Date;
         var endDay = end.Date;
 
         var endEdited = existing is not null;   // 用户手动动过结束就不再自动跟随
-        FrameworkElement? endTimeWheelHost = null;
 
-        var endWheelHost = new ContentControl();
-        void BuildEndTimeWheel()
-            => endWheelHost.Content = WheelPicker.Time(endAt, v => { endAt = v; endEdited = true; });
-        BuildEndTimeWheel();
-
-        var startWheel = WheelPicker.Time(startAt, v =>
+        var (endTimeEl, setEndTime) = WheelPicker.Time(endAt, v => { endAt = v; endEdited = true; });
+        var (startTimeEl, _) = WheelPicker.Time(startAt, v =>
         {
             startAt = v;
-            // 改开始时刻 -> 结束自动跟到 +1 小时(仅在用户还没手动改过结束时)
             if (endEdited) return;
+            // 改开始 -> 结束自动跟到 +1 小时(夹在当天内)
             var next = startAt + DefaultDuration;
             endAt = next < TimeSpan.FromDays(1) ? next : WheelPicker.Snap(TimeSpan.FromHours(23.5));
-            var keep = endEdited;
-            BuildEndTimeWheel();
-            endEdited = keep;   // 重建滚轮不算"用户手动改过"
+            setEndTime(endAt);   // 内部改值不回调,不会被误判成"用户手动改过"
         });
 
-        var timedRow = TwoUp("开始", startWheel, "结束", endWheelHost);
+        var timedRow = TwoUp("开始", startTimeEl, "结束", endTimeEl);
         var allDayRow = TwoUp("开始日期", WheelPicker.Date(startDay, d => startDay = d),
                               "结束日期", WheelPicker.Date(endDay, d => endDay = d));
+
+        // ★ 互斥显示。上一轮我在重写时把这段连带删掉了,导致两组转盘一直同时显示。
+        void SyncMode()
+        {
+            var on = allDay.IsChecked == true;
+            timedRow.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+            allDayRow.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        }
+        allDay.Checked += (_, _) => SyncMode();
+        allDay.Unchecked += (_, _) => SyncMode();
+        SyncMode();
 
         // ---- iCloud 日历组(接入后由服务端下发真实分组)----
         var group = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };

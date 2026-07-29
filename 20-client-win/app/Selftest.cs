@@ -395,6 +395,26 @@ public static class Selftest
                     Assert(homeSrc.Contains("new Thickness(0, 0, -WeatherGap, 12)"),
                            "容器用负右边距吸收末格多出的间距,整排右缘仍对齐");
                 }
+
+                // 编辑器:时间/日期转盘必须【互斥显示】,且滚动要有动画
+                var edSrc = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
+                if (edSrc is not null)
+                {
+                    Assert(edSrc.Contains("void SyncMode()"), "全天开关切换两组转盘的互斥显示(曾被重写连带删掉)");
+                    Assert(edSrc.Contains("timedRow.Visibility") && edSrc.Contains("allDayRow.Visibility"),
+                           "未勾选只显示时间转盘;勾选后只显示日期转盘");
+                    Assert(edSrc.Contains("allDay.Checked") && edSrc.Contains("allDay.Unchecked"),
+                           "勾选与取消勾选都会触发切换");
+                }
+                var whSrc = TryReadSource(Path.Combine("Views", "WheelPicker.cs"));
+                if (whSrc is not null)
+                {
+                    Assert(whSrc.Contains("BeginAnimation(TranslateTransform.YProperty"),
+                           "转盘滚动用位移动画(不是瞬间跳到位)");
+                    // 只看【实际调用】,不看注释 —— 注释里还留着"为什么不用它"的说明
+                    Assert(!whSrc.Contains(".ScrollIntoView("), "不再调用 ListBox.ScrollIntoView(那是硬切)");
+                    Assert(whSrc.Contains("Math.Clamp(next, 0"), "转盘有头有尾,越界停在边界");
+                }
                 Assert(calSrc.Contains("const int SpanRowsReserved = 1"), "全天线只占【一行】——多条不分行,不会一上一下");
                 Assert(calSrc.Contains("MergeSpans("), "多条全天日程会合并成同一行的连续线段");
                 Assert(calSrc.Contains("const int DotsMaxBeforeTriangle = 4"), "定时日程超过 4 条改用实心三角形(阈值是常量)");
