@@ -25,6 +25,9 @@ public sealed class ClientProfile
     public string KeyName { get; set; } = "";
     public string CaCertB64 { get; set; } = "";
     public string DeviceCertB64 { get; set; } = "";
+    // Where to dial the hub ("ip:port"). Persisted so a paired client can reconnect on its own at
+    // startup -- pairing happens once, never again (P3c). Empty on profiles written before P3c.
+    public string Dial { get; set; } = "";
 }
 
 public static class Transport
@@ -66,6 +69,17 @@ public static class Transport
     public static async Task<ClientProfile> Pair(string edgeUrl, IPEndPoint dial, string stateDir, string displayName, Func<string, string[], Task> onSas)
     {
         Directory.CreateDirectory(stateDir);
+        // 重新配对前先清掉上一次的私钥:每次配对都新建随机 KeyName,不清理的话每点一次
+        // 「重新配对」就在 CNG 里多留一把无人引用、却仍可签名的孤儿密钥(审查发现 [10])。
+        try
+        {
+            var old = Path.Combine(stateDir, "profile.json");
+            if (File.Exists(old) &&
+                JsonSerializer.Deserialize<ClientProfile>(File.ReadAllText(old)) is { KeyName.Length: > 0 } prev)
+                DeleteKey(prev.KeyName);
+        }
+        catch { /* 旧档案损坏不该挡住重新配对 */ }
+
         var keyName = "localai-client-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(5)).ToLowerInvariant();
         using var ecdsa = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, keyName,
             new CngKeyCreationParameters { Provider = SwProv, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
@@ -122,20 +136,31 @@ public static class Transport
         using (var rc = await mtls.PostAsync(edgeUrl + "/pair/complete?requestId=" + reqId, new StringContent("")))
             if ((int)rc.StatusCode != 200) throw new InvalidOperationException("complete failed: " + (int)rc.StatusCode);
 
-        var profile = new ClientProfile { EdgeUrl = edgeUrl, HubId = hubId, KeyName = keyName, CaCertB64 = Convert.ToBase64String(caDer), DeviceCertB64 = Convert.ToBase64String(candidate.RawData) };
+        var profile = new ClientProfile { EdgeUrl = edgeUrl, HubId = hubId, KeyName = keyName, CaCertB64 = Convert.ToBase64String(caDer), DeviceCertB64 = Convert.ToBase64String(candidate.RawData), Dial = dial.ToString() };
         File.WriteAllText(Path.Combine(stateDir, "profile.json"), JsonSerializer.Serialize(profile, J));
         return profile;
     }
 
-    public static async Task<(int status, string body)> Call(ClientProfile p, IPEndPoint dial, string path)
+    public static Task<(int status, string body)> Call(ClientProfile p, IPEndPoint dial, string path)
+        => Send(p, dial, HttpMethod.Get, path, null);
+
+    /// <summary>
+    /// 用已保存的设备证书发任意 mTLS 请求(P3c:管理 API 的批准/解除是 POST,会话结束也是 POST)。
+    /// 不抛 HTTP 状态异常 —— 401/403 是有意义的业务答复(已被解除 / 权限不足),交给调用方判读。
+    /// </summary>
+    public static async Task<(int status, string body)> Send(ClientProfile p, IPEndPoint dial,
+        HttpMethod method, string path, object? body, CancellationToken ct = default)
     {
         var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
         var candidate = Cert(Convert.FromBase64String(p.DeviceCertB64));
         using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
         using var clientCert = candidate.CopyWithPrivateKey(key);
         using var cli = Trusted(dial, caPublic, clientCert);
-        using var r = await cli.GetAsync(p.EdgeUrl + path);
-        return ((int)r.StatusCode, await r.Content.ReadAsStringAsync());
+        using var req = new HttpRequestMessage(method, p.EdgeUrl + path);
+        if (body is not null)
+            req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        using var r = await cli.SendAsync(req, ct);
+        return ((int)r.StatusCode, await r.Content.ReadAsStringAsync(ct));
     }
 
     public static void DeleteKey(string keyName) { try { if (CngKey.Exists(keyName, SwProv)) CngKey.Open(keyName, SwProv).Delete(); } catch { } }

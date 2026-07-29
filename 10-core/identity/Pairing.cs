@@ -79,8 +79,24 @@ public sealed class Pairing
     public IReadOnlyList<(string RequestId, string DisplayName, string Status, string[] Sas)> ListPending()
     {
         lock (_gate)
+        {
+            SweepExpired();
             return _pending.Values.OrderBy(p => p.ExpiresAt)
                 .Select(p => (p.RequestId, p.DisplayName, p.Status, p.SasWords)).ToList();
+        }
+    }
+
+    /// <summary>待批请求还剩多少秒(界面上倒计时用;到点该自动消失,免得批到陈旧请求)。</summary>
+    public IReadOnlyList<(string RequestId, string DisplayName, string Status, string[] Sas, int SecondsLeft)> ListPendingDetailed()
+    {
+        lock (_gate)
+        {
+            SweepExpired();
+            var now = DateTimeOffset.UtcNow;
+            return _pending.Values.OrderBy(p => p.ExpiresAt)
+                .Select(p => (p.RequestId, p.DisplayName, p.Status, p.SasWords,
+                              (int)Math.Max(0, (p.ExpiresAt - now).TotalSeconds))).ToList();
+        }
     }
 
     // Resolve a request by a short id prefix (host types the first few hex chars). Throws if ambiguous/none.
@@ -102,12 +118,31 @@ public sealed class Pairing
 
     Pending Get(string reqId) => _pending.TryGetValue(reqId, out var p) ? p : throw new KeyNotFoundException("unknown request");
 
+    // ExpiresAt 以前只被当排序键用,从没有代码真的让请求过期(P3c 审查发现 [4])。后果有二:
+    //   ① 8 个匿名 enroll 就能把待批队列占满到 Edge 重启 = 拒绝服务;
+    //   ② 待批列表里堆着几小时前的陈旧请求,用户很可能批到一条早已不是当下那台机器的请求 ——
+    //      这恰好抵消了六词 SAS 想保护的东西。
+    // 所以 Enroll / ListPending / Approve 三处入口都先扫一遍。已终结的条目一并移出字典,
+    // 否则常驻的 Edge 会无限增长。
+    void SweepExpired()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var p in _pending.Values)
+            if (p.Status == "pending" && now > p.ExpiresAt) p.Status = "expired";
+        // active 要留着:/pair/complete 之后客户端可能重试;但 denied/expired 没有再被引用的理由。
+        foreach (var k in _pending.Where(kv => kv.Value.Status is "denied" or "expired")
+                                  .Where(kv => now > kv.Value.ExpiresAt.AddMinutes(5))
+                                  .Select(kv => kv.Key).ToList())
+            _pending.Remove(k);
+    }
+
     public EnrollResult Enroll(byte[] csrDer, byte[] clientNonce, byte[] claimSecretHash, int protoVer, string displayName)
     {
         lock (_gate)
         {
             if (!_windowOpen || DateTimeOffset.UtcNow > _windowExpires)
                 throw new InvalidOperationException("pairing window is closed");
+            SweepExpired();   // 先让过期的请求腾出位置,否则队列会被陈旧条目永久占满
             if (_pending.Values.Count(p => p.Status == "pending") >= MaxPending)
                 throw new InvalidOperationException("pending queue is full");
 
@@ -142,6 +177,7 @@ public sealed class Pairing
     {
       lock (_gate)
       {
+        SweepExpired();   // 过期的请求不该还能被批准 —— 那正是"批到早已不是本人那台机器"的路径
         var p = Get(reqId);
         if (p.Status != "pending")
             throw new InvalidOperationException("only a pending request can be approved (status=" + p.Status + ")");

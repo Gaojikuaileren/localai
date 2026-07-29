@@ -1,0 +1,9 @@
+<Application x:Class="LocalAI.Client.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- 资源字典由 ThemeManager.Initialize 在启动时装载(皮肤 slot0 + Tokens slot1),
+       不在这里写死 —— 否则换肤要动 XAML。样式表在 Styles.xaml,由 ThemeManager 之后追加。 -->
+  <Application.Resources>
+    <ResourceDictionary/>
+  </Application.Resources>
+</Application>

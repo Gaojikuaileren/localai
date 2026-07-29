@@ -1,0 +1,51 @@
+<!-- P3c 基础设计变量(设计文档 §7)。这里放**不随皮肤变**的东西:间距网格、字号、圆角、字体栈、
+     以及【风险语义色】——后者皮肤禁改(§7「皮肤禁改」清单),因为改了会让危险操作看起来不危险。 -->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+
+  <!-- 8px 间距网格 -->
+  <Thickness x:Key="Space1">4</Thickness>
+  <Thickness x:Key="Space2">8</Thickness>
+  <Thickness x:Key="Space3">16</Thickness>
+  <Thickness x:Key="Space4">24</Thickness>
+  <Thickness x:Key="Space5">32</Thickness>
+  <sys:Double x:Key="Gap2">8</sys:Double>
+  <sys:Double x:Key="Gap3">16</sys:Double>
+
+  <!-- 字体栈:同一串里同时覆盖 拉丁 / 简中 / 日文,避免某一语言掉进方框字 -->
+  <FontFamily x:Key="FontUI">Segoe UI, Microsoft YaHei UI, Yu Gothic UI, Meiryo, sans-serif</FontFamily>
+  <FontFamily x:Key="FontMono">Cascadia Mono, Consolas, monospace</FontFamily>
+
+  <!-- 字号阶梯 -->
+  <sys:Double x:Key="FontDisplay">28</sys:Double>
+  <sys:Double x:Key="FontTitle">20</sys:Double>
+  <sys:Double x:Key="FontSubtitle">15</sys:Double>
+  <sys:Double x:Key="FontBody">13.5</sys:Double>
+  <sys:Double x:Key="FontCaption">12</sys:Double>
+  <!-- 六个词要能一眼看清、逐词比对:等宽 + 大字号 + 宽字距 -->
+  <sys:Double x:Key="FontSas">22</sys:Double>
+
+  <CornerRadius x:Key="RadiusSm">4</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">8</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">12</CornerRadius>
+
+  <!-- 布局常量(设计 §3) -->
+  <sys:Double x:Key="NavWidth">240</sys:Double>
+  <sys:Double x:Key="NavWidthCollapsed">56</sys:Double>
+  <sys:Double x:Key="TopBarHeight">54</sys:Double>
+
+  <!-- 动效时长(§7:普通 150–220ms;支持"减少动态"时由代码置 0) -->
+  <Duration x:Key="MotionFast">0:0:0.16</Duration>
+  <Duration x:Key="MotionPanel">0:0:0.30</Duration>
+
+  <!-- ★ 风险语义色:三皮肤恒定,禁改(§7)。用于危险确认、急停、吊销一类操作。 -->
+  <SolidColorBrush x:Key="RiskDanger"  Color="#D93025"/>
+  <SolidColorBrush x:Key="RiskWarning" Color="#E37400"/>
+  <SolidColorBrush x:Key="RiskSafe"    Color="#188038"/>
+
+  <!-- ★ 可见范围标识色:同为禁改项(家庭/个人/仅本人 必须跨皮肤一致可辨) -->
+  <SolidColorBrush x:Key="ScopeFamily"   Color="#1A73E8"/>
+  <SolidColorBrush x:Key="ScopePersonal" Color="#7B4FBF"/>
+  <SolidColorBrush x:Key="ScopeOnlyMe"   Color="#B0308A"/>
+</ResourceDictionary>

@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms 只为托盘图标 NotifyIcon(WPF 无内建托盘 API);不用它的窗体 -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AssemblyName>localai-client</AssemblyName>
+    <RootNamespace>LocalAI.Client</RootNamespace>
+    <ApplicationIcon />
+    <!-- 自定义入口:selftest 走无界面路径,正常启动才进 WPF(见 Program.cs) -->
+    <StartupObject>LocalAI.Client.Program</StartupObject>
+  </PropertyGroup>
+
+  <!-- P3b 身份与传输层:直接链接源码复用(与 transport 工程同一手法),
+       避免把 mTLS/CNG 密钥逻辑重写一遍(D47 理由 1)。 -->
+  <ItemGroup>
+    <Compile Include="..\..\10-core\identity\Ca.cs" />
+    <Compile Include="..\..\10-core\identity\Store.cs" />
+    <Compile Include="..\..\10-core\identity\Sas.cs" />
+    <Compile Include="..\..\10-core\identity\Wordlist.cs" />
+    <Compile Include="..\..\10-core\identity\Pairing.cs" />
+    <Compile Include="..\..\10-core\identity\Identity.cs" />
+    <Compile Include="..\..\10-core\identity\Paths.cs" />
+    <Compile Include="..\..\10-core\identity\HubId.cs" />
+    <Compile Include="..\transport\ClientTransport.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms 会把 System.Windows.Forms 加进隐式 using,于是 Button/UserControl/Application
+         与 WPF 同名类型冲突(CS0104)。这里移除该隐式 using;托盘处用 `WinForms.` 别名显式引用。 -->
+    <Using Remove="System.Windows.Forms" />
+    <!-- System.Drawing 同理:Brush/Brushes/FontFamily 与 System.Windows.Media 撞名。
+         托盘图标处用全限定 System.Drawing.SystemIcons 引用。 -->
+    <Using Remove="System.Drawing" />
+    <!-- WPF/WinForms 工程的隐式 using 集合与普通工程不同(缺 System.IO / System.Net.Http),
+         而链进来的 identity / transport 源码依赖它们。显式声明,不依赖 SDK 默认集合。 -->
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="I18n\strings.json" />
+  </ItemGroup>
+
+  <!-- App.xaml 降为 Page:否则 WPF 会自动生成一个 Main,与 Program.Main 冲突(CS0017)。
+       由 Program.Main 显式 new App() + InitializeComponent() + Run()。 -->
+  <ItemGroup>
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
+</Project>
