@@ -24,6 +24,24 @@ public static class Workspaces
         new("finance", "nav.finance", IconName.Finance),        // 财务管理(钱包图标)
         new("investment", "nav.investment", IconName.Investment), // 投资研究(走势图图标)—— 之前误删,现补回为可勾选项
     };
+
+    /// <summary>
+    /// 按用户在"扩展"里拖定的顺序返回工作空间清单:已存顺序的在前(按其顺序),
+    /// 清单里有、顺序里没有的(如新增工作空间)追加在后 —— 保证新工作空间默认可见、不丢。
+    /// </summary>
+    public static List<Def> Ordered(Services.AppSettings settings)
+    {
+        var byKey = new Dictionary<string, Def>();
+        foreach (var d in All) byKey[d.Key] = d;
+
+        var result = new List<Def>();
+        var seen = new HashSet<string>();
+        foreach (var k in settings.WorkspaceOrder)
+            if (byKey.TryGetValue(k, out var d) && seen.Add(k)) result.Add(d);
+        foreach (var d in All)
+            if (seen.Add(d.Key)) result.Add(d);
+        return result;
+    }
 }
 
 /// <summary>

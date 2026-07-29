@@ -52,6 +52,15 @@ public sealed class AppSettings
 
     bool AddHidden(string key) { HiddenWorkspaces.Add(key); return true; }
 
+    /// <summary>
+    /// 左边栏工作空间的【顺序】(key 列表,在"扩展 › 工作空间"里拖动调整)。
+    /// 空 = 用默认顺序。存这里的可能少于/多于当前清单 —— 取交集 + 新增项追加(见 Workspaces.Ordered)。
+    /// 每台设备各自的偏好,不同步到中枢。
+    /// </summary>
+    public List<string> WorkspaceOrder { get; set; } = new();
+
+    public void SetWorkspaceOrder(IEnumerable<string> keys) { WorkspaceOrder = keys.ToList(); Save(); }
+
     /// <summary>主页【隐藏】的板块 key 列表(日历/待办/天气/项目)。在"扩展 › 主页板块"里勾选。同样存"隐藏项"。</summary>
     public List<string> HiddenPanels { get; set; } = new();
 

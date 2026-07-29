@@ -255,7 +255,7 @@ public static class Selftest
             var mwSrc2 = TryReadSource("MainWindow.xaml.cs");
             if (mwSrc2 is not null)
             {
-                Assert(mwSrc2.Contains("foreach (var w in Workspaces.All)"), "导航按统一清单渲染工作空间");
+                Assert(mwSrc2.Contains("foreach (var w in Workspaces.Ordered"), "导航按统一清单、用户排定顺序渲染工作空间");
                 Assert(mwSrc2.Contains("IsWorkspaceVisible(w.Key)"), "被关掉的工作空间不进导航");
                 Assert(mwSrc2.Contains("NavSystemPanel"), "系统组放在贴底的独立面板");
                 Assert(mwSrc2.Contains("public void RefreshNavRail"), "扩展改动后能只刷新导航栏");
@@ -269,6 +269,15 @@ public static class Selftest
                 Assert(extSrc.Contains("ext.ws_title") && extSrc.Contains("ext.panels_title"), "扩展分两类:工作空间扩展 + 主页板块扩展");
                 Assert(extSrc.Contains("SetPanelVisible"), "主页板块扩展勾选写入面板显隐");
                 Assert(extSrc.Contains("ext.ws_model_note"), "工作空间扩展注明将决定 AI 模型选择(接入后)");
+                Assert(extSrc.Contains("MoveWorkspace") && extSrc.Contains("SetWorkspaceOrder"), "工作空间可拖动排序并落盘");
+            }
+            // 拖动排序:自定义顺序 -> Ordered 反映;新增/未列项追加不丢
+            var os = new AppSettings();
+            os.WorkspaceOrder = new System.Collections.Generic.List<string> { "finance", "chat" };
+            var ord2 = Views.Workspaces.Ordered(os);
+            Assert(ord2[0].Key == "finance" && ord2[1].Key == "chat", "已存顺序在最前");
+            Assert(ord2.Count == Views.Workspaces.All.Length, "未列入顺序的工作空间也全部追加(不丢)");
+            {
             }
 
             // 主页板块显隐:默认全显示;隐藏后 HomeView 会跳过该板块

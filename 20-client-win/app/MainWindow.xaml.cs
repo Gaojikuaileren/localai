@@ -335,7 +335,7 @@ public partial class MainWindow : Window
         AddItem(new NavItem("home", "nav.home", IconName.Home, () => new HomeView()), NavPanel);
 
         AddGroupLabel(Strings.Get("nav.workspaces"), NavPanel);
-        foreach (var w in Workspaces.All)
+        foreach (var w in Workspaces.Ordered(TheApp.Settings))   // 顺序由"扩展"里拖动决定
         {
             if (!TheApp.Settings.IsWorkspaceVisible(w.Key)) continue;   // 用户在扩展里关掉的不显示
             var def = w;   // 闭包捕获
