@@ -54,7 +54,7 @@ public sealed class CalendarView : UserControl
     const int DotsMaxBeforeTriangle = 4;
 
     /// <summary>全天线在【真正的起止日】那一端内缩的量 —— 让人看出日程从哪天起、到哪天止。</summary>
-    const double EndInset = 9;
+    const double EndInset = 15;
 
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月

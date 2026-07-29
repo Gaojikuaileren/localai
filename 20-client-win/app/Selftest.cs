@@ -294,6 +294,23 @@ public static class Selftest
             Assert(!Views.CalendarData.TimedOn(monday.AddDays(1)).Any(), "全天条不计入定时日程(否则日期格会重复标点)");
             Assert(Views.CalendarData.On(monday.AddDays(2)).Any(e => e.Title == "跨三天"), "跨天日程覆盖区间内的每一天");
             Assert(Views.CalendarEditor.DefaultDuration == TimeSpan.FromHours(1), "新建日程默认时长 1 小时");
+
+            // 单日全天:两端都是【真端点】,所以左右都应内缩(用户裁定的边界感)
+            Views.CalendarData.Events.Clear();
+            var oneDay = monday.AddDays(2);
+            Views.CalendarData.Events.Add(new Views.CalendarEvent(oneDay, oneDay, "单日全天", "我", "家庭", AllDay: true));
+            var one = Views.CalendarData.SpansIn(monday, 7);
+            Assert(one.Count == 1 && one[0].Col == 2 && one[0].Span == 1, $"单日全天占 1 格(实得 col={one[0].Col} span={one[0].Span})");
+            Assert(!one[0].ClipStart && !one[0].ClipEnd, "单日全天两端都不被裁断 -> 左右都内缩,看得出起止就在这一天");
+
+            // 月末单日(如 31 日)落在周内任意位置都一样成立
+            var endOfMonth = new DateTime(2026, 7, 31);
+            Views.CalendarData.Events.Clear();
+            Views.CalendarData.Events.Add(new Views.CalendarEvent(endOfMonth, endOfMonth, "31日全天", "我", "家庭", AllDay: true));
+            var eom = Views.CalendarData.SpansIn(Views.CalendarViewTestHooks.StartOfWeek(endOfMonth), 7);
+            Assert(eom.Count == 1 && eom[0].Span == 1 && !eom[0].ClipStart && !eom[0].ClipEnd,
+                   "月末单日全天(31 日)同样两端内缩");
+            Views.CalendarData.Events.Clear();
             Views.CalendarData.Events.Clear();
 
             // ---- 接线自检:防"补丁静默失配导致整段成死代码" ----

@@ -85,3 +85,10 @@ public static class CalendarData
         return result;
     }
 }
+
+/// <summary>供自检调用的只读工具(不参与界面逻辑)。</summary>
+public static class CalendarViewTestHooks
+{
+    /// <summary>周一起始的那一周的第一天 —— 与 CalendarView 内部同一口径。</summary>
+    public static DateTime StartOfWeek(DateTime d) => d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7));
+}
