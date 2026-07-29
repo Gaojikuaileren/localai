@@ -117,6 +117,35 @@ public static class Selftest
             hub2.UnpairLocal();
             Assert(!File.Exists(AppPaths.ProfilePath) && !hub2.IsPaired, "解除配对会删掉本机档案");
 
+            // ---- 天气地点表:当前地固定首位 + 可拖拽排序 ----
+            var wSettings = new AppSettings();
+            var places = Places.Load(wSettings);
+            Assert(places.Count >= 1, "地点表至少有当前所在地一项");
+            Assert(places[0].IsCurrent, "第 0 项是【当前所在地】(固定首位,不可拖动)");
+            Assert(places.Skip(1).All(p2 => !p2.IsCurrent), "只有首项标记为当前");
+            Assert(places.Select(p2 => p2.City).Distinct().Count() == places.Count,
+                   "当前地与默认城市重名时会去重,不出现两格同名");
+            var here = Places.Current();
+            Assert(!string.IsNullOrWhiteSpace(here.City) && here.IsCurrent,
+                   $"当前地由系统时区推断得出(实得 {here.City} / {here.TimeZoneId})");
+
+            // 顺序持久化:只存可拖动部分
+            var reordered = places.Skip(1).Reverse().ToList();
+            Places.SaveOrder(wSettings, reordered);
+            Assert(!string.IsNullOrWhiteSpace(wSettings.WeatherCityOrder), "拖拽后的顺序被写入设置");
+            var reloaded = Places.Load(wSettings);
+            Assert(reloaded[0].IsCurrent, "重载后当前地仍在首位");
+            if (reordered.Count >= 2)
+                Assert(reloaded[1].City == reordered[0].City, "重载后可拖动部分保持用户排定的顺序");
+
+            // 时间滚轮:5 分钟粒度、有头有尾
+            Assert(Views.WheelPicker.MinuteStep == 5, "时间滚轮最小单位 5 分钟");
+            Assert(Views.WheelPicker.Snap(TimeSpan.FromMinutes(7)) == TimeSpan.FromMinutes(5), "7 分就近对齐到 5 分");
+            Assert(Views.WheelPicker.Snap(TimeSpan.FromMinutes(8)) == TimeSpan.FromMinutes(10), "8 分就近对齐到 10 分");
+            Assert(Views.WheelPicker.Snap(TimeSpan.FromMinutes(-5)) == TimeSpan.Zero, "负值被夹到 00:00(有头)");
+            Assert(Views.WheelPicker.Snap(TimeSpan.FromHours(25)) == TimeSpan.FromMinutes(24 * 60 - 5),
+                   "超过一天被夹到 23:55(有尾,不循环)");
+
             // ---- 显存条分段口径 ----
             var vs = new VramSnapshot(16.0, 4.0, 6.0, true);
             Assert(Math.Abs(vs.FreeGiB - 6.0) < 0.001, "显存三段相加等于总量(模型 + 桌面 + 未占用)");

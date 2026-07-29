@@ -30,40 +30,44 @@ public static class CalendarEditor
         {
             Content = "全天(可跨天)",
             IsChecked = existing?.AllDay ?? false,
-            Margin = new Thickness(0, 2, 0, 8),
+            Margin = new Thickness(0, 2, 0, 6),
             VerticalAlignment = VerticalAlignment.Center,
         };
 
-        var startTime = Field(start.ToString("HH:mm"));
-        var endTime = Field(end.ToString("HH:mm"));
-        var startDate = new DatePicker { SelectedDate = start.Date, Margin = new Thickness(0, 4, 0, 8) };
-        var endDate = new DatePicker { SelectedDate = end.Date, Margin = new Thickness(0, 4, 0, 8) };
+        // ---- 时间/日期一律用【竖直滚轮】(用户裁定)----
+        //   非全天:时:分 两列,最小单位 5 分钟,有头有尾不循环;
+        //   全天:年/月/日 三列 —— 与时间滚轮同一外观(此前用原生 DatePicker,风格不统一)。
+        var startAt = WheelPicker.Snap(start.TimeOfDay);
+        var endAt = WheelPicker.Snap(end.TimeOfDay);
+        var startDay = start.Date;
+        var endDay = end.Date;
 
-        var timedRow = TwoUp("开始", startTime, "结束", endTime);
-        var allDayRow = TwoUp("开始日期", startDate, "结束日期", endDate);
+        var endEdited = existing is not null;   // 用户手动动过结束就不再自动跟随
+        FrameworkElement? endTimeWheelHost = null;
 
-        void SyncMode()
+        var endWheelHost = new ContentControl();
+        void BuildEndTimeWheel()
+            => endWheelHost.Content = WheelPicker.Time(endAt, v => { endAt = v; endEdited = true; });
+        BuildEndTimeWheel();
+
+        var startWheel = WheelPicker.Time(startAt, v =>
         {
-            var on = allDay.IsChecked == true;
-            timedRow.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
-            allDayRow.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
-        }
-        allDay.Checked += (_, _) => SyncMode();
-        allDay.Unchecked += (_, _) => SyncMode();
-        SyncMode();
-
-        // 改开始时刻 -> 结束自动跟到 +1 小时。用户一旦手动动过结束就不再自动跟,免得覆盖他的输入。
-        var endEdited = existing is not null;
-        endTime.TextChanged += (_, _) => endEdited = true;
-        startTime.TextChanged += (_, _) =>
-        {
+            startAt = v;
+            // 改开始时刻 -> 结束自动跟到 +1 小时(仅在用户还没手动改过结束时)
             if (endEdited) return;
-            if (TimeSpan.TryParse(startTime.Text, out var ts))
-                endTime.Text = (DateTime.Today + ts + DefaultDuration).ToString("HH:mm");
-        };
+            var next = startAt + DefaultDuration;
+            endAt = next < TimeSpan.FromDays(1) ? next : WheelPicker.Snap(TimeSpan.FromHours(23.5));
+            var keep = endEdited;
+            BuildEndTimeWheel();
+            endEdited = keep;   // 重建滚轮不算"用户手动改过"
+        });
+
+        var timedRow = TwoUp("开始", startWheel, "结束", endWheelHost);
+        var allDayRow = TwoUp("开始日期", WheelPicker.Date(startDay, d => startDay = d),
+                              "结束日期", WheelPicker.Date(endDay, d => endDay = d));
 
         // ---- iCloud 日历组(接入后由服务端下发真实分组)----
-        var group = new ComboBox { Margin = new Thickness(0, 4, 0, 8) };
+        var group = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var g in CalendarData.Groups) group.Items.Add(g);
         group.SelectedIndex = Math.Max(0, Array.IndexOf(CalendarData.Groups, existing?.CalendarGroup ?? CalendarData.Groups[0]));
 
@@ -72,17 +76,17 @@ public static class CalendarEditor
         var notes = Field(existing?.Notes ?? "");
         notes.AcceptsReturn = true;
         notes.TextWrapping = TextWrapping.Wrap;
-        notes.MinHeight = 54;
+        notes.MinHeight = 40;   // 压缩高度:默认窗口下整页不出滚动条(用户裁定)
         notes.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
 
         // ---- 归属与可见范围(D45)----
         var owners = new[] { "我", "对方", "双方" };
-        var owner = new ComboBox { Margin = new Thickness(0, 4, 0, 8) };
+        var owner = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var o in owners) owner.Items.Add(o);
         owner.SelectedIndex = Math.Max(0, Array.IndexOf(owners, existing?.Owner ?? "我"));
 
         var scopes = new[] { Strings.Get("visibility.family"), Strings.Get("visibility.personal"), Strings.Get("visibility.only_me") };
-        var scope = new ComboBox { Margin = new Thickness(0, 4, 0, 8) };
+        var scope = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var sc in scopes) scope.Items.Add(sc);
         scope.SelectedIndex = Math.Max(0, Array.IndexOf(scopes, existing?.Scope ?? scopes[0]));
 
@@ -107,24 +111,23 @@ public static class CalendarEditor
         var form = Ui.Stack(
             Ui.Panel("基本信息",
                 Ui.Stack(Ui.Caption("标题"), title, allDay, timedRow, allDayRow),
-                Theme.IconName.Calendar, new Thickness(0, 0, 0, 12)),
+                Theme.IconName.Calendar, new Thickness(0, 0, 0, 8), compact: true),
 
             Ui.Panel("归类",
                 Ui.Stack(Ui.Caption("日历组"), group,
                          Ui.Caption("归属成员"), owner,
                          Ui.Caption("可见范围"), scope),
-                Theme.IconName.Member, new Thickness(0, 0, 0, 12)),
+                Theme.IconName.Member, new Thickness(0, 0, 0, 8), compact: true),
 
             Ui.Panel("详情",
                 Ui.Stack(Ui.Caption("地点"), location,
                          Ui.Caption("链接"), url,
                          Ui.Caption("备注"), notes),
-                Theme.IconName.Assets, new Thickness(0, 0, 0, 12)),
+                Theme.IconName.Assets, new Thickness(0, 0, 0, 8), compact: true),
 
             buttons,
             status,
-            Ui.Caption("全天日程可跨天,界面上用一条贯穿多日的线显示。" +
-                       "接入后:改与对方相关的日程只能发【邀请 / 修改建议】,由对方接受;AI 走同一入口,遵守同样的可见范围规则。")
+            Ui.Caption("接入后:与对方相关的日程只能发邀请/修改建议;AI 走同一入口,遵守同样的可见范围规则。")
         );
 
         // 装在右侧全高抽屉里,不再需要浮窗时代的高度上限;仍留滚动以应对小窗口。
@@ -139,8 +142,8 @@ public static class CalendarEditor
     static TextBox Field(string text) => new()
     {
         Text = text,
-        Margin = new Thickness(0, 4, 0, 8),
-        Padding = new Thickness(8, 5, 8, 5),
+        Margin = new Thickness(0, 2, 0, 6),
+        Padding = new Thickness(8, 4, 8, 4),
     };
 
     static Grid TwoUp(string leftLabel, UIElement left, string rightLabel, UIElement right)

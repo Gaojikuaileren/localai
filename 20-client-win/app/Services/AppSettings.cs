@@ -27,6 +27,13 @@ public sealed class AppSettings
     /// <summary>仅供界面渲染的成员显示名缓存 —— **不是**身份,不可用于任何可见范围/权限判定。</summary>
     public string? CachedMemberDisplayName { get; set; }
 
+    /// <summary>
+    /// 天气板块里【可拖动城市】的顺序(JSON:[[城市,时区], ...])。
+    /// 第一格是"当前所在地",由系统时区推断、固定在首位,不参与这个顺序。
+    /// 与皮肤/语言同理:每台设备各自的偏好,不同步到中枢。
+    /// </summary>
+    public string? WeatherCityOrder { get; set; }
+
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
     public static AppSettings Load()

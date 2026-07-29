@@ -49,9 +49,9 @@ public static class Ui
     /// <summary>
     /// 带标题(可选图标)的统一板块。并列板块用它,标题栏高度与排版完全一致。
     /// </summary>
-    public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null)
+    public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null, bool compact = false)
     {
-        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, compact ? 6 : 10) };
         if (icon is { } ic)
         {
             var el = Theme.Icons.Make(ic, 16, "FgMuted");
@@ -67,7 +67,9 @@ public static class Ui
         DockPanel.SetDock(head, Dock.Top);
         dock.Children.Add(head);
         dock.Children.Add(body);
-        return Card(dock, margin);
+        var card = Card(dock, margin);
+        if (compact) card.Padding = new Thickness(12, 10, 12, 10);   // 抽屉里的表单卡更紧凑
+        return card;
     }
 
     public static Button Primary(string text, RoutedEventHandler onClick)

@@ -21,6 +21,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using LocalAI.Client.I18n;
 using LocalAI.Client.Services;
@@ -30,20 +31,17 @@ namespace LocalAI.Client.Views;
 
 public sealed class HomeView : UserControl
 {
-    static readonly (string City, string Tag, string Tz)[] Cities =
-    {
-        ("科隆", "家", "W. Europe Standard Time"),
-        ("武汉", "",   "China Standard Time"),
-        ("札幌", "",   "Tokyo Standard Time"),
-    };
+    // 地点表:第 0 项 = 当前所在地(系统时区推断,标「当前」,不可拖动);其后可拖拽排序。
+    List<Place> _places = new();
 
     /// <summary>天气板块固定高度:标题 + 温度行 + 状态两行 + 曲线 + 逐小时,只占所需。</summary>
     const double WeatherHeight = 208;
 
     readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 22 };
-    readonly TextBlock[] _cityTime = new TextBlock[Cities.Length];
-    readonly TextBlock[] _cityMeta = new TextBlock[Cities.Length];
-    readonly UniformGrid[] _cityHourly = new UniformGrid[Cities.Length];
+    TextBlock[] _cityTime = Array.Empty<TextBlock>();
+    TextBlock[] _cityMeta = Array.Empty<TextBlock>();
+    UniformGrid[] _cityHourly = Array.Empty<UniformGrid>();
+    readonly UniformGrid _weatherGrid = new() { Rows = 1 };
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     readonly Grid _root = new();
@@ -97,11 +95,13 @@ public sealed class HomeView : UserControl
         Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
         _root.Children.Add(_todoPanel);
 
-        // ③ 天气三城:固定高度,只占所需
-        var weather = new UniformGrid { Rows = 1, Columns = Cities.Length, Height = WeatherHeight, Margin = new Thickness(0, 0, 0, 12) };
-        for (int i = 0; i < Cities.Length; i++) weather.Children.Add(CityCard(i));
-        Grid.SetRow(weather, 2); Grid.SetColumnSpan(weather, 2);
-        _root.Children.Add(weather);
+        // ③ 天气:固定高度,只占所需。地点表可拖拽排序(首格锁定)
+        _weatherGrid.Height = WeatherHeight;
+        _weatherGrid.Margin = new Thickness(0, 0, 0, 12);
+        _places = Places.Load(TheApp.Settings);
+        BuildWeather();
+        Grid.SetRow(_weatherGrid, 2); Grid.SetColumnSpan(_weatherGrid, 2);
+        _root.Children.Add(_weatherGrid);
 
         // ④ 项目方块:占满剩余,平分整宽,可滚动
         // ★ 顶端对齐 —— 否则 UniformGrid 会把仅有的一行拉伸到整个可用高度,
@@ -164,19 +164,52 @@ public sealed class HomeView : UserControl
         if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
 
         // 天气卡内可用宽度(减去卡片内边距与卡间距)
-        var cardW = (w - (Cities.Length - 1) * 12) / Cities.Length - 32;
+        var n = Math.Max(1, _places.Count);
+        var cardW = (w - (n - 1) * 12) / n - 32;
         var slots = Layout.HourlySlots(cardW, _slots);
         if (slots != _slots)
         {
             _slots = slots;
-            for (int i = 0; i < Cities.Length; i++) SetHourly(_cityHourly[i], slots);
+            for (int i = 0; i < _places.Count; i++) SetHourly(_cityHourly[i], slots);
         }
     }
 
-    // ---------------------------------------------------------------- 城市卡
-    Border CityCard(int i)
+    // ---------------------------------------------------------------- 天气区(可拖拽排序)
+    void BuildWeather()
     {
-        var (city, tag, _) = Cities[i];
+        _weatherGrid.Children.Clear();
+        _shifts.Clear();
+        _weatherGrid.Columns = _places.Count;
+        _cityTime = new TextBlock[_places.Count];
+        _cityMeta = new TextBlock[_places.Count];
+        _cityHourly = new UniformGrid[_places.Count];
+        for (int i = 0; i < _places.Count; i++) _weatherGrid.Children.Add(CityCard(i));
+        UpdateClocks();
+        RelayoutDiscrete();
+    }
+
+    /// <summary>
+    /// 拖拽换位。★ 第 0 格是"当前所在地",既不能被拖走也不能被插到它前面(用户裁定)。
+    /// </summary>
+    void MovePlace(int from, int to)
+    {
+        if (from <= 0 || to <= 0) return;                      // 首格锁定
+        if (from == to || from >= _places.Count || to >= _places.Count) return;
+        var p = _places[from];
+        _places.RemoveAt(from);
+        _places.Insert(to, p);
+        Places.SaveOrder(TheApp.Settings, _places.Skip(1));    // 首格不参与持久化顺序
+        BuildWeather();
+    }
+
+    // ---------------------------------------------------------------- 城市卡
+    FrameworkElement CityCard(int i)
+    {
+        var place = _places[i];
+        var city = place.City;
+        // 首格标「当前」(不是「家」)—— 它是由系统时区推断出的当前所在地
+        var tag = place.IsCurrent ? "当前" : "";
+        var draggable = i > 0;
 
         _cityTime[i] = new TextBlock { Text = "—", FontSize = 15, FontWeight = FontWeights.Medium, HorizontalAlignment = HorizontalAlignment.Right };
         _cityTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -230,8 +263,113 @@ public sealed class HomeView : UserControl
         inner.Children.Add(curve);
 
         var title = string.IsNullOrEmpty(tag) ? city : $"{city} · {tag}";
-        return Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, i < Cities.Length - 1 ? 12 : 0, 0));
+        var card = Ui.Panel(title, inner, IconName.Weather,
+                            new Thickness(0, 0, i < _places.Count - 1 ? 12 : 0, 0));
+
+        if (!draggable)
+        {
+            // 首格 = 当前所在地,固定不动。不给拖动光标,也不放角标。
+            return card;
+        }
+
+        // 右下角角标:提示这张卡可以拖(用户裁定:不用 ToolTip 提示,靠角标本身表达)
+        var grip = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M1,7 L7,1 M1,11 L11,1 M5,11 L11,5"),
+            StrokeThickness = 1.5,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeStartLineCap = PenLineCap.Round,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 9, 7),
+            IsHitTestVisible = false,
+            Opacity = 0.55,
+        };
+        grip.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
+
+        var host = new Grid();
+        host.Children.Add(card);
+        host.Children.Add(grip);
+
+        // 卡片自身带位移变换 —— 拖动时用它做"让位"动画
+        var shift = new TranslateTransform();
+        host.RenderTransform = shift;
+        _shifts[i] = shift;
+
+        card.Cursor = System.Windows.Input.Cursors.SizeAll;
+        card.PreviewMouseLeftButtonDown += (_, e) => { _dragFrom = i; _dragStart = e.GetPosition(this); };
+        card.MouseMove += (_, e) =>
+        {
+            if (_dragFrom is null || e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+            var now = e.GetPosition(this);
+            if (Math.Abs(now.X - _dragStart.X) < 12) return;   // 拖出一段才算拖拽,避免误判点击
+            var from = _dragFrom.Value;
+            _dragFrom = null;
+            _dragging = from;
+            DragDrop.DoDragDrop(card, new DataObject(DragFormat, from), DragDropEffects.Move);
+            _dragging = null;
+            ResetShifts();
+        };
+        card.AllowDrop = true;
+        card.DragOver += (_, e) =>
+        {
+            var ok = e.Data.GetDataPresent(DragFormat);
+            e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
+            if (ok && _dragging is int src) PreviewShift(src, i);   // 实时让位
+            e.Handled = true;
+        };
+        card.DragLeave += (_, _) => ResetShifts();
+        card.Drop += (_, e) =>
+        {
+            ResetShifts();
+            if (e.Data.GetData(DragFormat) is int src) MovePlace(src, i);
+            e.Handled = true;
+        };
+        return host;
     }
+
+    // ---------------------------------------------------------------- 拖拽的"让位"动画
+    // 用户裁定:拖动时要有动画,并且其它卡片要被【挤开】让位,而不是原地不动等着落下。
+    // 做法:把"若放在此处"的结果先用位移动画预演出来 —— 被跨过的卡片朝拖动的反方向平移一格宽度。
+    readonly Dictionary<int, TranslateTransform> _shifts = new();
+    int? _dragging;
+
+    void PreviewShift(int from, int over)
+    {
+        if (from == over) { ResetShifts(); return; }
+        var step = ColumnWidth();
+        for (int k = 1; k < _places.Count; k++)   // 第 0 格锁定,不参与让位
+        {
+            double target = 0;
+            if (from < over && k > from && k <= over) target = -step;   // 往右拖 -> 中间的左移让位
+            else if (from > over && k >= over && k < from) target = step;   // 往左拖 -> 中间的右移让位
+            if (k == from) target = 0;                                   // 被拖的那张不参与预演
+            Animate(k, target);
+        }
+    }
+
+    void ResetShifts()
+    {
+        for (int k = 0; k < _places.Count; k++) Animate(k, 0);
+    }
+
+    void Animate(int index, double toX)
+    {
+        if (!_shifts.TryGetValue(index, out var t)) return;
+        var anim = new DoubleAnimation(toX, TimeSpan.FromMilliseconds(160))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+        t.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
+
+    double ColumnWidth()
+    {
+        var n = Math.Max(1, _places.Count);
+        return _weatherGrid.ActualWidth > 0 ? _weatherGrid.ActualWidth / n : 220;
+    }
+
+    const string DragFormat = "localai/weather-place-index";
+    int? _dragFrom;
+    Point _dragStart;
 
     static void SetHourly(UniformGrid grid, int slots)
     {
@@ -339,15 +477,18 @@ public sealed class HomeView : UserControl
 
     void UpdateClocks()
     {
+        // 重建天气区时数组会被换掉,长度可能与地点表短暂不一致 -> 取交集,避免越界
+        if (_cityTime.Length != _places.Count) return;
+
         var hour = DateTime.Now.Hour;
         _greeting.Text = hour < 5 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
 
         var localOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
-        for (int i = 0; i < Cities.Length; i++)
+        for (int i = 0; i < _places.Count; i++)
         {
             try
             {
-                var z = TimeZoneInfo.FindSystemTimeZoneById(Cities[i].Tz);
+                var z = TimeZoneInfo.FindSystemTimeZoneById(_places[i].TimeZoneId);
                 var t = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, z);
                 _cityTime[i].Text = t.ToString("HH:mm");
                 var diff = (z.GetUtcOffset(DateTime.UtcNow) - localOffset).TotalHours;
