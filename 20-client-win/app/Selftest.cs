@@ -219,6 +219,34 @@ public static class Selftest
             projCenter.TogglePin("b");
             Assert(projCenter.Recent().First().ProjectId == "a", "取消置顶后回到按最近排序");
 
+            // ---- 工作空间显示开关 + 财务管理 + 系统贴底 + 设备并入设置 ----
+            Assert(Views.Workspaces.All.Any(w => w.Key == "finance"), "新增了「财务管理」工作空间");
+            Assert(Strings.Get("nav.finance") == "财务管理", "财务管理文案就位");
+            var st = new AppSettings();
+            Assert(st.IsWorkspaceVisible("finance"), "工作空间默认显示");
+            st.HiddenWorkspaces.Add("finance");
+            Assert(!st.IsWorkspaceVisible("finance"), "加入隐藏列表后不在左栏显示");
+            st.HiddenWorkspaces.Remove("finance");
+            Assert(st.IsWorkspaceVisible("finance"), "移出隐藏列表后恢复显示");
+            Assert(Views.Layout.PreferredWindowHeight >= 980, "默认窗口更高,一开始不出滚动条");
+
+            var mwSrc2 = TryReadSource("MainWindow.xaml.cs");
+            if (mwSrc2 is not null)
+            {
+                Assert(mwSrc2.Contains("foreach (var w in Workspaces.All)"), "导航按统一清单渲染工作空间");
+                Assert(mwSrc2.Contains("IsWorkspaceVisible(w.Key)"), "被关掉的工作空间不进导航");
+                Assert(mwSrc2.Contains("NavSystemPanel"), "系统组放在贴底的独立面板");
+                Assert(mwSrc2.Contains("public void RefreshNavRail"), "扩展改动后能只刷新导航栏");
+                Assert(!mwSrc2.Contains("ShouldShowInvestment"), "移除旧的投资隐藏策略(改由用户勾选)");
+                Assert(!mwSrc2.Contains("new NavItem(\"devices\""), "设备不再单列(已并入设置)");
+            }
+            var extSrc = TryReadSource(Path.Combine("Views", "ExtensionsView.cs"));
+            if (extSrc is not null)
+                Assert(extSrc.Contains("SetWorkspaceVisible") && extSrc.Contains("RefreshNavRail"), "扩展页勾选即时改左栏");
+            var setSrc = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (setSrc is not null)
+                Assert(setSrc.Contains("new DevicesView(embedded: true)"), "已配对的电脑并入设置页");
+
             // 接线:板块有 + 按钮、用共享行渲染器、变更自动刷新;编辑器当场写库并收起抽屉
             var homeTodo = TryReadSource(Path.Combine("Views", "HomeView.cs"));
             if (homeTodo is not null)

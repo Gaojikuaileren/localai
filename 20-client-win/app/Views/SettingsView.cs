@@ -91,7 +91,11 @@ public sealed class SettingsView : UserControl
                 Ui.Caption("以当前用户身份自启(不提权)。客户端必须保持普通用户运行,否则设备密钥打不开(见决议 D46)。"),
                 tray,
                 Ui.Caption("勾选后点窗口的 × 只是收起窗口,程序继续在托盘运行;要真正退出请用托盘图标右键 →「退出」。")
-            ))
+            )),
+
+            // 连接与设备:已配对的电脑、配对/解除 —— 从独立导航项并入设置(用户裁定)
+            Ui.Subtitle(Strings.Get("devices.title")),
+            new DevicesView(embedded: true)
         );
     }
 }

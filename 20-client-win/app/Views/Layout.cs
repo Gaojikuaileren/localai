@@ -36,12 +36,13 @@ public static class Layout
     /// <summary>
     /// 首次打开的建议窗口尺寸 —— 取"主页内容刚好放得下"的高度,这样【一开始就不出滚动条】(用户裁定)。
     /// 估算(与 HomeView 的行结构对应):
-    ///   标题栏 38 + 页边距 32 + 问候 ~40 + 日历/待办 ~342 + 天气 ~220 + 项目一行 ~200 ≈ 872,
-    ///   再留一点余量给不同 DPI 下的字体高度差 -> 940。
+    ///   标题栏 38 + 顶栏 54 + 页边距 32 + 问候(大字号+留白)~110 + 日历/待办 ~342 + 天气 ~220
+    ///   + 项目一行 ~150 ≈ 946,再留余量给不同 DPI 的字体高度差与面板内边距 -> 1000。
+    /// 之前用 940 仍会出滚动条(问候块加大后更高了),据此上调。
     /// 会被工作区与最小尺寸夹住,小屏上不会超出。
     /// </summary>
     public const double PreferredWindowWidth = 1480;
-    public const double PreferredWindowHeight = 940;
+    public const double PreferredWindowHeight = 1000;
 
     // ---------------------------------------------------------------- 连续量(不分档,不跳)
     static double Lerp(double a, double b, double t) => a + (b - a) * Math.Clamp(t, 0, 1);

@@ -328,32 +328,37 @@ public partial class MainWindow : Window
     void BuildNav()
     {
         NavPanel.Children.Clear();
+        NavSystemPanel.Children.Clear();
         _nav.Clear();
 
-        AddItem(new NavItem("home", "nav.home", IconName.Home, () => new HomeView()));
+        // 上半区:主页 + 工作空间(可在"扩展"里选择显示哪些)
+        AddItem(new NavItem("home", "nav.home", IconName.Home, () => new HomeView()), NavPanel);
 
-        AddGroupLabel(Strings.Get("nav.workspaces"));
-        AddItem(new NavItem("chat", "nav.chat", IconName.Chat, () => new PlaceholderView("nav.chat")));
-        AddItem(new NavItem("assets", "nav.assets", IconName.Assets, () => new PlaceholderView("nav.assets")));
-        AddItem(new NavItem("translation", "nav.translation", IconName.Translation, () => new PlaceholderView("nav.translation")));
-        AddItem(new NavItem("courses", "nav.courses", IconName.Courses, () => new PlaceholderView("nav.courses")));
-        AddItem(new NavItem("computer", "nav.computer_control", IconName.Computer, () => new PlaceholderView("nav.computer_control")));
-        // 投资研究:D42 §7/B4 只做隐藏占位。当前无"指定成员+指定端"配置 -> 整行不渲染。
-        if (ShouldShowInvestment()) AddItem(new NavItem("investment", "nav.investment", IconName.Investment, () => new PlaceholderView("nav.investment")));
+        AddGroupLabel(Strings.Get("nav.workspaces"), NavPanel);
+        foreach (var w in Workspaces.All)
+        {
+            if (!TheApp.Settings.IsWorkspaceVisible(w.Key)) continue;   // 用户在扩展里关掉的不显示
+            var def = w;   // 闭包捕获
+            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, () => new PlaceholderView(def.TitleKey)), NavPanel);
+        }
 
-        AddGroupLabel(Strings.Get("nav.system"));
-        AddItem(new NavItem("extensions", "nav.extensions", IconName.Extensions, () => new PlaceholderView("nav.extensions")));
-        AddItem(new NavItem("settings", "nav.settings", IconName.Settings, () => new SettingsView()));
-        // 主机管理 = 配对与设备管理的所在地。副机端也要能配对,所以这里显示的是"连接与设备";
-        // 真正的主机专属项(仅主机端 + 管理员)在该视图内部再判定。
-        AddItem(new NavItem("devices", "devices.title", IconName.Devices, () => new DevicesView()));
+        // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
+        AddGroupLabel(Strings.Get("nav.system"), NavSystemPanel);
+        AddItem(new NavItem("extensions", "nav.extensions", IconName.Extensions, () => new ExtensionsView()), NavSystemPanel);
+        AddItem(new NavItem("settings", "nav.settings", IconName.Settings, () => new SettingsView()), NavSystemPanel);
     }
 
-    static bool ShouldShowInvestment() => false;   // P3c 只做隐藏占位:任何人任何端都不显示(D42 §7/B4)
-
-    void AddGroupLabel(string text)
+    /// <summary>扩展里改了工作空间显示后调用:重建导航栏并保持当前选中(不重建正在看的内容)。</summary>
+    public void RefreshNavRail()
     {
-        NavPanel.Children.Add(new TextBlock
+        BuildNav();
+        HighlightNav(_currentKey);
+        if (_collapsed) ApplyCollapsed();   // 保持收起态
+    }
+
+    void AddGroupLabel(string text, StackPanel target)
+    {
+        target.Children.Add(new TextBlock
         {
             Text = text,
             Margin = new Thickness(10, 16, 10, 6),
@@ -363,7 +368,7 @@ public partial class MainWindow : Window
         });
     }
 
-    void AddItem(NavItem item)
+    void AddItem(NavItem item, StackPanel target)
     {
         // 图标 + 文字。图标形状跟随皮肤(墨白线性 / 苹果线性 / 暖萌可爱),换肤自动重建。
         var row = new StackPanel { Orientation = Orientation.Horizontal };
@@ -388,7 +393,7 @@ public partial class MainWindow : Window
             Cursor = System.Windows.Input.Cursors.Hand,
         };
         b.Click += (_, _) => Navigate(item.Key);
-        NavPanel.Children.Add(b);
+        target.Children.Add(b);
         _nav.Add((item, b));
     }
 
@@ -400,7 +405,12 @@ public partial class MainWindow : Window
         ContentHost.Content = hit.item.Build();
         // 主页右上角已经有日历板块了,顶栏就不再重复放按钮(用户裁定)。
         CalendarButton.Visibility = key == "home" ? Visibility.Collapsed : Visibility.Visible;
+        HighlightNav(key);
+    }
 
+    // 仅刷新导航栏的选中高亮(不重建内容)——扩展里改显示项后复用它,别把正在看的页面也重建。
+    void HighlightNav(string key)
+    {
         foreach (var (item, btn) in _nav)
         {
             var on = item.Key == key;
@@ -428,6 +438,11 @@ public partial class MainWindow : Window
     void OnToggleNav(object sender, RoutedEventArgs e)
     {
         _collapsed = !_collapsed;
+        ApplyCollapsed();
+    }
+
+    void ApplyCollapsed()
+    {
         NavColumn.Width = new GridLength(_collapsed ? 58 : 240);
         // 品牌现在在自绘标题栏里(贯通全宽),收起导航不影响它。
         foreach (var (item, btn) in _nav)
@@ -444,8 +459,9 @@ public partial class MainWindow : Window
             btn.HorizontalContentAlignment = _collapsed ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         }
         _vram.SetCollapsed(_collapsed);   // 收起 -> 环形+百分比;展开 -> 三段横条
-        // 分组标题在收起状态没有宽度显示,整条隐藏
+        // 分组标题在收起状态没有宽度显示,整条隐藏(上下两个面板都要处理)
         foreach (var c in NavPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
+        foreach (var c in NavSystemPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
     }
 
     public void RefreshStatus()

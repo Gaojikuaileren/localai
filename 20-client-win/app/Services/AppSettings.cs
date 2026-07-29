@@ -34,6 +34,24 @@ public sealed class AppSettings
     /// </summary>
     public string? WeatherCityOrder { get; set; }
 
+    /// <summary>
+    /// 左边栏【隐藏】的工作空间 key 列表(JSON string[])。在"扩展"里勾选控制。
+    /// 存"隐藏项"而非"显示项":这样以后新增的工作空间默认可见,不必逐台设备去开。
+    /// 每台设备各自的偏好,不同步到中枢。
+    /// </summary>
+    public List<string> HiddenWorkspaces { get; set; } = new();
+
+    public bool IsWorkspaceVisible(string key) => !HiddenWorkspaces.Contains(key);
+
+    public void SetWorkspaceVisible(string key, bool visible)
+    {
+        var changed = visible ? HiddenWorkspaces.Remove(key)
+                              : (!HiddenWorkspaces.Contains(key) && AddHidden(key));
+        if (changed) Save();
+    }
+
+    bool AddHidden(string key) { HiddenWorkspaces.Add(key); return true; }
+
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
     public static AppSettings Load()

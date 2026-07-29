@@ -22,8 +22,12 @@ public sealed class DevicesView : UserControl
     readonly TextBlock _hint;
     readonly Border _sasCard;
 
-    public DevicesView()
+    readonly bool _embedded;
+
+    // embedded = true:并入"设置"页时用 —— 去掉外层滚动/页边距/大标题,直接作为一段内容插进去。
+    public DevicesView(bool embedded = false)
     {
+        _embedded = embedded;
         _sasBlock = new TextBlock
         {
             FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
@@ -42,15 +46,24 @@ public sealed class DevicesView : UserControl
             _hint));
         _sasCard.Visibility = Visibility.Collapsed;
 
-        Content = new ScrollViewer
+        if (_embedded)
         {
-            Content = _root,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        };
-        _root.Margin = new Thickness(28, 24, 28, 24);
-        _root.MaxWidth = 980;
-        _root.HorizontalAlignment = HorizontalAlignment.Left;
+            // 并入设置:不要自己的滚动条(外层设置页已经有),不要页边距,直接就是内容栈
+            Content = _root;
+            _root.Margin = new Thickness(0);
+        }
+        else
+        {
+            Content = new ScrollViewer
+            {
+                Content = _root,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            };
+            _root.Margin = new Thickness(28, 24, 28, 24);
+            _root.MaxWidth = 980;
+            _root.HorizontalAlignment = HorizontalAlignment.Left;
+        }
 
         Build();
     }
@@ -58,7 +71,8 @@ public sealed class DevicesView : UserControl
     void Build()
     {
         _root.Children.Clear();
-        _root.Children.Add(Ui.Title(Strings.Get("devices.title")));
+        // 独立页才画大标题;并入设置时由设置页的分节小标题领起,避免重复标题
+        if (!_embedded) _root.Children.Add(Ui.Title(Strings.Get("devices.title")));
         _root.Children.Add(TheApp.Hub.IsPaired ? PairedCard() : PairCard());
         _root.Children.Add(_sasCard);
         _root.Children.Add(RemoteDevicesCard());

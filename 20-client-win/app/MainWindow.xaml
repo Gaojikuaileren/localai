@@ -138,6 +138,10 @@
           </Border>
           <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>
 
+          <!-- 系统组【贴底】:扩展 / 设置。位于显存条上方、工作空间下方(用户裁定) -->
+          <StackPanel x:Name="NavSystemPanel" DockPanel.Dock="Bottom" Margin="10,0,10,6"/>
+
+          <!-- 上半区:主页 + 工作空间(占满剩余,可滚动) -->
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel x:Name="NavPanel" Margin="10,0,10,0"/>
           </ScrollViewer>

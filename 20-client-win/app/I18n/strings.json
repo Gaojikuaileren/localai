@@ -13,7 +13,10 @@
   "nav.courses":          { "zh-CN": "PPT / 课程生成",      "en-US": "Slides & courses",        "ja-JP": "スライド・教材作成" },
   "nav.computer_control": { "zh-CN": "电脑操控",            "en-US": "PC control",              "ja-JP": "PC操作" },
   "nav.investment":       { "zh-CN": "投资研究",            "en-US": "Investment research",     "ja-JP": "投資リサーチ" },
+  "nav.finance":          { "zh-CN": "财务管理",            "en-US": "Finance",                 "ja-JP": "家計・資産管理" },
   "nav.extensions":       { "zh-CN": "扩展",                "en-US": "Extensions",              "ja-JP": "拡張機能" },
+  "ext.workspaces_title": { "zh-CN": "左边栏显示的工作空间", "en-US": "Workspaces in the sidebar", "ja-JP": "サイドバーに表示するワークスペース" },
+  "ext.workspaces_hint":  { "zh-CN": "勾选要在左边栏出现的工作空间。关掉的仍然存在,只是不在导航里显示。", "en-US": "Choose which workspaces appear in the left sidebar. Unchecked ones still exist — they just don't show in navigation.", "ja-JP": "左サイドバーに表示するワークスペースを選びます。外したものも存在はし、ナビに出ないだけです。" },
   "nav.settings":         { "zh-CN": "设置",                "en-US": "Settings",                "ja-JP": "設定" },
   "nav.host_admin":       { "zh-CN": "主机管理",            "en-US": "Hub administration",      "ja-JP": "ハブ管理" },
 
