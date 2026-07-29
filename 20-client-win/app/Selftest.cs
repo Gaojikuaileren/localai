@@ -305,6 +305,19 @@ public static class Selftest
                        "播种发生在建窗口【之前】(否则界面读到空表 = 开启时日程读不出来)");
                 Assert(calSrc.Contains("OpenSideDrawer"), "日程编辑走【右侧抽屉】而不是浮窗(曾被后续重写覆盖回去)");
                 Assert(calSrc.Contains("CalendarData.Changed += Rebuild"), "日历订阅了数据变更通知");
+
+                // 日期区高度必须【恒定】—— 行数随日程条数变化会让下方日程表位置上下跳(用户反馈)。
+                // 判据:行定义全部是绝对高度,且预留行数是常量;不允许在行结构里用 Auto。
+                var bandStart = calSrc.IndexOf("UIElement Band(", StringComparison.Ordinal);
+                var bandEnd = calSrc.IndexOf("static Border SpanBar(", StringComparison.Ordinal);
+                var bandSrc = bandStart >= 0 && bandEnd > bandStart ? calSrc[bandStart..bandEnd] : "";
+                Assert(bandSrc.Length > 0, "找到横带构建代码");
+                Assert(!bandSrc.Contains("Height = GridLength.Auto"),
+                       "横带的行高不含 Auto(Auto 会随内容有无而变 = 日期区高度浮动)");
+                Assert(bandSrc.Contains("SpanRowsReserved"), "全天线占【固定预留行数】,与实际条数无关");
+                Assert(calSrc.Contains("const int SpanRowsReserved"), "预留行数是编译期常量");
+                Assert(calSrc.Contains("const int SpanRowsReserved = 1"), "全天线只占【一行】——多条不分行,不会一上一下");
+                Assert(calSrc.Contains("MergeSpans("), "多条全天日程会合并成同一行的连续线段");
             }
 
             // ---- 日程数据变更通知(修"开启时日程读不出来")----

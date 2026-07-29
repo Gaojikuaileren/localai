@@ -39,6 +39,14 @@ public sealed class CalendarView : UserControl
     const double MonthCellHeight = 28;
     const double WeekCellHeight = 32;
 
+    // ★ 全天线【只占一行,高度统一】(用户裁定):
+    //   ① 行数若随日程条数变化,日期区高度就会浮动,下方日程表位置跟着上下跳;
+    //   ② 多条线分行画会"一上一下",看着杂乱。
+    //   所以恒定预留【一行】:某天有几条全天日程都只画一条线(内容在当日浮窗/下方列表里看)。
+    const int SpanRowsReserved = 1;
+    const double SpanRowHeight = 5;      // 线高 3 + 下留白 2(上留白 0,紧贴数字)
+    const double DotsRowHeight = 7;      // 圆点 5 + 下留白 2
+
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
@@ -351,9 +359,12 @@ public sealed class CalendarView : UserControl
         for (int i = 0; i < 7; i++)
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(numberHeight) });   // 0 数字
-        foreach (var _ in spans) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 全天线
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                // 末行 圆点
+        // 行结构【恒定】:数字行 + 固定 SpanRowsReserved 条线行 + 圆点行。
+        // 全部用绝对高度,不用 Auto —— Auto 会随内容有无而变,正是位置浮动的根源。
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(numberHeight) });
+        for (int r = 0; r < SpanRowsReserved; r++)
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(SpanRowHeight) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(DotsRowHeight) });
         var dotsRow = grid.RowDefinitions.Count - 1;
         var totalRows = grid.RowDefinitions.Count;
 
@@ -382,7 +393,8 @@ public sealed class CalendarView : UserControl
             grid.Children.Add(bg);
 
             // ② 日期数字(必要时带星期)
-            var numStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+            // 数字底部对齐 -> 全天线紧贴在数字下方(用户裁定)
+            var numStack = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, IsHitTestVisible = false };
             if (showWeekday)
             {
                 var wk = new TextBlock { Text = day.ToString("ddd", Zh), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 10 };
@@ -409,7 +421,7 @@ public sealed class CalendarView : UserControl
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 2),
-                Height = 5,
+                VerticalAlignment = VerticalAlignment.Center,
                 IsHitTestVisible = false,
             };
             foreach (var _ in timed.Take(3))
@@ -428,18 +440,55 @@ public sealed class CalendarView : UserControl
             grid.Children.Add(dots);
         }
 
-        // ④ 全天线:在数字与圆点【之间】,贯穿多格
-        for (int k = 0; k < spans.Count; k++)
+        // ④ 全天线:在数字与圆点【之间】,统一画在【同一行】。
+        //    多条全天日程重叠时不分行 —— 按"哪些天被覆盖"合并成连续线段,
+        //    于是每一天最多只有一条线、高度完全一致(用户裁定)。
+        foreach (var (col, span, clipStart, clipEnd) in MergeSpans(spans))
         {
-            var (ev, col, span, clipStart, clipEnd) = spans[k];
             var dim = isDim(weekStart.AddDays(col));
             var bar = SpanBar(clipStart, clipEnd, dim);
-            Grid.SetColumn(bar, col); Grid.SetColumnSpan(bar, span); Grid.SetRow(bar, k + 1);
+            Grid.SetColumn(bar, col); Grid.SetColumnSpan(bar, span); Grid.SetRow(bar, 1);
             Panel.SetZIndex(bar, 1);
             grid.Children.Add(bar);
         }
 
         return grid;
+    }
+
+    /// <summary>
+    /// 把一周内的多条全天日程合并成【互不重叠的连续线段】。
+    /// 目的:同一天有多个全天日程时只画一条线,且所有线在同一行、高度一致 ——
+    /// 分行画会一上一下,也会让日期区高度随条数浮动。
+    /// 合并后每段的两端各自判断是否被周界裁断(用于决定收不收圆角)。
+    /// </summary>
+    static List<(int Col, int Span, bool ClipStart, bool ClipEnd)> MergeSpans(
+        List<(CalendarEvent Ev, int Col, int Span, bool ClipStart, bool ClipEnd)> spans)
+    {
+        // 先把"哪些列被覆盖"以及"该列是否续前/续后"摊平到 7 格
+        var covered = new bool[7];
+        var contPrev = new bool[7];
+        var contNext = new bool[7];
+        foreach (var s in spans)
+            for (int i = 0; i < s.Span; i++)
+            {
+                var col = s.Col + i;
+                if (col is < 0 or > 6) continue;
+                covered[col] = true;
+                if (i == 0 && s.ClipStart) contPrev[col] = true;
+                if (i == s.Span - 1 && s.ClipEnd) contNext[col] = true;
+            }
+
+        var result = new List<(int, int, bool, bool)>();
+        int c0 = 0;
+        while (c0 < 7)
+        {
+            if (!covered[c0]) { c0++; continue; }
+            var c1 = c0;
+            while (c1 + 1 < 7 && covered[c1 + 1]) c1++;
+            result.Add((c0, c1 - c0 + 1, contPrev[c0], contNext[c1]));
+            c0 = c1 + 1;
+        }
+        return result;
     }
 
     /// <summary>
@@ -453,7 +502,8 @@ public sealed class CalendarView : UserControl
         var bar = new Border
         {
             Height = 3,
-            Margin = new Thickness(2, 1.5, 2, 1.5),   // 与数字、圆点各留一点距离,但不浪费高度
+            // 贴近日期数字底部(用户裁定):上留白几乎为 0,下方留一点与圆点分开
+            Margin = new Thickness(2, 0, 2, 2),
             Opacity = dim ? 0.5 : 1,
             IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
             CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
