@@ -382,16 +382,35 @@ public sealed class HomeView : UserControl
         _weatherGrid.MouseLeftButtonUp -= OnDragEnd;
         _weatherGrid.LostMouseCapture -= OnDragLost;
         if (_weatherGrid.IsMouseCaptured) _weatherGrid.ReleaseMouseCapture();
-
-        if (_hosts.TryGetValue(from, out var host)) { Panel.SetZIndex(host, 0); host.Opacity = 1; }
         _dragIndex = null;
 
-        if (commit && target != from) MovePlace(from, target);   // 会重建天气区,位移随之归零
-        else
+        var swap = commit && target != from;
+        // ★ 松手要【滑过去】而不是瞬间弹过去(用户裁定):
+        //   先把被拖的卡从当前手位平滑动画到目标格位,动画结束后才重建列表。
+        //   重建时新卡就在目标位置、位移为 0 —— 与动画终点像素重合,所以看不到跳变。
+        var settleTo = swap ? (target - from) * ColumnWidth() : 0;
+
+        void Land()
         {
-            // 没换位:所有卡滑回原处(包括被拖的那张)
-            for (int k = 0; k < _places.Count; k++) AnimateShift(k, 0);
+            if (_hosts.TryGetValue(from, out var h2)) { Panel.SetZIndex(h2, 0); h2.Opacity = 1; }
+            if (swap) MovePlace(from, target);   // 重建天气区,位移归零
         }
+
+        if (_shifts.TryGetValue(from, out var t))
+        {
+            var anim = new DoubleAnimation(settleTo, TimeSpan.FromMilliseconds(190))
+            { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+            anim.Completed += (_, _) => Land();
+            // 从当前手位起算:先把动画值锚在当前 X,避免从 0 开始跳一下
+            t.BeginAnimation(TranslateTransform.XProperty, null);
+            var fromX = t.X;
+            anim.From = fromX;
+            t.BeginAnimation(TranslateTransform.XProperty, anim);
+        }
+        else Land();
+
+        // 其余卡同步滑回各自的最终位置(它们在拖动期间已经让位到那里了)
+        if (!swap) for (int k = 0; k < _places.Count; k++) if (k != from) AnimateShift(k, 0);
     }
 
     void AnimateShift(int index, double toX)
