@@ -64,6 +64,10 @@ public partial class App : Application
         SetupTray();
         Strings.LanguageChanged += () => Dispatcher.Invoke(RebuildTrayMenu);
 
+        // ★ 示例数据必须在建窗口【之前】播种 —— 否则界面构建时读到的是空表,
+        //   表现为"开启时日程读不出来,点一下才有"。
+        SeedDemoTasks();
+
         _main = new MainWindow();
         _main.Closing += OnMainWindowClosing;
         if (!_startHidden) _main.Show();

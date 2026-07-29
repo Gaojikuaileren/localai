@@ -289,6 +289,24 @@ public static class Selftest
             Assert(Views.CalendarEditor.DefaultDuration == TimeSpan.FromHours(1), "新建日程默认时长 1 小时");
             Views.CalendarData.Events.Clear();
 
+            // ---- 接线自检:防"补丁静默失配导致整段成死代码" ----
+            // 已经踩过三次:替换字符串没匹配上,函数还在但调用点被删,编译通过、断言全绿、功能没了。
+            // 这里直接对源码做结构断言 —— 我改动的正是这些接线点。
+            var appSrc = TryReadSource("App.xaml.cs");
+            var calSrc = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
+            if (appSrc is null || calSrc is null)
+                Console.WriteLine("  SKIP  接线自检(发布环境无源码,开发/CI 下才跑)");
+            else
+            {
+                Assert(appSrc.Contains("SeedDemoTasks();"), "示例数据的播种函数【真的被调用】(曾出现整段成死代码)");
+                var seedIdx = appSrc.IndexOf("SeedDemoTasks();", StringComparison.Ordinal);
+                var winIdx = appSrc.IndexOf("_main = new MainWindow();", StringComparison.Ordinal);
+                Assert(seedIdx >= 0 && winIdx >= 0 && seedIdx < winIdx,
+                       "播种发生在建窗口【之前】(否则界面读到空表 = 开启时日程读不出来)");
+                Assert(calSrc.Contains("OpenSideDrawer"), "日程编辑走【右侧抽屉】而不是浮窗(曾被后续重写覆盖回去)");
+                Assert(calSrc.Contains("CalendarData.Changed += Rebuild"), "日历订阅了数据变更通知");
+            }
+
             // ---- 日程数据变更通知(修"开启时日程读不出来")----
             // 成因:示例数据在窗口构建【之后】才播种,日历读到的是空表;任务与项目有变更通知
             // 能补刷,日历没有,于是表现为"必须点一下才出现"。加了 Changed 事件后不再依赖时序。
@@ -408,6 +426,22 @@ public static class Selftest
 
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
         return fail > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// 读源码文件(开发/CI 环境)。发布环境没有源码 -> 返回 null,调用方跳过接线自检。
+    /// 用途:对"接线点"做结构断言 —— 有些缺陷是"函数还在、调用点没了",编译与行为断言都抓不到。
+    /// </summary>
+    static string? TryReadSource(string relative)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 8 && dir is not null; i++)
+        {
+            var p = Path.Combine(dir, relative);
+            if (File.Exists(p)) return File.ReadAllText(p);
+            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        return null;
     }
 
     // 模拟被阻塞的 WPF UI 线程:任何 post 进来的续体都不会被执行。若善后代码依赖回到此上下文,

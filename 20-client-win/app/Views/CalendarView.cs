@@ -599,9 +599,14 @@ public sealed class CalendarView : UserControl
     }
 
     /// <summary>existing 为 null = 新增;否则 = 编辑那一条。</summary>
+    /// <summary>
+    /// 打开日程编辑。★ 用【右侧全高抽屉】而不是浮窗(用户裁定):字段有九项,
+    /// 浮窗放不下会变成套娃滚动;抽屉一页能显示完。
+    /// </summary>
     void OpenEditor(DateTime day, CalendarEvent? existing)
-        => Flyout.ShowAtMouse(this,   // 在鼠标边弹出(用户裁定)
-                       day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程"),
-                       CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); }),
-                       width: 340);
+    {
+        var title = day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程");
+        var body = CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); });
+        (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(title, body);
+    }
 }
