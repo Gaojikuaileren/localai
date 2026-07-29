@@ -117,6 +117,18 @@ public static class Selftest
             hub2.UnpairLocal();
             Assert(!File.Exists(AppPaths.ProfilePath) && !hub2.IsPaired, "解除配对会删掉本机档案");
 
+            // ---- 显存条分段口径 ----
+            var vs = new VramSnapshot(16.0, 4.0, 6.0, true);
+            Assert(Math.Abs(vs.FreeGiB - 6.0) < 0.001, "显存三段相加等于总量(模型 + 桌面 + 未占用)");
+            Assert(Math.Abs(vs.UsedRatio - 10.0 / 16.0) < 0.001, "占用比例 = (模型 + 桌面) / 总量");
+            var vFull = new VramSnapshot(16.0, 10.0, 5.6, true);
+            Assert(vFull.UsedRatio >= VramMonitor.DangerRatio, "逼近上限时越过危险阈值(界面转红)");
+            var vNone = new VramSnapshot(0, 0, 0, false, "no gpu");
+            Assert(!vNone.Available && vNone.UsedRatio == 0, "读不到 GPU 时标记不可用(界面隐藏该条,不显示 0 冒充空闲)");
+            var vOver = new VramSnapshot(16.0, 12.0, 8.0, true);
+            Assert(vOver.FreeGiB == 0, "占用超过总量时未占用段不为负");
+            Assert(VramMonitor.Interval.TotalSeconds is >= 1 and <= 5, "显存轮询间隔在合理区间(默认 2 秒)");
+
             // ---- 三语文案 ----
             var (keys, missing) = Strings.Audit();
             Assert(keys > 40, $"文案表已装载({keys} 个键)");

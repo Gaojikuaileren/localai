@@ -115,7 +115,7 @@
                     ToolTip="收起导航" Click="OnToggleNav"/>
           </Grid>
 
-          <!-- 底部:当前成员 -->
+          <!-- 底部:显存条(在"当前成员/纠正"上方) + 当前成员 -->
           <Border DockPanel.Dock="Bottom" Margin="10,8,10,12" Padding="10,8"
                   Background="{DynamicResource BgSunken}" CornerRadius="{DynamicResource RadiusMd}">
             <StackPanel>
@@ -124,6 +124,7 @@
                          FontSize="{DynamicResource FontCaption}" TextWrapping="Wrap"/>
             </StackPanel>
           </Border>
+          <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>
 
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel x:Name="NavPanel" Margin="10,0,10,0"/>

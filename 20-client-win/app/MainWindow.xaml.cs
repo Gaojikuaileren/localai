@@ -49,7 +49,16 @@ public partial class MainWindow : Window
         TheApp.Tasks.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
         _taskRotate.Tick += (_, _) => { _taskIndex++; RefreshTaskBar(); };
         RefreshTaskBar();
+
+        // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
+        VramHost.Content = _vram;
+        TheApp.Vram.Updated += s => Dispatcher.Invoke(() => _vram.Update(s));
+        _vram.Update(TheApp.Vram.Last);
+        IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) TheApp.Vram.Resume(); else TheApp.Vram.Pause(); };
+        StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) TheApp.Vram.Pause(); else TheApp.Vram.Resume(); };
     }
+
+    readonly VramBar _vram = new();
 
     // ---------------------------------------------------------------- 底部任务横条
     public void RefreshTaskBar()

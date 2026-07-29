@@ -24,6 +24,8 @@ public partial class App : Application
     public HubClient Hub { get; private set; } = new();
     /// <summary>全局任务中心:底部横条与全局抽屉共用同一份状态(用户裁定抽屉是全局的)。</summary>
     public TaskCenter Tasks { get; } = new();
+    /// <summary>显存实时监视(左导航的显存条)。2 秒轮询,窗口不可见时自动停表。</summary>
+    public VramMonitor Vram { get; } = new();
     // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
     // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
     public ShutdownCoordinator Lifecycle { get; } = new();
@@ -95,6 +97,8 @@ public partial class App : Application
         Lifecycle.Register("save-settings", () => Settings.Save());
 
         // ③ 收掉托盘图标,否则进程没了图标还赖在任务栏上直到鼠标划过。
+        Lifecycle.Register("stop-vram-monitor", () => Vram.Dispose());
+
         Lifecycle.Register("dispose-tray", () => { _tray?.Dispose(); _tray = null; });
     }
 
