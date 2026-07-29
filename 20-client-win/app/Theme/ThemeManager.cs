@@ -33,8 +33,10 @@ public static class ThemeManager
     {
         var dicts = Application.Current.Resources.MergedDictionaries;
         dicts.Clear();
-        dicts.Add(new ResourceDictionary { Source = UriOf(skin) });                                  // slot 0
+        dicts.Add(new ResourceDictionary { Source = UriOf(skin) });                                  // slot 0(可换)
         dicts.Add(new ResourceDictionary { Source = new("pack://application:,,,/Theme/Tokens.xaml", UriKind.Absolute) });
+        // 控件样式(细滚动条等)。放在最后:它引用上面两个字典里的颜色令牌。
+        dicts.Add(new ResourceDictionary { Source = new("pack://application:,,,/Theme/Controls.xaml", UriKind.Absolute) });
         Current = skin;
     }
 }
