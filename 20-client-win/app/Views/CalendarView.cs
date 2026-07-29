@@ -543,21 +543,9 @@ public sealed class CalendarView : UserControl
         var wasMonth = _mode == Mode.Month;
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
         Rebuild();
-        if (wasMonth) OpenDayFlyout(day);
-    }
-
-    // ---------------------------------------------------------------- 月排布:当日浮窗
-    void OpenDayFlyout(DateTime day)
-    {
-        var body = new StackPanel();
-        var evts = CalendarData.On(day).ToList();
-        foreach (var ev in evts) body.Children.Add(EventRow(ev, compact: false));
-
-        // 新增按钮放在浮窗【标题行右侧】(日期右方,用户裁定);当天没有日程时浮窗就只剩这一行。
-        var add = CompactAdd(() => { Overlay.CloseActive(); OpenEditor(day, null); });
-        add.Margin = new Thickness(12, 0, 0, 0);
-
-        Flyout.ShowAtMouse(this, day.ToString("M月 d日 dddd", Zh), body, width: 300, headerAction: add);
+        // 月排布(= 顶栏日历下拉):选中某天 -> 直接弹出右侧【新增日程】抽屉(用户裁定,替代原来的当日浮窗)。
+        //   OpenEditor 会经 Overlay 顺带收起这个日历下拉,和主页新建日程走同一个抽屉。
+        if (wasMonth) OpenEditor(day, null);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出
