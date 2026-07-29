@@ -27,6 +27,15 @@ public static class Program
             return Selftest.Run();
         }
 
+        // 转盘渲染诊断(调试用):--wheeltest <输出目录>
+        var wt = Array.IndexOf(args, "--wheeltest");
+        if (wt >= 0)
+        {
+            if (!AttachConsole(AttachParentProcess)) AllocConsole();
+            var outDir = wt + 1 < args.Length ? args[wt + 1] : ".";
+            return WheelTest.Run(outDir);
+        }
+
         // D46 护栏:提权运行会打不开设备密钥,与其让人踩到「密钥集不存在」那种隐晦报错,
         // 不如启动时就拒绝并说清楚。放在最前面 —— 建窗口之前。
         if (Elevation.IsElevated())

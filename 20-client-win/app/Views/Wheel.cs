@@ -22,6 +22,11 @@ public static class Wheel
     {
         sv.PreviewMouseWheel += (s, e) =>
         {
+            // ★ 滚轮落在【转盘】里时让路:PassThrough 在隧道阶段先于转盘触发,
+            //   若抽屉本身已不可滚动,它会把每个滚轮都吞掉上抛,转盘就永远收不到。
+            //   发现事件源在转盘内就直接返回,让它继续隧道传到转盘自己处理。
+            if (WheelColumn.IsInsideWheel(e.OriginalSource as DependencyObject)) return;
+
             var self = (ScrollViewer)s;
             var canScrollUp = self.VerticalOffset > 0.5;
             var canScrollDown = self.VerticalOffset < self.ScrollableHeight - 0.5;

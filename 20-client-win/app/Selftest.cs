@@ -414,7 +414,15 @@ public static class Selftest
                     // 只看【实际调用】,不看注释 —— 注释里还留着"为什么不用它"的说明
                     Assert(!whSrc.Contains(".ScrollIntoView("), "不再调用 ListBox.ScrollIntoView(那是硬切)");
                     Assert(whSrc.Contains("Math.Clamp(next, 0"), "转盘有头有尾,越界停在边界");
+                    // 大索引列曾整列空白:滑动列被定高格子加了布局裁剪,位移前只剩头三行。
+                    // 修法是放进 Canvas(不加布局裁剪)。钉住这个结构,别再退回直接塞 Grid。
+                    Assert(whSrc.Contains("new Canvas()"), "滑动列放进 Canvas(否则大索引列会被布局裁剪成空白)");
+                    Assert(whSrc.Contains("IsInsideWheel"), "转盘暴露 IsInsideWheel 供外层滚动区让路");
                 }
+                var whlSrc = TryReadSource(Path.Combine("Views", "Wheel.cs"));
+                if (whlSrc is not null)
+                    Assert(whlSrc.Contains("IsInsideWheel(e.OriginalSource"),
+                           "PassThrough 发现滚轮落在转盘里就让路(否则抽屉不滚时会吞掉滚轮)");
                 Assert(calSrc.Contains("const int SpanRowsReserved = 1"), "全天线只占【一行】——多条不分行,不会一上一下");
                 Assert(calSrc.Contains("MergeSpans("), "多条全天日程会合并成同一行的连续线段");
                 Assert(calSrc.Contains("const int DotsMaxBeforeTriangle = 4"), "定时日程超过 4 条改用实心三角形(阈值是常量)");

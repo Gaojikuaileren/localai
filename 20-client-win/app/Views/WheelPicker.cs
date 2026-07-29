@@ -5,12 +5,18 @@
 //   · 时间最小单位【5 分钟】;
 //   · 【不做无限循环】—— 有头有尾,滚到边界就停;
 //   · 滚动要有【动画】,不是硬切;
-//   · 全天勾选后的起止日期用同一套外观(原生 DatePicker 是系统风,与整体脱节)。
+//   · 鼠标停在转盘上滚动时,滚的是【转盘自己】,不带动整页(用户反馈);
+//   · 全天勾选后的起止日期用同一套外观(原生 DatePicker 是系统风,与整体脱节);
+//   · 整体要【窄】—— 两个日期转盘要能并排塞进右侧抽屉,不能超宽被裁掉(用户反馈)。
 //
-// ★ 实现从 ListBox + ScrollIntoView 改成【自绘 + 位移动画】:
-//   ListBox 的 ScrollIntoView 是瞬间跳到位的,做不出轮盘的滑动感(用户反馈"硬切")。
-//   现在是一列 TextBlock 叠在裁剪容器里,靠 TranslateTransform 动画滑到目标行,
+// ★ 实现:一列 TextBlock 叠在裁剪容器里,靠 TranslateTransform 动画滑到目标行,
 //   中间一行有高亮带,选中项加粗、离中心越远越淡 —— 才像转盘。
+//   ListBox.ScrollIntoView 是瞬间跳到位的,做不出滑动感,已弃用。
+//
+// ★ 滚轮为什么曾经滚不动:编辑抽屉外层套了带 PassThrough 的 ScrollViewer,
+//   它的 PreviewMouseWheel 在【隧道阶段】先于转盘触发;抽屉压缩到不再滚动后,
+//   它"两个方向都滚不动"→ 把每个滚轮事件都吞掉并上抛,于是永远传不到转盘。
+//   修法在 Wheel.PassThrough:发现滚轮落在转盘里就让路(见 IsInsideWheel)。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -23,7 +29,7 @@ namespace LocalAI.Client.Views;
 /// <summary>一列可滚动的候选值。多列并排即构成"时:分"或"年/月/日"。</summary>
 public sealed class WheelColumn : Border
 {
-    public const double RowHeight = 26;
+    public const double RowHeight = 28;
     const int VisibleRows = 3;                    // 上一个 / 当前 / 下一个
     const double Duration = 150;                  // 单步滑动时长(ms)
 
@@ -40,7 +46,13 @@ public sealed class WheelColumn : Border
         _items = items;
         _index = Math.Clamp(selectedIndex, 0, Math.Max(0, items.Count - 1));
 
-        var stack = new StackPanel { RenderTransform = _slide };
+        // ★ 关键:滑动列必须放进 Canvas,不能直接塞进定高的 Grid。
+        //   若直接塞进 84px 高的格子,而列内容有 12~31 行(远高于 84),WPF 会给它
+        //   自动加一个【布局裁剪】,只留最上面 84px —— 而且这个裁剪发生在 RenderTransform
+        //   位移【之前】。于是选中项索引一大(如 7 月=6、29 日=28),位移把仅剩的头三行
+        //   顶出视野,整列就变空白(诊断 PNG 实拍到:大索引列全空)。
+        //   Canvas 会按子元素的【完整所需尺寸】排布、不加布局裁剪,位移后再由外层 Grid 裁剪。
+        var stack = new StackPanel { RenderTransform = _slide, Width = width - 2 };
         for (int i = 0; i < items.Count; i++)
         {
             var t = new TextBlock
@@ -48,7 +60,7 @@ public sealed class WheelColumn : Border
                 Text = items[i],
                 Height = RowHeight,
                 TextAlignment = TextAlignment.Center,
-                Padding = new Thickness(0, 4, 0, 0),
+                Padding = new Thickness(0, 5, 0, 0),
                 Cursor = Cursors.Hand,
                 Background = Brushes.Transparent,   // 有底色才接得到点击
             };
@@ -70,9 +82,12 @@ public sealed class WheelColumn : Border
         band.SetResourceReference(CornerRadiusProperty, "RadiusSm");
         band.Opacity = 0.55;
 
+        var canvas = new Canvas();          // 不约束子元素尺寸、不加布局裁剪
+        canvas.Children.Add(stack);         // Canvas.Left/Top 默认 0
+
         var layers = new Grid { ClipToBounds = true, Height = RowHeight * VisibleRows };
         layers.Children.Add(band);
-        layers.Children.Add(stack);
+        layers.Children.Add(canvas);
 
         Child = layers;
         Width = width;
@@ -82,7 +97,8 @@ public sealed class WheelColumn : Border
             .Dyn(BorderBrushProperty, "Border")
             .Dyn(CornerRadiusProperty, "RadiusSm");
 
-        // 滚轮换一格(有头有尾,到边界即停)
+        // 滚轮换一格(有头有尾,到边界即停)。挂在隧道阶段并消费,
+        // 外层 ScrollViewer 因此不会再滚动 —— 前提是它先"让路"(见 Wheel.PassThrough)。
         PreviewMouseWheel += (_, e) =>
         {
             e.Handled = true;
@@ -130,12 +146,31 @@ public sealed class WheelColumn : Border
             t.SetResourceReference(TextBlock.ForegroundProperty, d == 0 ? "FgPrimary" : "FgSecondary");
         }
     }
+
+    /// <summary>
+    /// 某个元素是否落在转盘内部。★ 外层带 PassThrough 的 ScrollViewer 用它来判断
+    /// "该不该抢这次滚轮" —— 落在转盘里就让路,别把事件上抛(否则转盘永远收不到)。
+    /// </summary>
+    public static bool IsInsideWheel(DependencyObject? o)
+    {
+        while (o is not null)
+        {
+            if (o is WheelColumn) return true;
+            o = o is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(o)
+                : LogicalTreeHelper.GetParent(o);
+        }
+        return false;
+    }
 }
 
 public static class WheelPicker
 {
     /// <summary>时间的最小单位(用户裁定:5 分钟)。</summary>
     public const int MinuteStep = 5;
+
+    // 窄一点的列宽:两个日期转盘要能并排塞进抽屉(用户反馈"设计超宽了")。
+    const double HourW = 46, MinW = 46, YearW = 54, MonW = 40, DayW = 40;
 
     static readonly string[] Hours = Enumerable.Range(0, 24).Select(h => h.ToString("00")).ToArray();
     static readonly string[] Minutes = Enumerable.Range(0, 60 / MinuteStep).Select(i => (i * MinuteStep).ToString("00")).ToArray();
@@ -152,8 +187,8 @@ public static class WheelPicker
     public static (FrameworkElement Element, Action<TimeSpan> Set) Time(TimeSpan initial, Action<TimeSpan> onChanged)
     {
         var snapped = Snap(initial);
-        var hCol = new WheelColumn(Hours, snapped.Hours, 54);
-        var mCol = new WheelColumn(Minutes, snapped.Minutes / MinuteStep, 54);
+        var hCol = new WheelColumn(Hours, snapped.Hours, HourW);
+        var mCol = new WheelColumn(Minutes, snapped.Minutes / MinuteStep, MinW);
 
         var quiet = false;
         void Raise() { if (!quiet) onChanged(new TimeSpan(hCol.SelectedIndex, mCol.SelectedIndex * MinuteStep, 0)); }
@@ -181,9 +216,9 @@ public static class WheelPicker
         var days = Enumerable.Range(1, 31).Select(d => d.ToString("00")).ToArray();
 
         var yIdx = Math.Max(0, Array.IndexOf(years, initial.Year.ToString()));
-        var yCol = new WheelColumn(years, yIdx, 62);
-        var mCol = new WheelColumn(months, initial.Month - 1, 48);
-        var dCol = new WheelColumn(days, initial.Day - 1, 48);
+        var yCol = new WheelColumn(years, yIdx, YearW);
+        var mCol = new WheelColumn(months, initial.Month - 1, MonW);
+        var dCol = new WheelColumn(days, initial.Day - 1, DayW);
 
         void Raise()
         {
@@ -206,7 +241,7 @@ public static class WheelPicker
         var t = new TextBlock
         {
             Text = text, VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(5, 0, 5, 0),
+            Margin = new Thickness(3, 0, 3, 0),
         };
         t.Dyn(TextBlock.ForegroundProperty, "FgMuted");
         return t;
@@ -214,7 +249,13 @@ public static class WheelPicker
 
     static FrameworkElement Row(params FrameworkElement[] children)
     {
-        var p = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 6) };
+        // 靠左排,别让转盘在 Star 列里被拉宽 —— 宽度只由列宽之和决定
+        var p = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 2, 0, 4),
+        };
         foreach (var c in children) p.Children.Add(c);
         return p;
     }
