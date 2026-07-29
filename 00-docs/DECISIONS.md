@@ -1838,3 +1838,31 @@ DNS-SD 自动发现(先静态配置对端)。理由:被推迟的多是防"拿到
 S0→S7 一次一节,每节记 目标/改动/测试证据/失败项/回滚/提交号/下一节;
 **S1–S4 回环门禁全过前禁止任何非回环监听或 LAN 开放**;不借 P3b 放宽 P3a;不顺手做 P3c/P4/P6/P9。
 每次继续前重读 DECISIONS/PLAN/STATE/worklog/决策包,避免压缩后偏移。
+
+---
+
+## 2026-07-29 · D44 · B17 裁定:TLS 叶密钥用不可导出软件 CNG,CA 仍在 TPM
+
+**背景:** P3b S4 实测 **SChannel/Kestrel 不能把 TPM 密钥用作 TLS 凭据**(handshake "unexpected EOF")。
+攻坚(选项①,`20-client-win/spikes/b17-tpm-tls`)全数失败:`CngKey.Create`+`CopyWithPrivateKey`(直连/经 store)、
+`AllUsages`(TPM 拒:参数错误)、`New-SelfSignedCertificate -Provider PCP`(`NTE_PROV_TYPE_NOT_DEF`)。
+TPM 直接 CNG **签名**可用(S2 的 CA 已证),坏的只是"TPM 密钥做 **TLS 认证**"这一条,在本机标准路径下不可行。
+用户裁定"按推荐来"(①失败退②)。
+
+**裁定:**
+- **CA 私钥:仍在 TPM,不可导出。** 最关键 —— CA 沦陷=全盘沦陷,硬件绑定必须守住。
+- **服务器叶 + 客户端叶密钥:非导出软件 CNG**(`Microsoft Software Key Storage Provider`,`ExportPolicy=None`)。
+  这是对 **D35**(客户端密钥落 TPM)与 **D43 S0.7**(服务器密钥落 TPM)的正式修订。
+
+**安全影响(诚实记账):**
+- 失去:设备密钥的**硬件绑定**(TPM)—— 这是纵深防御的一层,不是主控。
+- 保住:① **CA 硬件绑定**(底线);② 密钥**不可导出**(`ExportPolicy=None`:私钥字节无法经标准 API 导出,
+  攻击者需以机主身份取得代码执行 + 内存提取,门槛远高于"拷个文件");③ **D35 两道门主控完整**
+  (偷安装包→生成新密钥→出现在待批列表→带外六词 SAS 比对→主机批准)—— 硬件绑定丢失不动摇这条。
+- 结论:对单用户 2 台家用 PC 可接受;CA 在 TPM 的底线已守。
+
+**推翻条件:** 未来解决 TPM↔SChannel 集成(低层 NCrypt / `certreq -accept` 链接 / 换 TLS 栈)可迁回 TPM。
+
+**实现:** `Ca.TlsKeyProvider`=软件 KSP;`Identity.Init` 服务器密钥用它,locators 记 `ca_provider`/`server_provider`;
+Edge `LoadServerCert` 按 locators 开密钥;`Ca.DeleteKey` provider 无关。
+**S4 生产路径 selftest 8/8、S2 回归全过。** 客户端叶密钥同走软件 KSP(client-transport CLI 未来实现时遵此)。

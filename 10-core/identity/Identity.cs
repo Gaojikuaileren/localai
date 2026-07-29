@@ -31,10 +31,11 @@ public static class Identity
 
         using var caCert = Ca.CreateCa(caKeyName, "LocalAI Hub CA " + hubShort, years: 10);
 
-        // server leaf key in the TPM (persistent, non-exportable), used by Kestrel in S4/S5
+        // server leaf key: non-exportable software CNG key (SChannel-usable; B17/D44). Persistent,
+        // used by Kestrel in S4/S5. The CA key (above) stays in the TPM.
         var srvParams = new CngKeyCreationParameters
         {
-            Provider = new CngProvider(Ca.TpmProvider),
+            Provider = new CngProvider(Ca.TlsKeyProvider),
             ExportPolicy = CngExportPolicies.None,
             KeyUsage = CngKeyUsages.Signing,
         };
@@ -57,7 +58,8 @@ public static class Identity
         // TPM key locators (NOT the private keys) -> {state}/secrets
         File.WriteAllText(Path.Combine(secretsDir, "identity-locators.json"), JsonSerializer.Serialize(new
         {
-            provider = Ca.TpmProvider,
+            ca_provider = Ca.TpmProvider,           // CA key: TPM (non-exportable)
+            server_provider = Ca.TlsKeyProvider,    // server leaf key: software KSP (non-exportable; B17/D44)
             ca_key_name = caKeyName,
             server_key_name = serverKeyName,
             ca_thumbprint = caCert.Thumbprint,

@@ -15,6 +15,11 @@ namespace LocalAI.Identity;
 public static class Ca
 {
     public const string TpmProvider = "Microsoft Platform Crypto Provider";
+    public const string SoftwareProvider = "Microsoft Software Key Storage Provider";
+    // ★ B17/D44: TLS leaf keys (server + client) use the software KSP -- SChannel cannot use TPM keys
+    //   as TLS credentials on this platform. They are still ExportPolicy=None (non-exportable). The CA
+    //   key stays in the TPM (CngKey.Create in CreateCa below).
+    public const string TlsKeyProvider = SoftwareProvider;
     public const string OidServerAuth = "1.3.6.1.5.5.7.3.1";
     public const string OidClientAuth = "1.3.6.1.5.5.7.3.2";
 
@@ -22,9 +27,11 @@ public static class Ca
 
     public static bool CaExists(string keyName) => CngKey.Exists(keyName, Prov);
 
+    // provider-agnostic: the key may live in the TPM (CA) or the software KSP (TLS leaves).
     public static void DeleteKey(string keyName)
     {
-        if (CngKey.Exists(keyName, Prov)) CngKey.Open(keyName, Prov).Delete();
+        foreach (var p in new[] { new CngProvider(TpmProvider), new CngProvider(SoftwareProvider) })
+            if (CngKey.Exists(keyName, p)) { CngKey.Open(keyName, p).Delete(); return; }
     }
 
     public static X509Certificate2 PublicOf(X509Certificate2 cert)

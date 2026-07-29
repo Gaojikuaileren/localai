@@ -92,14 +92,8 @@ static async Task<int> Selftest()
         });
         await upstream.StartAsync();
 
-        // --- the Edge, pointed at the stub upstream (SChannel-usable software server cert, TPM CA-signed) ---
-        swSrvKeyName = "localai-edge-selftest-srv-" + Convert.ToHexString(R(4)).ToLowerInvariant();
-        using var srvKeyCng = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, swSrvKeyName,
-            new CngKeyCreationParameters { Provider = swProv, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
-        var srvPub = PublicKey.CreateFromSubjectPublicKeyInfo(srvKeyCng.ExportSubjectPublicKeyInfo(), out _);
-        using var srvLeafPub = Ca.IssueLeaf(hub.CaKeyName, caPublic, srvPub, hub.ServerName, hub.ServerName, null, true, false, 30);
-        using var serverCert = srvLeafPub.CopyWithPrivateKey(srvKeyCng);
-        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upstreamPort}", 18443), serverCert);
+        // --- the Edge, using the identity's REAL server cert (software-KSP key per B17/D44 -> SChannel-usable) ---
+        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upstreamPort}", 18443));
         await edge.StartAsync();
 
         // client helper: custom root trust (CA), dial loopback, optional client cert
@@ -315,7 +309,8 @@ static class Edge
         if (found.Count > 0 && found[0].HasPrivateKey) return found[0];
         var loc = JsonDocument.Parse(File.ReadAllText(Path.Combine(secDir, "identity-locators.json"))).RootElement;
         var serverKeyName = loc.GetProperty("server_key_name").GetString()!;
-        using var key = new ECDsaCng(CngKey.Open(serverKeyName, new CngProvider(Ca.TpmProvider)));
+        var serverProvider = loc.TryGetProperty("server_provider", out var sp) ? sp.GetString()! : Ca.TlsKeyProvider;
+        using var key = new ECDsaCng(CngKey.Open(serverKeyName, new CngProvider(serverProvider)));
         using var withKey = pub.CopyWithPrivateKey(key);
         store.Add(withKey);
         return store.Certificates.Find(X509FindType.FindByThumbprint, pub.Thumbprint, false)[0];
