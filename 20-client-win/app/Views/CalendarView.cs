@@ -57,6 +57,8 @@ public sealed class CalendarView : UserControl
     readonly ContentControl _body = new();
     readonly StackPanel _dayList = new();
     readonly ScrollViewer _dayScroll;
+    readonly DockPanel _dayArea;
+    readonly Button _addButton;
 
     public CalendarView(Mode mode)
     {
@@ -66,6 +68,10 @@ public sealed class CalendarView : UserControl
         _label.FontWeight = FontWeights.SemiBold;
         _label.VerticalAlignment = VerticalAlignment.Center;
         _label.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        // 点年月标签 -> 直接挑年份/月份(不用一格一格翻)
+        _label.Cursor = System.Windows.Input.Cursors.Hand;
+        _label.ToolTip = "选择年份 / 月份";
+        _label.MouseLeftButtonUp += (s, _) => OpenMonthPicker((FrameworkElement)s);
 
         // 左:月份标签 +「今日」—— 紧跟标签,不与翻页键混在一起
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -81,13 +87,24 @@ public sealed class CalendarView : UserControl
             Content = _dayList,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Margin = new Thickness(0, 8, 0, 0),
         }.PassThrough();
+
+        // 周排布下方区域:左边是当日日程列表,右边是"新增日程"—— 二者【并列】(用户裁定),
+        // 而不是把新增按到列表末尾。
+        _dayArea = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 8, 0, 0) };
+        _addButton = Ui.Secondary("+ 新增日程", (_, _) => OpenEditor(_selected, null));
+        _addButton.Height = 26;
+        _addButton.FontSize = 11.5;
+        _addButton.VerticalAlignment = VerticalAlignment.Top;
+        _addButton.Margin = new Thickness(10, 0, 0, 0);
+        DockPanel.SetDock(_addButton, Dock.Right);
+        _dayArea.Children.Add(_addButton);
+        _dayArea.Children.Add(_dayScroll);
 
         var root = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(head, Dock.Top); root.Children.Add(head);
         DockPanel.SetDock(_body, Dock.Top); root.Children.Add(_body);
-        root.Children.Add(_dayScroll);
+        root.Children.Add(_dayArea);
         Content = root;
 
         Rebuild();
@@ -102,7 +119,7 @@ public sealed class CalendarView : UserControl
         _leftActions.Children.Clear();
         if (!ShowsToday())
         {
-            var today = Btn("今日", () =>
+            var today = Btn("回到今日", () =>
             {
                 _selected = DateTime.Today;
                 _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
@@ -127,7 +144,7 @@ public sealed class CalendarView : UserControl
         _body.Content = _mode == Mode.Week ? WeekRows() : MonthGrid();
 
         // ★ 只有周排布在下方列当日日程;月排布靠点日期弹浮窗(用户裁定)
-        _dayScroll.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
+        _dayArea.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
         if (_mode == Mode.Week) RebuildDayList();
     }
 
@@ -255,21 +272,22 @@ public sealed class CalendarView : UserControl
         else { cell.Background = Brushes.Transparent; cell.BorderBrush = Brushes.Transparent; }
 
         var captured = day.Date;
-        cell.MouseLeftButtonUp += (s, _) =>
+        cell.MouseLeftButtonUp += (_, _) =>
         {
             _selected = captured;
             var wasMonth = _mode == Mode.Month;
-            // 月排布点到上/下月的灰日 -> 跟着翻到那个月
             if (wasMonth && captured.Month != _anchor.Month) _anchor = captured;
             Rebuild();
-            // ★ 月排布没有下方日程区,所以点日期弹浮窗显示当天日程 + 新增(用户裁定)
-            if (wasMonth) OpenDayFlyout((FrameworkElement)s, captured);
+            // ★ 月排布没有下方日程区,点日期弹浮窗显示当天日程 + 新增(用户裁定)。
+            //   注意:Rebuild() 已经把刚被点的那个格子换成新对象了,拿它当锚点会定位失败
+            //   (这正是"月视图点日期弹不出浮窗"的原因)。锚到本视图 + 在鼠标处弹出。
+            if (wasMonth) OpenDayFlyout(captured);
         };
         return cell;
     }
 
     // ---------------------------------------------------------------- 月排布:当日浮窗
-    void OpenDayFlyout(FrameworkElement anchor, DateTime day)
+    void OpenDayFlyout(DateTime day)
     {
         var body = new StackPanel();
         var evts = CalendarData.On(day).ToList();
@@ -288,7 +306,7 @@ public sealed class CalendarView : UserControl
             body.Children.Add(add);
         }
 
-        Flyout.Show(anchor, day.ToString("M月 d日 dddd", Zh), body, width: 300);
+        Flyout.ShowAtMouse(this, day.ToString("M月 d日 dddd", Zh), body, width: 300);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出
@@ -310,13 +328,6 @@ public sealed class CalendarView : UserControl
             _dayList.Children.Add(none);
         }
         else foreach (var ev in evts) _dayList.Children.Add(EventRow(ev, compact: true));
-
-        // 新增按钮在【日程下方】(用户裁定)。无论当天有没有日程都在。
-        var add = Ui.Secondary("+ 新增日程", (_, _) => OpenEditor(_selected, null));
-        add.Margin = new Thickness(0, 8, 0, 0);
-        add.Height = 26;
-        add.FontSize = 11.5;
-        _dayList.Children.Add(add);
     }
 
     /// <summary>一条日程。点它 = 编辑这一条(用户裁定)。</summary>
@@ -340,6 +351,62 @@ public sealed class CalendarView : UserControl
         hit.MouseLeave += (_, _) => hit.Background = Brushes.Transparent;
         hit.MouseLeftButtonUp += (_, _) => { Flyout.CloseAll(); OpenEditor(ev.Start.Date, ev); };
         return hit;
+    }
+
+    // ---------------------------------------------------------------- 年 / 月 选择浮窗
+    // 点左上角年月标签打开。翻页键适合走一两格,跨年跨月就该直接挑。
+    void OpenMonthPicker(FrameworkElement anchor)
+    {
+        var body = new StackPanel();
+        var year = _anchor.Year;
+
+        var yearRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 10) };
+        var yearLabel = new TextBlock { Text = year + " 年", FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+        yearLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+
+        var monthGrid = new UniformGrid { Columns = 4 };
+
+        void FillMonths()
+        {
+            yearLabel.Text = year + " 年";
+            monthGrid.Children.Clear();
+            for (int m = 1; m <= 12; m++)
+            {
+                var isCurrent = m == _anchor.Month && year == _anchor.Year;
+                var isThisMonth = m == DateTime.Today.Month && year == DateTime.Today.Year;
+                var t = new TextBlock { Text = m + " 月", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
+                t.SetResourceReference(TextBlock.ForegroundProperty, isCurrent ? "FgOnAccent" : isThisMonth ? "Accent" : "FgPrimary");
+                var cell = new Border { Child = t, Height = 34, Margin = new Thickness(2), Cursor = System.Windows.Input.Cursors.Hand };
+                cell.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+                if (isCurrent) cell.SetResourceReference(Border.BackgroundProperty, "Accent");
+                else cell.Background = Brushes.Transparent;
+                var capturedMonth = m; var capturedYear = year;
+                cell.MouseEnter += (_, _) => { if (!isCurrent) cell.SetResourceReference(Border.BackgroundProperty, "BgHover"); };
+                cell.MouseLeave += (_, _) => { if (!isCurrent) cell.Background = Brushes.Transparent; };
+                cell.MouseLeftButtonUp += (_, _) =>
+                {
+                    // 选定年月:月排布跳到该月;周排布跳到该月第一周
+                    var target = new DateTime(capturedYear, capturedMonth, 1);
+                    _anchor = _mode == Mode.Month ? target : StartOfWeek(target);
+                    _selected = target;
+                    Flyout.CloseAll();
+                    Rebuild();
+                };
+                monthGrid.Children.Add(cell);
+            }
+        }
+
+        var prevY = Btn("‹", () => { year--; FillMonths(); });
+        var nextY = Btn("›", () => { year++; FillMonths(); });
+        prevY.Margin = new Thickness(0); DockPanel.SetDock(prevY, Dock.Left); yearRow.Children.Add(prevY);
+        DockPanel.SetDock(nextY, Dock.Right); yearRow.Children.Add(nextY);
+        yearRow.Children.Add(yearLabel);
+
+        FillMonths();
+        body.Children.Add(yearRow);
+        body.Children.Add(monthGrid);
+
+        Flyout.Show(anchor, "选择年份 / 月份", body, width: 260);
     }
 
     /// <summary>existing 为 null = 新增;否则 = 编辑那一条。</summary>

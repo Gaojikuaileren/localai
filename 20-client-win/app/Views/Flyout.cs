@@ -2,7 +2,9 @@
 //
 // 用 WPF Popup 实现:
 //   · StaysOpen=false -> 点浮窗外面自动关(与抽屉"点外部即关"一致的手感);
-//   · AllowsTransparency=false -> 实色,不走 layered 合成(设计 §7 显存约束);
+//   · AllowsTransparency=true -> 圆角外必须透明,否则圆角四周会露出弹窗自身的黑底(实测)。
+//     设计 §7 禁的是【整窗大面积】毛玻璃/半透明带来的显存开销;一个小的、临时的浮窗
+//     用 layered 合成代价可忽略,而且不用它就做不出圆角与投影。这是有意的例外。
 //   · Placement 贴着触发元素,超出屏幕时 WPF 自动翻转到另一侧。
 //
 // 同一时刻只保留一个浮窗(CloseAll),避免层层叠叠。
@@ -24,7 +26,12 @@ public static class Flyout
         Open.Clear();
     }
 
-    public static void Show(FrameworkElement anchor, string title, UIElement body, double width = 320)
+    /// <summary>在鼠标位置弹出(点日期格时用)。锚元素只需存活,不要求它还在原位 ——
+    /// 因为点击往往会触发重建,原来的格子已经被换掉了。</summary>
+    public static void ShowAtMouse(FrameworkElement anchor, string title, UIElement body, double width = 320)
+        => Show(anchor, title, body, width, atMouse: true);
+
+    public static void Show(FrameworkElement anchor, string title, UIElement body, double width = 320, bool atMouse = false)
     {
         CloseAll();   // 同时只开一个
 
@@ -57,9 +64,9 @@ public static class Flyout
         {
             Child = card,
             PlacementTarget = anchor,
-            Placement = PlacementMode.Right,
-            StaysOpen = false,          // 点外面就关
-            AllowsTransparency = false, // 实色,不走 layered 合成
+            Placement = atMouse ? PlacementMode.MousePoint : PlacementMode.Right,
+            StaysOpen = false,         // 点外面就关
+            AllowsTransparency = true, // 圆角外透明,否则四角露黑底
             HorizontalOffset = 8,
             PopupAnimation = PopupAnimation.Fade,
         };
