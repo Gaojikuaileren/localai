@@ -20,7 +20,9 @@ public static class CalendarEditor
 
     public static UIElement Build(DateTime day, CalendarEvent? existing, Action onSaved)
     {
-        var start = existing?.Start ?? day.Date.AddHours(9);
+        // 新建日程:开始时间默认落在【当前时间之后最近的五分钟】(用户裁定),日期取所选那天。
+        // 编辑已有日程则保持它自己的时间。
+        var start = existing?.Start ?? (day.Date + WheelPicker.CeilToStep(DateTime.Now.TimeOfDay));
         var end = existing?.End ?? start + DefaultDuration;
 
         var title = Field(existing?.Title ?? "");

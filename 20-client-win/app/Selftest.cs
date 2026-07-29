@@ -146,6 +146,13 @@ public static class Selftest
             Assert(Views.WheelPicker.Snap(TimeSpan.FromHours(25)) == TimeSpan.FromMinutes(24 * 60 - 5),
                    "超过一天被夹到 23:55(有尾,不循环)");
 
+            // 新建日程默认开始 = 当前时间【向上】取到最近五分钟
+            Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 32, 0)) == new TimeSpan(9, 35, 0), "9:32 向上取到 9:35");
+            Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 31, 0)) == new TimeSpan(9, 35, 0), "9:31 也向上取到 9:35(不是就近的 9:30)");
+            Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 35, 0)) == new TimeSpan(9, 35, 0), "恰在刻度上则保持 9:35");
+            Assert(Views.WheelPicker.CeilToStep(new TimeSpan(9, 35, 1)) == new TimeSpan(9, 40, 0), "刚过刻度一秒也进到下一格 9:40");
+            Assert(Views.WheelPicker.CeilToStep(new TimeSpan(23, 58, 0)) == new TimeSpan(23, 55, 0), "临近午夜夹到 23:55");
+
             // ---- 显存条分段口径 ----
             var vs = new VramSnapshot(16.0, 4.0, 6.0, true);
             Assert(Math.Abs(vs.FreeGiB - 6.0) < 0.001, "显存三段相加等于总量(模型 + 桌面 + 未占用)");

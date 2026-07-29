@@ -183,6 +183,17 @@ public static class WheelPicker
         return TimeSpan.FromMinutes(total);
     }
 
+    /// <summary>
+    /// 【向上】取到最近的 5 分钟刻度 —— 新建日程时,开始时间默认落在"当前时间之后
+    /// 最近的五分钟"(用户裁定)。恰好在刻度上则保持不变;临近午夜夹到 23:55。
+    /// </summary>
+    public static TimeSpan CeilToStep(TimeSpan t)
+    {
+        var total = (int)Math.Ceiling(t.TotalMinutes / MinuteStep - 1e-9) * MinuteStep;
+        total = Math.Clamp(total, 0, 24 * 60 - MinuteStep);
+        return TimeSpan.FromMinutes(total);
+    }
+
     /// <summary>时:分 两列滚轮。返回容器,并给出可直接改值的句柄。</summary>
     public static (FrameworkElement Element, Action<TimeSpan> Set) Time(TimeSpan initial, Action<TimeSpan> onChanged)
     {
