@@ -190,15 +190,27 @@ public partial class MainWindow : Window
         TaskDrawerSlide.BeginAnimation(TranslateTransform.YProperty, anim);
     }
 
+    void OnOpenBriefing(object sender, RoutedEventArgs e)
+    {
+        if (_drawerKind == "briefing") { CloseDrawer(); return; }
+        OpenRightDrawer("briefing", "消息栏", new BriefingDrawerView());
+    }
+
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
         if (_drawerKind == "calendar") { CloseDrawer(); return; }
+        OpenRightDrawer("calendar", "日历", new CalendarPanel(CalendarPanel.Mode.TwoWeeks, expanded: true));
+    }
+
+    /// <summary>右上角下拉抽屉(日历 / 消息栏共用一个容器,同时只开一个)。</summary>
+    void OpenRightDrawer(string kind, string title, UserControl content)
+    {
         CloseDrawer();
-        _drawerKind = "calendar";
-        CalendarDrawerHost.Content = new CalendarPanel(CalendarPanel.Mode.TwoWeeks, expanded: true);
+        _drawerKind = kind;
+        RightDrawerTitle.Text = title;
+        CalendarDrawerHost.Content = content;
         DrawerScrim.Visibility = Visibility.Visible;
         CalendarDrawer.Visibility = Visibility.Visible;
-        // 从右上角向下展开
         var anim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
         { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
         CalendarDrawerScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
@@ -256,6 +268,7 @@ public partial class MainWindow : Window
         CloseButton.Content = Icons.Make(IconName.Close, 13, "FgSecondary");
         CollapseButton.Content = Icons.Make(IconName.Menu, 15, "FgMuted");
         CalendarButton.Content = Icons.Make(IconName.Calendar, 17, "FgSecondary");
+        BriefingButton.Content = Icons.Make(IconName.Chat, 17, "FgSecondary");
         TaskBarIcon.Content = Icons.Make(IconName.Tasks, 15, "Accent");
         TaskBarChevron.Content = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
         CalendarDrawerClose.Content = Icons.Make(IconName.Close, 12, "FgMuted");

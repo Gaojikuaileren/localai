@@ -144,7 +144,11 @@
               <Ellipse x:Name="StatusDot" Width="8" Height="8" Margin="0,0,8,0" Fill="{DynamicResource FgMuted}"/>
               <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{DynamicResource FgSecondary}"
                          FontSize="{DynamicResource FontCaption}" Margin="0,0,14,0"/>
-              <!-- 全局日历按钮。★ 主页里【不显示】—— 日历已经在主页右上角了(用户裁定)。 -->
+              <!-- 消息栏(含今日简报)。简报按用户裁定不占主页板块,放这个抽屉里。 -->
+              <Button x:Name="BriefingButton" Width="34" Height="34" Cursor="Hand"
+                      Background="Transparent" BorderThickness="0"
+                      Foreground="{DynamicResource FgSecondary}" ToolTip="消息栏 · 今日简报" Click="OnOpenBriefing"/>
+              <!-- 全局日历按钮。★ 主页里【不显示】—— 日历已经在主页最上面了(用户裁定)。 -->
               <Button x:Name="CalendarButton" Width="34" Height="34" Cursor="Hand"
                       Background="Transparent" BorderThickness="0"
                       Foreground="{DynamicResource FgSecondary}" ToolTip="日历" Click="OnOpenCalendar"/>
@@ -213,7 +217,7 @@
       </Border.Effect>
       <DockPanel>
         <Grid DockPanel.Dock="Top" Height="46" Margin="16,0,8,0">
-          <TextBlock Text="日历" VerticalAlignment="Center" FontWeight="SemiBold"
+          <TextBlock x:Name="RightDrawerTitle" Text="日历" VerticalAlignment="Center" FontWeight="SemiBold"
                      FontSize="{DynamicResource FontSubtitle}" Foreground="{DynamicResource FgPrimary}"/>
           <Button x:Name="CalendarDrawerClose" Width="30" Height="30" HorizontalAlignment="Right" Cursor="Hand"
                   Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>

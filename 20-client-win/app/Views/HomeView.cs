@@ -1,20 +1,19 @@
-// P3c -- 主页(= 今天)。布局:
-//   ┌──────────────┬──────────────┬────────┐
-//   │ 简报          │ 待办与家务    │        │
-//   ├──────────────┴──────────────┤ 日历    │
-//   │ 天气三城(各带当地时间)       │        │
-//   ├─────────────────────────────┴────────┤
-//   │ 正在进行的项目(方块平分整宽,可滚动) │
-//   └──────────────────────────────────────┘
+// P3c -- 主页(= 今天)。用户裁定的布局:
+//   ┌────────────────────────────┬────────┐
+//   │ 日历(周横排,固定高)        │ 待办    │   ← 最上面的板块;日历占宽多,待办占少
+//   ├────────────────────────────┴────────┤
+//   │ 天气三城(固定高,只占所需)          │
+//   ├─────────────────────────────────────┤
+//   │ 正在进行的项目(占满剩余,方块平分)   │
+//   └─────────────────────────────────────┘
 //
-// ★ 响应式(用户提出的三个畸变风险,判据全部收敛在 Layout.cs 的纯函数里,可自动回归):
-//   ① 项目方块用 UniformGrid【平分】可用宽度 —— 不是固定宽度靠 WrapPanel 排,
-//      那样右侧必然剩一条空白。列数 = 可用宽度 / 理想宽度,随窗口变化实时重算。
-//   ② 全屏与最小窗口都不畸变:按密度取舍 —— 曲线高度、逐小时格数、方块高度、日历栏宽度
-//      逐级下调;极小窗口宁可**不显示**曲线/逐小时,也不显示"半截"的曲线。
-//   ③ 简报/待办限高 + 内部滚动:一侧内容再长也不会把另一侧撑出大片留白,
-//      更不会把下面的天气与项目挤变形。
+// 关键裁定:
+//   · 简报【不在主页】,移到右侧消息栏抽屉(BriefingDrawerView);
+//   · 日历放最上面、占宽多,日期【以周横排】、【高度固定】;待办在其右侧占宽少;
+//   · 天气【固定高度】—— 只占所需信息的高度,不再随窗口拉伸吃掉版面;
+//   · 项目占满剩余空间,方块平分整宽、可滚动。
 //
+// 响应式:能连续的连续插值、离散的带迟滞、拖拽期节流(见 Layout.cs 与 ScheduleRelayout)。
 // 数据未接入(天气等出境白名单 / 日历等 Apple 接入):曲线与逐小时用无数据基线,
 // 绝不画假数字冒充实时(设计 §4.1 / 状态矩阵 §8)。
 
@@ -31,7 +30,6 @@ namespace LocalAI.Client.Views;
 
 public sealed class HomeView : UserControl
 {
-    // 三城 = 天气 + 各自当地时间(纽约已按裁定删除)
     static readonly (string City, string Tag, string Tz)[] Cities =
     {
         ("科隆", "家", "W. Europe Standard Time"),
@@ -39,20 +37,20 @@ public sealed class HomeView : UserControl
         ("札幌", "",   "Tokyo Standard Time"),
     };
 
-    readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 23 };
+    /// <summary>天气板块固定高度:标题 + 温度行 + 状态两行 + 曲线 + 逐小时,只占所需。</summary>
+    const double WeatherHeight = 208;
+
+    readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 22 };
     readonly TextBlock[] _cityTime = new TextBlock[Cities.Length];
     readonly TextBlock[] _cityMeta = new TextBlock[Cities.Length];
-    readonly Grid[] _cityCurve = new Grid[Cities.Length];
     readonly UniformGrid[] _cityHourly = new UniformGrid[Cities.Length];
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     readonly Grid _root = new();
-    readonly ColumnDefinition _calColumn = new();
+    readonly ColumnDefinition _todoColumn = new();
     readonly UniformGrid _tiles = new();
-    readonly Border _calendarPanel;
-    readonly Border _briefPanel, _todoPanel;
+    readonly Border _todoPanel;
     readonly ScrollViewer _pageScroll = new();
-
 
     App TheApp => (App)Application.Current;
 
@@ -60,41 +58,47 @@ public sealed class HomeView : UserControl
     {
         _greeting.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
 
-        _root.Margin = new Thickness(24, 16, 24, 18);
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        _calColumn.Width = new GridLength(Layout.CalendarWidth(1200));
-        _root.ColumnDefinitions.Add(_calColumn);
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                          // 问候
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                          // 简报 | 待办
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1.15, GridUnitType.Star), MinHeight = 150 });  // 天气
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 120 });     // 项目
+        _root.Margin = new Thickness(24, 14, 24, 18);
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 日历(宽)
+        _todoColumn.Width = new GridLength(300);                                                             // 待办(窄)
+        _root.ColumnDefinitions.Add(_todoColumn);
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 问候
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 日历 | 待办(固定高)
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 天气(固定高)
+        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 130 }); // 项目(占满剩余)
 
         // ① 问候
         _greeting.Margin = new Thickness(2, 0, 0, 10);
-        Grid.SetRow(_greeting, 0); Grid.SetColumn(_greeting, 0);
+        Grid.SetRow(_greeting, 0); Grid.SetColumnSpan(_greeting, 2);
         _root.Children.Add(_greeting);
 
-        // ② 简报 | 待办 —— 限高 + 内部滚动(用户担心的"一长一短"在这里被挡住)
-        _briefPanel = Ui.Panel(Strings.Get("today.briefing"),
-            Scrollable(Ui.Stack(Ui.Body("今天还没有简报。", muted: true),
-                                Ui.Caption("每天第一次打开时生成;每人每天只主动展示一次。个人简报只给本人。"))),
-            IconName.Chat, new Thickness(0, 0, 8, 12));
-        _todoPanel = Ui.Panel("待办与家务",
-            Scrollable(Ui.Stack(Ui.Body("还没有待办。", muted: true),
-                                Ui.Caption("「提醒我…」建个人待办;「提醒我们…」建家庭事务。"))),
-            IconName.Member, new Thickness(8, 0, 0, 12));
-        var pair = TwoUp(_briefPanel, _todoPanel);
-        pair.Margin = new Thickness(0, 0, 16, 0);
-        Grid.SetRow(pair, 1); Grid.SetColumn(pair, 0);
-        _root.Children.Add(pair);
+        // ② 日历(周横排,固定高)| 待办(窄)
+        var calPanel = Ui.Panel("日历", new CalendarStrip { Height = CalendarStrip.StripHeight },
+                                IconName.Calendar, new Thickness(0, 0, 12, 12));
+        Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
+        _root.Children.Add(calPanel);
 
-        // ③ 天气三城
-        var weather = new UniformGrid { Rows = 1, Columns = Cities.Length, Margin = new Thickness(0, 0, 16, 12) };
+        _todoPanel = Ui.Panel("待办与家务",
+            new ScrollViewer
+            {
+                Content = Ui.Stack(Ui.Body("还没有待办。", muted: true),
+                                   Ui.Caption("「提醒我…」建个人待办;「提醒我们…」建家庭事务。")),
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            }.PassThrough(),
+            IconName.Member, new Thickness(0, 0, 0, 12));
+        // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
+        _todoPanel.Height = CalendarStrip.StripHeight + 46;
+        Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
+        _root.Children.Add(_todoPanel);
+
+        // ③ 天气三城:固定高度,只占所需
+        var weather = new UniformGrid { Rows = 1, Columns = Cities.Length, Height = WeatherHeight, Margin = new Thickness(0, 0, 0, 12) };
         for (int i = 0; i < Cities.Length; i++) weather.Children.Add(CityCard(i));
-        Grid.SetRow(weather, 2); Grid.SetColumn(weather, 0);
+        Grid.SetRow(weather, 2); Grid.SetColumnSpan(weather, 2);
         _root.Children.Add(weather);
 
-        // ④ 项目方块:UniformGrid 平分整宽
+        // ④ 项目方块:占满剩余,平分整宽,可滚动
         _tiles.Columns = 4;
         var projects = Ui.Panel(Strings.Get("project.resume"),
             new ScrollViewer
@@ -102,18 +106,12 @@ public sealed class HomeView : UserControl
                 Content = _tiles,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            },
-            IconName.Tasks, new Thickness(0, 0, 16, 0));
-        Grid.SetRow(projects, 3); Grid.SetColumn(projects, 0);
+            }.PassThrough(),
+            IconName.Tasks, new Thickness(0));
+        Grid.SetRow(projects, 3); Grid.SetColumnSpan(projects, 2);
         _root.Children.Add(projects);
 
-        // 右栏:日历
-        _calendarPanel = Ui.Panel("日历", new CalendarPanel(CalendarPanel.Mode.TwoWeeks), IconName.Calendar, new Thickness(0));
-        _calendarPanel.VerticalAlignment = VerticalAlignment.Stretch;
-        Grid.SetRow(_calendarPanel, 0); Grid.SetRowSpan(_calendarPanel, 4); Grid.SetColumn(_calendarPanel, 1);
-        _root.Children.Add(_calendarPanel);
-
-        // 兜底逃生口:窗口小到连 Tight 都放不下时,允许整页纵向滚动 —— 宁可滚动也不裁切内容。
+        // 兜底逃生口:极端尺寸下允许整页纵向滚动 —— 宁可滚动也不裁切内容
         _pageScroll.Content = _root;
         _pageScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         _pageScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
@@ -132,58 +130,34 @@ public sealed class HomeView : UserControl
         Unloaded += (_, _) => _timer.Stop();
     }
 
-    static ScrollViewer Scrollable(UIElement content) => new()
-    {
-        Content = content,
-        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-    };
-
     // ---------------------------------------------------------------- 随尺寸重排
-    // 丝滑要点:① 连续量直接跟随尺寸(不分档);② 离散量带迟滞;
-    //          ③ 拖动窗口时【节流】—— 每一像素都重排会卡,尤其逐小时格数变化要重建子元素。
     readonly DispatcherTimer _resizeThrottle = new() { Interval = TimeSpan.FromMilliseconds(60) };
     int _cols, _slots;
 
     void ScheduleRelayout()
     {
         _resizeThrottle.Stop();
-        _resizeThrottle.Start();   // 拖动停下来 60ms 后才真正重排
-        RelayoutContinuous();      // 连续量每帧都跟,视觉上完全跟手
+        _resizeThrottle.Start();   // 拖动停下 60ms 后才做需要重建子元素的活
+        RelayoutContinuous();      // 连续量每帧跟手
     }
 
-    /// <summary>连续量:每次尺寸变化都更新,平滑无跳变(不涉及重建子元素,开销极小)。</summary>
     void RelayoutContinuous()
     {
-        var w = ActualWidth; var h = ActualHeight;
-        if (w <= 0 || h <= 0) return;
-
-        var calW = Layout.CalendarWidth(w);
-        _calColumn.Width = new GridLength(calW);
-        _calendarPanel.Visibility = Visibility.Visible;
-
-        var panelMax = Layout.PanelMaxHeight(h);
-        _briefPanel.MaxHeight = panelMax;
-        _todoPanel.MaxHeight = panelMax;
-
-        var curveH = Layout.CurveHeight(h);
-        var tileH = Layout.TileHeight(h);
-        for (int i = 0; i < Cities.Length; i++) _cityCurve[i].Height = curveH;
-        foreach (var c in _tiles.Children) if (c is FrameworkElement fe) fe.Height = tileH;
+        var w = ActualWidth;
+        if (w <= 0) return;
+        // 待办列宽随窗口连续变化(268→340),始终"占少"
+        _todoColumn.Width = new GridLength(Math.Round(Math.Clamp(w * 0.22, 268, 340)));
     }
 
-    /// <summary>离散量:带迟滞,且只在拖动停下后执行(涉及重建子元素)。</summary>
     void RelayoutDiscrete()
     {
-        var w = ActualWidth; var h = ActualHeight;
-        if (w <= 0 || h <= 0) return;
+        var w = ActualWidth;
+        if (w <= 0) return;
 
-        var contentW = Math.Max(0, w - Layout.CalendarWidth(w) - 64);
-
-        var cols = Layout.ProjectColumns(contentW, _cols);
+        var cols = Layout.ProjectColumns(w - 8, _cols);
         if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
 
-        var cardW = contentW / Cities.Length;
+        var cardW = w / Cities.Length;
         var slots = Layout.HourlySlots(cardW, _slots);
         if (slots != _slots)
         {
@@ -197,7 +171,7 @@ public sealed class HomeView : UserControl
     {
         var (city, tag, _) = Cities[i];
 
-        _cityTime[i] = new TextBlock { Text = "—", FontSize = 16, FontWeight = FontWeights.Medium, HorizontalAlignment = HorizontalAlignment.Right };
+        _cityTime[i] = new TextBlock { Text = "—", FontSize = 15, FontWeight = FontWeights.Medium, HorizontalAlignment = HorizontalAlignment.Right };
         _cityTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         _cityMeta[i] = new TextBlock { HorizontalAlignment = HorizontalAlignment.Right };
         _cityMeta[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -207,10 +181,10 @@ public sealed class HomeView : UserControl
         timeCol.HorizontalAlignment = HorizontalAlignment.Right;
         DockPanel.SetDock(timeCol, Dock.Right);
 
-        var temp = new TextBlock { Text = "—°", FontSize = 32, FontWeight = FontWeights.Light, VerticalAlignment = VerticalAlignment.Center };
+        var temp = new TextBlock { Text = "—°", FontSize = 30, FontWeight = FontWeights.Light, VerticalAlignment = VerticalAlignment.Center };
         temp.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
 
-        var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 3) };
+        var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 2) };
         topRow.Children.Add(timeCol);
         topRow.Children.Add(temp);
 
@@ -221,8 +195,8 @@ public sealed class HomeView : UserControl
         hl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         hl.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        // 气温曲线(高度由 Relayout 按密度设定;0 = 不显示,不显示半截)
-        _cityCurve[i] = new Grid { Height = Layout.CurveHeight(800), Margin = new Thickness(0, 8, 0, 0), ClipToBounds = true };
+        // 气温曲线:天气板块固定高,曲线也固定高(不再随窗口伸缩 -> 不会显示不全)
+        var curve = new Grid { Height = 40, Margin = new Thickness(0, 6, 0, 0), ClipToBounds = true };
         var baseline = new System.Windows.Shapes.Path
         {
             StrokeThickness = 1.5,
@@ -232,11 +206,11 @@ public sealed class HomeView : UserControl
             VerticalAlignment = VerticalAlignment.Center,
         };
         baseline.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Border");
-        _cityCurve[i].Children.Add(baseline);
+        curve.Children.Add(baseline);
         var noData = new TextBlock { Text = "今日气温曲线待接入", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         noData.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         noData.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        _cityCurve[i].Children.Add(noData);
+        curve.Children.Add(noData);
 
         _cityHourly[i] = new UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 0) };
         SetHourly(_cityHourly[i], 6);
@@ -246,15 +220,15 @@ public sealed class HomeView : UserControl
         DockPanel.SetDock(st, Dock.Top); inner.Children.Add(st);
         DockPanel.SetDock(hl, Dock.Top); inner.Children.Add(hl);
         DockPanel.SetDock(_cityHourly[i], Dock.Bottom); inner.Children.Add(_cityHourly[i]);
-        inner.Children.Add(_cityCurve[i]);
+        inner.Children.Add(curve);
 
         var title = string.IsNullOrEmpty(tag) ? city : $"{city} · {tag}";
-        return Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, 12, 0));
+        return Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, i < Cities.Length - 1 ? 12 : 0, 0));
     }
 
     static void SetHourly(UniformGrid grid, int slots)
     {
-        if (grid.Columns == slots && grid.Children.Count == slots) return;   // 无变化则不重建
+        if (grid.Columns == slots && grid.Children.Count == slots) return;
         grid.Columns = slots;
         grid.Children.Clear();
         var h0 = DateTime.Now.Hour;
@@ -287,7 +261,7 @@ public sealed class HomeView : UserControl
             return;
         }
         foreach (var p in items) _tiles.Children.Add(ProjectTile(p));
-        _cols = 0;   // 重建后重新协商列数
+        _cols = 0;
         RelayoutContinuous(); RelayoutDiscrete();
     }
 
@@ -335,8 +309,7 @@ public sealed class HomeView : UserControl
         var tile = new Border
         {
             Child = body,
-            Height = Layout.TileHeight(800),
-            // ★ 不设 Width:由 UniformGrid 平分可用宽度,方块自动拉伸填满,右侧不留空白
+            Height = 126,
             Padding = new Thickness(14),
             Margin = new Thickness(0, 0, 12, 12),
             BorderThickness = new Thickness(1),
@@ -354,17 +327,6 @@ public sealed class HomeView : UserControl
         };
         tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}";
         return tile;
-    }
-
-    static Grid TwoUp(UIElement left, UIElement right)
-    {
-        var g = new Grid();
-        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        Grid.SetColumn((FrameworkElement)left, 0);
-        Grid.SetColumn((FrameworkElement)right, 1);
-        g.Children.Add(left); g.Children.Add(right);
-        return g;
     }
 
     void UpdateClocks()
