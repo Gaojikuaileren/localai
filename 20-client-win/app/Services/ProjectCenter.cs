@@ -19,7 +19,8 @@ public sealed record Project(
     string Subtitle,
     string WorkspaceKey,
     ProjectScope Scope,
-    DateTime LastOpened);
+    DateTime LastOpened,
+    bool Pinned = false);
 
 public sealed class ProjectCenter
 {
@@ -37,6 +38,14 @@ public sealed class ProjectCenter
         if (i >= 0) { _items[i] = _items[i] with { LastOpened = DateTime.Now }; Changed?.Invoke(); }
     }
 
-    /// <summary>最近使用在前 —— 主页要的是"回到刚才那件事"。</summary>
-    public IEnumerable<Project> Recent() => _items.OrderByDescending(p => p.LastOpened);
+    /// <summary>置顶 / 取消置顶。置顶的项排在最前(见 Recent)。</summary>
+    public void TogglePin(string projectId)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i >= 0) { _items[i] = _items[i] with { Pinned = !_items[i].Pinned }; Changed?.Invoke(); }
+    }
+
+    /// <summary>置顶在最前,其余按最近使用 —— 主页要的是"回到刚才那件事"。</summary>
+    public IEnumerable<Project> Recent()
+        => _items.OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
 }

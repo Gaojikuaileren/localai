@@ -208,6 +208,17 @@ public static class Selftest
             Assert(!(overdue with { Due = DateTime.Now.AddHours(1) }).IsOverdue, "未来截止不算逾期");
             Assert(!(overdue with { Done = true }).IsOverdue, "已完成不算逾期");
 
+            // ---- 项目置顶:置顶在前 + 切换 ----
+            var projCenter = new Services.ProjectCenter();
+            projCenter.Add(new Services.Project("a", "较新", "", "chat", Services.ProjectScope.Family, DateTime.Now));
+            projCenter.Add(new Services.Project("b", "较旧", "", "chat", Services.ProjectScope.Family, DateTime.Now.AddHours(-3)));
+            Assert(projCenter.Recent().First().ProjectId == "a", "未置顶时:最近的在前");
+            projCenter.TogglePin("b");
+            Assert(projCenter.Recent().First().ProjectId == "b", "置顶后:置顶项排到最前(盖过更近的)");
+            Assert(projCenter.Items.First(x => x.ProjectId == "b").Pinned, "TogglePin 置为已置顶");
+            projCenter.TogglePin("b");
+            Assert(projCenter.Recent().First().ProjectId == "a", "取消置顶后回到按最近排序");
+
             // 接线:板块有 + 按钮、用共享行渲染器、变更自动刷新;编辑器当场写库并收起抽屉
             var homeTodo = TryReadSource(Path.Combine("Views", "HomeView.cs"));
             if (homeTodo is not null)
@@ -221,8 +232,17 @@ public static class Selftest
                 Assert(homeTodo.Contains("_todoGrace"), "有 3 秒宽限轮询把已完成项刷走");
 
                 Assert(homeTodo.Contains("Greetings.SubFor"), "问候块显示小助手副句");
-                Assert(homeTodo.Contains("(ActualWidth - 48) / 3.0"), "问候块占约 1/3 宽");
+                Assert(homeTodo.Contains("contentW / 3.0"), "问候块占约 1/3 宽");
                 Assert(homeTodo.Contains("FontSize = 30"), "问候主句字号更大");
+
+                Assert(homeTodo.Contains("PinButton(") && homeTodo.Contains("Projects.TogglePin"), "项目方块有置顶按钮");
+                Assert(homeTodo.Contains("p.Pinned ? 2 : 1"), "置顶方块描边更粗");
+                Assert(homeTodo.Contains("Opacity = 0") && homeTodo.Contains("pinBtn.Opacity = 1"), "置顶按钮平时隐藏、hover 才显示");
+                Assert(homeTodo.Contains("AnimateTodoOut") && homeTodo.Contains("IsHitTestVisible = false"), "完成项向右划出、动画期间不可交互");
+                Assert(homeTodo.Contains("_todoColumn.Width = new GridLength(Math.Max(150, cardOuter))"), "待办列宽=一个天气卡宽(与天气对齐)");
+                var uiSrc = TryReadSource(Path.Combine("Views", "Ui.cs"));
+                if (uiSrc is not null)
+                    Assert(uiSrc.Contains("用两条【居中的矩形】拼"), "+ 号用居中矩形绘制(不再偏移)");
 
                 // 天气拖拽只能从右下角手柄起手,不是整块板块(用户裁定)
                 Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown"), "天气拖拽从右下角手柄区起手");

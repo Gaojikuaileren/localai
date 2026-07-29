@@ -90,19 +90,22 @@ public static class Ui
     /// </summary>
     public static FrameworkElement PlusButton(Action onClick, string? tip = null)
     {
-        var plus = new System.Windows.Shapes.Path
-        {
-            Data = Geometry.Parse("M8,3.5 L8,12.5 M3.5,8 L12.5,8"),
-            StrokeThickness = 1.7,
-            StrokeStartLineCap = PenLineCap.Round,
-            StrokeEndLineCap = PenLineCap.Round,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            IsHitTestVisible = false,
-        };
-        plus.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgOnAccent");
+        // ★ 用两条【居中的矩形】拼"+",而不是 Path。Path(Stretch=None)会把几何自带的
+        //   原点偏移一起算进元素边界,导致"+"在按钮块里偏右下、看着不居中(用户反馈)。
+        //   两条矩形各自在 24×24 里水平/垂直居中,交点恰在正中,像素也更清晰。
+        const double bar = 11, thick = 1.8;
+        var hBar = new System.Windows.Shapes.Rectangle
+        { Width = bar, Height = thick, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+        var vBar = new System.Windows.Shapes.Rectangle
+        { Width = thick, Height = bar, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+        hBar.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgOnAccent");
+        vBar.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgOnAccent");
 
-        var b = new Border { Width = 24, Height = 24, Cursor = System.Windows.Input.Cursors.Hand, Child = plus };
+        var glyph = new Grid();
+        glyph.Children.Add(hBar);
+        glyph.Children.Add(vBar);
+
+        var b = new Border { Width = 24, Height = 24, Cursor = System.Windows.Input.Cursors.Hand, Child = glyph };
         b.Dyn(Border.BackgroundProperty, "Accent").Dyn(Border.CornerRadiusProperty, "RadiusSm");
         b.MouseEnter += (_, _) => b.Opacity = 0.85;
         b.MouseLeave += (_, _) => b.Opacity = 1.0;

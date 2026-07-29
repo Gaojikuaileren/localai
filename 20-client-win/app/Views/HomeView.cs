@@ -58,9 +58,11 @@ public sealed class HomeView : UserControl
     readonly UniformGrid _tiles = new();
     readonly StackPanel _todoList = new();
     readonly Border _todoPanel;
-    // 完成后停留 3 秒再归档:宽限期内每 400ms 刷一次,到点把已完成项从主板块刷走
-    readonly DispatcherTimer _todoGrace = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    // 完成后停留 3 秒再归档:宽限期内每 250ms 巡一次,到点把已完成项【向右划出】再移除
+    readonly DispatcherTimer _todoGrace = new() { Interval = TimeSpan.FromMilliseconds(250) };
     TextBlock? _archiveLabel;
+    readonly Dictionary<string, FrameworkElement> _todoRows = new();   // id -> 当前显示的行,供划出动画定位
+    readonly HashSet<string> _todoAnimatingOut = new();               // 正在划出的行(动画期间不重复触发、不可交互)
     readonly ScrollViewer _pageScroll = new();
 
     App TheApp => (App)Application.Current;
@@ -71,9 +73,11 @@ public sealed class HomeView : UserControl
         _greetingSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
 
         _root.Margin = new Thickness(24, 14, 24, 18);
-        // 用户裁定:日历占【三分之二】,待办占三分之一
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });   // 日历 2/3
-        _todoColumn.Width = new GridLength(1, GridUnitType.Star);                                             // 待办 1/3
+        // 用户裁定:待办要与下方天气板块【对齐】,日历占【两个天气板块 + 间隔】的宽度。
+        //   做法:待办列宽 = 一个天气卡宽(在 RelayoutContinuous 里按窗口算),日历列吃掉剩余(星号)。
+        //   于是待办正好压在最右那张天气卡上,日历正好等于其余两卡 + 中间那道 12px 间隔。
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });   // 日历(占剩余)
+        _todoColumn.Width = new GridLength(1, GridUnitType.Star);                                             // 待办(启动后改为一卡宽 px)
         _root.ColumnDefinitions.Add(_todoColumn);
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 问候
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 日历 | 待办(固定高)
@@ -118,7 +122,7 @@ public sealed class HomeView : UserControl
             headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"));
         BuildTodos();
         TheApp.Todos.Changed += BuildTodos;
-        _todoGrace.Tick += (_, _) => BuildTodos();   // 宽限期内轮询,到点把已完成项刷走
+        _todoGrace.Tick += (_, _) => SweepExpiredTodos();   // 宽限到点 -> 划出动画,不是整表重建
         Unloaded += (_, _) => { TheApp.Todos.Changed -= BuildTodos; _todoGrace.Stop(); };
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
         // 与日历面板等高:日历面板 = 日历本体 + Ui.Panel 的标题行与内边距(约 62),
@@ -183,9 +187,14 @@ public sealed class HomeView : UserControl
 
     void RelayoutContinuous()
     {
-        // 日历 2/3、待办 1/3 由 Grid 星号列直接分配,随窗口天然连续,无需手动插值。
-        // 问候块占约 1/3 宽(减去 _root 左右各 24 的外边距)。
-        if (ActualWidth > 0) _greetingBox.Width = Math.Max(200, (ActualWidth - 48) / 3.0);
+        if (ActualWidth <= 0) return;
+        var contentW = ActualWidth - 48;                       // _root 左右各 24 外边距
+        // 待办列 = 一个天气卡宽 ->与下方天气对齐;日历列吃剩余(= 两卡 + 间隔)。
+        var n = Math.Max(1, _places.Count);
+        var cardOuter = (contentW - (n - 1) * WeatherGap) / n;
+        _todoColumn.Width = new GridLength(Math.Max(150, cardOuter));
+        // 问候块占约 1/3 宽
+        _greetingBox.Width = Math.Max(200, contentW / 3.0);
     }
 
     void RelayoutDiscrete()
@@ -505,6 +514,8 @@ public sealed class HomeView : UserControl
     void BuildTodos()
     {
         _todoList.Children.Clear();
+        _todoRows.Clear();
+        _todoAnimatingOut.Clear();   // 整表重建 -> 旧的划出动画作废(元素已被清掉)
         var items = TheApp.Todos.Active().ToList();
         if (items.Count == 0)
         {
@@ -514,15 +525,56 @@ public sealed class HomeView : UserControl
         else
         {
             foreach (var t in items)
-                _todoList.Children.Add(TodoList.Row(t, () => TheApp.Todos.Toggle(t.Id), () => OpenTodoEditor(t)));
+            {
+                var row = TodoList.Row(t, () => TheApp.Todos.Toggle(t.Id), () => OpenTodoEditor(t));
+                _todoRows[t.Id] = row;
+                _todoList.Children.Add(row);
+            }
         }
 
         // 已完成计数刷新
         if (_archiveLabel is not null) _archiveLabel.Text = $"已完成 ({TheApp.Todos.CompletedCount})";
 
-        // 还有处于 3 秒宽限期的项 -> 保持轮询,到点自动把它刷走;否则停表
+        // 还有处于 3 秒宽限期的项 -> 保持巡查,到点触发划出;否则停表
         if (TheApp.Todos.HasGrace()) { if (!_todoGrace.IsEnabled) _todoGrace.Start(); }
         else _todoGrace.Stop();
+    }
+
+    // 宽限到点的项:向右划出 + 淡出,划完再从列表移除(此时它已在"已完成"抽屉里)。
+    void SweepExpiredTodos()
+    {
+        var now = DateTime.Now;
+        foreach (var kv in _todoRows.ToList())
+        {
+            if (_todoAnimatingOut.Contains(kv.Key)) continue;
+            var item = TheApp.Todos.Items.FirstOrDefault(x => x.Id == kv.Key);
+            if (item is null) continue;
+            if (item.Done && item.CompletedAt is { } c && (now - c).TotalSeconds >= TodoCenter.ArchiveGraceSeconds)
+                AnimateTodoOut(kv.Key, kv.Value);
+        }
+        if (!TheApp.Todos.HasGrace() && _todoAnimatingOut.Count == 0) _todoGrace.Stop();
+    }
+
+    void AnimateTodoOut(string id, FrameworkElement row)
+    {
+        _todoAnimatingOut.Add(id);
+        row.IsHitTestVisible = false;   // ★ 动画期间不可点击、不可交互(用户裁定)
+        var tx = new TranslateTransform();
+        row.RenderTransform = tx;
+
+        var dist = row.ActualWidth > 0 ? row.ActualWidth + 24 : 340;
+        var slide = new DoubleAnimation(0, dist, TimeSpan.FromMilliseconds(300))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
+        slide.Completed += (_, _) =>
+        {
+            _todoList.Children.Remove(row);
+            _todoRows.Remove(id);
+            _todoAnimatingOut.Remove(id);
+            if (_todoList.Children.Count == 0) BuildTodos();     // 空了 -> 显示空态
+            if (!TheApp.Todos.HasGrace() && _todoAnimatingOut.Count == 0) _todoGrace.Stop();
+        };
+        tx.BeginAnimation(TranslateTransform.XProperty, slide);
+        row.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(300)));
     }
 
     // 右下角「已完成 (N) ›」—— 点开右侧抽屉看已归档的
@@ -610,6 +662,9 @@ public sealed class HomeView : UserControl
         var scopeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
         scopeRow.Children.Add(dot); scopeRow.Children.Add(scopeLabel);
 
+        // 标题给右上角的置顶按钮留出位置,长标题不会顶到 pin 图标下面
+        title.Margin = new Thickness(0, 0, 22, 0);
+
         var body = new DockPanel { LastChildFill = false };
         DockPanel.SetDock(icon, Dock.Top); body.Children.Add(icon);
         DockPanel.SetDock(scopeRow, Dock.Bottom); body.Children.Add(scopeRow);
@@ -618,18 +673,26 @@ public sealed class HomeView : UserControl
 
         var tile = new Border
         {
-            Child = body,
             Height = 126,
             Padding = new Thickness(14),
             Margin = new Thickness(0, 0, 12, 12),
-            BorderThickness = new Thickness(1),
+            // 置顶态:描边更粗 + 强调色 —— 常驻标识,不靠 hover(用户裁定)
+            BorderThickness = new Thickness(p.Pinned ? 2 : 1),
             Cursor = System.Windows.Input.Cursors.Hand,
         };
         tile.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-        tile.SetResourceReference(Border.BorderBrushProperty, "Border");
+        tile.SetResourceReference(Border.BorderBrushProperty, p.Pinned ? "Accent" : "Border");
         tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-        tile.MouseEnter += (_, _) => tile.SetResourceReference(Border.BackgroundProperty, "BgHover");
-        tile.MouseLeave += (_, _) => tile.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+
+        // 右上角置顶/取消置顶按钮:平时隐藏,鼠标移到方块上才显示(用户裁定)
+        var pinBtn = PinButton(p);
+        var overlay = new Grid();
+        overlay.Children.Add(body);
+        overlay.Children.Add(pinBtn);
+        tile.Child = overlay;
+
+        tile.MouseEnter += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); pinBtn.Opacity = 1; };
+        tile.MouseLeave += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); pinBtn.Opacity = 0; };
         tile.MouseLeftButtonUp += (_, _) =>
         {
             TheApp.Projects.Touch(p.ProjectId);
@@ -637,6 +700,37 @@ public sealed class HomeView : UserControl
         };
         tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}";
         return tile;
+    }
+
+    // 方块右上角的置顶按钮。未置顶=空心 pin,置顶=实心强调色 pin;点击切换。
+    FrameworkElement PinButton(Project p)
+    {
+        var pin = new System.Windows.Shapes.Path
+        {
+            // 水滴形 pin(小尺寸下最易读作"置顶/图钉")
+            Data = Geometry.Parse("M8,1.6 C5.4,1.6 3.3,3.7 3.3,6.3 C3.3,9.8 8,14.4 8,14.4 C8,14.4 12.7,9.8 12.7,6.3 C12.7,3.7 10.6,1.6 8,1.6 Z"),
+            Width = 15, Height = 15, Stretch = Stretch.Uniform, StrokeThickness = 1.4,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+        };
+        pin.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, p.Pinned ? "Accent" : "FgSecondary");
+        if (p.Pinned) pin.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "Accent");
+
+        var btn = new Border
+        {
+            Width = 24, Height = 24,
+            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+            Background = System.Windows.Media.Brushes.Transparent,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Opacity = 0,                       // 平时隐藏,tile hover 时置 1
+            Child = pin,
+            ToolTip = p.Pinned ? "取消置顶" : "置顶",
+        };
+        btn.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        btn.MouseEnter += (_, _) => btn.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        btn.MouseLeave += (_, _) => btn.Background = System.Windows.Media.Brushes.Transparent;
+        btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Projects.TogglePin(p.ProjectId); };
+        return btn;
     }
 
     void UpdateClocks()
