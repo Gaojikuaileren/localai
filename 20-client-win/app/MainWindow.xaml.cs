@@ -441,8 +441,9 @@ public partial class MainWindow : Window
         TheApp.Projects.Touch(projectId);
     }
 
-    /// <summary>右侧抽屉打开【项目抽屉】(新建/改状态/进项目聊天/项目库入口)。</summary>
-    public void OpenProjectDrawer() => OpenSideDrawer("项目", new ProjectDrawerView(), IconName.Tasks);
+    /// <summary>右侧抽屉打开【项目编辑器】(新建/编辑重定向路径)。existing 为空 = 新建。</summary>
+    public void OpenProjectEditor(Project? existing)
+        => OpenSideDrawer(existing is null ? "新建项目" : "编辑项目", ProjectEditor.Build(existing, () => Overlay.CloseActive()), IconName.Folder);
 
     /// <summary>右侧抽屉打开【项目库】(已完成项目)。</summary>
     public void OpenProjectLibrary() => OpenSideDrawer("项目库", new ProjectLibraryView(), IconName.Tasks);

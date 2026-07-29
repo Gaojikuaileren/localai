@@ -307,21 +307,43 @@ public static class Selftest
             if (mwStatus is not null)
             {
                 Assert(mwStatus.Contains("new ChatView()"), "聊天工作空间接入 ChatView");
-                Assert(mwStatus.Contains("OpenProjectDrawer") && mwStatus.Contains("OpenProjectLibrary") && mwStatus.Contains("OpenProjectInChat"), "项目抽屉/项目库/进项目聊天入口就位");
+                Assert(mwStatus.Contains("OpenProjectEditor") && mwStatus.Contains("OpenProjectLibrary") && mwStatus.Contains("OpenProjectInChat"), "项目编辑/项目库/进项目聊天入口就位");
             }
             var homeProj = TryReadSource(Path.Combine("Views", "HomeView.cs"));
             if (homeProj is not null)
             {
                 Assert(homeProj.Contains("ProjectLibraryButton"), "主页项目板块右上角有【项目库】按钮");
                 Assert(homeProj.Contains("ProjectUi.StatusChip"), "主页方块显示状态(进行中/准备中)");
-                Assert(homeProj.Contains("OpenInExplorer"), "主页方块右键可在文件夹打开");
+                Assert(homeProj.Contains("ProjectUi.DotsButton"), "主页方块用三个点菜单(取消右键)");
             }
-            var pdrawer = TryReadSource(Path.Combine("Views", "ProjectDrawerView.cs"));
-            if (pdrawer is not null)
-                Assert(pdrawer.Contains("PickFolder") && pdrawer.Contains("SetAiPermission"), "项目抽屉可建项目(选文件夹)并设 AI 权限");
+            var picker = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
+            if (picker is not null)
+            {
+                Assert(picker.Contains("IconName.Folder") && picker.Contains("UniformGrid"), "项目选择器用田字形文件夹图标");
+                Assert(picker.Contains("ProjectUi.DotsButton") && picker.Contains("ShowEditor"), "项目用三个点菜单;编辑取代网格");
+            }
+            var editorSrc = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
+            if (editorSrc is not null)
+                Assert(editorSrc.Contains("PickFolder") && editorSrc.Contains("SetAiPermission") && editorSrc.Contains("重定向"), "项目编辑器可选文件夹/设 AI 权限/重定向路径(新建编辑共用)");
             var chatSrc = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (chatSrc is not null)
+            {
                 Assert(chatSrc.Contains("UpgradeToProject") && chatSrc.Contains("MoveToProject"), "普通会话可升级为项目 / 移动到项目");
+                Assert(chatSrc.Contains("\"FgOnSelected\""), "会话选中态字色用 FgOnSelected(墨白不再黑底黑字)");
+                Assert(chatSrc.Contains("开始新的对话") && chatSrc.Contains("VerticalAlignment.Center"), "空态输入框竖直居中(像 GPT)");
+                Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PasteClipboard") && chatSrc.Contains("PickFile"), "可加附件/图片/剪贴板截图");
+            }
+
+            // 附件:只带路径/剪贴板指令,不真发内容;发送记录附件且仍不伪造回复
+            var att = new Services.ChatAttachment(Services.AttachKind.Image, "x.png", "x.png");
+            Assert(att.IsImage, "图片附件 IsImage=true");
+            Assert(new Services.ChatAttachment(Services.AttachKind.File, "a.zip", "a.zip").IsImage == false, "文件附件 IsImage=false");
+            var cc2 = new Services.ChatCenter();
+            var chatSes = cc2.NewSession(null);
+            cc2.Send(chatSes.SessionId, "", new[] { att });
+            var m3 = cc2.MessagesOf(chatSes.SessionId).ToList();
+            Assert(m3.Any(x => x.Role == Services.ChatRole.User && x.Attachments is { Count: 1 }), "仅附件也能发送并记下引用");
+            Assert(!m3.Any(x => x.Role == Services.ChatRole.Assistant), "带附件发送同样不伪造 AI 回复");
             msSet.DisabledModels.Add("chat.8b");
             Assert(!msSet.IsModelEnabled("chat.8b"), "停用列表里的模型不启用");
 

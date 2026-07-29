@@ -58,6 +58,76 @@ public static class ProjectUi
         host.ContextMenu = menu;
     }
 
+    static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
+
+    /// <summary>项目的下拉菜单(用户裁定:取消右键,改成【三个点】按钮拉出这个菜单)。
+    ///   在文件夹打开 · 改状态 · 改 AI 权限 · 编辑项目(重定向路径)。onEdit 打开项目编辑器。</summary>
+    public static ContextMenu BuildMenu(Project p, Action onEdit)
+    {
+        var m = new ContextMenu();
+
+        var open = new MenuItem { Header = "在文件夹中打开" };
+        open.Click += (_, _) =>
+        {
+            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
+                MessageBox.Show(string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
+                    "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information);
+        };
+        m.Items.Add(open);
+
+        m.Items.Add(new Separator());
+        foreach (var st in new[] { ProjectStatus.Preparing, ProjectStatus.Active, ProjectStatus.Done })
+        {
+            var (label, _) = Status(st);
+            var mi = new MenuItem { Header = "标记为 " + label, IsChecked = p.Status == st };
+            var captured = st;
+            mi.Click += (_, _) => Projects.SetStatus(p.ProjectId, captured);
+            m.Items.Add(mi);
+        }
+
+        m.Items.Add(new Separator());
+        var ai = new MenuItem { Header = "AI 权限" };
+        foreach (var perm in new[] { AiPermission.ReadOnly, AiPermission.Ask, AiPermission.Edit })
+        {
+            var mi = new MenuItem { Header = AiLabel(perm), IsChecked = p.Ai == perm, ToolTip = AiHint(perm) };
+            var captured = perm;
+            mi.Click += (_, _) => Projects.SetAiPermission(p.ProjectId, captured);
+            ai.Items.Add(mi);
+        }
+        m.Items.Add(ai);
+
+        m.Items.Add(new Separator());
+        var edit = new MenuItem { Header = "编辑项目 / 重定向路径…" };
+        edit.Click += (_, _) => onEdit();
+        m.Items.Add(edit);
+        return m;
+    }
+
+    /// <summary>三个点按钮:左键点开上面的菜单(替代右键)。</summary>
+    public static FrameworkElement DotsButton(Project p, Action onEdit)
+    {
+        var dots = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        for (int k = 0; k < 3; k++)
+        {
+            var e = new System.Windows.Shapes.Ellipse { Width = 3, Height = 3, Margin = new Thickness(1.3, 0, 1.3, 0) };
+            e.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgSecondary");
+            dots.Children.Add(e);
+        }
+        var b = new Border { Child = dots, Width = 26, Height = 22, Cursor = System.Windows.Input.Cursors.Hand, Background = Brushes.Transparent };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            var menu = BuildMenu(p, onEdit);
+            menu.PlacementTarget = b;
+            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+            menu.IsOpen = true;
+        };
+        return b;
+    }
+
     /// <summary>状态小圆点 + 文字,用于项目行/方块。</summary>
     public static StackPanel StatusChip(ProjectStatus s)
     {

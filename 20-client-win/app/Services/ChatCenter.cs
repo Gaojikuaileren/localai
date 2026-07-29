@@ -9,9 +9,21 @@
 
 namespace LocalAI.Client.Services;
 
-public sealed record ChatMessage(string SessionId, ChatRole Role, string Text, DateTime At);
-
 public enum ChatRole { User, Assistant, System }
+
+public enum AttachKind { File, Image, Clipboard }
+
+/// <summary>
+/// 一个附件引用。★ 本机运行,不真的"发文件":只带【路径】(文件/图片)或【读剪贴板图片】的指令,
+/// 让 AI 自己去本机读;界面上给用户看的是预览。Path 对剪贴板 = 落到本机临时目录的预览 png。
+/// </summary>
+public sealed record ChatAttachment(AttachKind Kind, string Path, string Display)
+{
+    public bool IsImage => Kind is AttachKind.Image or AttachKind.Clipboard;
+}
+
+public sealed record ChatMessage(string SessionId, ChatRole Role, string Text, DateTime At,
+    IReadOnlyList<ChatAttachment>? Attachments = null);
 
 public sealed record ChatSession(
     string SessionId,
@@ -69,22 +81,27 @@ public sealed class ChatCenter
     /// 发送一条用户消息。★ 模型未接入:只记录用户消息 + 一条系统说明,不伪造 AI 回复。
     /// 首条消息把会话标题设为消息开头(方便在列表里认出来)。返回是否记下了(空消息不记)。
     /// </summary>
-    public bool Send(string sessionId, string text)
+    public bool Send(string sessionId, string text, IReadOnlyList<ChatAttachment>? attachments = null)
     {
         text = text?.Trim() ?? "";
-        if (text.Length == 0) return false;
+        var hasAtt = attachments is { Count: > 0 };
+        if (text.Length == 0 && !hasAtt) return false;   // 空消息且无附件 -> 不记
         var i = _sessions.FindIndex(x => x.SessionId == sessionId);
         if (i < 0) return false;
 
         var first = !_messages.Any(m => m.SessionId == sessionId && m.Role == ChatRole.User);
-        _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now));
-        _messages.Add(new ChatMessage(sessionId, ChatRole.System,
-            "AI 模型尚未接入(P4 GPU Broker)。你的消息已记录;接入后这里会给出真实回复。", DateTime.Now));
+        _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments));
+        // ★ 诚实:AI 未接入。附件只是【路径/剪贴板指令】,不真发内容(见 ChatAttachment)。
+        var note = hasAtt
+            ? "AI 模型尚未接入(P4)。消息与附件引用(路径/剪贴板)已记录;接入后由 AI 自行在本机读取,不会真的把文件发出去。"
+            : "AI 模型尚未接入(P4 GPU Broker)。你的消息已记录;接入后这里会给出真实回复。";
+        _messages.Add(new ChatMessage(sessionId, ChatRole.System, note, DateTime.Now));
 
+        var titleSeed = text.Length > 0 ? text : (hasAtt ? attachments![0].Display : "");
         _sessions[i] = _sessions[i] with
         {
             LastActive = DateTime.Now,
-            Title = first ? Trim(text) : _sessions[i].Title,
+            Title = first && titleSeed.Length > 0 ? Trim(titleSeed) : _sessions[i].Title,
         };
         Changed?.Invoke();
         return true;

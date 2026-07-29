@@ -46,20 +46,23 @@ public static class Flyout
     public static void Show(FrameworkElement anchor, string title, UIElement body, double width = 320,
                             bool atMouse = false, UIElement? headerAction = null)
     {
-        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
-        var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
-        t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-        t.SetResourceReference(TextBlock.FontSizeProperty, "FontSubtitle");
-        DockPanel.SetDock(t, Dock.Left);
-        head.Children.Add(t);
-        if (headerAction is not null)
-        {
-            DockPanel.SetDock(headerAction, Dock.Right);
-            head.Children.Add(headerAction);
-        }
-
         var content = new StackPanel();
-        content.Children.Add(head);
+        // 标题为空且无 headerAction => 无头模式:内容自带 chrome(项目选择器就是这么用的)
+        if (!string.IsNullOrEmpty(title) || headerAction is not null)
+        {
+            var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
+            var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontSubtitle");
+            DockPanel.SetDock(t, Dock.Left);
+            head.Children.Add(t);
+            if (headerAction is not null)
+            {
+                DockPanel.SetDock(headerAction, Dock.Right);
+                head.Children.Add(headerAction);
+            }
+            content.Children.Add(head);
+        }
         content.Children.Add(body);
 
         var card = new Border

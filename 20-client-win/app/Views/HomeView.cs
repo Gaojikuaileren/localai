@@ -724,46 +724,27 @@ public sealed class HomeView : UserControl
         tile.SetResourceReference(Border.BorderBrushProperty, p.Pinned ? "Accent" : "Border");
         tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
 
-        // 右上角置顶/取消置顶按钮:平时隐藏,鼠标移到方块上才显示(用户裁定)
+        // 右上角:三个点菜单 + 置顶按钮。平时隐藏,鼠标移到方块上才显示(用户裁定)
         var pinBtn = PinButton(p);
+        var dots = ProjectUi.DotsButton(p, () => (Application.Current.MainWindow as MainWindow)?.OpenProjectEditor(p));
+        dots.Opacity = 0;
+        var topRight = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
+        topRight.Children.Add(dots);
+        topRight.Children.Add(pinBtn);
         var overlay = new Grid();
         overlay.Children.Add(body);
-        overlay.Children.Add(pinBtn);
+        overlay.Children.Add(topRight);
         tile.Child = overlay;
 
-        tile.MouseEnter += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); pinBtn.Opacity = 1; };
-        tile.MouseLeave += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); pinBtn.Opacity = 0; };
+        tile.MouseEnter += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); pinBtn.Opacity = 1; dots.Opacity = 1; };
+        tile.MouseLeave += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); pinBtn.Opacity = 0; dots.Opacity = 0; };
         tile.MouseLeftButtonUp += (_, _) =>
         {
             TheApp.Projects.Touch(p.ProjectId);
             (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.WorkspaceKey, p.ProjectId);
         };
         tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}";
-        tile.ContextMenu = TileMenu(p);   // 右键:在文件夹打开 + 改状态
         return tile;
-    }
-
-    ContextMenu TileMenu(Project p)
-    {
-        var m = new ContextMenu();
-        var open = new MenuItem { Header = "在文件夹中打开" };
-        open.Click += (_, _) =>
-        {
-            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                System.Windows.MessageBox.Show(string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
-                    "本地 AI 中枢", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
-        };
-        m.Items.Add(open);
-        m.Items.Add(new Separator());
-        foreach (var st in new[] { ProjectStatus.Preparing, ProjectStatus.Active, ProjectStatus.Done })
-        {
-            var (label, _) = ProjectUi.Status(st);
-            var mi = new MenuItem { Header = "标记为 " + label, IsChecked = p.Status == st };
-            var captured = st;
-            mi.Click += (_, _) => TheApp.Projects.SetStatus(p.ProjectId, captured);
-            m.Items.Add(mi);
-        }
-        return m;
     }
 
     FrameworkElement ProjectLibraryButton()
