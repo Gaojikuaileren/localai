@@ -332,7 +332,13 @@ public sealed class CalendarView : UserControl
         return grid;
     }
 
-    /// <summary>跨天长条。左右端点按是否被区间裁断决定要不要收圆角(续前/续后则平接)。</summary>
+    /// <summary>
+    /// 跨天长条。★ 【纯展示,不可点击】(用户裁定):
+    ///   它横跨多天,点它无法确定你指的是哪一天,而且会绕过"先选日期"这条统一路径。
+    ///   要编辑全天日程,走与定时日程完全相同的入口 —— 周排布在下方日程列表里点它,
+    ///   月排布在当日浮窗里点它。一条日程只有一个编辑入口,不给第二条捷径。
+    /// 左右端点按是否被区间裁断决定要不要收圆角(续前/续后则平接)。
+    /// </summary>
     Border SpanBar(CalendarEvent ev, bool clipStart, bool clipEnd, bool dim)
     {
         var t = new TextBlock
@@ -351,13 +357,14 @@ public sealed class CalendarView : UserControl
             Height = 16,
             Margin = new Thickness(1.5, 1, 1.5, 1),
             Opacity = dim ? 0.55 : 1,
-            Cursor = System.Windows.Input.Cursors.Hand,
+            // 不给手型光标、不挂点击处理 —— 明确它只是标记,不是按钮。
+            // 仍保留 hit-test:这样悬停还能看到 ToolTip(起止日期),点击则自然落空。
+            Cursor = System.Windows.Input.Cursors.Arrow,
             // 被裁断的一端不收圆角,视觉上表示"还在继续"
             CornerRadius = new CornerRadius(clipStart ? 0 : 4, clipEnd ? 0 : 4, clipEnd ? 0 : 4, clipStart ? 0 : 4),
         };
         bar.SetResourceReference(Border.BackgroundProperty, "Accent");
         bar.ToolTip = ev.IsMultiDay ? $"{ev.Title}\n{ev.FirstDay:M月d日} – {ev.LastDay:M月d日}(全天)" : $"{ev.Title}(全天)";
-        bar.MouseLeftButtonUp += (_, _) => OpenEditor(ev.FirstDay, ev);
         return bar;
     }
 
