@@ -110,6 +110,22 @@ public sealed class VramBar : UserControl
         Update(_last);
     }
 
+    /// <summary>
+    /// 生成占用弧的路径数据(12 点起顺时针)。抽成独立方法是为了能被自检直接断言 ——
+    /// 这段曾经在德语区域崩过:小数点是逗号时 "14,5" 被几何解析器当成两个坐标。
+    /// </summary>
+    public static string ArcPath(double ratio)
+    {
+        const double r = 14.5, cx = 17, cy = 17;
+        var sweep = Math.Clamp(ratio, 0, 0.9999) * 360.0;
+        var rad = (sweep - 90) * Math.PI / 180.0;
+        var x = cx + r * Math.Cos(rad);
+        var y = cy + r * Math.Sin(rad);
+        var large = sweep > 180 ? 1 : 0;
+        // ★ 整串用不变文化格式化,不要逐个字段打补丁 —— 漏掉任何一个都会在逗号小数点区域崩。
+        return FormattableString.Invariant($"M {cx},{cy - r} A {r},{r} 0 {large} 1 {x},{y}");
+    }
+
     void UpdateRing(VramSnapshot s)
     {
         var danger = s.UsedRatio >= VramMonitor.DangerRatio;
@@ -120,14 +136,11 @@ public sealed class VramBar : UserControl
         _ringText.Foreground = brush;
         _ringArc.Stroke = brush;
 
-        // 从 12 点顺时针画占用弧
-        const double r = 14.5, cx = 17, cy = 17;
-        var sweep = Math.Clamp(s.UsedRatio, 0, 0.9999) * 360.0;
-        var rad = (sweep - 90) * Math.PI / 180.0;
-        var x = cx + r * Math.Cos(rad);
-        var y = cy + r * Math.Sin(rad);
-        var large = sweep > 180 ? 1 : 0;
-        _ringArc.Data = Geometry.Parse($"M {cx},{cy - r} A {r},{r} 0 {large} 1 {x.ToString(System.Globalization.CultureInfo.InvariantCulture)},{y.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        // 从 12 点顺时针画占用弧。
+        // ★ 路径字符串必须【整串】用不变文化格式化 —— 本机是德语区域,小数点是逗号,
+        //   "14,5" 会被几何解析器当成两个坐标(实测崩在这:FormatException «M 17,2,5 A 14,5,14,5…»)。
+        //   所以用 FormattableString.Invariant 一次性管住所有数字,而不是逐个字段 .ToString(Invariant)。
+        _ringArc.Data = Geometry.Parse(ArcPath(s.UsedRatio));
         _ringArc.Fill = null;
         _ring.ToolTip = ToolTip;
     }

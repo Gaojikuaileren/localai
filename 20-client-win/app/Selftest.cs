@@ -129,6 +129,29 @@ public static class Selftest
             Assert(vOver.FreeGiB == 0, "占用超过总量时未占用段不为负");
             Assert(VramMonitor.Interval.TotalSeconds is >= 1 and <= 5, "显存轮询间隔在合理区间(默认 2 秒)");
 
+            // 区域回归:显存环形的弧线路径是【拼出来的字符串再被几何解析器读回】,
+            // 这类地方对小数点符号极敏感。本机是德语区域(小数点=逗号),曾因此启动即崩:
+            // FormatException «M 17,2,5 A 14,5,14,5 …» —— 半径 14.5 被写成 14,5 后当成两个坐标。
+            // 注意:路径里逗号本就是 x,y 分隔符,所以不能笼统查逗号,要查【小数必须用点】。
+            var prevCulture = System.Globalization.CultureInfo.CurrentCulture;
+            try
+            {
+                System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+                var half = Views.VramBar.ArcPath(0.5);
+                Assert(half.Contains("14.5"), "德语区域下半径仍写成 14.5(不变文化)  实得:" + half);
+                Assert(!half.Contains("14,5"), "德语区域下不会出现 14,5 这种会被解析成两个坐标的写法");
+
+                // 逐比例确认能真的被几何解析器读回(这才是最终判据)
+                var allParsed = true; string? bad = null;
+                foreach (var ratio in new[] { 0.0, 0.065, 0.25, 0.5, 0.78, 0.9, 1.0 })
+                {
+                    try { System.Windows.Media.Geometry.Parse(Views.VramBar.ArcPath(ratio)); }
+                    catch { allParsed = false; bad = ratio.ToString(); break; }
+                }
+                Assert(allParsed, "各占用比例下的环形弧线都能被 Geometry.Parse 解析" + (bad is null ? "" : " 失败于 ratio=" + bad));
+            }
+            finally { System.Globalization.CultureInfo.CurrentCulture = prevCulture; }
+
             // ---- 项目中心(主页田字格 + 深链)----
             var pc = new ProjectCenter();
             Assert(pc.Items.Count == 0, "项目中心初始为空");
