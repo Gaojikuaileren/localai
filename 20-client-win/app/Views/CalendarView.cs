@@ -47,6 +47,12 @@ public sealed class CalendarView : UserControl
     const double SpanRowHeight = 5;      // 线高 3 + 下留白 2(上留白 0,紧贴数字)
     const double DotsRowHeight = 7;      // 圆点 5 + 下留白 2
 
+    /// <summary>
+    /// 定时(非全天)日程超过这个数量时,不再逐个画点,而是画一个【实心三角形】(用户裁定)。
+    /// 理由:点再多也数不清,而且会挤破格宽;一个三角形明确表示"这天很满",细节看日程列表。
+    /// </summary>
+    const int DotsMaxBeforeTriangle = 4;
+
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
@@ -424,7 +430,19 @@ public sealed class CalendarView : UserControl
                 VerticalAlignment = VerticalAlignment.Center,
                 IsHitTestVisible = false,
             };
-            foreach (var _ in timed.Take(3))
+            if (timed.Count > DotsMaxBeforeTriangle)
+            {
+                // 超过阈值:一个实心三角形代替一排点(用户裁定)
+                var tri = new System.Windows.Shapes.Path
+                {
+                    Data = Geometry.Parse("M0,0 L9,0 L4.5,6 Z"),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Opacity = dim ? 0.55 : 1,
+                };
+                tri.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isToday ? "FgOnAccent" : "Accent");
+                dots.Children.Add(tri);
+            }
+            else foreach (var _ in timed)
             {
                 var d = new System.Windows.Shapes.Ellipse
                 {
