@@ -103,19 +103,27 @@ public static class CalendarEditor
             buttons.Children.Add(del);
         }
 
+        // 分组成卡片 + 带图标的小标题 —— 与主页各板块同一套视觉语言(用户反馈:抽屉风格不统一)
         var form = Ui.Stack(
-            Ui.Caption("标题"), title,
-            allDay,
-            timedRow, allDayRow,
-            Ui.Caption("日历组"), group,
-            Ui.Caption("地点"), location,
-            Ui.Caption("链接"), url,
-            Ui.Caption("备注"), notes,
-            Ui.Caption("归属成员"), owner,
-            Ui.Caption("可见范围"), scope,
+            Ui.Panel("基本信息",
+                Ui.Stack(Ui.Caption("标题"), title, allDay, timedRow, allDayRow),
+                Theme.IconName.Calendar, new Thickness(0, 0, 0, 12)),
+
+            Ui.Panel("归类",
+                Ui.Stack(Ui.Caption("日历组"), group,
+                         Ui.Caption("归属成员"), owner,
+                         Ui.Caption("可见范围"), scope),
+                Theme.IconName.Member, new Thickness(0, 0, 0, 12)),
+
+            Ui.Panel("详情",
+                Ui.Stack(Ui.Caption("地点"), location,
+                         Ui.Caption("链接"), url,
+                         Ui.Caption("备注"), notes),
+                Theme.IconName.Assets, new Thickness(0, 0, 0, 12)),
+
             buttons,
             status,
-            Ui.Caption("全天日程可跨天,界面上用一条贯穿多日的长条显示。" +
+            Ui.Caption("全天日程可跨天,界面上用一条贯穿多日的线显示。" +
                        "接入后:改与对方相关的日程只能发【邀请 / 修改建议】,由对方接受;AI 走同一入口,遵守同样的可见范围规则。")
         );
 

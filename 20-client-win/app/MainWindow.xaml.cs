@@ -226,11 +226,15 @@ public partial class MainWindow : Window
     /// 右侧边缘向左滑入的【全高抽屉】。用于字段多、浮窗放不下的表单(如日程编辑,用户裁定)。
     /// 走同一个浮层协调器 —— 会自动关掉别的浮层,Esc / 点外部也能关它。
     /// </summary>
-    public void OpenSideDrawer(string title, UIElement content)
+    public void OpenSideDrawer(string title, UIElement content, IconName icon = IconName.Calendar)
     {
         Overlay.Register(CloseDrawer);
         _drawerKind = "side";
         SideDrawerTitle.Text = title;
+        SideDrawerIcon.Content = Icons.Make(icon, 17, "FgSecondary");
+        // 圆角跟随皮肤:只圆【左侧】两角(抽屉贴在窗口右缘,右侧应与窗口边平齐)
+        var r = TryFindResource("RadiusMd") is CornerRadius cr ? cr.TopLeft : 8;
+        SideDrawer.CornerRadius = new CornerRadius(r, 0, 0, r);
         SideDrawerHost.Content = content;
         DrawerScrim.Visibility = Visibility.Visible;
         SideDrawer.Visibility = Visibility.Visible;

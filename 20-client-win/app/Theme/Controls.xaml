@@ -94,4 +94,164 @@
       </Trigger>
     </Style.Triggers>
   </Style>
+
+  <!-- ================= 输入控件 =================
+       原生 WPF 的 TextBox/ComboBox/CheckBox 是方角灰边的系统外观,与整体脱节(用户反馈)。
+       这里全部换成走令牌的样式:底色 BgSunken · 描边 Border · 圆角 RadiusSm(随皮肤)·
+       聚焦时描边转强调色。三个皮肤自动跟随,不需要各写一套。 -->
+
+  <Style TargetType="TextBox">
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="CaretBrush" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="9,6,9,6"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <Border x:Name="Bd" CornerRadius="{DynamicResource RadiusSm}"
+                  Background="{DynamicResource BgSunken}"
+                  BorderBrush="{DynamicResource Border}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  SnapsToDevicePixels="True">
+            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                          HorizontalScrollBarVisibility="Disabled"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource BorderStrong}"/>
+            </Trigger>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+              <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource FocusRing}"/>
+              <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgSurface}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="{DynamicResource FgMuted}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- 复选框:自绘方框 + 勾,不用系统外观 -->
+  <Style TargetType="CheckBox">
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="CheckBox">
+          <StackPanel Orientation="Horizontal" Background="Transparent">
+            <Border x:Name="Box" Width="16" Height="16" VerticalAlignment="Center"
+                    CornerRadius="{DynamicResource RadiusSm}"
+                    Background="{DynamicResource BgSunken}"
+                    BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1"
+                    SnapsToDevicePixels="True">
+              <Path x:Name="Tick" Visibility="Collapsed" Stretch="Uniform" Margin="3"
+                    Data="M0,4 L3,7 L9,0" Stroke="{DynamicResource FgOnAccent}"
+                    StrokeThickness="1.8" StrokeEndLineCap="Round" StrokeStartLineCap="Round"/>
+            </Border>
+            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="Box" Property="Background" Value="{DynamicResource Accent}"/>
+              <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+              <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource FocusRing}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- 下拉项 -->
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="Padding" Value="9,6,9,6"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="Bd" Background="Transparent" Padding="{TemplateBinding Padding}"
+                  CornerRadius="{DynamicResource RadiusSm}" Margin="3,1,3,1">
+            <ContentPresenter/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgSelected}"/>
+              <Setter Property="Foreground" Value="{DynamicResource FgOnSelected}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- 下拉框:自绘按钮 + 弹出列表,与文本框同一套描边/圆角/底色 -->
+  <Style TargetType="ComboBox">
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="MinHeight" Value="30"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <ToggleButton x:Name="PART_ToggleButton" Focusable="False" ClickMode="Press"
+                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+              <ToggleButton.Template>
+                <ControlTemplate TargetType="ToggleButton">
+                  <Border x:Name="Bd" CornerRadius="{DynamicResource RadiusSm}"
+                          Background="{DynamicResource BgSunken}"
+                          BorderBrush="{DynamicResource Border}" BorderThickness="1"
+                          SnapsToDevicePixels="True">
+                    <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"
+                          Data="M0,0 L8,0 L4,5 Z" Fill="{DynamicResource FgMuted}"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource BorderStrong}"/>
+                    </Trigger>
+                    <Trigger Property="IsChecked" Value="True">
+                      <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource FocusRing}"/>
+                      <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgSurface}"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </ToggleButton.Template>
+            </ToggleButton>
+            <ContentPresenter IsHitTestVisible="False"
+                              Content="{TemplateBinding SelectionBoxItem}"
+                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                              Margin="9,6,26,6" VerticalAlignment="Center"/>
+            <Popup x:Name="PART_Popup" AllowsTransparency="True" Placement="Bottom"
+                   IsOpen="{TemplateBinding IsDropDownOpen}" Focusable="False" PopupAnimation="Fade">
+              <Border MinWidth="{TemplateBinding ActualWidth}" MaxHeight="240" Margin="0,4,6,6"
+                      CornerRadius="{DynamicResource RadiusSm}"
+                      Background="{DynamicResource BgSurface}"
+                      BorderBrush="{DynamicResource Border}" BorderThickness="1">
+                <Border.Effect>
+                  <DropShadowEffect BlurRadius="16" ShadowDepth="3" Direction="270" Opacity="0.22" Color="Black"/>
+                </Border.Effect>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                  <ItemsPresenter/>
+                </ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
 </ResourceDictionary>
+

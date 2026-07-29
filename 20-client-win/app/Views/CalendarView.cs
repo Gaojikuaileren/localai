@@ -691,6 +691,6 @@ public sealed class CalendarView : UserControl
     {
         var title = day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程");
         var body = CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); });
-        (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(title, body);
+        (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(title, body, Theme.IconName.Calendar);
     }
 }

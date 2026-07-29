@@ -328,6 +328,21 @@ public static class Selftest
                 Assert(seedIdx >= 0 && winIdx >= 0 && seedIdx < winIdx,
                        "播种发生在建窗口【之前】(否则界面读到空表 = 开启时日程读不出来)");
                 Assert(calSrc.Contains("OpenSideDrawer"), "日程编辑走【右侧抽屉】而不是浮窗(曾被后续重写覆盖回去)");
+
+                // 抽屉与输入控件要走主题,不能露出系统外观(用户反馈"太过于系统")
+                var ctlSrc = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+                if (ctlSrc is not null)
+                {
+                    foreach (var ctl in new[] { "TextBox", "ComboBox", "CheckBox", "ComboBoxItem" })
+                        Assert(ctlSrc.Contains($"TargetType=\"{ctl}\""), $"{ctl} 有主题化样式(不用系统外观)");
+                    Assert(ctlSrc.Contains("{DynamicResource RadiusSm}"), "输入控件圆角走皮肤令牌(随皮肤变)");
+                }
+                var mwSrc = TryReadSource("MainWindow.xaml.cs");
+                if (mwSrc is not null)
+                {
+                    Assert(mwSrc.Contains("SideDrawerIcon.Content = Icons.Make"), "侧边抽屉标题带图标");
+                    Assert(mwSrc.Contains("SideDrawer.CornerRadius = new CornerRadius"), "侧边抽屉圆角跟随皮肤令牌");
+                }
                 Assert(calSrc.Contains("CalendarData.Changed += Rebuild"), "日历订阅了数据变更通知");
 
                 // 日期区高度必须【恒定】—— 行数随日程条数变化会让下方日程表位置上下跳(用户反馈)。
