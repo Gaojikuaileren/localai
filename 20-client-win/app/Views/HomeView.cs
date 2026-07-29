@@ -59,8 +59,9 @@ public sealed class HomeView : UserControl
         _greeting.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
 
         _root.Margin = new Thickness(24, 14, 24, 18);
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 日历(宽)
-        _todoColumn.Width = new GridLength(300);                                                             // 待办(窄)
+        // 用户裁定:日历占【三分之二】,待办占三分之一
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });   // 日历 2/3
+        _todoColumn.Width = new GridLength(1, GridUnitType.Star);                                             // 待办 1/3
         _root.ColumnDefinitions.Add(_todoColumn);
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 问候
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 日历 | 待办(固定高)
@@ -73,7 +74,8 @@ public sealed class HomeView : UserControl
         _root.Children.Add(_greeting);
 
         // ② 日历(周横排,固定高)| 待办(窄)
-        var calPanel = Ui.Panel("日历", new CalendarStrip { Height = CalendarStrip.StripHeight },
+        // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
+        var calPanel = Ui.Panel("日历", new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.WeekModeHeight },
                                 IconName.Calendar, new Thickness(0, 0, 12, 12));
         Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
         _root.Children.Add(calPanel);
@@ -88,7 +90,7 @@ public sealed class HomeView : UserControl
             }.PassThrough(),
             IconName.Member, new Thickness(0, 0, 0, 12));
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
-        _todoPanel.Height = CalendarStrip.StripHeight + 46;
+        _todoPanel.Height = CalendarView.WeekModeHeight + 46;
         Grid.SetRow(_todoPanel, 1); Grid.SetColumn(_todoPanel, 1);
         _root.Children.Add(_todoPanel);
 
@@ -143,10 +145,7 @@ public sealed class HomeView : UserControl
 
     void RelayoutContinuous()
     {
-        var w = ActualWidth;
-        if (w <= 0) return;
-        // 待办列宽随窗口连续变化(268→340),始终"占少"
-        _todoColumn.Width = new GridLength(Math.Round(Math.Clamp(w * 0.22, 268, 340)));
+        // 日历 2/3、待办 1/3 由 Grid 星号列直接分配,随窗口天然连续,无需手动插值。
     }
 
     void RelayoutDiscrete()

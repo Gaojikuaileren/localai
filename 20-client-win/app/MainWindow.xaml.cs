@@ -199,7 +199,7 @@ public partial class MainWindow : Window
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
         if (_drawerKind == "calendar") { CloseDrawer(); return; }
-        OpenRightDrawer("calendar", "日历", new CalendarPanel(CalendarPanel.Mode.TwoWeeks, expanded: true));
+        OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Month));
     }
 
     /// <summary>右上角下拉抽屉(日历 / 消息栏共用一个容器,同时只开一个)。</summary>
@@ -352,7 +352,6 @@ public partial class MainWindow : Window
         if (hit.item is null) return;
         _currentKey = key;
         ContentHost.Content = hit.item.Build();
-        PageTitle.Text = Strings.Get(hit.item.TitleKey);
         // 主页右上角已经有日历板块了,顶栏就不再重复放按钮(用户裁定)。
         CalendarButton.Visibility = key == "home" ? Visibility.Collapsed : Visibility.Visible;
 

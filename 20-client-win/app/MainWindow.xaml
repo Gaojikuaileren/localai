@@ -87,8 +87,20 @@
         <!-- 中间空白 = 拖动区(CaptionHeight=0,所以靠 MouseLeftButtonDown 触发 DragMove) -->
         <Border Grid.Column="1" Background="Transparent" MouseLeftButtonDown="OnTitleBarDrag"/>
 
-        <!-- 窗口按钮:Segoe MDL2 图标 最小化 E921 / 最大化 E922 / 还原 E923 / 关闭 E8BB -->
+        <!-- 右侧:连接状态 · 日历 · 消息栏(消息栏最靠右)· 窗口按钮 -->
         <StackPanel Grid.Column="2" Orientation="Horizontal">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0"
+                      shell:WindowChrome.IsHitTestVisibleInChrome="True">
+            <Ellipse x:Name="StatusDot" Width="7" Height="7" Margin="0,0,6,0" Fill="{DynamicResource FgMuted}"/>
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{DynamicResource FgSecondary}"
+                       FontSize="11" Margin="0,0,8,0"/>
+            <Button x:Name="CalendarButton" Width="30" Height="30" Cursor="Hand"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTip="日历" Click="OnOpenCalendar"/>
+            <Button x:Name="BriefingButton" Width="30" Height="30" Cursor="Hand"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTip="消息栏 · 今日简报" Click="OnOpenBriefing"/>
+          </StackPanel>
           <Button x:Name="MinButton" Style="{StaticResource CaptionButton}" ToolTip="最小化" Click="OnMinimize"/>
           <Button x:Name="MaxButton" Style="{StaticResource CaptionButton}" ToolTip="最大化" Click="OnMaximizeRestore"/>
           <Button x:Name="CloseButton" Style="{StaticResource CloseButton}" ToolTip="关闭(留在托盘)" Click="OnCloseClick"/>
@@ -134,28 +146,6 @@
 
       <!-- 右侧:页面顶栏 + 内容 + 底部任务横条 -->
       <DockPanel Grid.Column="1">
-        <Border DockPanel.Dock="Top" Height="54" Background="{DynamicResource BgSurface}"
-                BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">
-          <Grid Margin="24,0,16,0">
-            <TextBlock x:Name="PageTitle" VerticalAlignment="Center"
-                       FontSize="{DynamicResource FontSubtitle}" FontWeight="SemiBold"
-                       Foreground="{DynamicResource FgPrimary}"/>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-              <Ellipse x:Name="StatusDot" Width="8" Height="8" Margin="0,0,8,0" Fill="{DynamicResource FgMuted}"/>
-              <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{DynamicResource FgSecondary}"
-                         FontSize="{DynamicResource FontCaption}" Margin="0,0,14,0"/>
-              <!-- 消息栏(含今日简报)。简报按用户裁定不占主页板块,放这个抽屉里。 -->
-              <Button x:Name="BriefingButton" Width="34" Height="34" Cursor="Hand"
-                      Background="Transparent" BorderThickness="0"
-                      Foreground="{DynamicResource FgSecondary}" ToolTip="消息栏 · 今日简报" Click="OnOpenBriefing"/>
-              <!-- 全局日历按钮。★ 主页里【不显示】—— 日历已经在主页最上面了(用户裁定)。 -->
-              <Button x:Name="CalendarButton" Width="34" Height="34" Cursor="Hand"
-                      Background="Transparent" BorderThickness="0"
-                      Foreground="{DynamicResource FgSecondary}" ToolTip="日历" Click="OnOpenCalendar"/>
-            </StackPanel>
-          </Grid>
-        </Border>
-
         <!-- 底部任务横条:有任务才出现,空闲自动隐藏(设计 §3)。只显示简要 + 进度;
              多个任务随时间自动轮播;点整条打开【全局】任务抽屉。 -->
         <Border x:Name="TaskBar" DockPanel.Dock="Bottom" Height="48" Visibility="Collapsed"
@@ -204,7 +194,7 @@
     <!-- 日历:右上角下拉 -->
     <Border x:Name="CalendarDrawer" Grid.Row="1" Panel.ZIndex="60" Width="420" MaxHeight="620"
             HorizontalAlignment="Right" VerticalAlignment="Top"
-            Margin="0,54,16,0" Visibility="Collapsed"
+            Margin="0,6,12,0" Visibility="Collapsed"
             Background="{DynamicResource BgSurface}"
             BorderBrush="{DynamicResource Border}" BorderThickness="1"
             CornerRadius="{DynamicResource RadiusMd}"
