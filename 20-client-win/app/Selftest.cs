@@ -129,6 +129,15 @@ public static class Selftest
             Assert(vOver.FreeGiB == 0, "占用超过总量时未占用段不为负");
             Assert(VramMonitor.Interval.TotalSeconds is >= 1 and <= 5, "显存轮询间隔在合理区间(默认 2 秒)");
 
+            // ---- 项目中心(主页田字格 + 深链)----
+            var pc = new ProjectCenter();
+            Assert(pc.Items.Count == 0, "项目中心初始为空");
+            pc.Add(new Project("a", "旧项目", "x", "chat", ProjectScope.Family, DateTime.Now.AddHours(-3)));
+            pc.Add(new Project("b", "新项目", "y", "courses", ProjectScope.Personal, DateTime.Now.AddMinutes(-1)));
+            Assert(pc.Recent().First().ProjectId == "b", "项目按最近打开排序(主页要的是回到刚才那件事)");
+            pc.Touch("a");
+            Assert(pc.Recent().First().ProjectId == "a", "打开项目后它排到最前");
+
             // ---- 三语文案 ----
             var (keys, missing) = Strings.Audit();
             Assert(keys > 40, $"文案表已装载({keys} 个键)");

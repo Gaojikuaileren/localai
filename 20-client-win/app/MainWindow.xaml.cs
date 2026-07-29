@@ -277,6 +277,17 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 从主页项目方块深链进来:切到对应工作空间,并把要打开的项目 id 交给它。
+    /// 工作空间本身还是占位(功能等 P4/P6/P9),所以先切过去并显示"要打开哪个项目",
+    /// 不假装已经打开了会话。
+    /// </summary>
+    public void NavigateToProject(string workspaceKey, string projectId)
+    {
+        Navigate(workspaceKey);
+        if (ContentHost.Content is PlaceholderView ph) ph.ShowPendingProject(projectId);
+    }
+
     void OnToggleNav(object sender, RoutedEventArgs e)
     {
         _collapsed = !_collapsed;
@@ -295,6 +306,7 @@ public partial class MainWindow : Window
             btn.ToolTip = _collapsed ? Strings.Get(item.TitleKey) : null;
             btn.HorizontalContentAlignment = _collapsed ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         }
+        _vram.SetCollapsed(_collapsed);   // 收起 -> 环形+百分比;展开 -> 三段横条
         // 分组标题在收起状态没有宽度显示,整条隐藏
         foreach (var c in NavPanel.Children) if (c is TextBlock t) t.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
     }

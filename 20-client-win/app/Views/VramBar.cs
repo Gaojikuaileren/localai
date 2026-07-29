@@ -71,15 +71,70 @@ public sealed class VramBar : UserControl
         _root.Children.Add(clip);
         _root.Children.Add(_caption);
         _root.Margin = new Thickness(0, 0, 0, 10);
-        Content = _root;
+
+        BuildRing();
+        var host = new Grid();
+        host.Children.Add(_root);
+        host.Children.Add(_ring);
+        Content = host;
 
         Visibility = Visibility.Collapsed;   // 读到数据前不占位
     }
 
     readonly TextBlock _pct;
 
+    // ---- 收起态:环形 + 中间百分比(用户裁定)----
+    readonly Grid _ring = new() { Width = 34, Height = 34, HorizontalAlignment = HorizontalAlignment.Center };
+    readonly System.Windows.Shapes.Ellipse _ringTrack = new() { StrokeThickness = 3.5 };
+    readonly System.Windows.Shapes.Path _ringArc = new() { StrokeThickness = 3.5, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
+    readonly TextBlock _ringText = new() { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 9.5, FontWeight = FontWeights.SemiBold };
+    bool _collapsed;
+    VramSnapshot _last = new(0, 0, 0, false);
+
+    void BuildRing()
+    {
+        _ringTrack.Stroke = FreeBrush;
+        _ring.Children.Add(_ringTrack);
+        _ring.Children.Add(_ringArc);
+        _ring.Children.Add(_ringText);
+        _ring.Visibility = Visibility.Collapsed;
+        _ring.Margin = new Thickness(0, 0, 0, 10);
+    }
+
+    /// <summary>导航收起时切成环形(只剩 34px 宽,横条没有意义);展开时切回三段横条。</summary>
+    public void SetCollapsed(bool collapsed)
+    {
+        _collapsed = collapsed;
+        _root.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        _ring.Visibility = collapsed ? Visibility.Visible : Visibility.Collapsed;
+        Update(_last);
+    }
+
+    void UpdateRing(VramSnapshot s)
+    {
+        var danger = s.UsedRatio >= VramMonitor.DangerRatio;
+        var warn = !danger && s.UsedRatio >= VramMonitor.WarnRatio;
+        var brush = danger ? DesktopDanger : warn ? WarnBrush : DesktopBrush;
+
+        _ringText.Text = $"{s.UsedRatio * 100:0}";
+        _ringText.Foreground = brush;
+        _ringArc.Stroke = brush;
+
+        // 从 12 点顺时针画占用弧
+        const double r = 14.5, cx = 17, cy = 17;
+        var sweep = Math.Clamp(s.UsedRatio, 0, 0.9999) * 360.0;
+        var rad = (sweep - 90) * Math.PI / 180.0;
+        var x = cx + r * Math.Cos(rad);
+        var y = cy + r * Math.Sin(rad);
+        var large = sweep > 180 ? 1 : 0;
+        _ringArc.Data = Geometry.Parse($"M {cx},{cy - r} A {r},{r} 0 {large} 1 {x.ToString(System.Globalization.CultureInfo.InvariantCulture)},{y.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        _ringArc.Fill = null;
+        _ring.ToolTip = ToolTip;
+    }
+
     public void Update(VramSnapshot s)
     {
+        _last = s;
         if (!s.Available || s.TotalGiB <= 0)
         {
             Visibility = Visibility.Collapsed;   // 读不到就藏起来,不显示 0 冒充空闲
@@ -108,5 +163,7 @@ public sealed class VramBar : UserControl
             : $"已用 {used:0.0} / {s.TotalGiB:0.0} GiB · 暂无已启用模型";
         ToolTip = $"启用的模型 max:{s.ModelReservedGiB:0.00} GiB\n当前桌面占用:{s.DesktopUsedGiB:0.00} GiB\n未占用:{s.FreeGiB:0.00} GiB\n总计:{s.TotalGiB:0.00} GiB"
                   + (danger ? "\n\n⚠ 已逼近显存上限" : "");
+
+        UpdateRing(s);   // 收起态的环形与展开态的横条读同一份数据
     }
 }
