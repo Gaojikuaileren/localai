@@ -41,6 +41,8 @@ public sealed class CalendarView : UserControl
     Mode _mode;
     DateTime _anchor;                      // 周排布 = 第一行所在周的周一;月排布 = 所在月
     DateTime _selected = DateTime.Today;
+    /// <summary>用户是否点过日期。★ 启动时不预先展开任何一天的日程(用户裁定:不点就不显示)。</summary>
+    bool _daySelected;
     bool _animating;
 
     readonly TextBlock _label = new();
@@ -168,6 +170,7 @@ public sealed class CalendarView : UserControl
         var today = Btn("回到今日", () =>
         {
             _selected = DateTime.Today;
+            _daySelected = true;
             _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
             Rebuild();
         });
@@ -208,6 +211,11 @@ public sealed class CalendarView : UserControl
 
         if (outgoing is null) { _body.Content = incoming; _animating = false; AfterPage(); return; }
 
+        // ★ WPF 的元素只能有一个父级:outgoing 此刻还挂在 _body 上,
+        //   直接 host.Children.Add(outgoing) 会抛异常 —— 这正是"切换下一页闪退"的原因。
+        //   必须先把它从 _body 摘下来,再放进动画容器。
+        _body.Content = null;
+
         var host = new Grid { ClipToBounds = true };
         var outT = new TranslateTransform();
         var inT = new TranslateTransform();
@@ -227,7 +235,9 @@ public sealed class CalendarView : UserControl
         var slideIn = new DoubleAnimation(inT.X, 0, dur) { EasingFunction = ease };
         slideIn.Completed += (_, _) =>
         {
-            host.Children.Clear();          // 丢弃旧页,只留新页
+            // 同理:先把 incoming 从 host 摘下来,再挂到 _body,否则又是"两个父级"
+            host.Children.Clear();
+            _body.Content = null;
             incoming.RenderTransform = null;
             _body.Content = incoming;
             _animating = false;
@@ -341,30 +351,22 @@ public sealed class CalendarView : UserControl
     /// </summary>
     Border SpanBar(CalendarEvent ev, bool clipStart, bool clipEnd, bool dim)
     {
-        var t = new TextBlock
-        {
-            Text = (clipStart ? "\u2039 " : "") + ev.Title + (clipEnd ? " \u203a" : ""),
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(6, 0, 6, 0),
-            FontSize = 10.5,
-        };
-        t.SetResourceReference(TextBlock.ForegroundProperty, "FgOnAccent");
-
+        // ★ 只画【线】,不写标题(用户裁定):写了标题就得给 16px 以上的行高,
+        //   两三条全天日程就把周排布顶高,把下方的当日日程挤得显示不全。
+        //   内容改由 —— 月排布的当日浮窗 / 周排布下方的日程列表 —— 负责展示。
         var bar = new Border
         {
-            Child = t,
-            Height = 16,
+            Height = 4,
             Margin = new Thickness(1.5, 1, 1.5, 1),
-            Opacity = dim ? 0.55 : 1,
-            // 不给手型光标、不挂点击处理 —— 明确它只是标记,不是按钮。
-            // 仍保留 hit-test:这样悬停还能看到 ToolTip(起止日期),点击则自然落空。
-            Cursor = System.Windows.Input.Cursors.Arrow,
+            Opacity = dim ? 0.5 : 1,
+            Cursor = System.Windows.Input.Cursors.Arrow,   // 纯标记,不是按钮
             // 被裁断的一端不收圆角,视觉上表示"还在继续"
-            CornerRadius = new CornerRadius(clipStart ? 0 : 4, clipEnd ? 0 : 4, clipEnd ? 0 : 4, clipStart ? 0 : 4),
+            CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
         };
         bar.SetResourceReference(Border.BackgroundProperty, "Accent");
-        bar.ToolTip = ev.IsMultiDay ? $"{ev.Title}\n{ev.FirstDay:M月d日} – {ev.LastDay:M月d日}(全天)" : $"{ev.Title}(全天)";
+        bar.ToolTip = ev.IsMultiDay
+            ? $"{ev.Title}\n{ev.FirstDay:M月d日} – {ev.LastDay:M月d日}(全天)"
+            : $"{ev.Title}(全天)";
         return bar;
     }
 
@@ -469,6 +471,7 @@ public sealed class CalendarView : UserControl
         cell.MouseLeftButtonUp += (_, _) =>
         {
             _selected = captured;
+            _daySelected = true;
             var wasMonth = _mode == Mode.Month;
             if (wasMonth && captured.Month != _anchor.Month) _anchor = captured;
             Rebuild();
@@ -499,6 +502,19 @@ public sealed class CalendarView : UserControl
     void RebuildDayList()
     {
         _dayList.Children.Clear();
+
+        // 没点过日期 -> 只给一句提示,不预先摊开今天的日程(用户裁定:不点就不显示)
+        if (!_daySelected)
+        {
+            _dayTitle.Text = "";
+            _addButton.Visibility = Visibility.Collapsed;
+            var hint = new TextBlock { Text = "点某一天查看当天的日程", TextWrapping = TextWrapping.Wrap };
+            hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            hint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            _dayList.Children.Add(hint);
+            return;
+        }
+        _addButton.Visibility = Visibility.Visible;
 
         _dayTitle.Text = _selected.ToString("M月d日 dddd", Zh);
 

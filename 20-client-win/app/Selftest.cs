@@ -289,6 +289,21 @@ public static class Selftest
             Assert(Views.CalendarEditor.DefaultDuration == TimeSpan.FromHours(1), "新建日程默认时长 1 小时");
             Views.CalendarData.Events.Clear();
 
+            // ---- 翻页动画的"两个父级"回归 ----
+            // 闪退根因:WPF 元素只能有一个父级。翻页动画把仍挂在容器里的旧页直接加进新容器,
+            // 抛 InvalidOperationException -> 进程崩。这里用同构的最小场景把规则钉住。
+            var holder = new System.Windows.Controls.ContentControl();
+            var page = new System.Windows.Controls.Grid();
+            holder.Content = page;
+            var animHost = new System.Windows.Controls.Grid();
+            var threw = false;
+            try { animHost.Children.Add(page); } catch (InvalidOperationException) { threw = true; }
+            Assert(threw, "把仍有父级的元素加进另一个容器会抛异常(这正是翻页闪退的机制)");
+            holder.Content = null;                       // 正解:先脱离旧父级
+            var ok2 = true;
+            try { animHost.Children.Add(page); } catch { ok2 = false; }
+            Assert(ok2, "先解除旧父级后即可加入新容器(翻页动画的正确顺序)");
+
             // ---- 浮层协调(抽屉与浮窗共用一套规则)----
             // 重构前抽屉与浮窗各写一套规则、互不知情:Esc 关不掉浮窗、抽屉里的浮窗会变孤儿、
             // "同时只开一个"合起来不成立。现在统一由 Overlay 裁决,这里逐条断言。
