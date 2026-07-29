@@ -2181,11 +2181,13 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
       mTLS 终止 + 客户端证书验证(链到 CA + clientAuth + **成员表 active**)· 业务代理回环网关(**注入验证过的指纹、
       剥除客户端自带 X-LocalAI-***)· `/pair/*` 匿名路由接 S2 配对 · Kestrel 资源上限 · 只绑回环。
       ★★ **开真 LAN 前置 = 先裁定 B17**(SChannel 不能用 TPM 密钥做 TLS 凭据;逻辑已用软件密钥证全对)
-- [ ] **S5 · 可恢复地开放 LAN**:activation 精简(启动对账+不满足即回环;**7 步持久 saga 推迟 P3b.2**)·
-      防火墙窄化(**选定网卡+Private+LocalSubnet**,D43 S0.6)· 冲突规则扫描 · 先启用规则再绑监听(无"已监听未就绪"窗口)
-- [ ] **S6 · 第二台 Windows PC 实机验收**(Q4=有):初次配对 · 换 DHCP 免重配 · 拔 WAN(只断互联网)冷启动仍可用 +
-      未配对设备仍能配 · 单台吊销 · 流式中吊销 · 非授权扫描 · Private+选定网卡约束 · mDNS 闭环及被阻断时 dial_ip 回退 ·
-      权限回归 · 拒绝且告警
+- [~] **S5 · 可恢复地开放 LAN**(脚本就绪 · 执行=用户,对外行为):
+      **防火墙窄化脚本已写** `90-ops/lan/lan-firewall.ps1`(选定网卡+Private+LocalSubnet+EdgeTraversal=Block+程序限定,
+      拒 Public,扫冲突宽规则;`-Remove` 关闭)—— **你 elevated 运行**(网络/防火墙改动=用户执行)。
+      activation 精简(启动对账+不满足即回环)+ Edge 绑选定网卡 = 随 S6 真机联调时收尾。7 步持久 saga 推迟 P3b.2
+- [ ] **S6 · 第二台 Windows PC 实机验收**(Q4=有 · **需你的第二台 PC**):
+      **验收清单已写** `90-ops/lan/S6-acceptance-checklist.md`(初次配对/六词SAS · 拔WAN冷启动 · 换DHCP免重配 ·
+      单台吊销+流式中吊销 · 暴露面扫描 · 权限回归 · 拒绝且告警)。有第二台机器时按清单走,全过即签 P3b 完成。
 - [ ] **S7 · 串行更新中央文档**(DECISIONS/PLAN/STATE/worklog,唯一由主 Claude 一次性写)
 
 **推迟 P3b.2(不丢核心安全属性)**:三服务分权(edge/registry/signer named-pipe SID 互验)· 双证书**自动**轮换状态机 ·
