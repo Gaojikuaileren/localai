@@ -68,31 +68,47 @@ public static class Layout
     /// 项目田字格列数。算出后交给 UniformGrid【平分】可用宽度,方块随之拉伸填满。
     /// current 传入当前列数以启用迟滞:只有明显越过边界才改,拖动时不会来回抖。
     /// </summary>
-    public static int ProjectColumns(double availableWidth, int current = 0)
+    /// <param name="itemCount">项目总数。列数【不能超过它】—— 否则多出来的空列就是右侧一块空白。</param>
+    public static int ProjectColumns(double availableWidth, int current = 0, int itemCount = int.MaxValue)
     {
         if (double.IsNaN(availableWidth) || availableWidth <= 0) return Math.Max(current, MinTileColumns);
-        var raw = Math.Clamp((int)Math.Floor(availableWidth / TileIdealWidth), MinTileColumns, MaxTileColumns);
+        var cap = Math.Clamp(itemCount, MinTileColumns, MaxTileColumns);
+        var raw = Math.Clamp((int)Math.Floor(availableWidth / TileIdealWidth), MinTileColumns, cap);
         if (current < MinTileColumns || current > MaxTileColumns) return raw;
         if (raw == current) return current;
 
         // 变多:要宽到"再多一列还绰绰有余"才升;变少:要窄到明显放不下才降。
+        if (current > cap) return cap;   // 项目变少了要立刻收,不走迟滞(否则留空列)
         if (raw > current && availableWidth < (current + 1) * TileIdealWidth + Hysteresis) return current;
         if (raw < current && availableWidth > current * TileIdealWidth - Hysteresis) return current;
         return raw;
     }
 
-    /// <summary>逐小时天气格数,同样带迟滞。窄了少给几格,而不是把每格挤到看不清。</summary>
+    // 逐小时天气:每格约需 46px。宽度富余时【加格数 + 缩小时间间隔】,
+    // 而不是把 6 个格子撑得又宽又空 —— 用户反馈全屏时天气多出很多宽度没被利用。
+    const double HourlySlotWidth = 46;
+    public const int MinHourlySlots = 3;
+    public const int MaxHourlySlots = 12;
+
+    /// <summary>逐小时格数,带迟滞。窄了少给几格;宽了多给几格(配合更细的间隔)。</summary>
     public static int HourlySlots(double cardWidth, int current = 0)
     {
-        var raw = cardWidth < 210 ? 3 : cardWidth < 270 ? 4 : cardWidth < 340 ? 5 : 6;
-        if (current is < 3 or > 6) return raw;
+        if (double.IsNaN(cardWidth) || cardWidth <= 0) return Math.Max(current, MinHourlySlots);
+        var raw = Math.Clamp((int)Math.Floor(cardWidth / HourlySlotWidth), MinHourlySlots, MaxHourlySlots);
+        if (current is < MinHourlySlots or > MaxHourlySlots) return raw;
         if (raw == current) return current;
-        // 边界附近保持不变(迟滞),避免拖动时格数抖动
-        var bounds = new[] { 210.0, 270.0, 340.0 };
-        foreach (var b in bounds)
-            if (Math.Abs(cardWidth - b) < Hysteresis) return current;
+        // 迟滞:要明显越过边界才改档,避免拖动时格数抖动
+        if (raw > current && cardWidth < (current + 1) * HourlySlotWidth + Hysteresis) return current;
+        if (raw < current && cardWidth > current * HourlySlotWidth - Hysteresis) return current;
         return raw;
     }
+
+    /// <summary>
+    /// 逐小时的【时间间隔】(小时)。格子多了就把间隔调细 —— 格数 × 间隔 大致覆盖未来 12–24 小时,
+    /// 这样多出来的宽度换来的是【更细的时间粒度】,而不是更空的格子。
+    /// </summary>
+    public static int HourlyStepHours(int slots)
+        => slots >= 12 ? 1 : slots >= 8 ? 2 : 3;
 
     /// <summary>
     /// 密度仍保留,但只用于极端兜底(窗口最小值已提到屏幕四分之一,正常几乎不会到 Tight)。

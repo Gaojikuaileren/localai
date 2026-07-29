@@ -176,7 +176,7 @@ public static class Selftest
                 if (contentW / cols < 120) { layoutOk = false; layoutBad = name + " 单块过窄 " + (contentW / cols).ToString("0"); break; }
                 if (panelMax < 90 || tileH < 100) { layoutOk = false; layoutBad = name + " 高度过小"; break; }
                 if (curve < 28) { layoutOk = false; layoutBad = name + " 曲线高度过小会显示不全 " + curve; break; }
-                if (slots is < 3 or > 6) { layoutOk = false; layoutBad = name + " 逐小时格数异常 " + slots; break; }
+                if (slots < Views.Layout.MinHourlySlots || slots > Views.Layout.MaxHourlySlots) { layoutOk = false; layoutBad = name + " 逐小时格数异常 " + slots; break; }
                 if (calW < 260) { layoutOk = false; layoutBad = name + " 日历栏过窄 " + calW; break; }
             }
             Assert(layoutOk, "全屏→最小窗口(屏幕四分之一)各档判据均成立" + (layoutBad is null ? "" : "  失败于:" + layoutBad));
@@ -212,7 +212,10 @@ public static class Selftest
             if (cur4 != 4 || back4 != 4) stableCols = false;
             Assert(stableCols, $"列数在边界±5px 来回拖动时保持不变(迟滞生效)  实得 {cur4}/{back4}");
 
-            var slotsStable = Views.Layout.HourlySlots(270 + 5, 4) == 4 && Views.Layout.HourlySlots(270 - 5, 4) == 4;
+            // 迟滞:格数边界(每格 46px)附近来回拖动应保持不变
+            var slotBoundary = 46.0 * 6;   // 恰好 6 格
+            var slotsStable = Views.Layout.HourlySlots(slotBoundary + 6, 6) == 6
+                           && Views.Layout.HourlySlots(slotBoundary - 6, 6) == 6;
             Assert(slotsStable, "逐小时格数在边界附近不横跳(迟滞生效)");
 
             // 项目方块:宽度增加时列数单调不减
@@ -226,6 +229,28 @@ public static class Selftest
             Assert(mono, "可用宽度变大时项目列数单调不减");
             Assert(Views.Layout.ProjectColumns(0) >= Views.Layout.MinTileColumns, "宽度未知(0/NaN)时回落到最小列数,不会算出 0 列");
             Assert(Views.Layout.ProjectColumns(double.NaN) >= Views.Layout.MinTileColumns, "NaN 宽度不会导致 0 列");
+
+            // 列数不得超过项目数 —— 否则多出的空列就是右侧一块空白(用户反馈的排版问题)
+            Assert(Views.Layout.ProjectColumns(3000, 0, 4) == 4, "很宽但只有 4 个项目时用 4 列(方块变宽填满,右侧不留空列)");
+            Assert(Views.Layout.ProjectColumns(3000, 0, 2) == 2, "只有 2 个项目时最多 2 列");
+            Assert(Views.Layout.ProjectColumns(3000, 6, 3) == 3, "项目变少时列数立刻收缩,不走迟滞(否则留空列)");
+            Assert(Views.Layout.ProjectColumns(3000, 0, 100) <= Views.Layout.MaxTileColumns, "项目再多也不超过列数上限");
+
+            // 宽度富余 -> 更多格子 + 更细的时间间隔(用户:全屏时天气多出的宽度要利用起来)
+            var narrowSlots = Views.Layout.HourlySlots(200);
+            var wideSlots = Views.Layout.HourlySlots(600);
+            Assert(wideSlots > narrowSlots, $"卡片更宽时逐小时格数更多({narrowSlots} -> {wideSlots})");
+            Assert(Views.Layout.HourlyStepHours(narrowSlots) >= Views.Layout.HourlyStepHours(wideSlots),
+                   "格子多时时间间隔更细(3h -> 2h -> 1h),多出的宽度换成更细的粒度");
+            Assert(Views.Layout.HourlyStepHours(12) == 1 && Views.Layout.HourlyStepHours(8) == 2 && Views.Layout.HourlyStepHours(6) == 3,
+                   "间隔分档正确:12 格=1h · 8 格=2h · 6 格=3h");
+            var span = wideSlots * Views.Layout.HourlyStepHours(wideSlots);
+            Assert(span is >= 8 and <= 26, $"逐小时覆盖的时间跨度保持在半天到一天之间(实得 {span}h)");
+
+            // 月历高度必须够 —— 否则最后一两行被裁(用户反馈"按月显示不全")
+            Assert(Views.CalendarView.MonthModeHeight > Views.CalendarView.WeekModeHeight, "月排布高度大于周排布");
+            Assert(Views.CalendarView.MonthModeHeight >= 6 * 32 + 60, "月排布高度容得下 6 行日期 + 表头 + 当日日程行");
+            Assert(Views.CalendarView.HeightFor(Views.CalendarView.Mode.Month) == Views.CalendarView.MonthModeHeight, "HeightFor 返回对应排布的高度");
 
             // ---- 项目中心(主页田字格 + 深链)----
             var pc = new ProjectCenter();

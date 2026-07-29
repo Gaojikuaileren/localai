@@ -75,8 +75,14 @@ public sealed class HomeView : UserControl
 
         // ② 日历(周横排,固定高)| 待办(窄)
         // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
-        var calPanel = Ui.Panel("日历", new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.WeekModeHeight },
-                                IconName.Calendar, new Thickness(0, 0, 12, 12));
+        var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.WeekModeHeight };
+        var calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, 12, 12));
+        // 切到月历时面板要长高,否则月历被裁(用户反馈"按月显示不全");待办同步等高。
+        calView.ModeChanged += m =>
+        {
+            calView.Height = CalendarView.HeightFor(m);
+            _todoPanel.Height = CalendarView.HeightFor(m) + 46;
+        };
         Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
         _root.Children.Add(calPanel);
 
@@ -153,10 +159,12 @@ public sealed class HomeView : UserControl
         var w = ActualWidth;
         if (w <= 0) return;
 
-        var cols = Layout.ProjectColumns(w - 8, _cols);
+        // 列数不超过项目数 —— 否则多出的空列就是右侧一块空白
+        var cols = Layout.ProjectColumns(w - 8, _cols, TheApp.Projects.Items.Count);
         if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
 
-        var cardW = w / Cities.Length;
+        // 天气卡内可用宽度(减去卡片内边距与卡间距)
+        var cardW = (w - (Cities.Length - 1) * 12) / Cities.Length - 32;
         var slots = Layout.HourlySlots(cardW, _slots);
         if (slots != _slots)
         {
@@ -231,7 +239,8 @@ public sealed class HomeView : UserControl
         grid.Columns = slots;
         grid.Children.Clear();
         var h0 = DateTime.Now.Hour;
-        var step = Math.Max(1, 18 / Math.Max(1, slots));
+        // 格子多 -> 间隔更细(1h/2h/3h)。多出来的宽度换成更细的时间粒度,而不是更空的格子。
+        var step = Layout.HourlyStepHours(slots);
         for (int k = 0; k < slots; k++)
         {
             var hr = new TextBlock { Text = $"{(h0 + k * step) % 24:00}", HorizontalAlignment = HorizontalAlignment.Center };

@@ -38,8 +38,16 @@ public sealed class CalendarView : UserControl
 
     static readonly CultureInfo Zh = new("zh-CN");
 
-    /// <summary>周排布时的固定高度(标题 + 一行日期 + 当日日程行)。</summary>
+    /// <summary>周排布固定高度(标题 + 一行日期 + 当日日程行)。</summary>
     public const double WeekModeHeight = 132;
+    /// <summary>月排布所需高度(标题 + 星期表头 + 最多 6 行日期 + 当日日程行)。
+    /// ★ 月历必须给够高度,否则会被裁掉最后一两行(用户反馈"按月显示不全")。</summary>
+    public const double MonthModeHeight = 300;
+
+    public static double HeightFor(Mode m) => m == Mode.Month ? MonthModeHeight : WeekModeHeight;
+
+    /// <summary>排布切换时通知宿主调整高度(周/月所需高度不同)。</summary>
+    public event Action<Mode>? ModeChanged;
 
     Mode _mode;
     DateTime _anchor = DateTime.Today;     // 周排布=所在周;月排布=所在月
@@ -108,6 +116,7 @@ public sealed class CalendarView : UserControl
             _mode = _mode == Mode.Month ? Mode.Week : Mode.Month;
             _anchor = _selected;
             Rebuild();
+            ModeChanged?.Invoke(_mode);   // 宿主据此调整面板高度 —— 月历比周条高得多
         }));
         _actions.Children.Add(Btn("编辑", () => OpenEditFlyout(_selected)));
 
