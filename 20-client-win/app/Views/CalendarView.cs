@@ -22,16 +22,6 @@ using LocalAI.Client.I18n;
 
 namespace LocalAI.Client.Views;
 
-public sealed record CalendarEvent(DateTime Start, DateTime End, string Title, string Owner, string Scope);
-
-/// <summary>日程数据源。未接入 -> 空。AI 与编辑浮窗将来往这里写(同一个入口)。</summary>
-public static class CalendarData
-{
-    public static List<CalendarEvent> Events { get; } = new();
-    public static IEnumerable<CalendarEvent> On(DateTime day)
-        => Events.Where(e => e.Start.Date == day.Date).OrderBy(e => e.Start);
-}
-
 public sealed class CalendarView : UserControl
 {
     public enum Mode { Week, Month }
@@ -304,13 +294,71 @@ public sealed class CalendarView : UserControl
         panel.Children.Add(WeekdayHeader());
         // 第一行 = 本周(正常);第二行 = 下周(灰)
         for (int row = 0; row < 2; row++)
-        {
-            var grid = new UniformGrid { Rows = 1, Columns = 7 };
-            for (int i = 0; i < 7; i++)
-                grid.Children.Add(DayCell(_anchor.AddDays(row * 7 + i), WeekCellHeight, dim: row == 1));
-            panel.Children.Add(grid);
-        }
+            panel.Children.Add(WeekBand(_anchor.AddDays(row * 7), WeekCellHeight, dim: row == 1));
         return panel;
+    }
+
+    /// <summary>
+    /// 一周的横带 = 7 个日期格 + 其下的【跨天长条层】。
+    /// 跨天/全天日程用一条贯穿多格、与日期格【同宽】的长条表示(用户裁定),
+    /// 而不是在每一天各画一个点 —— 那样看不出它是同一件事。
+    /// </summary>
+    UIElement WeekBand(DateTime weekStart, double cellHeight, bool dim)
+    {
+        var grid = new Grid();
+        for (int i = 0; i < 7; i++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 日期格
+
+        for (int i = 0; i < 7; i++)
+        {
+            var cell = DayCell(weekStart.AddDays(i), cellHeight, dim);
+            Grid.SetColumn(cell, i);
+            Grid.SetRow(cell, 0);
+            grid.Children.Add(cell);
+        }
+
+        // 跨天长条:每条占一行,互不重叠
+        var spans = CalendarData.SpansIn(weekStart, 7);
+        for (int k = 0; k < spans.Count; k++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var (ev, col, span, clipStart, clipEnd) = spans[k];
+            var bar = SpanBar(ev, clipStart, clipEnd, dim);
+            Grid.SetColumn(bar, col);
+            Grid.SetColumnSpan(bar, span);
+            Grid.SetRow(bar, k + 1);
+            grid.Children.Add(bar);
+        }
+        return grid;
+    }
+
+    /// <summary>跨天长条。左右端点按是否被区间裁断决定要不要收圆角(续前/续后则平接)。</summary>
+    Border SpanBar(CalendarEvent ev, bool clipStart, bool clipEnd, bool dim)
+    {
+        var t = new TextBlock
+        {
+            Text = (clipStart ? "\u2039 " : "") + ev.Title + (clipEnd ? " \u203a" : ""),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 6, 0),
+            FontSize = 10.5,
+        };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgOnAccent");
+
+        var bar = new Border
+        {
+            Child = t,
+            Height = 16,
+            Margin = new Thickness(1.5, 1, 1.5, 1),
+            Opacity = dim ? 0.55 : 1,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            // 被裁断的一端不收圆角,视觉上表示"还在继续"
+            CornerRadius = new CornerRadius(clipStart ? 0 : 4, clipEnd ? 0 : 4, clipEnd ? 0 : 4, clipStart ? 0 : 4),
+        };
+        bar.SetResourceReference(Border.BackgroundProperty, "Accent");
+        bar.ToolTip = ev.IsMultiDay ? $"{ev.Title}\n{ev.FirstDay:M月d日} – {ev.LastDay:M月d日}(全天)" : $"{ev.Title}(全天)";
+        bar.MouseLeftButtonUp += (_, _) => OpenEditor(ev.FirstDay, ev);
+        return bar;
     }
 
     // ---------------------------------------------------------------- 月排布
@@ -322,15 +370,47 @@ public sealed class CalendarView : UserControl
         var first = new DateTime(_anchor.Year, _anchor.Month, 1);
         var lead = ((int)first.DayOfWeek + 6) % 7;
         var days = DateTime.DaysInMonth(_anchor.Year, _anchor.Month);
-        var grid = new UniformGrid { Columns = 7 };
+        var gridStart = first.AddDays(-lead);
+        var weeks = (int)Math.Ceiling((lead + days) / 7.0);
 
-        for (int i = lead; i > 0; i--) grid.Children.Add(DayCell(first.AddDays(-i), MonthCellHeight, dim: true));
-        for (int d = 1; d <= days; d++) grid.Children.Add(DayCell(new DateTime(_anchor.Year, _anchor.Month, d), MonthCellHeight));
-        var tail = (7 - (lead + days) % 7) % 7;
-        for (int i = 1; i <= tail; i++) grid.Children.Add(DayCell(first.AddDays(days + i - 1), MonthCellHeight, dim: true));
-
-        panel.Children.Add(grid);
+        // 逐周成带 —— 这样跨天长条可以在每一周里贯穿多格(月历里跨周会在周界自然断开续接)
+        for (int w = 0; w < weeks; w++)
+        {
+            var weekStart = gridStart.AddDays(w * 7);
+            panel.Children.Add(MonthWeekBand(weekStart, first, days));
+        }
         return panel;
+    }
+
+    /// <summary>月排布里的一周:非本月的日子置灰。</summary>
+    UIElement MonthWeekBand(DateTime weekStart, DateTime monthFirst, int daysInMonth)
+    {
+        var grid = new Grid();
+        for (int i = 0; i < 7; i++) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        for (int i = 0; i < 7; i++)
+        {
+            var day = weekStart.AddDays(i);
+            var outside = day < monthFirst || day >= monthFirst.AddDays(daysInMonth);
+            var cell = DayCell(day, MonthCellHeight, dim: outside);
+            Grid.SetColumn(cell, i);
+            Grid.SetRow(cell, 0);
+            grid.Children.Add(cell);
+        }
+
+        var spans = CalendarData.SpansIn(weekStart, 7);
+        for (int k = 0; k < spans.Count; k++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var (ev, col, span, clipStart, clipEnd) = spans[k];
+            var bar = SpanBar(ev, clipStart, clipEnd, dim: false);
+            Grid.SetColumn(bar, col);
+            Grid.SetColumnSpan(bar, span);
+            Grid.SetRow(bar, k + 1);
+            grid.Children.Add(bar);
+        }
+        return grid;
     }
 
     // ---------------------------------------------------------------- 单个日期格
@@ -338,7 +418,8 @@ public sealed class CalendarView : UserControl
     {
         var isToday = day.Date == DateTime.Today;
         var isSelected = day.Date == _selected.Date;
-        var evts = CalendarData.On(day).ToList();
+        // 标点只算【定时】日程 —— 全天/跨天已经由长条画出来了,再点一次是重复
+        var evts = CalendarData.TimedOn(day).ToList();
 
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
 

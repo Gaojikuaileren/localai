@@ -261,6 +261,34 @@ public static class Selftest
             pc.Touch("a");
             Assert(pc.Recent().First().ProjectId == "a", "打开项目后它排到最前");
 
+            // ---- 日历:全天 / 跨天的分段计算 ----
+            // 跨天日程要在每一周里画成一条贯穿多格的长条,跨到区间外的部分要被裁断并标出续前/续后。
+            Views.CalendarData.Events.Clear();
+            var monday = new DateTime(2026, 7, 27);   // 周一
+            Views.CalendarData.Events.Add(new Views.CalendarEvent(monday.AddDays(1), monday.AddDays(3), "跨三天", "我", "家庭", AllDay: true));
+            Views.CalendarData.Events.Add(new Views.CalendarEvent(monday.AddDays(5), monday.AddDays(9), "跨周", "我", "家庭", AllDay: true));
+            Views.CalendarData.Events.Add(new Views.CalendarEvent(monday.AddHours(10), monday.AddHours(11), "定时", "我", "家庭"));
+
+            var week1 = Views.CalendarData.SpansIn(monday, 7);
+            Assert(week1.Count == 2, $"本周有两条全天条(实得 {week1.Count})");
+            var s3 = week1.First(x => x.Ev.Title == "跨三天");
+            Assert(s3.Col == 1 && s3.Span == 3, $"跨三天:第 2 格起、占 3 格(实得 col={s3.Col} span={s3.Span})");
+            Assert(!s3.ClipStart && !s3.ClipEnd, "完全落在本周内的条,两端都不裁断");
+            var sx = week1.First(x => x.Ev.Title == "跨周");
+            Assert(sx.Col == 5 && sx.Span == 2, $"跨周条在本周占最后 2 格(实得 col={sx.Col} span={sx.Span})");
+            Assert(!sx.ClipStart && sx.ClipEnd, "延伸到下周的条:右端标记为续后");
+
+            var week2 = Views.CalendarData.SpansIn(monday.AddDays(7), 7);
+            var sx2 = week2.First(x => x.Ev.Title == "跨周");
+            Assert(sx2.Col == 0 && sx2.Span == 3, $"跨周条在下周从第 1 格起占 3 格(实得 col={sx2.Col} span={sx2.Span})");
+            Assert(sx2.ClipStart && !sx2.ClipEnd, "承接上周的条:左端标记为续前");
+
+            Assert(Views.CalendarData.TimedOn(monday).Count() == 1, "定时日程只算在起始那天");
+            Assert(!Views.CalendarData.TimedOn(monday.AddDays(1)).Any(), "全天条不计入定时日程(否则日期格会重复标点)");
+            Assert(Views.CalendarData.On(monday.AddDays(2)).Any(e => e.Title == "跨三天"), "跨天日程覆盖区间内的每一天");
+            Assert(Views.CalendarEditor.DefaultDuration == TimeSpan.FromHours(1), "新建日程默认时长 1 小时");
+            Views.CalendarData.Events.Clear();
+
             // ---- 浮层协调(抽屉与浮窗共用一套规则)----
             // 重构前抽屉与浮窗各写一套规则、互不知情:Esc 关不掉浮窗、抽屉里的浮窗会变孤儿、
             // "同时只开一个"合起来不成立。现在统一由 Overlay 裁决,这里逐条断言。

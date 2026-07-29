@@ -119,6 +119,16 @@ public partial class App : Application
         Ev(10, 20, 0,  90, "(示例)家庭电影夜", "双方", "家庭");
         // 下月初(验证月排布翻月)
         Ev(32, 14, 0,  60, "(示例)季度复盘", "我", "个人");
+
+        // 全天 / 跨天(验证贯穿多格的长条):单日全天、本周内跨 3 天、跨周 5 天
+        void AllDay(int fromOffset, int toOffset, string title, string owner, string scope, string group)
+            => Views.CalendarData.Events.Add(new Views.CalendarEvent(
+                today.AddDays(fromOffset), today.AddDays(toOffset), title, owner, scope,
+                AllDay: true, CalendarGroup: group, Location: "", Url: "", Notes: ""));
+
+        AllDay(2, 2, "(示例)公休日", "双方", "家庭", "家庭");
+        AllDay(4, 6, "(示例)出差 · 柏林", "我", "个人", "工作");
+        AllDay(9, 13, "(示例)家庭旅行", "双方", "家庭", "家庭");
     }
 
     void RegisterCleanupSteps()
