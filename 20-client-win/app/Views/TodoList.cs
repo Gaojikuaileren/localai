@@ -32,7 +32,14 @@ public static class TodoList
         };
         check.SetResourceReference(Shape.StrokeProperty, "FgOnAccent");
 
-        var circle = new Grid { Width = 18, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0), Cursor = System.Windows.Input.Cursors.Hand };
+        // ★ 圆圈整块都要能点:未完成时圆圈是【空心描边】,圈内没有填充 -> 点圆心命中不到。
+        //   给容器一层透明底色(并放宽到 24px),整块可命中,点哪儿都切换(用户反馈)。
+        var circle = new Grid
+        {
+            Width = 24, Height = 24, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0), Cursor = System.Windows.Input.Cursors.Hand,
+            Background = Brushes.Transparent,
+        };
         circle.Children.Add(ring);
         circle.Children.Add(check);
         circle.MouseLeftButtonUp += (_, e) => { e.Handled = true; onToggle(); };  // 点圈只切换,不打开编辑

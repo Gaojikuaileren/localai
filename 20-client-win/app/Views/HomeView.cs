@@ -56,6 +56,9 @@ public sealed class HomeView : UserControl
     readonly UniformGrid _tiles = new();
     readonly StackPanel _todoList = new();
     readonly Border _todoPanel;
+    // 完成后停留 3 秒再归档:宽限期内每 400ms 刷一次,到点把已完成项从主板块刷走
+    readonly DispatcherTimer _todoGrace = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    TextBlock? _archiveLabel;
     readonly ScrollViewer _pageScroll = new();
 
     App TheApp => (App)Application.Current;
@@ -88,18 +91,30 @@ public sealed class HomeView : UserControl
         _root.Children.Add(calPanel);
 
         _todoList.Margin = new Thickness(0, 2, 0, 0);
-        _todoPanel = Ui.Panel("待办与家务",
-            new ScrollViewer
-            {
-                Content = _todoList,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            }.PassThrough(),
+        var todoScroll = new ScrollViewer
+        {
+            Content = _todoList,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        }.PassThrough();
+
+        // 底部一条:右下角「已完成 (N) ›」入口,点开右侧抽屉看已归档的
+        var footer = new Border { BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(0, 6, 0, 0), Margin = new Thickness(0, 6, 0, 0) };
+        footer.SetResourceReference(Border.BorderBrushProperty, "Border");
+        footer.Child = ArchiveButton();
+
+        var todoBody = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(footer, Dock.Bottom);
+        todoBody.Children.Add(footer);
+        todoBody.Children.Add(todoScroll);
+
+        _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
-            headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办 / 家务"));
+            headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"));
         BuildTodos();
         TheApp.Todos.Changed += BuildTodos;
-        Unloaded += (_, _) => TheApp.Todos.Changed -= BuildTodos;
+        _todoGrace.Tick += (_, _) => BuildTodos();   // 宽限期内轮询,到点把已完成项刷走
+        Unloaded += (_, _) => { TheApp.Todos.Changed -= BuildTodos; _todoGrace.Stop(); };
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮
         // 与日历面板等高:日历面板 = 日历本体 + Ui.Panel 的标题行与内边距(约 62),
         // 之前按 +46 算,导致两块并排时高度差了十几像素。
@@ -477,22 +492,63 @@ public sealed class HomeView : UserControl
     {
         var body = TodoEditor.Build(existing);
         (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
-            existing is null ? "新建待办 / 家务" : "编辑待办 / 家务", body, IconName.Member);
+            existing is null ? "新建待办事项" : "编辑待办事项", body, IconName.Member);
     }
 
     void BuildTodos()
     {
         _todoList.Children.Clear();
-        var items = TheApp.Todos.Ordered().ToList();
+        var items = TheApp.Todos.Active().ToList();
         if (items.Count == 0)
         {
-            _todoList.Children.Add(Ui.Body("还没有待办。", muted: true));
+            _todoList.Children.Add(Ui.Body("没有待办事项了。", muted: true));
             _todoList.Children.Add(Ui.Caption("点右上角 + 新建;或「提醒我…」建个人待办、「提醒我们…」建家庭事务。"));
-            return;
         }
-        foreach (var t in items)
-            _todoList.Children.Add(TodoList.Row(t, () => TheApp.Todos.Toggle(t.Id), () => OpenTodoEditor(t)));
+        else
+        {
+            foreach (var t in items)
+                _todoList.Children.Add(TodoList.Row(t, () => TheApp.Todos.Toggle(t.Id), () => OpenTodoEditor(t)));
+        }
+
+        // 已完成计数刷新
+        if (_archiveLabel is not null) _archiveLabel.Text = $"已完成 ({TheApp.Todos.CompletedCount})";
+
+        // 还有处于 3 秒宽限期的项 -> 保持轮询,到点自动把它刷走;否则停表
+        if (TheApp.Todos.HasGrace()) { if (!_todoGrace.IsEnabled) _todoGrace.Start(); }
+        else _todoGrace.Stop();
     }
+
+    // 右下角「已完成 (N) ›」—— 点开右侧抽屉看已归档的
+    FrameworkElement ArchiveButton()
+    {
+        _archiveLabel = new TextBlock { Text = "已完成 (0)", VerticalAlignment = VerticalAlignment.Center };
+        _archiveLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        _archiveLabel.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var chev = Icons.Make(IconName.ChevronRight, 12, "FgMuted");
+        chev.VerticalAlignment = VerticalAlignment.Center;
+        chev.Margin = new Thickness(3, 0, 0, 0);
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        row.Children.Add(_archiveLabel);
+        row.Children.Add(chev);
+
+        var b = new Border
+        {
+            Child = row, Padding = new Thickness(8, 4, 6, 4),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Background = System.Windows.Media.Brushes.Transparent,
+        };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = System.Windows.Media.Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, _) => OpenTodoArchive();
+        return b;
+    }
+
+    void OpenTodoArchive()
+        => (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer("已完成", new TodoArchiveView(), IconName.Tasks);
 
     // ---------------------------------------------------------------- 项目方块
     void BuildTiles()

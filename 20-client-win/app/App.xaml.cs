@@ -108,7 +108,7 @@ public partial class App : Application
             Due: DateTime.Today.AddDays(1), Flagged: true, Priority: TodoPriority.High, Owner: "我", Scope: "个人"));
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)预约理发", TodoKind.Personal, Owner: "我", Scope: "个人"));
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)倒垃圾", TodoKind.Chore,
-            Done: true, Owner: "我", Scope: "家庭"));
+            Done: true, Owner: "我", Scope: "家庭", CompletedAt: DateTime.Now.AddHours(-2)));
     }
 
     // 日历同理:没有日程就只能看到空的格子,没法评审"有日程标点 / 点日期看当天"这些交互。

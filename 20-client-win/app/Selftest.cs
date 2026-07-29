@@ -164,11 +164,33 @@ public static class Selftest
             Assert(todos.Items[0].Done && todoChanged == 2, "Toggle 置为完成并触发 Changed");
             todos.Update(todos.Items[0] with { Title = "买菜和蛋" });
             Assert(todos.Items[0].Title == "买菜和蛋", "Update 生效");
-            todos.Add(new Services.TodoItem("", "交电费", Services.TodoKind.Personal));
-            var ord = todos.Ordered().ToList();
-            Assert(!ord[0].Done && ord[^1].Done, "排序:未完成在前、已完成沉底");
+            // 排序:未完成按截止升序(逾期/最近在前),无截止排后
+            var t0 = todos.Add(new Services.TodoItem("", "无截止", Services.TodoKind.Personal));
+            var t1 = todos.Add(new Services.TodoItem("", "后天到期", Services.TodoKind.Personal, Due: DateTime.Now.AddDays(2)));
+            var t2 = todos.Add(new Services.TodoItem("", "已逾期", Services.TodoKind.Personal, Due: DateTime.Now.AddDays(-1)));
+            var act = todos.Active().Where(x => !x.Done).ToList();   // 排除上面刚 Toggle 的那条
+            var iOver = act.FindIndex(x => x.Id == t2);
+            var iSoon = act.FindIndex(x => x.Id == t1);
+            var iNone = act.FindIndex(x => x.Id == t0);
+            Assert(iOver < iSoon && iSoon < iNone, "排序:逾期 < 将到期 < 无截止(按截止升序,无截止垫底)");
+
             todos.Remove(tid);
             Assert(todos.Items.All(x => x.Id != tid), "Remove 删除该条");
+
+            // 完成后 3 秒宽限:刚完成仍在 Active,超过宽限期则进 Completed、离开 Active
+            var g = todos.Add(new Services.TodoItem("", "刚完成", Services.TodoKind.Personal));
+            todos.Toggle(g);
+            var justNow = DateTime.Now;
+            Assert(todos.Active(justNow).Any(x => x.Id == g), "刚勾选完成的项仍留在待办板块(宽限期内)");
+            Assert(todos.HasGrace(justNow), "有项处于宽限期");
+            var later = justNow.AddSeconds(Services.TodoCenter.ArchiveGraceSeconds + 1);
+            Assert(!todos.Active(later).Any(x => x.Id == g), "宽限期过后离开待办板块");
+            Assert(todos.Completed().Any(x => x.Id == g), "完成项进入【已完成】");
+            Assert(!todos.HasGrace(later), "宽限期过后不再有宽限项");
+            // 取消完成 -> 回到待办、离开已完成
+            todos.Toggle(g);
+            Assert(todos.Active(later).Any(x => x.Id == g) && !todos.Completed().Any(x => x.Id == g),
+                   "取消完成后回到待办、不在已完成里");
 
             var overdue = new Services.TodoItem("x", "逾期", Services.TodoKind.Personal, Due: DateTime.Now.AddMinutes(-5));
             Assert(overdue.IsOverdue, "有截止、过期、未完成 => 逾期");
@@ -182,6 +204,10 @@ public static class Selftest
                 Assert(homeTodo.Contains("Ui.PlusButton"), "待办板块标题栏有 + 新增按钮");
                 Assert(homeTodo.Contains("TodoList.Row("), "待办列表用共享行渲染器(与诊断同一份布局)");
                 Assert(homeTodo.Contains("Todos.Changed += BuildTodos"), "待办变更自动刷新列表(不依赖播种时序)");
+                Assert(homeTodo.Contains("Ui.Panel(\"待办事项\"") , "板块改名为「待办事项」");
+                Assert(homeTodo.Contains("OpenTodoArchive"), "右下角有「已完成」入口打开抽屉");
+                Assert(homeTodo.Contains("Todos.Active()"), "主板块只显示进行中(含宽限期)项");
+                Assert(homeTodo.Contains("_todoGrace"), "有 3 秒宽限轮询把已完成项刷走");
 
                 // 天气拖拽只能从右下角手柄起手,不是整块板块(用户裁定)
                 Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown"), "天气拖拽从右下角手柄区起手");

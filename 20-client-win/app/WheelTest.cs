@@ -42,7 +42,7 @@ public static class WheelTest
             new(TodoCenter.NewId(), "倒垃圾", TodoKind.Chore, Done: true),
         };
         foreach (var t in demo) list.Children.Add(TodoList.Row(t, () => { }, () => { }));
-        var panel = Ui.Panel("待办与家务", list, IconName.Member, new Thickness(0),
+        var panel = Ui.Panel("待办事项", list, IconName.Member, new Thickness(0),
             headerAction: Ui.PlusButton(() => { }, "新增"));
         panel.Width = 300;
         Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 320);

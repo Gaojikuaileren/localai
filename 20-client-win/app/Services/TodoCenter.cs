@@ -17,7 +17,10 @@ namespace LocalAI.Client.Services;
 public enum TodoKind { Personal, Chore }              // 待办 / 家务
 public enum TodoPriority { None, Low, Medium, High }  // 无 / 低 / 中 / 高(仿提醒事项)
 
-/// <summary>一条待办 / 家务。Due 为空=无截止;DueHasTime=false 表示只到"某天",不含具体时刻。</summary>
+/// <summary>
+/// 一条待办事项。Due 为空=无截止;DueHasTime=false 表示只到"某天",不含具体时刻。
+/// CompletedAt = 勾选完成的时刻(用于"完成后停留 3 秒再归档"的宽限判定)。
+/// </summary>
 public sealed record TodoItem(
     string Id,
     string Title,
@@ -29,7 +32,8 @@ public sealed record TodoItem(
     TodoPriority Priority = TodoPriority.None,
     string? Notes = null,
     string Owner = "我",
-    string Scope = "家庭")
+    string Scope = "家庭",
+    DateTime? CompletedAt = null)
 {
     /// <summary>已逾期:有截止、未完成、且截止在此刻之前。</summary>
     public bool IsOverdue => Due is { } d && !Done && d < DateTime.Now;
@@ -69,24 +73,48 @@ public sealed class TodoCenter
         if (_items.RemoveAll(x => x.Id == id) > 0) Changed?.Invoke();
     }
 
-    /// <summary>勾选 / 取消勾选完成 —— 提醒事项那一下点圈。</summary>
+    /// <summary>勾选 / 取消勾选完成 —— 提醒事项那一下点圈。完成时打上时间戳,取消则清掉。</summary>
     public void Toggle(string id)
     {
         var i = _items.FindIndex(x => x.Id == id);
         if (i < 0) return;
-        _items[i] = _items[i] with { Done = !_items[i].Done };
+        var done = !_items[i].Done;
+        _items[i] = _items[i] with { Done = done, CompletedAt = done ? DateTime.Now : null };
         Changed?.Invoke();
     }
 
     public static string NewId() => Guid.NewGuid().ToString("N")[..8];
 
+    /// <summary>勾完成后先停留几秒再归档到"已完成"抽屉(用户裁定:3 秒)。</summary>
+    public const double ArchiveGraceSeconds = 3;
+
+    static bool InGrace(TodoItem t, DateTime now)
+        => t.Done && t.CompletedAt is { } c && (now - c).TotalSeconds < ArchiveGraceSeconds;
+
     /// <summary>
-    /// 排序口径:未完成在前、已完成沉底;各自先按截止时间(无截止排后),再按标题。
-    /// kind 给定则只取该类。
+    /// 主板块要显示的:未完成 + 刚勾选还在宽限期内的。
+    /// 排序(用户裁定):按截止时间升序 —— 逾期/最近到期在最前,无截止的排最后;同截止按标题。
     /// </summary>
-    public IEnumerable<TodoItem> Ordered(TodoKind? kind = null)
-        => _items.Where(t => kind is null || t.Kind == kind)
-                 .OrderBy(t => t.Done)
-                 .ThenBy(t => t.Due ?? DateTime.MaxValue)
+    public IEnumerable<TodoItem> Active(DateTime? asOf = null)
+    {
+        var now = asOf ?? DateTime.Now;
+        return _items.Where(t => !t.Done || InGrace(t, now))
+                     .OrderBy(t => t.Due ?? DateTime.MaxValue)
+                     .ThenBy(t => t.Title, StringComparer.CurrentCulture);
+    }
+
+    /// <summary>已完成抽屉:全部已完成,最近完成在前。</summary>
+    public IEnumerable<TodoItem> Completed()
+        => _items.Where(t => t.Done)
+                 .OrderByDescending(t => t.CompletedAt ?? DateTime.MinValue)
                  .ThenBy(t => t.Title, StringComparer.CurrentCulture);
+
+    public int CompletedCount => _items.Count(t => t.Done);
+
+    /// <summary>是否还有处于"完成后 3 秒宽限期"的项(界面据此决定要不要继续轮询刷新)。</summary>
+    public bool HasGrace(DateTime? asOf = null)
+    {
+        var now = asOf ?? DateTime.Now;
+        return _items.Any(t => InGrace(t, now));
+    }
 }

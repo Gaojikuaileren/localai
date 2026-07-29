@@ -102,7 +102,8 @@ public static class TodoEditor
                 Priority: (TodoPriority)Math.Max(0, priority.SelectedIndex),
                 Notes: string.IsNullOrWhiteSpace(notes.Text) ? null : notes.Text,
                 Owner: owners[Math.Max(0, owner.SelectedIndex)],
-                Scope: scopes[Math.Max(0, scope.SelectedIndex)]);
+                Scope: scopes[Math.Max(0, scope.SelectedIndex)],
+                CompletedAt: existing?.CompletedAt);   // 保留完成时间戳,编辑不影响归档
         }
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
