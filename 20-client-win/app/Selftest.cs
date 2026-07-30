@@ -1038,6 +1038,16 @@ public static class Selftest
             var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvTrans is not null)
             {
+                // ★★ 只读是【数据状态】,必须排在【工作空间分流】之前。排反了 = 在已删除/已完成
+                //   的项目里还能打字、还能发送、甚至在回收站里的项目下新建会话(2026-07-30 审查发现)。
+                var bc = Slice(cvTrans, "void BuildConversation()", "var isGhost");
+                if (bc is not null)
+                {
+                    var ro = bc.IndexOf("if (ReadOnly)", StringComparison.Ordinal);
+                    var ws = bc.IndexOf("_wsKey ==", StringComparison.Ordinal);
+                    Assert(ro >= 0 && ws >= 0 && ro < ws,
+                           "★ 只读判断排在工作空间分流之前(否则删掉的项目里还能发消息)");
+                }
                 Assert(cvTrans.Contains("_wsKey == \"translation\"") && cvTrans.Contains("BuildTranslationLayout"),
                        "翻译空间:上方主会话框 + 下方语言池一排");
                 Assert(cvTrans.Contains("searchIcon: true") && cvTrans.Contains("IconName.Search"),
@@ -2019,6 +2029,22 @@ public static class Selftest
     /// 去掉注释行再做结构匹配。★ 已经踩过三次:断言"某处提到 X"结果匹配到的是【注释里】的 X,
     /// 代码其实早就没了 —— 凡是"不该再出现某写法"的断言,一律先过这一遍。
     /// </summary>
+    /// <summary>
+    /// 在源码里切一段来做结构断言。★ 任一标记找不到就返回 null —— 绝不能写成 src[src.IndexOf(x)..],
+    /// 那样标记一旦被重构掉就是 ArgumentOutOfRangeException:自检【进程崩掉】而不是报 FAIL,
+    /// 反而更难查。调用方拿到 null 就跳过该条(与"发布版无源码"同样的处理)。
+    /// </summary>
+    static string? Slice(string? src, string from, string? to = null)
+    {
+        if (src is null) return null;
+        var a = src.IndexOf(from, StringComparison.Ordinal);
+        if (a < 0) return null;
+        var rest = src[a..];
+        if (to is null) return rest;
+        var b = rest.IndexOf(to, StringComparison.Ordinal);
+        return b < 0 ? null : rest[..b];
+    }
+
     static string Body(string src) =>
         string.Join(Environment.NewLine, src.Split('\n').Where(l => !l.TrimStart().StartsWith("//")));
 

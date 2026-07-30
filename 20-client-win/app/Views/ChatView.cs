@@ -586,14 +586,19 @@ public sealed class ChatView : UserControl
 
     void BuildConversation()
     {
+        // ★★ 顺序不能动:只读是【数据状态】,和在哪个工作空间无关,所以必须排在工作空间分流【之前】。
+        //   排在后面出过事:翻译空间(以及其余占位空间)先 return 掉,只读判断永远轮不到 ——
+        //   于是在已删除/已完成的项目里,输入框照样能编辑、回车照样把消息写进去
+        //   (ChatCenter.Send 只按 sessionId 找会话,不看项目删没删);
+        //   更糟的是该项目下若没有可见会话,发送还会顺手在【回收站里的项目】下新建一条会话。
+        //   界面当时是自相矛盾的:右上角「新建会话」被隐藏了,却让你往删掉的会话里打字。
+        if (ReadOnly) { _conv.Content = BuildReadonlyProject(); return; }
+
         // ★ 翻译工作空间(用户裁定的排版):上方【主会话框】(输入框直接在底部,不居中;发送 = 放大镜),
         //   下方一排【程度竖条 / 目标池 / 语言池 / 学习笔记】。会话列表与项目抽屉外壳照旧。
         if (_wsKey == "translation") { _conv.Content = BuildTranslationLayout(); return; }
         // 其余工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假界面。
         if (_wsKey != "chat") { _conv.Content = PlaceholderCenter(); return; }
-
-        // ★ 只读:选中的是【已删除项目】或【已完成项目】—— 只能浏览记录,输入区换成对应动作按钮。
-        if (ReadOnly) { _conv.Content = BuildReadonlyProject(); return; }
 
         var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
