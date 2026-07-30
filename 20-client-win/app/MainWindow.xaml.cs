@@ -47,6 +47,20 @@ public partial class MainWindow : Window
         //   按钮/复选框设成不可聚焦之后方向键已无处可去,这条属于保险丝。
         KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None);
 
+        // ★★ Tab 由我们自己接管:只在【可编辑的输入框】之间走(见 FocusPolicy)。
+        //   为什么不靠给控件设 IsTabStop=False —— 那是打地鼠:Control 的 Focusable 默认就是 true,
+        //   ContentControl 这类纯板块容器天生就是 Tab 停靠点,列不全。这里正面执行白名单。
+        //   ★ Tab 是【二态开关】(用户第二轮裁定):聚焦 AI 交流输入框 ⇄ 什么都不聚焦。
+        //     不再在多个输入框之间循环 —— 抽屉里的编辑器改用鼠标点格子。
+        //   ★ Tab 可以在隧道层拦,方向键不可以(见下面那段)——TextBox 的 AcceptsTab 是 false,
+        //     Tab 在输入框里本来就只用于导航,拦掉不损失任何东西。
+        PreviewKeyDown += (_, ke) =>
+        {
+            if (ke.Key != Key.Tab) return;
+            ke.Handled = true;
+            FocusPolicy.HandleTab(this);
+        };
+
         // ★ Esc 是【总闸】:浮层和菜单都归它管。以前只管浮层 —— 万一菜单状态卡住,
         //   界面点不动而 Esc 又救不了,用户就只能杀进程(实际发生过一次)。
         PreviewKeyDown += (_, ke) =>

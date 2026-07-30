@@ -104,7 +104,16 @@ public sealed class ChatView : UserControl
         BuildConversation();
         TheApp.Chat.Changed += OnChatChanged;
         TheApp.Projects.Changed += UpdateContext;
-        Unloaded += (_, _) => { TheApp.Chat.Changed -= OnChatChanged; TheApp.Projects.Changed -= UpdateContext; TheApp.Chat.PurgeGhosts(); };
+        // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
+        //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
+        TheApp.Translation.Changed += RefreshSendEnabled;
+        Unloaded += (_, _) =>
+        {
+            TheApp.Chat.Changed -= OnChatChanged;
+            TheApp.Projects.Changed -= UpdateContext;
+            TheApp.Translation.Changed -= RefreshSendEnabled;
+            TheApp.Chat.PurgeGhosts();
+        };
     }
 
     void OnChatChanged() { BuildSessions(); BuildConversation(); }
@@ -509,6 +518,9 @@ public sealed class ChatView : UserControl
             MaxLines = InputMaxLines,                   // ② 最多 3 行高
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,   // 超过就滚动
         };
+        // ★ 标记它是【AI 交流输入框】—— Tab 唯一认的落点(用户第二轮裁定)。
+        //   用显式标记而不是"树里第一个 TextBox":输入区每次重建都是新对象,标记跟着控件走最可靠。
+        FocusPolicy.SetIsChatInput(_input, true);
         _input.TextChanged += (_, _) => _draft = _input.Text;
         _input.PreviewKeyDown += (_, e) =>
         {
@@ -525,6 +537,9 @@ public sealed class ChatView : UserControl
             // Shift/Ctrl + Enter = 换行;单独 Enter = 发送
             if ((Keyboard.Modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) != 0) return;
             e.Handled = true;
+            // ★ Enter 必须问【同一条】前置条件:只把按钮灰掉是做样子 ——
+            //   目标池空着时按钮是灰的,回车却照发(审查发现的实缺口)。两条路一个判据。
+            if (_canSend is not null && !_canSend()) return;
             SendCurrent();
         };
         // ★ 在输入框里直接【粘贴截图】(Ctrl+V):剪贴板是图片就收进附件栏,而不是当文本贴进去。
@@ -536,12 +551,13 @@ public sealed class ChatView : UserControl
         if (searchIcon) send = SearchSendButton(SendCurrent);
         else send = Ui.Primary("发送", (_, _) => SendCurrent());
         send.Height = 40;
-        // ★ 翻译空间:目标池空 = 不知道要翻成什么,发送禁用(用户裁定)
-        if (searchIcon && TheApp.Translation.Targets.Count == 0)
-        {
-            send.IsEnabled = false;
-            send.Opacity = 0.45;
-        }
+        // ★★ 发送能不能按,是一个【会变的条件】,不是建界面那一刻算一次就完事。
+        //   之前写成建构时算一次:进翻译空间时目标池是空的 -> 按钮灰掉,之后你把语言拖进目标池,
+        //   按钮还是灰的(用户实测)—— 因为没人再去重算它。
+        //   现在:条件存成谓词,状态由 RefreshSendEnabled() 统一刷,目标池一变就跟着变。
+        _sendBtn = send;
+        _canSend = searchIcon ? () => TheApp.Translation.Targets.Count > 0 : null;
+        RefreshSendEnabled();
         var attach = AttachButton();
 
         var inputRow = new DockPanel { LastChildFill = true };
@@ -598,6 +614,19 @@ public sealed class ChatView : UserControl
     ///   对它 Focus() 只会静默返回 false,焦点落空 = 整页键盘敲不进任何地方(纪律里"没有输入框就不聚焦"
     ///   说的正是这种情况:不聚焦,而不是聚焦到一个不存在的东西上)。
     /// </summary>
+    // 发送键与它的前置条件。★ 存谓词而不是存布尔:布尔是"当时的答案",谓词才是"问题本身"。
+    Button? _sendBtn;
+    Func<bool>? _canSend;
+
+    /// <summary>按当前条件刷新发送键的可用状态。目标池一变就会被叫到。</summary>
+    void RefreshSendEnabled()
+    {
+        if (_sendBtn is null) return;
+        var ok = _canSend is null || _canSend();
+        _sendBtn.IsEnabled = ok;
+        _sendBtn.Opacity = ok ? 1 : 0.45;
+    }
+
     void FocusInputIfPresent()
     {
         if (_input.IsLoaded) _input.Focus();

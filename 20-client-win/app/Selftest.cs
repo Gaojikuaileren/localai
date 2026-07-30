@@ -1061,8 +1061,17 @@ public static class Selftest
                 Assert(sendBlk.Contains("new Grid { Width = 22, Height = 22 }") && sendBlk.Contains("Padding = new Thickness(0)")
                        && sendBlk.Contains("HorizontalContentAlignment = HorizontalAlignment.Center"),
                        "★ 放大镜居中且不被裁(定尺容器 + 零内边距 + 内容居中)");
-                Assert(cvTrans.Contains("searchIcon && TheApp.Translation.Targets.Count == 0"),
-                       "★ 目标池为空 -> 发送按钮灰掉禁用");
+                // ★★ 发送能不能按是个【会变的条件】,不能建界面时算一次就完事:
+                //   之前进翻译空间时目标池是空的 -> 按钮灰掉,之后把语言拖进去按钮还是灰的(用户实测)。
+                Assert(!Body(cvTrans).Contains("searchIcon && TheApp.Translation.Targets.Count == 0"),
+                       "★ 发送状态不再是建构时算死的布尔");
+                Assert(cvTrans.Contains("_canSend = searchIcon ? () => TheApp.Translation.Targets.Count > 0 : null;"),
+                       "★ 发送前置条件存成【谓词】(问题本身),不是当时的答案");
+                Assert(cvTrans.Contains("TheApp.Translation.Changed += RefreshSendEnabled;"),
+                       "★ 目标池一变,发送键当场跟着变");
+                var enter = Slice(cvTrans, "if (e.Key != Key.Enter) return;", "DataObject.AddPastingHandler");
+                Assert(enter is not null && enter.Contains("_canSend is not null && !_canSend()"),
+                       "★ Enter 与按钮问同一条判据(只灰按钮是做样子,回车照发)");
             }
             var setLang = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (setLang is not null)
@@ -2056,6 +2065,67 @@ public static class Selftest
                         app.Resources.MergedDictionaries.RemoveAt(app.Resources.MergedDictionaries.Count - 1);
                 }
             }
+            // ---- Tab = 二态开关:聚焦 AI 交流输入框 ⇄ 什么都不聚焦(用户第二轮裁定)----
+            // ★★ 用户先后实测两轮:第一轮"按钮能被 Tab 到",第二轮"板块也能被 Tab 到"。
+            //   根因是 WPF 里 Control 的 Focusable 默认就是 true —— ContentControl 这种纯板块容器
+            //   天生就是停靠点。一个个控件去关是打地鼠、注定漏,所以改成正面执行:
+            //   Tab 只认一个【显式标记过】的落点,别的一律"不聚焦"。
+            {
+                var root = new System.Windows.Controls.Grid();
+                var panelHost = new System.Windows.Controls.ContentControl();   // ← 当初漏掉的"板块"
+                var inner = new System.Windows.Controls.StackPanel();
+                panelHost.Content = inner;
+                var chatInput = new System.Windows.Controls.TextBox();
+                Views.FocusPolicy.SetIsChatInput(chatInput, true);
+                var otherBox = new System.Windows.Controls.TextBox();           // 编辑器里的普通输入格
+                var btnT = new System.Windows.Controls.Button();
+                var readonlyBubble = new System.Windows.Controls.TextBox { IsReadOnly = true };
+                foreach (var el in new System.Windows.UIElement[] { btnT, otherBox, readonlyBubble, chatInput })
+                    inner.Children.Add(el);
+                root.Children.Add(panelHost);
+                root.Measure(new System.Windows.Size(800, 800));
+                root.Arrange(new System.Windows.Rect(0, 0, 800, 800));
+
+                var found = Views.FocusPolicy.FindChatInput(root);
+                Assert(ReferenceEquals(found, chatInput), "★ Tab 只认被标记的 AI 交流输入框");
+                Assert(!ReferenceEquals(found, otherBox), "编辑器里的普通输入格不是 Tab 的落点");
+
+                // 二态开关:没聚焦 -> 聚焦它;已聚焦 -> 取消聚焦
+                Assert(ReferenceEquals(Views.FocusPolicy.Toggle(found, null), chatInput), "★ Tab 一下:聚焦输入框");
+                Assert(Views.FocusPolicy.Toggle(found, chatInput) is null, "★ 再 Tab 一下:取消聚焦(不跳到别处)");
+                Assert(ReferenceEquals(Views.FocusPolicy.Toggle(found, btnT), chatInput),
+                       "焦点在别处时 Tab 收回输入框");
+
+                // ★ 当前页面没有 AI 输入框 -> 恒为"不聚焦任何"
+                var bare = new System.Windows.Controls.Grid();
+                bare.Children.Add(new System.Windows.Controls.Button());
+                bare.Children.Add(new System.Windows.Controls.ContentControl());
+                bare.Children.Add(new System.Windows.Controls.TextBox());        // 没标记的输入框也不算
+                bare.Measure(new System.Windows.Size(800, 800));
+                Assert(Views.FocusPolicy.FindChatInput(bare) is null, "没有 AI 输入框的页面:找不到落点");
+                Assert(Views.FocusPolicy.Toggle(null, null) is null, "★ 没有输入框就不聚焦任何东西");
+
+                // 藏起来的输入框不该被 Tab 到
+                var hidden = new System.Windows.Controls.Grid();
+                var hiddenHost = new System.Windows.Controls.ContentControl { Visibility = System.Windows.Visibility.Collapsed };
+                var hiddenInput = new System.Windows.Controls.TextBox();
+                Views.FocusPolicy.SetIsChatInput(hiddenInput, true);
+                hiddenHost.Content = hiddenInput;
+                hidden.Children.Add(hiddenHost);
+                hidden.Measure(new System.Windows.Size(800, 800));
+                Assert(Views.FocusPolicy.FindChatInput(hidden) is null, "折叠起来的分支里的输入框不被 Tab 到");
+            }
+            var mwTab = TryReadSource("MainWindow.xaml.cs");
+            if (mwTab is not null)
+            {
+                Assert(mwTab.Contains("ke.Key != Key.Tab") && mwTab.Contains("FocusPolicy.HandleTab(this)"),
+                       "★ Tab 由窗口统一接管(不靠逐个控件设 IsTabStop)");
+            }
+            var cvMark = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvMark is not null)
+                Assert(cvMark.Contains("FocusPolicy.SetIsChatInput(_input, true);"),
+                       "★ AI 交流输入框被显式标记(输入区每次重建都是新对象,标记跟着控件走)");
+
             // 主窗口那三个标题栏按钮走 keyed 样式 —— 隐式样式对它们【整条不生效】,必须各补一遍
             var mwCap = TryReadSource("MainWindow.xaml");
             if (mwCap is not null)
@@ -2063,8 +2133,10 @@ public static class Selftest
                 var cap = Slice(mwCap, "x:Key=\"CaptionButton\"", "</Style>");
                 Assert(cap is not null && cap.Contains("\"Focusable\" Value=\"False\"") && cap.Contains("\"IsTabStop\" Value=\"False\""),
                        "★ 标题栏按钮也退出焦点体系(带显式 Style 的元素不吃隐式样式)");
-                Assert(mwCap.Contains("KeyboardNavigation.TabNavigation=\"Cycle\""),
-                       "Tab 圈在抽屉里(编辑器多个输入格之间跳,但不跑到抽屉外)");
+                // ★ 抽屉不再需要 TabNavigation=Cycle:Tab 已由窗口接管、只认 AI 输入框一个落点,
+                //   WPF 自己的 Tab 导航根本不会跑起来。留着是死设定,反而误导后来人。
+                Assert(!mwCap.Contains("KeyboardNavigation.TabNavigation"),
+                       "抽屉不留失效的 Tab 导航设定(Tab 由 FocusPolicy 统一接管)");
             }
             var mwFocus = TryReadSource("MainWindow.xaml.cs");
             if (mwFocus is not null)
@@ -2091,8 +2163,11 @@ public static class Selftest
             }
             var cdSrc = TryReadSource(Path.Combine("Views", "ConfirmDialog.cs"));
             if (cdSrc is not null)
-                Assert(cdSrc.Contains("e.Key == Key.Enter && !danger"),
-                       "★ 危险确认不认 Enter(惯性回车不该删掉不可回收的东西)");
+            {
+                var kd = Slice(cdSrc, "win.KeyDown +=", "win.ShowDialog");
+                Assert(kd is not null && kd.Contains("Key.Escape") && !kd.Contains("Key.Enter"),
+                       "★ 确认框只认 Esc 取消,回车【不】确认(回车只触发发送)");
+            }
             var mvSrc = TryReadSource(Path.Combine("Views", "ModelsView.cs"));
             if (mvSrc is not null)
                 Assert(mvSrc.Contains("path.LostFocus += (_, _) => Commit();") && mvSrc.Contains("Unloaded += (_, _) => Commit();"),

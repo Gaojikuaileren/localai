@@ -284,10 +284,7 @@
                   Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>
         </Grid>
         <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
-        <!-- Tab 圈在抽屉里:笔记编辑器有 7 个输入格、日程 4 个,Tab 在格子之间跳是有用的;
-             但抽屉和主界面同属一棵可视树,不圈住的话 Tab 会从最后一格跑到抽屉外面去。 -->
-        <ContentControl x:Name="SideDrawerHost" Margin="20,14,20,18"
-                        KeyboardNavigation.TabNavigation="Cycle"/>
+        <ContentControl x:Name="SideDrawerHost" Margin="20,14,20,18"/>
       </DockPanel>
     </Border>
 
