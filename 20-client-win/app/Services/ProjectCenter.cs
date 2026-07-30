@@ -34,8 +34,8 @@ public sealed record Project(
     DateTime LastOpened,
     bool Pinned = false,
     ProjectStatus Status = ProjectStatus.Active,
-    string? FolderPath = null,        // 实际本机文件夹(建时选)
-    string? AttachmentPath = null,    // 可选附件文件夹
+    string? FolderPath = null,               // 实际本机文件夹(建时选)
+    IReadOnlyList<string>? Attachments = null, // 可选附件文件夹(可多个)
     AiPermission Ai = AiPermission.Ask);   // 给 AI 的权限(默认"需批准")
 
 public sealed class ProjectCenter
@@ -50,11 +50,11 @@ public sealed class ProjectCenter
 
     public static string NewId() => "prj-" + Guid.NewGuid().ToString("N")[..8];
 
-    /// <summary>新建项目。默认【准备中】。folder 为实际文件夹,attachment 可空。</summary>
-    public Project Create(string title, string? folder, string? attachment, ProjectScope scope, string workspaceKey = "chat")
+    /// <summary>新建项目。默认【准备中】。folder 为实际文件夹,attachments 可为多个或空。</summary>
+    public Project Create(string title, string? folder, IEnumerable<string>? attachments, ProjectScope scope, string workspaceKey = "chat")
     {
         var p = new Project(NewId(), title, "", workspaceKey, scope, DateTime.Now,
-            Status: ProjectStatus.Preparing, FolderPath: folder, AttachmentPath: attachment);
+            Status: ProjectStatus.Preparing, FolderPath: folder, Attachments: attachments?.ToList());
         _items.Add(p);
         Changed?.Invoke();
         return p;
@@ -98,10 +98,18 @@ public sealed class ProjectCenter
         if (_items.RemoveAll(x => x.ProjectId == projectId) > 0) Changed?.Invoke();
     }
 
-    /// <summary>非已完成(准备中 + 进行中),置顶在前、再按最近。主页项目板块用它。</summary>
-    public IEnumerable<Project> Ongoing()
-        => _items.Where(p => p.Status != ProjectStatus.Done)
+    /// <summary>非已完成(准备中 + 进行中),置顶在前、再按最近。workspaceKey 给定则只取该空间的。
+    ///   主页项目板块用【全部】(跨空间总览);各工作空间的项目选择器用【本空间】。</summary>
+    public IEnumerable<Project> Ongoing(string? workspaceKey = null)
+        => _items.Where(p => p.Status != ProjectStatus.Done && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
                  .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+
+    /// <summary>把项目【发送到另一个工作空间】。它名下的会话由调用方一并迁移(SetSessionsWorkspace)。</summary>
+    public void MoveToWorkspace(string projectId, string workspaceKey)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i >= 0 && _items[i].WorkspaceKey != workspaceKey) { _items[i] = _items[i] with { WorkspaceKey = workspaceKey }; Changed?.Invoke(); }
+    }
 
     /// <summary>已完成 —— 项目库用它。</summary>
     public IEnumerable<Project> Completed()

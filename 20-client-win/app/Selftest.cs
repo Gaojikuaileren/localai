@@ -290,12 +290,12 @@ public static class Selftest
             Assert(!Services.ProjectCenter.OpenInExplorer(nope), "路径不存在时打开 Explorer 返回 false(不抛)");
 
             var cc = new Services.ChatCenter();
-            var ns = cc.NewSession(null, Services.ProjectScope.Personal);
-            Assert(cc.NormalSessions().Any(x => x.SessionId == ns.SessionId), "无项目 = 普通会话");
-            var pj = cc.NewSession("prj-x", Services.ProjectScope.Family);
+            var ns = cc.NewSession(null, "chat", Services.ProjectScope.Personal);
+            Assert(cc.NormalSessions("chat").Any(x => x.SessionId == ns.SessionId), "无项目 = 普通会话");
+            var pj = cc.NewSession("prj-x", "chat", Services.ProjectScope.Family);
             Assert(cc.SessionsOf("prj-x").Any(x => x.SessionId == pj.SessionId), "项目会话归到该项目下");
             cc.MoveToProject(ns.SessionId, "prj-x");
-            Assert(cc.SessionsOf("prj-x").Any(x => x.SessionId == ns.SessionId) && !cc.NormalSessions().Any(x => x.SessionId == ns.SessionId),
+            Assert(cc.SessionsOf("prj-x").Any(x => x.SessionId == ns.SessionId) && !cc.NormalSessions("chat").Any(x => x.SessionId == ns.SessionId),
                    "会话可移动到项目(离开普通列表)");
             cc.Send(pj.SessionId, "你好");
             var msgs = cc.MessagesOf(pj.SessionId).ToList();
@@ -303,11 +303,24 @@ public static class Selftest
             Assert(msgs.Any(m => m.Role == Services.ChatRole.System), "给出系统说明(模型未接入)");
             Assert(!msgs.Any(m => m.Role == Services.ChatRole.Assistant), "★ 不伪造 AI 回复(无 Assistant 消息)");
 
+            // 跨工作空间:会话不共享,可发送到别的空间
+            var wsSes = cc.NewSession(null, "chat");
+            cc.MoveSessionToWorkspace(wsSes.SessionId, "translation");
+            Assert(!cc.NormalSessions("chat").Any(x => x.SessionId == wsSes.SessionId), "发送后离开原工作空间");
+            Assert(cc.NormalSessions("translation").Any(x => x.SessionId == wsSes.SessionId), "出现在目标工作空间");
+
+            // 幽灵会话:不进任何列表
+            var ghost = cc.NewGhostSession("chat");
+            Assert(!cc.NormalSessions("chat").Any(x => x.SessionId == ghost.SessionId), "幽灵会话不进普通列表");
+            cc.PurgeGhosts();
+            Assert(cc.Find(ghost.SessionId) is null, "PurgeGhosts 抹掉幽灵会话");
+
             // 接线
             if (mwStatus is not null)
             {
-                Assert(mwStatus.Contains("new ChatView()"), "聊天工作空间接入 ChatView");
+                Assert(mwStatus.Contains("new ChatView(def.Key)"), "所有工作空间共用会话/项目外壳(ChatView)");
                 Assert(mwStatus.Contains("OpenProjectEditor") && mwStatus.Contains("OpenProjectLibrary") && mwStatus.Contains("OpenProjectInChat"), "项目编辑/项目库/进项目聊天入口就位");
+                Assert(mwStatus.Contains("TaskDrawer.Margin"), "任务抽屉避开左侧导航栏");
             }
             var homeProj = TryReadSource(Path.Combine("Views", "HomeView.cs"));
             if (homeProj is not null)
@@ -321,17 +334,25 @@ public static class Selftest
             {
                 Assert(picker.Contains("IconName.Folder") && picker.Contains("UniformGrid"), "项目选择器用田字形文件夹图标");
                 Assert(picker.Contains("ProjectUi.DotsButton") && picker.Contains("ShowEditor"), "项目用三个点菜单;编辑取代网格");
+                Assert(picker.Contains("_onPick(p.ProjectId)") && !picker.Contains("Overlay.CloseActive(); _onPick"), "选中项目不自动关抽屉(用户确认)");
             }
             var editorSrc = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
             if (editorSrc is not null)
+            {
                 Assert(editorSrc.Contains("PickFolder") && editorSrc.Contains("SetAiPermission") && editorSrc.Contains("重定向"), "项目编辑器可选文件夹/设 AI 权限/重定向路径(新建编辑共用)");
+                Assert(editorSrc.Contains("AddAttachSlot") && editorSrc.Contains("Ui.Shake"), "附件文件夹靠 + 逐个加,可多个;空槽再按 + 会震荡");
+            }
             var chatSrc = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (chatSrc is not null)
             {
                 Assert(chatSrc.Contains("MoveToNewProject") && chatSrc.Contains("MoveToProject"), "普通会话可新建项目并移入 / 移动到项目");
+                Assert(chatSrc.Contains("MoveSessionToWorkspace"), "会话可发送到其它工作空间");
                 Assert(chatSrc.Contains("\"FgOnSelected\""), "会话选中态字色用 FgOnSelected(墨白不再黑底黑字)");
+                Assert(chatSrc.Contains("Accent") && chatSrc.Contains("inProject"), "项目会话标题着重色区分普通会话");
                 Assert(chatSrc.Contains("ChatOpener") && chatSrc.Contains("VerticalAlignment.Center"), "空态输入框竖直居中(像 GPT)+ 开场问候");
                 Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PasteClipboard") && chatSrc.Contains("PickFile"), "可加附件/图片/剪贴板截图");
+                Assert(chatSrc.Contains("GhostButton") && chatSrc.Contains("虚线") || chatSrc.Contains("StrokeDashArray"), "幽灵会话:虚线边框会话面板");
+                Assert(chatSrc.Contains("OpenTrash") && chatSrc.Contains("已删除"), "会话列表底部有【已删除】入口");
             }
 
             // 附件:只带路径/剪贴板指令,不真发内容;发送记录附件且仍不伪造回复
@@ -339,25 +360,31 @@ public static class Selftest
             Assert(att.IsImage, "图片附件 IsImage=true");
             Assert(new Services.ChatAttachment(Services.AttachKind.File, "a.zip", "a.zip").IsImage == false, "文件附件 IsImage=false");
             var cc2 = new Services.ChatCenter();
-            var chatSes = cc2.NewSession(null);
+            var chatSes = cc2.NewSession(null, "chat");
             cc2.Send(chatSes.SessionId, "", new[] { att });
             var m3 = cc2.MessagesOf(chatSes.SessionId).ToList();
             Assert(m3.Any(x => x.Role == Services.ChatRole.User && x.Attachments is { Count: 1 }), "仅附件也能发送并记下引用");
             Assert(!m3.Any(x => x.Role == Services.ChatRole.Assistant), "带附件发送同样不伪造 AI 回复");
 
-            // 会话:置顶 / 删除 / 项目脱附
+            // 会话:置顶 / 软删除进已删除(30 天)/ 恢复 / 项目删除连会话
             var cc3 = new Services.ChatCenter();
-            var sa = cc3.NewSession(null);
-            var sb = cc3.NewSession(null);
-            cc3.Send(sa.SessionId, "hi");     // sa 更近
+            var sa = cc3.NewSession(null, "chat");
+            var sb = cc3.NewSession(null, "chat");
+            cc3.Send(sa.SessionId, "hi");
             cc3.TogglePin(sb.SessionId);
-            Assert(cc3.NormalSessions().First().SessionId == sb.SessionId, "置顶会话排最前(盖过更近的)");
-            cc3.Send(sa.SessionId, "again");
-            var pjS = cc3.NewSession("prjZ");
-            cc3.DetachProject("prjZ");
-            Assert(cc3.NormalSessions().Any(x => x.SessionId == pjS.SessionId), "删项目后其会话变回普通会话(不丢)");
+            Assert(cc3.NormalSessions("chat").First().SessionId == sb.SessionId, "置顶会话排最前(盖过更近的)");
+            var pjS = cc3.NewSession("prjZ", "chat");
+            cc3.DeleteProjectSessions("prjZ");
+            Assert(!cc3.NormalSessions("chat").Any(x => x.SessionId == pjS.SessionId) && cc3.Deleted("chat").Any(x => x.SessionId == pjS.SessionId),
+                   "删项目连会话一起进【已删除】");
             cc3.Delete(sa.SessionId);
-            Assert(!cc3.NormalSessions().Any(x => x.SessionId == sa.SessionId) && !cc3.MessagesOf(sa.SessionId).Any(), "删除会话连消息一并删");
+            Assert(!cc3.NormalSessions("chat").Any(x => x.SessionId == sa.SessionId), "删除后离开普通列表");
+            Assert(cc3.Deleted("chat").Any(x => x.SessionId == sa.SessionId) && cc3.MessagesOf(sa.SessionId).Any(), "★ 软删除:进已删除、消息仍在(可恢复)");
+            cc3.Restore(sa.SessionId);
+            Assert(cc3.NormalSessions("chat").Any(x => x.SessionId == sa.SessionId), "可从已删除恢复");
+            cc3.Delete(sa.SessionId);
+            cc3.SweepExpiredDeleted(DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
+            Assert(cc3.Find(sa.SessionId) is null, "超过保留期自动清除(不可恢复)");
 
             var pcd = new Services.ProjectCenter();
             var pdel = pcd.Create("待删", Path.Combine(Path.GetTempPath(), "x"), null, Services.ProjectScope.Personal);

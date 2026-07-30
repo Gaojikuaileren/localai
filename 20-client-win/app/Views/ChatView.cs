@@ -20,6 +20,7 @@ public sealed class ChatView : UserControl
 {
     static App TheApp => (App)Application.Current;
 
+    readonly string _wsKey;  // 本视图所属工作空间(chat / translation / …)。会话与项目按空间隔离。
     string? _projectId;      // 当前项目上下文;null = 普通会话
     string? _sessionId;      // 当前打开的会话
 
@@ -31,38 +32,51 @@ public sealed class ChatView : UserControl
     readonly List<ChatAttachment> _pending = new();   // 待发送的附件引用(路径/剪贴板)
     string _draft = "";                                // 跨重建保留正在输入的文字
     readonly Dictionary<string, FrameworkElement> _sessionRows = new();   // id -> 行,供"震荡提醒"定位
+    TextBlock? _trashLabel;   // 底部"已删除 (N)"入口的计数
 
-    public ChatView()
+    public ChatView(string workspaceKey = "chat")
     {
+        _wsKey = workspaceKey;
         _ctxTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        _ctxTitle.FontWeight = FontWeights.SemiBold;
 
-        // ---- 右:会话列表(常驻)----
+        // ---- 右:会话列表(常驻)。顶部:上下文标题 + 幽灵会话(仅聊天)+ 新建 ----
         var newBtn = Ui.PlusButton(NewSession, "新建会话");
-        var head = new DockPanel { LastChildFill = true, Margin = new Thickness(2, 0, 2, 6) };
+        var head = new DockPanel { LastChildFill = true, Margin = new Thickness(2, 0, 0, 6) };
         DockPanel.SetDock(newBtn, Dock.Right);
-        DockPanel.SetDock(_backBtnHost, Dock.Right);
         head.Children.Add(newBtn);
+        if (_wsKey == "chat")
+        {
+            var ghostBtn = GhostButton();
+            DockPanel.SetDock(ghostBtn, Dock.Right);
+            head.Children.Add(ghostBtn);
+        }
+        DockPanel.SetDock(_backBtnHost, Dock.Right);
         head.Children.Add(_backBtnHost);
         head.Children.Add(_ctxTitle);
 
         var sessDock = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(head, Dock.Top);
         sessDock.Children.Add(head);
+        var trash = TrashLink();
+        DockPanel.SetDock(trash, Dock.Bottom);
+        sessDock.Children.Add(trash);
         sessDock.Children.Add(new ScrollViewer
         {
             Content = _sessions,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         }.PassThrough());
-        var sessCard = Ui.Card(sessDock, new Thickness(12, 0, 0, 0));
-        sessCard.Width = 250;
+        var sessCard = Ui.Card(sessDock, new Thickness(10, 0, 0, 0));
+        sessCard.Padding = new Thickness(10);   // 比默认 16 紧凑
+        sessCard.Width = 208;                    // 收窄,别浪费右侧空间(用户反馈)
 
         // ---- 左缘箭头:拉开项目选择器 ----
         var arrow = ArrowButton();
 
         // ---- 布局:会话区 | 会话列表 | 箭头(在最右) ----
         //   用户裁定:项目列表按钮放在会话列表【右侧】,不夹在对话与会话之间。
-        var grid = new Grid { Margin = new Thickness(24, 18, 24, 18) };
+        var grid = new Grid { Margin = new Thickness(14, 12, 14, 14) };   // 收紧:内嵌板块与边距别太大(用户反馈)
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -78,15 +92,86 @@ public sealed class ChatView : UserControl
         BuildConversation();
         TheApp.Chat.Changed += OnChatChanged;
         TheApp.Projects.Changed += UpdateContext;
-        Unloaded += (_, _) => { TheApp.Chat.Changed -= OnChatChanged; TheApp.Projects.Changed -= UpdateContext; };
+        Unloaded += (_, _) => { TheApp.Chat.Changed -= OnChatChanged; TheApp.Projects.Changed -= UpdateContext; TheApp.Chat.PurgeGhosts(); };
     }
 
     void OnChatChanged() { BuildSessions(); BuildConversation(); }
+
+    // 底部"已删除 (N)"入口
+    FrameworkElement TrashLink()
+    {
+        _trashLabel = new TextBlock { Text = "已删除", VerticalAlignment = VerticalAlignment.Center };
+        _trashLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _trashLabel.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border { Child = _trashLabel, Padding = new Thickness(8, 6, 8, 4), Margin = new Thickness(0, 4, 0, 0), Cursor = Cursors.Hand, Background = Brushes.Transparent, BorderThickness = new Thickness(0, 1, 0, 0) };
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
+        b.MouseEnter += (_, _) => _trashLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        b.MouseLeave += (_, _) => _trashLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        b.MouseLeftButtonUp += (_, _) => OpenTrash(b);
+        return b;
+    }
+
+    void OpenTrash(FrameworkElement anchor)
+    {
+        var list = new StackPanel { MinWidth = 300 };
+        void Fill()
+        {
+            list.Children.Clear();
+            var items = TheApp.Chat.Deleted(_wsKey).ToList();
+            if (items.Count == 0) { list.Children.Add(Ui.Body("没有已删除的会话。", muted: true)); return; }
+            list.Children.Add(Ui.Caption($"保留 {ChatCenter.TrashRetentionDays} 天,过期自动清除(不可恢复)。"));
+            foreach (var s in items) list.Children.Add(TrashRow(s, Fill));
+        }
+        Fill();
+        var clear = Ui.DangerFilled("全部清除", (_, _) => { TheApp.Chat.ClearDeleted(_wsKey); Overlay.CloseActive(); });
+        clear.Height = 28;
+        Flyout.Show(anchor, "已删除会话", list, width: 320, headerAction: clear);
+    }
+
+    FrameworkElement TrashRow(ChatSession s, Action refresh)
+    {
+        var title = new TextBlock { Text = s.Title, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+        title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        var when = new TextBlock { Text = "删除于 " + (s.DeletedAt?.ToString("M月d日 HH:mm") ?? ""), Margin = new Thickness(0, 1, 0, 0) };
+        when.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        when.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var col = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        col.Children.Add(title);
+        col.Children.Add(when);
+
+        var restore = Chip("恢复", "FgSecondary", () => { TheApp.Chat.Restore(s.SessionId); refresh(); });
+        var purge = Chip("彻底删除", "RiskDanger", () => { TheApp.Chat.PurgeDeleted(s.SessionId); refresh(); });
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        actions.Children.Add(restore);
+        actions.Children.Add(purge);
+
+        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 4, 0, 4) };
+        DockPanel.SetDock(actions, Dock.Right);
+        row.Children.Add(actions);
+        row.Children.Add(col);
+        return row;
+    }
+
+    static FrameworkElement Chip(string text, string colorKey, Action onClick)
+    {
+        var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, colorKey);
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border { Child = t, Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(6, 0, 0, 0), Cursor = Cursors.Hand, Background = Brushes.Transparent };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
+        b.BorderThickness = new Thickness(1);
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        return b;
+    }
 
     public void SelectProject(string projectId)
     {
         _projectId = projectId;
         _sessionId = TheApp.Chat.SessionsOf(projectId).FirstOrDefault()?.SessionId;
+        TheApp.Chat.PurgeGhosts();
         BuildSessions();
         BuildConversation();
     }
@@ -94,16 +179,20 @@ public sealed class ChatView : UserControl
     void ToNormal()
     {
         _projectId = null;
-        _sessionId = TheApp.Chat.NormalSessions().FirstOrDefault()?.SessionId;
+        _sessionId = TheApp.Chat.NormalSessions(_wsKey).FirstOrDefault()?.SessionId;
+        TheApp.Chat.PurgeGhosts();
         BuildSessions();
         BuildConversation();
     }
 
     void UpdateContext()
     {
-        _ctxTitle.Text = _projectId is { } pid ? "项目 · " + (TheApp.Projects.Find(pid)?.Title ?? "项目") : "普通会话";
+        var inProject = _projectId is not null;
+        _ctxTitle.Text = inProject ? "项目 · " + (TheApp.Projects.Find(_projectId!)?.Title ?? "项目") : "普通会话";
+        // ★ 项目会话用【着重色】区分;普通会话用常规前景色(用户裁定)。
+        _ctxTitle.SetResourceReference(TextBlock.ForegroundProperty, inProject ? "Accent" : "FgPrimary");
         _backBtnHost.Children.Clear();
-        if (_projectId is not null) _backBtnHost.Children.Add(BackChip());
+        if (inProject) _backBtnHost.Children.Add(BackChip());
     }
 
     // ---------------------------------------------------------------- 会话列表
@@ -112,7 +201,7 @@ public sealed class ChatView : UserControl
         UpdateContext();
         _sessions.Children.Clear();
         _sessionRows.Clear();
-        var list = (_projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions()).ToList();
+        var list = (_projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions(_wsKey)).ToList();
         if (list.Count == 0)
         {
             _sessions.Children.Add(Ui.Caption(_projectId is null ? "还没有会话。点 + 新建。" : "这个项目下还没有会话。点 + 新建。"));
@@ -157,7 +246,7 @@ public sealed class ChatView : UserControl
         host.Background = selected ? (Brush)FindResource("BgSelected") : Brushes.Transparent;
         host.MouseEnter += (_, _) => { if (!selected) host.SetResourceReference(Border.BackgroundProperty, "BgHover"); dots.Opacity = 1; };
         host.MouseLeave += (_, _) => { if (!selected) host.Background = Brushes.Transparent; if (!selected) dots.Opacity = 0; };
-        host.MouseLeftButtonUp += (_, _) => { _sessionId = s.SessionId; BuildSessions(); BuildConversation(); };
+        host.MouseLeftButtonUp += (_, _) => { _sessionId = s.SessionId; TheApp.Chat.PurgeGhosts(); BuildSessions(); BuildConversation(); };
         return host;
     }
 
@@ -181,7 +270,7 @@ public sealed class ChatView : UserControl
         var m = new ContextMenu();
 
         var move = new MenuItem { Header = "移动到项目" };
-        foreach (var p in TheApp.Projects.Items.Where(x => x.Status != ProjectStatus.Done))
+        foreach (var p in TheApp.Projects.Ongoing(_wsKey))   // 只列本工作空间的项目
         {
             var mi = new MenuItem { Header = p.Title, IsChecked = s.ProjectId == p.ProjectId };
             var pid = p.ProjectId;
@@ -200,6 +289,18 @@ public sealed class ChatView : UserControl
         }
         m.Items.Add(move);
 
+        // 发送到其它工作空间(不含当前)
+        var toWs = new MenuItem { Header = "发送到工作空间" };
+        foreach (var w in Workspaces.All)
+        {
+            if (w.Key == _wsKey) continue;
+            var mi = new MenuItem { Header = I18n.Strings.Get(w.TitleKey) };
+            var key = w.Key;
+            mi.Click += (_, _) => { if (_sessionId == s.SessionId) _sessionId = null; TheApp.Chat.MoveSessionToWorkspace(s.SessionId, key); };
+            toWs.Items.Add(mi);
+        }
+        m.Items.Add(toWs);
+
         var rename = new MenuItem { Header = "重命名会话…" };
         rename.Click += (_, _) => RenameSession(s, anchor);
         m.Items.Add(rename);
@@ -209,13 +310,9 @@ public sealed class ChatView : UserControl
         m.Items.Add(pin);
 
         m.Items.Add(new Separator());
+        // 删除 = 软删除进"已删除"(30 天可恢复),不弹确认(用户裁定)
         var del = new MenuItem { Header = "删除会话" };
-        del.Click += (_, _) =>
-        {
-            if (MessageBox.Show($"删除会话「{s.Title}」?此会话的消息也会一并删除。", "本地 AI 中枢", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
-            TheApp.Chat.Delete(s.SessionId);
-            if (_sessionId == s.SessionId) _sessionId = null;
-        };
+        del.Click += (_, _) => { if (_sessionId == s.SessionId) _sessionId = null; TheApp.Chat.Delete(s.SessionId); };
         m.Items.Add(del);
         return m;
     }
@@ -224,7 +321,7 @@ public sealed class ChatView : UserControl
     {
         var folder = ProjectUi.PickFolder("为新项目选择文件夹");
         if (folder is null) return;
-        var p = TheApp.Projects.Create(string.IsNullOrWhiteSpace(s.Title) ? "新项目" : s.Title, folder, null, s.Scope);
+        var p = TheApp.Projects.Create(string.IsNullOrWhiteSpace(s.Title) ? "新项目" : s.Title, folder, null, s.Scope, _wsKey);
         TheApp.Chat.MoveToProject(s.SessionId, p.ProjectId);
         SelectProject(p.ProjectId);
         _sessionId = s.SessionId;
@@ -271,15 +368,20 @@ public sealed class ChatView : UserControl
 
     void BuildConversation()
     {
+        // 非聊天工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假聊天界面。
+        if (_wsKey != "chat") { _conv.Content = PlaceholderCenter(); return; }
+
+        var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var inputArea = BuildInputArea();
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
+        FrameworkElement inner;
         if (!hasMsgs)
         {
             // 空态:输入框竖直居中(像 GPT)。开场问候 ★ 接入模型后由 AI 生成;现用本地暖句(不标 AI)。
             var title = new TextBlock { Text = Greetings.ChatOpener(DateTime.Now), FontWeight = FontWeights.SemiBold, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Center };
             title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             var hint = Ui.Caption(_projectId is null
-                ? "没选项目直接聊 = 普通会话。左侧 ‹ 箭头可选项目。"
+                ? "没选项目直接聊 = 普通会话。右侧箭头可选项目。"
                 : "当前在项目「" + (TheApp.Projects.Find(_projectId!)?.Title ?? "") + "」下,新消息会归到该项目。");
             hint.HorizontalAlignment = HorizontalAlignment.Center;
             hint.TextAlignment = TextAlignment.Center;
@@ -290,7 +392,7 @@ public sealed class ChatView : UserControl
             box.Children.Add(new Border { Height = 16 });
             inputArea.Width = 640;
             box.Children.Add(inputArea);
-            _conv.Content = Ui.Card(box, new Thickness(0));
+            inner = box;
         }
         else
         {
@@ -303,9 +405,57 @@ public sealed class ChatView : UserControl
             DockPanel.SetDock(inputWrap, Dock.Bottom);
             dock.Children.Add(inputWrap);
             dock.Children.Add(scroll);
-            _conv.Content = Ui.Card(dock, new Thickness(0));
+            inner = dock;
             Dispatcher.BeginInvoke(new Action(() => scroll.ScrollToEnd()), System.Windows.Threading.DispatcherPriority.Loaded);
         }
+        _conv.Content = ConvShell(inner, isGhost);
+    }
+
+    // 会话面板外壳:普通=实心卡;幽灵=虚线边框 + 顶部提示(不保留记录、不纳入记忆)。
+    FrameworkElement ConvShell(FrameworkElement inner, bool ghost)
+    {
+        if (!ghost) { var c = Ui.Card(inner, new Thickness(0)); c.Padding = new Thickness(12); return c; }
+
+        var banner = Ui.Caption("幽灵会话 · 不保留记录、不纳入记忆");
+        banner.HorizontalAlignment = HorizontalAlignment.Center;
+        banner.TextAlignment = TextAlignment.Center;
+        banner.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        var d = new DockPanel { LastChildFill = true };
+        var bWrap = new Border { Child = banner, Margin = new Thickness(0, 0, 0, 8) };
+        DockPanel.SetDock(bWrap, Dock.Top);
+        d.Children.Add(bWrap);
+        d.Children.Add(inner);
+
+        var host = new Border { Child = d, Padding = new Thickness(12) };
+        host.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+        host.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        var r = TryFindResource("RadiusMd") is CornerRadius cr ? cr.TopLeft : 8;
+        var dash = new System.Windows.Shapes.Rectangle
+        {
+            StrokeThickness = 1.5, StrokeDashArray = new DoubleCollection { 4, 3 }, Fill = Brushes.Transparent,
+            RadiusX = r, RadiusY = r, IsHitTestVisible = false,
+        };
+        dash.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Accent");
+        var g = new Grid();
+        g.Children.Add(host);
+        g.Children.Add(dash);
+        return g;
+    }
+
+    FrameworkElement PlaceholderCenter()
+    {
+        var def = Workspaces.All.FirstOrDefault(w => w.Key == _wsKey);
+        var name = def is null ? _wsKey : I18n.Strings.Get(def.TitleKey);
+        var t = new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, FontSize = 20, HorizontalAlignment = HorizontalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        var c = Ui.Caption("该工作空间的功能待其前置阶段接入;右侧的会话与项目管理已就绪。");
+        c.HorizontalAlignment = HorizontalAlignment.Center;
+        c.TextAlignment = TextAlignment.Center;
+        var box = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 520 };
+        box.Children.Add(t);
+        box.Children.Add(new Border { Height = 8 });
+        box.Children.Add(c);
+        return Ui.Card(box, new Thickness(0));
     }
 
     FrameworkElement Bubble(ChatMessage m)
@@ -346,9 +496,10 @@ public sealed class ChatView : UserControl
     // ---------------------------------------------------------------- 动作
     void NewSession()
     {
+        TheApp.Chat.PurgeGhosts();   // 切走时清掉幽灵会话
         // ★ 当前上下文里【已有空会话】就不重复建 —— 选中它并震荡提醒(用户裁定)。
         //   "上下文"按 _projectId 判定:普通会话/各项目各自算,互不影响。
-        var inCtx = _projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions();
+        var inCtx = _projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions(_wsKey);
         var empty = inCtx.FirstOrDefault(s => !TheApp.Chat.MessagesOf(s.SessionId).Any());
         if (empty is not null)
         {
@@ -361,7 +512,7 @@ public sealed class ChatView : UserControl
         }
 
         var scope = _projectId is null ? ProjectScope.Personal : (TheApp.Projects.Find(_projectId!)?.Scope ?? ProjectScope.Personal);
-        var s2 = TheApp.Chat.NewSession(_projectId, scope);
+        var s2 = TheApp.Chat.NewSession(_projectId, _wsKey, scope);
         _sessionId = s2.SessionId;
         BuildSessions();
         BuildConversation();
@@ -550,10 +701,38 @@ public sealed class ChatView : UserControl
 
     void OpenPicker()
     {
-        var picker = new ProjectPickerView(_projectId,
-            onPick: pid => { Overlay.CloseActive(); SelectProject(pid); },
-            onNormal: () => { Overlay.CloseActive(); ToNormal(); });
+        // 选中不自动关抽屉(用户裁定)—— 切上下文即可,关闭交给用户点关闭/点外部。
+        var picker = new ProjectPickerView(_wsKey, _projectId,
+            onPick: SelectProject,
+            onNormal: ToNormal);
         (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer("项目", picker, IconName.Folder);
+    }
+
+    // 幽灵会话按钮(仅聊天):虚线小圈,开一个不留痕的会话
+    FrameworkElement GhostButton()
+    {
+        var ring = new System.Windows.Shapes.Ellipse
+        {
+            Width = 13, Height = 13, StrokeThickness = 1.4,
+            StrokeDashArray = new DoubleCollection { 2, 1.6 },
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
+        };
+        ring.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
+        var b = new Border { Child = ring, Width = 26, Height = 26, Margin = new Thickness(0, 0, 4, 0), Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = "幽灵会话:不保留记录、不纳入记忆" };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, _) => StartGhost();
+        return b;
+    }
+
+    void StartGhost()
+    {
+        var g = TheApp.Chat.NewGhostSession(_wsKey);
+        _sessionId = g.SessionId;
+        BuildSessions();
+        BuildConversation();
+        _input.Focus();
     }
 
     FrameworkElement BackChip()

@@ -339,10 +339,8 @@ public partial class MainWindow : Window
         {
             if (!TheApp.Settings.IsWorkspaceVisible(w.Key)) continue;   // 用户在扩展里关掉的不显示
             var def = w;   // 闭包捕获
-            Func<UserControl> build = def.Key == "chat"
-                ? () => new ChatView()                       // 聊天工作空间已落地
-                : () => new PlaceholderView(def.TitleKey);   // 其余仍是占位
-            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, build), NavPanel);
+            // 所有工作空间共用同一套外壳(会话列表 + 项目抽屉);聊天有对话区,其余中间是占位。
+            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, () => new ChatView(def.Key)), NavPanel);
         }
 
         // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
@@ -466,6 +464,8 @@ public partial class MainWindow : Window
     void ApplyCollapsed()
     {
         NavColumn.Width = new GridLength(_collapsed ? 58 : 240);
+        // 任务抽屉从底部升起,但要【避开左侧导航栏】(用户裁定):左缩进 = 当前导航宽。
+        TaskDrawer.Margin = new Thickness(_collapsed ? 58 : 240, 0, 0, 0);
         // 品牌现在在自绘标题栏里(贯通全宽),收起导航不影响它。
         foreach (var (item, btn) in _nav)
         {

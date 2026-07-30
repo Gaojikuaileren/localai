@@ -28,10 +28,13 @@ public sealed record ChatMessage(string SessionId, ChatRole Role, string Text, D
 public sealed record ChatSession(
     string SessionId,
     string Title,
-    string? ProjectId,     // null = 普通会话
+    string? ProjectId,          // null = 普通会话
     ProjectScope Scope,
     DateTime LastActive,
-    bool Pinned = false);
+    bool Pinned = false,
+    string WorkspaceKey = "chat",    // 会话属于哪个工作空间(不跨空间共享;可发送到别的空间)
+    bool Ghost = false,              // 幽灵会话:不保留记录、不纳入记忆,不进任何列表
+    DateTime? DeletedAt = null);     // 软删除:进"已删除",保留 30 天,过期自动清除
 
 public sealed class ChatCenter
 {
@@ -44,9 +47,9 @@ public sealed class ChatCenter
 
     public static string NewId() => "s-" + Guid.NewGuid().ToString("N")[..8];
 
-    public ChatSession NewSession(string? projectId, ProjectScope scope = ProjectScope.Personal, string? title = null)
+    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null)
     {
-        var s = new ChatSession(NewId(), title ?? "新会话", projectId, scope, DateTime.Now);
+        var s = new ChatSession(NewId(), title ?? "新会话", projectId, scope, DateTime.Now, WorkspaceKey: workspaceKey);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -54,11 +57,53 @@ public sealed class ChatCenter
 
     public ChatSession? Find(string sessionId) => _sessions.FirstOrDefault(x => x.SessionId == sessionId);
 
-    public IEnumerable<ChatSession> NormalSessions()
-        => _sessions.Where(s => s.ProjectId is null).OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+    /// <summary>某工作空间的【普通会话】(不含项目/幽灵/已删除)。</summary>
+    public IEnumerable<ChatSession> NormalSessions(string workspaceKey)
+        => _sessions.Where(s => s.ProjectId is null && !s.Ghost && s.DeletedAt is null && s.WorkspaceKey == workspaceKey)
+                    .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
 
     public IEnumerable<ChatSession> SessionsOf(string projectId)
-        => _sessions.Where(s => s.ProjectId == projectId).OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+        => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost && s.DeletedAt is null)
+                    .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+
+    /// <summary>幽灵会话:不保留记录、不纳入记忆,不进任何列表。开一个新的前先清掉旧的幽灵。</summary>
+    public ChatSession NewGhostSession(string workspaceKey)
+    {
+        PurgeGhosts();
+        var s = new ChatSession(NewId(), "幽灵会话", null, ProjectScope.OnlyMe, DateTime.Now, WorkspaceKey: workspaceKey, Ghost: true);
+        _sessions.Add(s);
+        Changed?.Invoke();
+        return s;
+    }
+
+    /// <summary>清除所有幽灵会话及其消息(切走/退出即抹掉,不留痕)。</summary>
+    public void PurgeGhosts()
+    {
+        var ids = _sessions.Where(s => s.Ghost).Select(s => s.SessionId).ToHashSet();
+        if (ids.Count == 0) return;
+        _sessions.RemoveAll(s => ids.Contains(s.SessionId));
+        _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        Changed?.Invoke();
+    }
+
+    /// <summary>把会话【发送到另一个工作空间】。跨空间就离开原项目(项目不跨空间);随后可在新空间继续。</summary>
+    public void MoveSessionToWorkspace(string sessionId, string workspaceKey)
+    {
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i < 0 || _sessions[i].WorkspaceKey == workspaceKey) return;
+        _sessions[i] = _sessions[i] with { WorkspaceKey = workspaceKey, ProjectId = null };
+        Changed?.Invoke();
+    }
+
+    /// <summary>项目被发送到别的工作空间时,它名下的会话跟着走。</summary>
+    public void SetSessionsWorkspace(string projectId, string workspaceKey)
+    {
+        var any = false;
+        for (int i = 0; i < _sessions.Count; i++)
+            if (_sessions[i].ProjectId == projectId && _sessions[i].WorkspaceKey != workspaceKey)
+            { _sessions[i] = _sessions[i] with { WorkspaceKey = workspaceKey }; any = true; }
+        if (any) Changed?.Invoke();
+    }
 
     /// <summary>置顶 / 取消置顶(置顶排在会话列表最前)。</summary>
     public void TogglePin(string sessionId)
@@ -67,21 +112,76 @@ public sealed class ChatCenter
         if (i >= 0) { _sessions[i] = _sessions[i] with { Pinned = !_sessions[i].Pinned }; Changed?.Invoke(); }
     }
 
-    /// <summary>项目被删除时:把它名下的会话【移出】变回普通会话(不丢聊天)。</summary>
-    public void DetachProject(string projectId)
+    /// <summary>已删除会话保留天数(用户裁定:30 天后自动清除,不可恢复)。</summary>
+    public const int TrashRetentionDays = 30;
+
+    /// <summary>项目被删除时:【软删除】它名下的所有会话(进"已删除",清掉项目归属,恢复即为普通会话)。</summary>
+    public void DeleteProjectSessions(string projectId)
     {
         var any = false;
         for (int i = 0; i < _sessions.Count; i++)
-            if (_sessions[i].ProjectId == projectId) { _sessions[i] = _sessions[i] with { ProjectId = null }; any = true; }
+            if (_sessions[i].ProjectId == projectId && _sessions[i].DeletedAt is null)
+            { _sessions[i] = _sessions[i] with { ProjectId = null, DeletedAt = DateTime.Now }; any = true; }
         if (any) Changed?.Invoke();
     }
 
-    /// <summary>删除会话(连同它的消息)。</summary>
+    /// <summary>删除会话 = 【软删除】进"已删除"(保留 30 天;不弹确认)。幽灵会话直接抹掉。</summary>
     public void Delete(string sessionId)
     {
-        var removed = _sessions.RemoveAll(x => x.SessionId == sessionId) > 0;
-        _messages.RemoveAll(m => m.SessionId == sessionId);
-        if (removed) Changed?.Invoke();
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i < 0) return;
+        if (_sessions[i].Ghost) { _sessions.RemoveAt(i); _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); return; }
+        _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now, Pinned = false };
+        Changed?.Invoke();
+    }
+
+    /// <summary>某工作空间"已删除"的会话(最近删的在前)。取时顺带清掉过期的。</summary>
+    public IEnumerable<ChatSession> Deleted(string workspaceKey, DateTime? asOf = null)
+    {
+        SweepExpiredDeleted(asOf ?? DateTime.Now);
+        return _sessions.Where(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey)
+                        .OrderByDescending(s => s.DeletedAt);
+    }
+
+    public int DeletedCount(string workspaceKey)
+    {
+        SweepExpiredDeleted(DateTime.Now);
+        return _sessions.Count(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey);
+    }
+
+    /// <summary>从"已删除"恢复(回到普通/项目会话)。</summary>
+    public void Restore(string sessionId)
+    {
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i >= 0 && _sessions[i].DeletedAt is not null) { _sessions[i] = _sessions[i] with { DeletedAt = null }; Changed?.Invoke(); }
+    }
+
+    /// <summary>彻底删除一条已删除会话(不可恢复)。</summary>
+    public void PurgeDeleted(string sessionId)
+    {
+        var removed = _sessions.RemoveAll(x => x.SessionId == sessionId && x.DeletedAt is not null) > 0;
+        if (removed) { _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); }
+    }
+
+    /// <summary>清空某工作空间的"已删除"(手动清除,不可恢复)。</summary>
+    public void ClearDeleted(string workspaceKey)
+    {
+        var ids = _sessions.Where(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey).Select(s => s.SessionId).ToHashSet();
+        if (ids.Count == 0) return;
+        _sessions.RemoveAll(s => ids.Contains(s.SessionId));
+        _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        Changed?.Invoke();
+    }
+
+    /// <summary>清掉超过保留期的已删除会话(30 天)。asOf 供测试注入。</summary>
+    public void SweepExpiredDeleted(DateTime asOf)
+    {
+        var cutoff = asOf.AddDays(-TrashRetentionDays);
+        var ids = _sessions.Where(s => s.DeletedAt is { } d && d < cutoff).Select(s => s.SessionId).ToHashSet();
+        if (ids.Count == 0) return;
+        _sessions.RemoveAll(s => ids.Contains(s.SessionId));
+        _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        Changed?.Invoke();
     }
 
     public IEnumerable<ChatMessage> MessagesOf(string sessionId)

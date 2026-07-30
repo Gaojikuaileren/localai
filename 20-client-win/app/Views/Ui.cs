@@ -167,6 +167,22 @@ public static class Ui
         return b;
     }
 
+    /// <summary>左右小幅震荡,用于"已经有了、别重复建"的提醒(空会话 / 空附件槽)。结束回原位。</summary>
+    public static void Shake(FrameworkElement el)
+    {
+        var t = new TranslateTransform();
+        el.RenderTransform = t;
+        var a = new System.Windows.Media.Animation.DoubleAnimation
+        {
+            From = -6, To = 6,
+            Duration = TimeSpan.FromMilliseconds(55),
+            AutoReverse = true,
+            RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(3),
+            FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop,
+        };
+        t.BeginAnimation(TranslateTransform.XProperty, a);
+    }
+
     public static StackPanel Stack(params UIElement[] children)
     {
         var p = new StackPanel();

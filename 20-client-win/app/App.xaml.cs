@@ -98,8 +98,8 @@ public partial class App : Application
         Projects.Add(new Project("p5", "(示例)旧网站搬迁", "已收尾归档", "chat", ProjectScope.Personal, DateTime.Now.AddDays(-9), Status: ProjectStatus.Done));
 
         // 聊天示例:一个普通会话、一个归在"家庭旅行计划"项目下的会话
-        Chat.NewSession(null, ProjectScope.Personal, "(示例)随便问问");
-        Chat.NewSession("p1", ProjectScope.Family, "(示例)行程讨论");
+        Chat.NewSession(null, "chat", ProjectScope.Personal, "(示例)随便问问");
+        Chat.NewSession("p1", "chat", ProjectScope.Family, "(示例)行程讨论");
 
         SeedDemoEvents();
         SeedDemoTodos();

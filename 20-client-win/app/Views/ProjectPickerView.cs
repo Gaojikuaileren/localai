@@ -19,22 +19,24 @@ public sealed class ProjectPickerView : UserControl
 {
     static App TheApp => (App)Application.Current;
 
-    readonly string? _current;
+    readonly string _wsKey;
+    string? _current;   // 当前选中项目;选后不关抽屉、只高亮,让用户确认(用户裁定)
     readonly Action<string> _onPick;
     readonly Action _onNormal;
     readonly StackPanel _root = new();
     readonly ContentControl _body = new();
     bool _editing;
 
-    public ProjectPickerView(string? current, Action<string> onPick, Action onNormal)
+    public ProjectPickerView(string workspaceKey, string? current, Action<string> onPick, Action onNormal)
     {
+        _wsKey = workspaceKey;
         _current = current;
         _onPick = onPick;
         _onNormal = onNormal;
 
         // 顶部:返回普通会话 + 新增项目
         var add = Ui.PlusButton(() => ShowEditor(null), "新建项目");
-        var normal = Chip("‹ 普通会话", _onNormal);
+        var normal = Chip("‹ 普通会话", () => { _current = null; ShowGrid(); _onNormal(); });
         var top = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
         DockPanel.SetDock(add, Dock.Right);
         DockPanel.SetDock(normal, Dock.Left);
@@ -60,7 +62,7 @@ public sealed class ProjectPickerView : UserControl
     void ShowGrid()
     {
         _editing = false;
-        var items = TheApp.Projects.Ongoing().ToList();
+        var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 只看本工作空间的项目
         if (items.Count == 0)
         {
             _body.Content = Ui.Stack(
@@ -76,7 +78,7 @@ public sealed class ProjectPickerView : UserControl
     void ShowEditor(Project? existing)
     {
         _editing = true;
-        _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid);
+        _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid, workspaceKey: _wsKey);
     }
 
     FrameworkElement FolderTile(Project p)
@@ -116,7 +118,8 @@ public sealed class ProjectPickerView : UserControl
         tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
         tile.MouseEnter += (_, _) => { if (_current != p.ProjectId) tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); };
         tile.MouseLeave += (_, _) => { if (_current != p.ProjectId) tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); };
-        tile.MouseLeftButtonUp += (_, _) => _onPick(p.ProjectId);
+        // 选中后不关抽屉:只切上下文 + 重画高亮,让用户确认选的是哪个;关闭由用户点关闭/点外部
+        tile.MouseLeftButtonUp += (_, _) => { _current = p.ProjectId; ShowGrid(); _onPick(p.ProjectId); };
         return tile;
     }
 

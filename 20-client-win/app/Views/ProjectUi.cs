@@ -59,6 +59,7 @@ public static class ProjectUi
     }
 
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
+    static ChatCenter Chat => ((LocalAI.Client.App)Application.Current).Chat;
 
     /// <summary>项目的下拉菜单(用户裁定:取消右键,改成【三个点】按钮拉出这个菜单)。
     ///   在文件夹打开 · 改状态 · 改 AI 权限 · 编辑项目(重定向路径)。onEdit 打开项目编辑器。</summary>
@@ -97,6 +98,18 @@ public static class ProjectUi
         m.Items.Add(ai);
 
         m.Items.Add(new Separator());
+        var toWs = new MenuItem { Header = "发送到工作空间" };
+        foreach (var w in Workspaces.All)
+        {
+            if (w.Key == p.WorkspaceKey) continue;   // 不列当前所在空间
+            var mi = new MenuItem { Header = I18n.Strings.Get(w.TitleKey) };
+            var key = w.Key;
+            mi.Click += (_, _) => { Projects.MoveToWorkspace(p.ProjectId, key); Chat.SetSessionsWorkspace(p.ProjectId, key); };
+            toWs.Items.Add(mi);
+        }
+        m.Items.Add(toWs);
+
+        m.Items.Add(new Separator());
         var edit = new MenuItem { Header = "编辑项目 / 重定向路径…" };
         edit.Click += (_, _) => onEdit();
         m.Items.Add(edit);
@@ -107,30 +120,26 @@ public static class ProjectUi
         return m;
     }
 
-    // 删除项目的【二次确认】(红色按钮)。★ 只删项目记录,不动磁盘文件夹;会话移出变回普通会话。
+    // 删除项目的【二次确认】(自绘浮窗,红色按钮)。★ 只删客户端里的项目与其会话,【不动磁盘文件夹】。
+    //   会话进"已删除"(30 天内可恢复)。★ 延到菜单彻底关闭后再弹 —— 否则 StaysOpen=false 的浮窗
+    //   会被"菜单关闭那一下"顺带关掉,表现为"点了没反应/没有确认框"(用户反馈)。
     static void ConfirmDelete(Project p, FrameworkElement? anchor)
     {
+        if (anchor is null) return;
         var chat = ((LocalAI.Client.App)Application.Current).Chat;
-        void DoDelete() { Overlay.CloseActive(); chat.DetachProject(p.ProjectId); Projects.Delete(p.ProjectId); }
-
-        if (anchor is null)
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (MessageBox.Show($"删除项目「{p.Title}」?\n项目文件夹本身不会被删除;其会话会移出、变回普通会话。",
-                "本地 AI 中枢", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK)
-            { chat.DetachProject(p.ProjectId); Projects.Delete(p.ProjectId); }
-            return;
-        }
-
-        var del = Ui.DangerFilled("删除项目", (_, _) => DoDelete());
-        var cancel = Ui.Secondary("取消", (_, _) => Overlay.CloseActive());
-        var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
-        btns.Children.Add(del);
-        btns.Children.Add(new Border { Child = cancel, Margin = new Thickness(10, 0, 0, 0) });
-        var body = Ui.Stack(
-            Ui.Body($"删除项目「{p.Title}」?"),
-            Ui.Caption("项目文件夹本身不会被删除;它名下的会话会移出、变回普通会话。此操作不可撤销。"),
-            btns);
-        Flyout.Show(anchor, "删除项目", body, width: 300);
+            var del = Ui.DangerFilled("删除项目", (_, _) => { Overlay.CloseActive(); chat.DeleteProjectSessions(p.ProjectId); Projects.Delete(p.ProjectId); });
+            var cancel = Ui.Secondary("取消", (_, _) => Overlay.CloseActive());
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+            btns.Children.Add(del);
+            btns.Children.Add(new Border { Child = cancel, Margin = new Thickness(10, 0, 0, 0) });
+            var body = Ui.Stack(
+                Ui.Body($"删除项目「{p.Title}」?"),
+                Ui.Caption("不会删除磁盘上的项目文件夹;只从客户端移除这个项目及其所有会话(会话进「已删除」,30 天内可恢复)。"),
+                btns);
+            Flyout.Show(anchor, "删除项目", body, width: 300);
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>三个点按钮:左键点开上面的菜单(替代右键)。</summary>
