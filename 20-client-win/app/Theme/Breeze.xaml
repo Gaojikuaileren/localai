@@ -24,6 +24,16 @@
   <!-- 导航选中态的前景色。必须与 BgSelected 成对定义,否则会出现同色系底+字看不清 -->
   <SolidColorBrush x:Key="FgOnSelected" Color="#123A78"/>
 
+
+  <!-- 项目抽屉的三种页面(说明框)。用户指定(苹果风):
+       进行中 = 重点色蓝描边 · 已完成 = 黑描边 + 浅灰底 · 已删除 = 红描边 + 很浅的红底 -->
+  <SolidColorBrush x:Key="StateOngoingBorder" Color="#2F6FE4"/>
+  <SolidColorBrush x:Key="StateOngoingFill"   Color="#FFFFFF"/>
+  <SolidColorBrush x:Key="StateDoneBorder"    Color="#1C1C1E"/>
+  <SolidColorBrush x:Key="StateDoneFill"      Color="#F0F1F4"/>
+  <SolidColorBrush x:Key="StateTrashBorder"   Color="#D93025"/>
+  <SolidColorBrush x:Key="StateTrashFill"     Color="#FDF0EF"/>
+
   <!-- 圆角三档跟随皮肤(用户裁定:暖萌大 / 微风中 / 墨白小)。窗口边框圆角见 WindowCorners.cs -->
   <CornerRadius x:Key="RadiusSm">6</CornerRadius>
   <CornerRadius x:Key="RadiusMd">10</CornerRadius>

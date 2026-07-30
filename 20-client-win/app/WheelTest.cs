@@ -92,34 +92,35 @@ public static class WheelTest
         pair.Children.Add(InkTile("客厅灯光方案", selected: false));
         Save(Themed(pair), Path.Combine(outDir, "ink-selected-tile.png"), 300, 150);
 
-        // 项目抽屉三个页面的顶部说明框:高度必须一致、内容不能被固定高截断、描边颜色要能区分
-        ThemeManager.Initialize(Skin.Breeze);
-        var heads = new StackPanel { Width = 400 };
-        heads.Children.Add(ProjectPickerView.PageHeader("项目会话", "RiskSafe",
-            Ui.Stack(Ui.Body("选择一个项目"), Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"))));
-        heads.Children.Add(ProjectPickerView.PageHeader("已完成项目", "FgMuted",
-            Ui.Stack(Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"),
-                     ChipRow("‹ 返回项目"))));
-        heads.Children.Add(ProjectPickerView.PageHeader("已删除项目", "RiskDanger",
-            Ui.Stack(Ui.Caption("所有工作空间共享,保留 30 天后自动清除。选中可只读浏览。"),
-                     ChipRow("‹ 返回项目", "全选", "彻底删除所选 (2)", "退出多选"))));
-        // 说明框下面接一排方块(同样 Margin=4),核对左右缘是否齐平
-        var tileRow = new System.Windows.Controls.Primitives.UniformGrid { Columns = 2 };
-        foreach (var nm in new[] { "家庭旅行计划", "客厅灯光方案" })
+        // 项目抽屉三个页面的说明框:每种皮肤各出一张,核对描边 + 浅填充是否分得清、且与方块左右对齐
+        foreach (var (skin, file) in new[] { (Skin.Breeze, "headers-breeze.png"), (Skin.Ink, "headers-ink.png"), (Skin.Warm, "headers-warm.png") })
         {
-            var inner = new StackPanel();
-            inner.Children.Add(Icons.Make(IconName.Folder, 30, "FgSecondary"));
-            var lab = new TextBlock { Text = nm, FontSize = 12, Margin = new Thickness(0, 6, 26, 0) };
-            lab.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            inner.Children.Add(lab);
-            var tb = new Border { Child = inner, Height = 108, Padding = new Thickness(12), Margin = new Thickness(4), BorderThickness = new Thickness(1) };
-            tb.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            tb.SetResourceReference(Border.BorderBrushProperty, "Border");
-            tb.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-            tileRow.Children.Add(tb);
+            ThemeManager.Initialize(skin);
+            var heads = new StackPanel { Width = 400 };
+            heads.Children.Add(ProjectPickerView.PageHeader("项目会话", ProjectPickerView.HeaderState.Ongoing,
+                Ui.Stack(Ui.Body("选择一个项目"), Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"))));
+            heads.Children.Add(ProjectPickerView.PageHeader("已完成项目", ProjectPickerView.HeaderState.Done,
+                Ui.Stack(Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"), ChipRow("‹ 返回项目"))));
+            heads.Children.Add(ProjectPickerView.PageHeader("已删除项目", ProjectPickerView.HeaderState.Trash,
+                Ui.Stack(Ui.Caption("所有工作空间共享,保留 30 天后自动清除。选中可只读浏览。"),
+                         ChipRow("‹ 返回项目", "全选", "彻底删除所选 (2)", "退出多选"))));
+            var tileRow = new System.Windows.Controls.Primitives.UniformGrid { Columns = 2 };
+            foreach (var nm in new[] { "家庭旅行计划", "客厅灯光方案" })
+            {
+                var inner = new StackPanel();
+                inner.Children.Add(Icons.Make(IconName.Folder, 30, "FgSecondary"));
+                var lab = new TextBlock { Text = nm, FontSize = 12, Margin = new Thickness(0, 6, 26, 0) };
+                lab.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                inner.Children.Add(lab);
+                var tb = new Border { Child = inner, Height = 100, Padding = new Thickness(12), Margin = new Thickness(4), BorderThickness = new Thickness(1) };
+                tb.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+                tb.SetResourceReference(Border.BorderBrushProperty, "Border");
+                tb.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+                tileRow.Children.Add(tb);
+            }
+            heads.Children.Add(tileRow);
+            Save(Themed(heads), Path.Combine(outDir, file), 420, 560);
         }
-        heads.Children.Add(tileRow);
-        Save(Themed(heads), Path.Combine(outDir, "drawer-headers.png"), 420, 570);
 
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;

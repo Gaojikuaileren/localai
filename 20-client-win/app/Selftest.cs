@@ -458,6 +458,24 @@ public static class Selftest
                 Assert(ctlTip.Contains("TargetType=\"ToolTip\"") && ctlTip.Contains("Visibility\" Value=\"Collapsed"),
                        "★ 全局关闭鼠标悬停提示(一处关掉,不逐个删)");
 
+            foreach (var skinFile in new[] { "Ink.xaml", "Breeze.xaml", "Warm.xaml" })
+            {
+                var sk = TryReadSource(Path.Combine("Theme", skinFile));
+                if (sk is null) continue;
+                foreach (var key in new[] { "StateOngoingBorder", "StateOngoingFill", "StateDoneBorder", "StateDoneFill", "StateTrashBorder", "StateTrashFill" })
+                    Assert(sk.Contains(key), $"{skinFile} 定义了 {key}");
+                // ★ 进行中与已删除的描边【不能同色】—— 暖萌曾用陶土橙撞上危险红,两块并排分不清(渲染诊断发现)
+                string ColorOf(string key)
+                {
+                    var i = sk.IndexOf($"x:Key=\"{key}\"", StringComparison.Ordinal);
+                    if (i < 0) return "";
+                    var c = sk.IndexOf("Color=\"", i, StringComparison.Ordinal);
+                    return c < 0 ? "" : sk.Substring(c + 7, 7);
+                }
+                Assert(!string.Equals(ColorOf("StateOngoingBorder"), ColorOf("StateTrashBorder"), StringComparison.OrdinalIgnoreCase),
+                       $"{skinFile}:进行中与已删除的描边不同色(否则分不清)");
+            }
+
             var uiPanel = TryReadSource(Path.Combine("Views", "Ui.cs"));
             if (uiPanel is not null)
                 Assert(uiPanel.Contains("iconAction") && uiPanel.Contains("IconName.Settings"), "面板标题图标可 hover 变齿轮并点击");
@@ -761,9 +779,10 @@ public static class Selftest
                 Assert(pkBoard.Contains("PinButton"), "项目方块用 hover 置顶按钮(像主页)");
                 Assert(pkBoard.Contains("HeaderHeight") && pkBoard.Contains("card.Height = HeaderHeight"),
                        "★ 各页面说明框【统一高度】(切页时项目方块位置不动、好对齐)");
-                Assert(pkBoard.Contains("PageHeader(\"项目会话\", \"RiskSafe\"") && pkBoard.Contains("PageHeader(\"已完成项目\", \"FgMuted\"")
-                       && pkBoard.Contains("PageHeader(\"已删除项目\", \"RiskDanger\""),
-                       "说明框描边按页面区分(进行中绿 / 已完成淡 / 已删除红,均走皮肤令牌)");
+                Assert(pkBoard.Contains("HeaderState.Ongoing") && pkBoard.Contains("HeaderState.Done") && pkBoard.Contains("HeaderState.Trash"),
+                       "说明框按页面分三种状态(进行中 / 已完成 / 已删除)");
+                Assert(pkBoard.Contains("StateOngoingBorder") && pkBoard.Contains("StateTrashFill"),
+                       "★ 状态配色走【皮肤令牌】(描边 + 浅填充),不在视图里写死颜色");
             }
             var cvRO = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvRO is not null)

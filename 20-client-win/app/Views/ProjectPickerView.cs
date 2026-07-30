@@ -106,7 +106,7 @@ public sealed class ProjectPickerView : UserControl
                        Ui.Caption("右侧新建/发送即【基于该项目开始会话】。"))
             : Ui.Stack(Ui.Body("选择一个项目"),
                        Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"));
-        _header.Content = PageHeader("项目会话", "RiskSafe", hint);
+        _header.Content = PageHeader("项目会话", HeaderState.Ongoing, hint);
 
         var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 含"刚完成还在 3 秒宽限"的
         var panel = new StackPanel();
@@ -167,7 +167,7 @@ public sealed class ProjectPickerView : UserControl
         _graceTimer.Stop();
 
         var items = TheApp.Projects.Completed(_wsKey).ToList();
-        _header.Content = PageHeader("已完成项目", "FgMuted",
+        _header.Content = PageHeader("已完成项目", HeaderState.Done,
             Ui.Stack(
                 Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"),
                 BackRow()));
@@ -193,7 +193,7 @@ public sealed class ProjectPickerView : UserControl
         var items = TheApp.Projects.DeletedProjects().ToList();
         _picked.RemoveWhere(id => !items.Any(x => x.ProjectId == id));   // 清掉已消失的选中项
 
-        _header.Content = PageHeader("已删除项目", "RiskDanger",
+        _header.Content = PageHeader("已删除项目", HeaderState.Trash,
             Ui.Stack(
                 Ui.Caption($"所有工作空间共享,保留 {ProjectCenter.TrashRetentionDays} 天后自动清除。选中可只读浏览。"),
                 DeletedActionRow(items)));
@@ -260,13 +260,23 @@ public sealed class ProjectPickerView : UserControl
     /// </summary>
     const double HeaderHeight = 132;
 
-    internal static Border PageHeader(string title, string borderKey, UIElement content)
+    /// <summary>说明框的三种状态。配色由【各皮肤自己定义】(State*Border / State*Fill),不在这里写死颜色。</summary>
+    internal enum HeaderState { Ongoing, Done, Trash }
+
+    internal static Border PageHeader(string title, HeaderState state, UIElement content)
     {
         // ★ 左右各留 4:与下方项目方块的外边距(Tile 的 Margin=4)对齐,说明框与方块左右缘齐平。
         var card = Ui.Panel(title, content, IconName.Folder, new Thickness(4, 0, 4, 8), compact: true);
         card.Height = HeaderHeight;                 // 统一高度 -> 各页方块起始位置一致
         card.BorderThickness = new Thickness(2.5);  // 描边够粗才分得清三种页面(用户反馈 1.4 太窄)
+        var (borderKey, fillKey) = state switch
+        {
+            HeaderState.Done => ("StateDoneBorder", "StateDoneFill"),
+            HeaderState.Trash => ("StateTrashBorder", "StateTrashFill"),
+            _ => ("StateOngoingBorder", "StateOngoingFill"),
+        };
         card.SetResourceReference(Border.BorderBrushProperty, borderKey);
+        card.SetResourceReference(Border.BackgroundProperty, fillKey);
         return card;
     }
 
