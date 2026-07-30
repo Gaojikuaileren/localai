@@ -103,7 +103,23 @@ public static class WheelTest
         heads.Children.Add(ProjectPickerView.PageHeader("已删除项目", "RiskDanger",
             Ui.Stack(Ui.Caption("所有工作空间共享,保留 30 天后自动清除。选中可只读浏览。"),
                      ChipRow("‹ 返回项目", "全选", "彻底删除所选 (2)", "退出多选"))));
-        Save(Themed(heads), Path.Combine(outDir, "drawer-headers.png"), 420, 440);
+        // 说明框下面接一排方块(同样 Margin=4),核对左右缘是否齐平
+        var tileRow = new System.Windows.Controls.Primitives.UniformGrid { Columns = 2 };
+        foreach (var nm in new[] { "家庭旅行计划", "客厅灯光方案" })
+        {
+            var inner = new StackPanel();
+            inner.Children.Add(Icons.Make(IconName.Folder, 30, "FgSecondary"));
+            var lab = new TextBlock { Text = nm, FontSize = 12, Margin = new Thickness(0, 6, 26, 0) };
+            lab.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            inner.Children.Add(lab);
+            var tb = new Border { Child = inner, Height = 108, Padding = new Thickness(12), Margin = new Thickness(4), BorderThickness = new Thickness(1) };
+            tb.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+            tb.SetResourceReference(Border.BorderBrushProperty, "Border");
+            tb.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+            tileRow.Children.Add(tb);
+        }
+        heads.Children.Add(tileRow);
+        Save(Themed(heads), Path.Combine(outDir, "drawer-headers.png"), 420, 570);
 
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;

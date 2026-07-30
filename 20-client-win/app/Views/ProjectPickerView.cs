@@ -262,9 +262,10 @@ public sealed class ProjectPickerView : UserControl
 
     internal static Border PageHeader(string title, string borderKey, UIElement content)
     {
-        var card = Ui.Panel(title, content, IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+        // ★ 左右各留 4:与下方项目方块的外边距(Tile 的 Margin=4)对齐,说明框与方块左右缘齐平。
+        var card = Ui.Panel(title, content, IconName.Folder, new Thickness(4, 0, 4, 8), compact: true);
         card.Height = HeaderHeight;                 // 统一高度 -> 各页方块起始位置一致
-        card.BorderThickness = new Thickness(1.4);  // 比常规卡略粗,让颜色读得出来
+        card.BorderThickness = new Thickness(2.5);  // 描边够粗才分得清三种页面(用户反馈 1.4 太窄)
         card.SetResourceReference(Border.BorderBrushProperty, borderKey);
         return card;
     }
