@@ -79,24 +79,108 @@ public sealed class TranslationBar : UserControl
         var notes = NotesCard(); Grid.SetColumn(notes, 3);
         grid.Children.Add(lvl); grid.Children.Add(target); grid.Children.Add(pool); grid.Children.Add(notes);
 
+        // ★ 同传模式下这一条完全换一套(用户裁定):
+        //   没有"目标池"这个概念,取而代之的是【一对固定方向】—— 我说的语言 -> 对方的语言。
+        //   翻译程度也不适用:同传就是直译,没有例句和语法可讲。
+        _textLayout = grid;
+        _interpretLayout = InterpretLayout();
+        var stack = new Grid();
+        stack.Children.Add(_textLayout);
+        stack.Children.Add(_interpretLayout);
+
         var root = new Grid();
-        root.Children.Add(grid);
+        root.Children.Add(stack);
         root.Children.Add(_overlay);
         Content = root;
 
         Refresh();
-        Loaded += (_, _) => { TheApp.Translation.Changed += Refresh; TheApp.History.Changed += Refresh; };
+        Loaded += (_, _) =>
+        {
+            TheApp.Translation.Changed += Refresh;
+            TheApp.History.Changed += Refresh;
+            TheApp.Interpret.Changed += Refresh;
+        };
         // ★ 卸载时必须把拖拽善后掉:界面在拖到一半时被重建的话,鼠标捕获会跟着这个已经不在
         //   可视树上的控件走 —— 那之后整个窗口的点击都到不了别处(与"点不动"同一类事故)。
         Unloaded += (_, _) =>
         {
             TheApp.Translation.Changed -= Refresh;
             TheApp.History.Changed -= Refresh;
+            TheApp.Interpret.Changed -= Refresh;
             FinishDrag(null);
         };
     }
 
-    void Refresh() { RefreshPools(); RefreshLevel(); RefreshNotes(); }
+    Grid _textLayout = null!;
+    FrameworkElement _interpretLayout = null!;
+
+    void Refresh()
+    {
+        var interpreting = TheApp.Interpret.Mode == TranslationMode.Interpret;
+        _textLayout.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
+        _interpretLayout.Visibility = interpreting ? Visibility.Visible : Visibility.Collapsed;
+
+        if (interpreting) { RefreshInterpret(); return; }
+        RefreshPools(); RefreshLevel(); RefreshNotes();
+    }
+
+    // ---------------------------------------------------------------- 同传:输入语言 / 输出语言
+    readonly ComboBox _myLang = new();
+    readonly ComboBox _theirLang = new();
+    bool _syncingLangs;
+
+    /// <summary>
+    /// 同传的下半条:【上=我说的语言,下=对方的语言】,中间一个对调键。
+    /// ★ 固定方向不是偷懒,是设计判断(用户提出,理由成立):
+    ///   省掉热路径上的语种检测,既降延迟,也避免半句话被判错语种后整句翻歪。
+    /// </summary>
+    FrameworkElement InterpretLayout()
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        foreach (var cb in new[] { _myLang, _theirLang })
+        {
+            cb.Margin = new Thickness(0, 3, 0, 0);
+            foreach (var l in Languages.Catalog) cb.Items.Add(new ComboBoxItem { Content = l.Name, Tag = l.Code });
+        }
+        _myLang.SelectionChanged += (_, _) => { if (!_syncingLangs && _myLang.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.Interpret.SetMyLang(c); };
+        _theirLang.SelectionChanged += (_, _) => { if (!_syncingLangs && _theirLang.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.Interpret.SetTheirLang(c); };
+
+        var swap = Chip("⇅ 对调", () => TheApp.Interpret.SwapLangs());
+        swap.HorizontalAlignment = HorizontalAlignment.Left;
+        swap.Margin = new Thickness(0, 6, 0, 6);
+
+        var body = new StackPanel();
+        body.Children.Add(Ui.Caption("我说"));
+        body.Children.Add(_myLang);
+        body.Children.Add(swap);
+        body.Children.Add(Ui.Caption("对方听 / 对方说"));
+        body.Children.Add(_theirLang);
+
+        var card = Card(body, "语言方向", scroll: false);
+        card.Width = LangPoolWidth;
+        card.HorizontalAlignment = HorizontalAlignment.Left;
+        Grid.SetColumn(card, 0);
+
+        var notes = NotesCard();
+        Grid.SetColumn(notes, 1);
+
+        grid.Children.Add(card);
+        grid.Children.Add(notes);
+        return grid;
+    }
+
+    void RefreshInterpret()
+    {
+        var st = TheApp.Interpret;
+        _syncingLangs = true;
+        _myLang.SelectedIndex = Array.FindIndex(Languages.Catalog, x => x.Code == st.MyLang);
+        _theirLang.SelectedIndex = Array.FindIndex(Languages.Catalog, x => x.Code == st.TheirLang);
+        _syncingLangs = false;
+        RefreshNotes();
+    }
 
     // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡
     FrameworkElement LevelCard()

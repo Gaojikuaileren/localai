@@ -31,6 +31,8 @@ public static class ClientStore
     public static string NotesPath => Path.Combine(AppPaths.StateDir, "notes.json");
     /// <summary>翻译历史的【收藏】。★ 只存收藏的键,原文一直在会话里(不留两份真相)。</summary>
     public static string HistoryFavPath => Path.Combine(AppPaths.StateDir, "history-favorites.json");
+    /// <summary>同传的本机偏好(语言方向、字幕开关、音色)。</summary>
+    public static string InterpretPath => Path.Combine(AppPaths.StateDir, "interpret.json");
     public static string TranslationPath => Path.Combine(AppPaths.StateDir, "translation.json");
 
     /// <summary>本机是否已有存档(有则不再播种示例数据 —— 否则每次启动都冒出一堆"(示例)")。</summary>

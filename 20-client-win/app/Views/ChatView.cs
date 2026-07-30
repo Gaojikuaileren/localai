@@ -753,6 +753,8 @@ public sealed class ChatView : UserControl
         public Func<ChatView, string, bool>? Fallback { get; init; }
         /// <summary>草稿变了(文本 + 是否挂着非图片附件)。翻译空间据此判断输入形态。</summary>
         public Action<string, bool>? OnDraftChanged { get; init; }
+        /// <summary>这个空间左上角要不要放【场景切换】(目前只有翻译空间有三个场景)。</summary>
+        public bool ModeSwitch { get; init; }
     }
 
     /// <summary>_wsKey -> ConvSpec 的【唯一】映射点。别处不再拿 _wsKey 和字面量比。</summary>
@@ -768,6 +770,7 @@ public sealed class ChatView : UserControl
                 "翻成哪些语言由下面的【目标池】决定;详细程度由左边的竖条决定。",
             },
             SearchIcon = true,
+            ModeSwitch = true,
             CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0,
             BottomAccessory = () => new TranslationBar(),
             BlockReason = TranslationBlockReason,
@@ -778,9 +781,77 @@ public sealed class ChatView : UserControl
         _ => new ConvSpec(),                 // 聊天:全默认
     };
 
+    /// <summary>
+    /// 翻译工作空间左上角的【三个场景】切换。★ 位置是用户指定的:会话板块左上角。
+    /// 第三个先留空 —— 用户还没想好做什么,但入口先占住,免得将来加进来时又要挪版面。
+    /// </summary>
+    FrameworkElement ModeSwitcher()
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+        foreach (var (mode, name, tip) in new[]
+                 {
+                     (TranslationMode.Text, "文字翻译", "打字或粘贴内容,翻成目标池里的语言。"),
+                     (TranslationMode.Interpret, "同声传译", "会议实时口译:我说的话译给对方,对方的话生成字幕。"),
+                     (TranslationMode.Reserved, "…", "第三个场景尚未确定 —— 入口先留着。"),
+                 })
+        {
+            var on = TheApp.Interpret.Mode == mode;
+            var t = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center };
+            t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            var b = new Border
+            {
+                Child = t, Padding = new Thickness(11, 5, 11, 5), Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand, BorderThickness = new Thickness(1), ToolTip = tip,
+            };
+            b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            if (on)
+            {
+                b.SetResourceReference(Border.BackgroundProperty, "Accent");
+                b.SetResourceReference(Border.BorderBrushProperty, "Accent");
+            }
+            else
+            {
+                b.Background = Brushes.Transparent;
+                b.SetResourceReference(Border.BorderBrushProperty, "Border");
+                b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+                b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+            }
+            var captured = mode;
+            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); BuildConversation(); };
+            row.Children.Add(b);
+        }
+        return row;
+    }
+
     /// <summary>唯一的会话面板。聊天与翻译都由它生成,差异全部走 ConvSpec。</summary>
     FrameworkElement BuildConvPanel(ConvSpec spec)
     {
+        // ★ 翻译空间的三个场景:切到同传时整个会话区换成同传面板(输入框那一套不适用)。
+        if (spec.ModeSwitch)
+        {
+            var mode = TheApp.Interpret.Mode;
+            if (mode != TranslationMode.Text)
+            {
+                var body = new DockPanel { LastChildFill = true };
+                var head = ModeSwitcher();
+                DockPanel.SetDock(head, Dock.Top);
+                body.Children.Add(head);
+                body.Children.Add(mode == TranslationMode.Interpret
+                    ? new InterpretPanel()
+                    : ReservedScenePlaceholder());
+                var only = ConvCard(body);
+                if (spec.BottomAccessory is null) return only;
+                var wrap = new DockPanel { LastChildFill = true };
+                var acc = spec.BottomAccessory();
+                acc.Margin = new Thickness(0, 10, 0, 0);
+                DockPanel.SetDock(acc, Dock.Bottom);
+                wrap.Children.Add(acc);
+                wrap.Children.Add(only);
+                return wrap;
+            }
+        }
+
         var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
         // ★ 居中态 = 【这个空间要居中】且【确实没有消息】。附件放哪、横幅浮不浮、
@@ -848,6 +919,16 @@ public sealed class ChatView : UserControl
             inner = DockWithInput(MessageScroller(msgs), inputArea, slideFromCenter: _wasEmptyState);
         }
 
+        if (spec.ModeSwitch)
+        {
+            var withModes = new DockPanel { LastChildFill = true };
+            var head = ModeSwitcher();
+            DockPanel.SetDock(head, Dock.Top);
+            withModes.Children.Add(head);
+            withModes.Children.Add(inner);
+            inner = withModes;
+        }
+
         _wasEmptyState = heroNow;   // ★ 不是 !hasMsgs:贴底态永远没有"从居中滑下来"这一说
         var card = ConvShell(inner, isGhost, overlayBanner: heroNow);
         if (spec.BottomAccessory is null) return card;
@@ -859,6 +940,19 @@ public sealed class ChatView : UserControl
         root.Children.Add(bar);
         root.Children.Add(card);
         return root;
+    }
+
+    /// <summary>第三个场景的占位。★ 如实说"还没定",不摆一个像功能的空壳。</summary>
+    static FrameworkElement ReservedScenePlaceholder()
+    {
+        var box = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+        var t = Ui.Body("第三个场景还没定。", muted: true);
+        t.HorizontalAlignment = HorizontalAlignment.Center;
+        var c = Ui.Caption("入口先占住位置 —— 想好做什么再填,免得那时又要挪版面。");
+        c.HorizontalAlignment = HorizontalAlignment.Center;
+        box.Children.Add(t);
+        box.Children.Add(c);
+        return box;
     }
 
     /// <summary>消息区在上、输入框 Dock 到底;需要时演一段"从居中滑到底部"。</summary>

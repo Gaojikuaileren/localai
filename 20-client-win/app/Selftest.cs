@@ -1268,6 +1268,65 @@ public static class Selftest
                 Assert(cvShape.Contains("spec.OnDraftChanged?.Invoke") && cvShape.Contains("TextShapes.Classify(draft, hasFileAttachment)"),
                        "★ 形态随输入实时上报(总不能等按了发送才告诉用户)");
 
+            // ---- 翻译工作空间的三个场景 + 同声传译骨架(用户裁定 2026-07-31)----
+            {
+                var ip = new Services.InterpretState();
+                Assert(ip.Mode == Services.TranslationMode.Text, "默认是文字翻译");
+                ip.SetMode(Services.TranslationMode.Interpret);
+                Assert(ip.Mode == Services.TranslationMode.Interpret, "能切到同传");
+
+                // 固定方向:我说的语言 -> 对方的语言(不是目标池)
+                ip.SetMyLang("ja"); ip.SetTheirLang("de");
+                Assert(ip.MyLang == "ja" && ip.TheirLang == "de", "语言方向可分别设置");
+                ip.SwapLangs();
+                Assert(ip.MyLang == "de" && ip.TheirLang == "ja", "★ 对调键把两端换过来(换人说话时最常按)");
+                ip.SetMyLang("zzz");
+                Assert(ip.MyLang == "de", "认不出的语言码不生效");
+
+                // ★ 语音链路未接入时如实为 false —— 界面据此说明,而不是给个按下没反应的开关
+                Assert(!Services.InterpretState.PipelineReady, "★ 语音链路未接入 —— 界面必须如实说,不做假开关");
+                Assert(Services.InterpretState.RequiredModels.Length == 3
+                       && !Services.InterpretState.RequiredModels.Contains("chat"),
+                       "★ 同传的模型清单里没有聊天模型(切进来时由 Broker 卸掉)");
+
+                // ★★ "用合成语音取代我的麦克风"不许被存档自动恢复 ——
+                //   每次开会都该由用户当场确认一次。
+                ip.SetSpeakTranslation(true);
+                ip.SetSubtitles(false);
+                var snap = ip.Export();
+                var ip2 = new Services.InterpretState();
+                ip2.Import(snap);
+                Assert(ip2.MyLang == ip.MyLang && ip2.TheirLang == ip.TheirLang, "语言方向会被记住");
+                Assert(!ip2.Subtitles, "字幕开关会被记住");
+                Assert(!ip2.SpeakTranslation,
+                       "★ 实时翻译输出【不】自动恢复 —— 不能因为上次开着就自动接管你的麦克风");
+            }
+            var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
+            if (ipSrc is not null)
+            {
+                Assert(ipSrc.Contains("我(麦克风)") && ipSrc.Contains("对方(会议音频)"),
+                       "★ 两条电平分开:麦克风与会议音频不混流,谁在说话是确定的");
+                Assert(ipSrc.Contains("不会静音"),
+                       "★ 界面上写明:同传出错会退回原声,不会让你在会议里静音");
+                Assert(!Body(ipSrc).Contains("Random"), "不画会动的假电平(那正好会骗过\"声音还在流动吗\"这个问题)");
+            }
+            var cvMode = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvMode is not null)
+            {
+                Assert(cvMode.Contains("FrameworkElement ModeSwitcher()") && cvMode.Contains("ModeSwitch = true"),
+                       "★ 会话板块左上角有三个场景的入口(位置由用户指定)");
+                Assert(cvMode.Contains("new InterpretPanel()") && cvMode.Contains("ReservedScenePlaceholder()"),
+                       "同传有自己的面板;第三个场景如实说\"还没定\"");
+            }
+            var barMode = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+            if (barMode is not null)
+            {
+                Assert(barMode.Contains("FrameworkElement InterpretLayout()") && barMode.Contains("语言方向"),
+                       "★ 同传模式下,下半条换成【输入/输出语言】而不是目标池");
+                Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),
+                       "两套版面按模式切换,不是各建一份");
+            }
+
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
