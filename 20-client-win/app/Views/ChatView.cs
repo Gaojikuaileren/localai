@@ -463,20 +463,54 @@ public sealed class ChatView : UserControl
     // 输入区(含附件按钮 + 待发附件预览 + 输入框 + 发送),空态与有消息态共用。
     // ★ 空态(输入框居中):附件放在输入框【下方】,不把居中的输入框往上顶(用户裁定);
     //   有消息态(输入框在底):附件仍在输入框【上方】。
-    FrameworkElement BuildInputArea(bool attachmentsBelow = false)
+    FrameworkElement BuildInputArea(bool attachmentsBelow = false, bool searchIcon = false)
     {
-        _input = new TextBox { Text = _draft, Padding = new Thickness(11, 9, 11, 9), VerticalContentAlignment = VerticalAlignment.Center };
+        // ★ 输入框(用户反馈的三条一起修):
+        //   ① 能换行 —— Shift+Enter 换行,单独 Enter 才发送(聊天的通用约定);
+        //   ② 文字多了【自己长高】,但最多 3 行,再多就在框内滚动(不能无限顶掉会话区);
+        //   ③ 能粘贴 —— 图片进附件栏,文本正常贴(见 OnInputPaste)。
+        _input = new TextBox
+        {
+            Text = _draft,
+            Padding = new Thickness(11, 9, 11, 9),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            AcceptsReturn = true,                       // ① 允许换行(否则 Enter 根本进不来)
+            TextWrapping = TextWrapping.Wrap,
+            MaxLines = InputMaxLines,                   // ② 最多 3 行高
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,   // 超过就滚动
+        };
         _input.TextChanged += (_, _) => _draft = _input.Text;
-        _input.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; SendCurrent(); } };
+        _input.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Enter) return;
+            // Shift/Ctrl + Enter = 换行;单独 Enter = 发送
+            if ((Keyboard.Modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) != 0) return;
+            e.Handled = true;
+            SendCurrent();
+        };
         // ★ 在输入框里直接【粘贴截图】(Ctrl+V):剪贴板是图片就收进附件栏,而不是当文本贴进去。
         //   用户裁定:去掉"+"菜单里的剪贴板项,改成这里粘贴。文本粘贴不受影响(仅在剪贴板是图片时拦截)。
         DataObject.AddPastingHandler(_input, OnInputPaste);
-        var send = Ui.Primary("发送", (_, _) => SendCurrent());
+        // 翻译空间的发送 = 放大镜(是"查翻译"不是"发消息",用户裁定)
+        Button send;
+        if (searchIcon)
+        {
+            var mag = Icons.Make(IconName.Search, 18, "FgOnAccent");
+            mag.HorizontalAlignment = HorizontalAlignment.Center;
+            mag.VerticalAlignment = VerticalAlignment.Center;
+            send = Ui.Primary("", (_, _) => SendCurrent());
+            send.Content = mag;
+            send.Width = 46;
+        }
+        else send = Ui.Primary("发送", (_, _) => SendCurrent());
         send.Height = 40;
         var attach = AttachButton();
 
         var inputRow = new DockPanel { LastChildFill = true };
-        var sendWrap = new Border { Child = send, Margin = new Thickness(10, 0, 0, 0) };
+        // 输入框会随文字长高,两侧按钮【贴底】才不会被拉伸或错位
+        send.VerticalAlignment = VerticalAlignment.Bottom;
+        attach.VerticalAlignment = VerticalAlignment.Bottom;
+        var sendWrap = new Border { Child = send, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Bottom };
         DockPanel.SetDock(sendWrap, Dock.Right);
         DockPanel.SetDock(attach, Dock.Left);
         inputRow.Children.Add(sendWrap);
@@ -522,8 +556,9 @@ public sealed class ChatView : UserControl
 
     void BuildConversation()
     {
-        // ★ 翻译工作空间:中间换成翻译外壳(语言池 / 档位 / 学习笔记),会话列表与项目抽屉照旧。
-        if (_wsKey == "translation") { _conv.Content = Ui.Card(new TranslationView(), new Thickness(0)); return; }
+        // ★ 翻译工作空间(用户裁定的排版):上方【主会话框】(输入框直接在底部,不居中;发送 = 放大镜),
+        //   下方一排【程度竖条 / 目标池 / 语言池 / 学习笔记】。会话列表与项目抽屉外壳照旧。
+        if (_wsKey == "translation") { _conv.Content = BuildTranslationLayout(); return; }
         // 其余工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假界面。
         if (_wsKey != "chat") { _conv.Content = PlaceholderCenter(); return; }
 
@@ -612,6 +647,47 @@ public sealed class ChatView : UserControl
         }
         _wasEmptyState = !hasMsgs;
         _conv.Content = ConvShell(inner, isGhost, overlayBanner: !hasMsgs);
+    }
+
+    /// <summary>翻译空间:上方主会话框(板块)+ 下方语言池/程度/笔记一排。</summary>
+    FrameworkElement BuildTranslationLayout()
+    {
+        var msgs = new StackPanel();
+        var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
+        if (hasMsgs)
+        {
+            foreach (var m in TheApp.Chat.MessagesOf(_sessionId!)) msgs.Children.Add(Bubble(m));
+        }
+        else
+        {
+            // 空态也【不居中】—— 用户裁定:输入框始终在板块底部
+            var hint = Ui.Body("输入要翻译的内容,按下放大镜。", muted: true);
+            hint.HorizontalAlignment = HorizontalAlignment.Center;
+            var tip = Ui.Caption("翻成哪些语言由下面的【目标池】决定;详细程度由左边的竖条决定。");
+            tip.HorizontalAlignment = HorizontalAlignment.Center;
+            msgs.Children.Add(new Border { Height = 24 });
+            msgs.Children.Add(hint);
+            msgs.Children.Add(tip);
+        }
+        var scroll = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }.PassThrough();
+        Dispatcher.BeginInvoke(new Action(() => scroll.ScrollToEnd()), System.Windows.Threading.DispatcherPriority.Loaded);
+
+        var inputArea = BuildInputArea(attachmentsBelow: false, searchIcon: true);
+        var convDock = new DockPanel { LastChildFill = true };
+        var inputWrap = new Border { Child = inputArea, Margin = new Thickness(0, 10, 0, 0) };
+        DockPanel.SetDock(inputWrap, Dock.Bottom);
+        convDock.Children.Add(inputWrap);
+        convDock.Children.Add(scroll);
+
+        var conv = Ui.Card(convDock, new Thickness(0));
+        conv.Padding = new Thickness(12);
+
+        var root = new DockPanel { LastChildFill = true };
+        var bar = new TranslationBar { Margin = new Thickness(0, 10, 0, 0) };
+        DockPanel.SetDock(bar, Dock.Bottom);
+        root.Children.Add(bar);
+        root.Children.Add(conv);
+        return root;
     }
 
     // 只读浏览:已删除 / 已完成项目。灰化会话内容,底部换成对应的动作按钮。
@@ -858,6 +934,9 @@ public sealed class ChatView : UserControl
     }
 
     // 附件上限与"上下文吃紧"阈值(用户裁定):最多 99 个;超过 5 个提示、且只展开显示前 5 个。
+    /// <summary>输入框最多长到几行,再多就在框内滚动(用户裁定:3 行)。</summary>
+    const int InputMaxLines = 3;
+
     const int MaxAttachments = 99;
     const int SoftAttachLimit = 5;
     static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" };
@@ -935,11 +1014,24 @@ public sealed class ChatView : UserControl
     {
         try
         {
-            var hasImage = e.SourceDataObject?.GetDataPresent(DataFormats.Bitmap) == true || Clipboard.ContainsImage();
-            var hasText = e.SourceDataObject?.GetDataPresent(DataFormats.UnicodeText) == true;
-            if (!hasImage || hasText) return;   // 有文本就走正常文本粘贴;只有图片才收进附件
-            e.CancelCommand();                  // 别把图片贴成文本
-            AddClipboardImage();
+            var d = e.SourceDataObject;
+
+            // ① 从资源管理器复制的【文件】-> 直接进附件栏(按路径,不读内容)
+            if (d?.GetDataPresent(DataFormats.FileDrop) == true &&
+                d.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
+            {
+                e.CancelCommand();
+                // ★ 延后执行:粘贴处理器里直接重建界面会打断这次输入事件
+                Dispatcher.BeginInvoke(new Action(() => AddPaths(files)), System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            }
+
+            // ② 截图(剪贴板位图)-> 进附件栏。有文本时按文本贴,不抢。
+            var hasImage = d?.GetDataPresent(DataFormats.Bitmap) == true || Clipboard.ContainsImage();
+            var hasText = d?.GetDataPresent(DataFormats.UnicodeText) == true;
+            if (!hasImage || hasText) return;
+            e.CancelCommand();
+            Dispatcher.BeginInvoke(new Action(AddClipboardImage), System.Windows.Threading.DispatcherPriority.Background);
         }
         catch { /* 粘贴出错不该影响输入 */ }
     }

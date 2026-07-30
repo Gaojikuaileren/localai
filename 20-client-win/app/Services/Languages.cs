@@ -19,8 +19,11 @@ public sealed record Lang(string Code, string Name, string Native);
 
 public static class Languages
 {
-    /// <summary>常用语言池的默认内容(用户可在界面上增删)。</summary>
-    public static readonly Lang[] Common =
+    /// <summary>
+    /// 全部支持的语言(设置里"添加语言"从这里选)。★ 常用语言池【默认只放中/日/英/德/韩】(用户裁定),
+    /// 其余留在目录里,想用再到设置里加 —— 池子太长反而不好拖。
+    /// </summary>
+    public static readonly Lang[] Catalog =
     {
         new("zh", "中文", "中文"),
         new("ja", "日语", "日本語"),
@@ -30,9 +33,14 @@ public static class Languages
         new("fr", "法语", "Français"),
         new("es", "西班牙语", "Español"),
         new("ru", "俄语", "Русский"),
+        new("it", "意大利语", "Italiano"),
+        new("pt", "葡萄牙语", "Português"),
     };
 
-    public static Lang? Find(string code) => Common.FirstOrDefault(l => l.Code == code);
+    /// <summary>默认的常用语言池(用户裁定:只要这五个)。</summary>
+    public static readonly string[] DefaultPool = { "zh", "ja", "en", "de", "ko" };
+
+    public static Lang? Find(string code) => Catalog.FirstOrDefault(l => l.Code == code);
 
     public static string NameOf(string code) => Find(code)?.Name ?? code;
 

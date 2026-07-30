@@ -78,6 +78,9 @@ public sealed class AppSettings
     /// <summary>主页待办板块当前显示的分类(all/today/personal/chore/shopping)。每台设备各自的偏好。</summary>
     public string HomeTodoFilter { get; set; } = "all";
 
+    /// <summary>翻译工作空间的【常用语言池】(可在设置里增删)。默认只有中/日/英/德/韩。</summary>
+    public List<string> TranslationPool { get; set; } = Languages.DefaultPool.ToList();
+
     // ---- 会话整理 / 记忆库(用户裁定 2026-07-30)----
     /// <summary>摘要触发方式:"ai" = AI 自己判断何时整理(默认);"manual" = 只在设置里手动点。</summary>
     public string SummaryTrigger { get; set; } = "ai";

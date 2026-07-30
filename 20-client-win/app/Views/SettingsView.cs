@@ -93,6 +93,8 @@ public sealed class SettingsView : UserControl
                 Ui.Caption("勾选后点窗口的 × 只是收起窗口,程序继续在托盘运行;要真正退出请用托盘图标右键 →「退出」。")
             )),
 
+            LanguagePoolCard(),
+
             AppleSyncCard(),
 
             // 存储与清理 + 记忆库编辑(用户裁定:一键清爽 + 勾选执行内容;记忆可预览删减)
@@ -102,6 +104,88 @@ public sealed class SettingsView : UserControl
             Ui.Subtitle(Strings.Get("devices.title")),
             new DevicesView(embedded: true)
         );
+    }
+
+    Border? _langCard;
+    readonly StackPanel _langBody = new();
+
+    /// <summary>
+    /// 翻译工作空间的【常用语言池】:增删这里的语言,翻译空间的语言池就跟着变。
+    /// ★ 默认只有中/日/英/德/韩(用户裁定);其余在目录里,想用再加 —— 池子太长不好拖。
+    /// </summary>
+    public Border LanguagePoolCard()
+    {
+        RefreshLangPool();
+        _langCard = Ui.Card(Ui.Stack(
+            Ui.Subtitle("翻译语言池"),
+            Ui.Caption("这里决定翻译空间【常用语言池】里有哪些语言。目标池最多同时选 3 个。"),
+            _langBody));
+        return _langCard;
+    }
+
+    void RefreshLangPool()
+    {
+        var s = TheApp.Settings;
+        _langBody.Children.Clear();
+
+        var inPool = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+        foreach (var code in s.TranslationPool.ToList())
+        {
+            var l = Languages.Find(code);
+            if (l is null) continue;
+            inPool.Children.Add(LangPill(l, inPool: true, () =>
+            {
+                s.TranslationPool.Remove(code);
+                s.Save();
+                TheApp.Translation.RemoveTarget(code);   // 从池里删掉的,目标池也不该再留着
+                RefreshLangPool();
+            }));
+        }
+        if (inPool.Children.Count == 0) inPool.Children.Add(Ui.Caption("语言池是空的 —— 下面加几个。"));
+        _langBody.Children.Add(Ui.Caption("池内(点可移除)"));
+        _langBody.Children.Add(inPool);
+
+        var rest = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+        foreach (var l in Languages.Catalog.Where(x => !s.TranslationPool.Contains(x.Code)))
+            rest.Children.Add(LangPill(l, inPool: false, () =>
+            {
+                s.TranslationPool.Add(l.Code);
+                s.Save();
+                RefreshLangPool();
+            }));
+        if (rest.Children.Count == 0) rest.Children.Add(Ui.Caption("目录里的语言都已经在池中了。"));
+        _langBody.Children.Add(Ui.Caption("可添加"));
+        _langBody.Children.Add(rest);
+    }
+
+    static FrameworkElement LangPill(Lang l, bool inPool, Action onClick)
+    {
+        var t = new TextBlock { Text = inPool ? l.Name : "+ " + l.Name, VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, inPool ? "FgOnAccent" : "FgSecondary");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border
+        {
+            Child = t, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 6, 6),
+            CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        b.SetResourceReference(Border.BackgroundProperty, inPool ? "Accent" : "BgSurface");
+        b.SetResourceReference(Border.BorderBrushProperty, inPool ? "Accent" : "Border");
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        return b;
+    }
+
+    /// <summary>从翻译空间的齿轮跳进来:滚到语言池并闪一下。</summary>
+    public void RevealLanguagePool()
+    {
+        if (_langCard is null) return;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _langCard.BringIntoView();
+            var flash = new System.Windows.Media.Animation.DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
+            { AutoReverse = true, RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(2) };
+            _langCard.BeginAnimation(OpacityProperty, flash);
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     /// <summary>

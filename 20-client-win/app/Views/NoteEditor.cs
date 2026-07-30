@@ -22,7 +22,7 @@ public static class NoteEditor
         var level = existing?.Level ?? currentLevel;
 
         // 目标语言:新建时从目标池里选(池空则给常用语言全表)
-        var langs = (poolTargets.Count > 0 ? poolTargets.ToList() : Languages.Common.Select(l => l.Code).ToList());
+        var langs = poolTargets.Count > 0 ? poolTargets.ToList() : TheApp.Settings.TranslationPool.ToList();
         var langBox = new ComboBox { Margin = new Thickness(0, 2, 0, 8) };
         foreach (var c in langs) langBox.Items.Add(Languages.NameOf(c));
         var li = existing is null ? 0 : Math.Max(0, langs.IndexOf(existing.Lang));

@@ -706,6 +706,22 @@ public static class Selftest
                 Assert(Services.ClientStore.Load<List<Services.TodoItem>>(okPath)?.Count == 1, "存档可读回");
                 try { File.Delete(okPath); } catch { }
             }
+            // ---- 输入框:换行 / 自动长高(上限 3 行)/ 粘贴 ----
+            var cvInput = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvInput is not null)
+            {
+                Assert(cvInput.Contains("AcceptsReturn = true") && cvInput.Contains("InputMaxLines = 3"),
+                       "★ 输入框可换行,最多长到 3 行");
+                Assert(cvInput.Contains("MaxLines = InputMaxLines") && cvInput.Contains("VerticalScrollBarVisibility = ScrollBarVisibility.Auto"),
+                       "超过 3 行在框内滚动(不无限顶掉会话区)");
+                Assert(cvInput.Contains("ModifierKeys.Shift") && cvInput.Contains("SendCurrent();"),
+                       "★ Shift+Enter 换行、单独 Enter 发送");
+                Assert(cvInput.Contains("DataFormats.FileDrop") && cvInput.Contains("AddPaths(files)"),
+                       "★ 可以粘贴【文件】进附件栏(从资源管理器复制)");
+                Assert(cvInput.Contains("DispatcherPriority.Background") && cvInput.Contains("AddClipboardImage"),
+                       "粘贴截图延后执行(粘贴处理器里直接重建界面会打断输入事件)");
+            }
+
             // ---- 附件栏重做(2026-07-30 用户裁定)----
             var cvAtt = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvAtt is not null)
@@ -919,18 +935,31 @@ public static class Selftest
                 Assert(nc.AddSplit(new[] { new Services.StudyNote("", "de", "x", "zh", "", Services.TranslationLevel.Plain) }) == 0,
                        "空译文不会被存成笔记");
             }
-            var tvSrc = TryReadSource(Path.Combine("Views", "TranslationView.cs"));
-            if (tvSrc is not null)
+            var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+            if (tbSrc is not null)
             {
-                Assert(tvSrc.Contains("DragDrop.DoDragDrop") && tvSrc.Contains("AllowDrop = true"), "常用语言可拖进目标池");
-                Assert(tvSrc.Contains("TranslationLevels.NameOf") && tvSrc.Contains("new Slider"), "翻译程度用滑条(四档)");
-                Assert(tvSrc.Contains("学习笔记") && tvSrc.Contains("NotesBoard"), "有学习笔记板块");
-                Assert(tvSrc.Contains("AI 尚未接入"), "★ 如实说明现在还不能真的翻译(不假装翻了)");
+                Assert(tbSrc.Contains("DragDrop.DoDragDrop") && tbSrc.Contains("AllowDrop = true"), "语言气泡可拖进目标池");
+                Assert(tbSrc.Contains("CornerRadius(14)"), "语言是【气泡】(大圆角),池子是方形板块");
+                Assert(tbSrc.Contains("LevelColumn") && tbSrc.Contains("TranslationLevels.All.Reverse()"), "翻译程度是上下竖条(四档)");
+                Assert(tbSrc.Contains("OpenLanguagePoolSettings"), "★ 语言池旁的齿轮通到设置");
+                Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(3)"), "右下角学习笔记预览最新几条");
             }
             var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvTrans is not null)
-                Assert(cvTrans.Contains("_wsKey == \"translation\"") && cvTrans.Contains("new TranslationView()"),
-                       "翻译工作空间的中间区换成翻译外壳(会话列表与项目抽屉照旧)");
+            {
+                Assert(cvTrans.Contains("_wsKey == \"translation\"") && cvTrans.Contains("BuildTranslationLayout"),
+                       "翻译空间:上方主会话框 + 下方语言池一排");
+                Assert(cvTrans.Contains("searchIcon: true") && cvTrans.Contains("IconName.Search"),
+                       "★ 翻译的发送按钮是放大镜(查翻译)");
+                var bt = cvTrans[cvTrans.IndexOf("FrameworkElement BuildTranslationLayout()", StringComparison.Ordinal)..];
+                bt = bt[..bt.IndexOf("// 只读浏览", StringComparison.Ordinal)];
+                Assert(!bt.Contains("VerticalAlignment.Center"), "★ 翻译空间输入框始终在底部,不居中(用户裁定)");
+            }
+            var setLang = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (setLang is not null)
+                Assert(setLang.Contains("翻译语言池") && setLang.Contains("RevealLanguagePool"), "设置里可增删语言池的语言");
+            Assert(Services.Languages.DefaultPool.SequenceEqual(new[] { "zh", "ja", "en", "de", "ko" }),
+                   "★ 默认语言池只有中/日/英/德/韩(用户裁定)");
 
             // ★ 回普通会话一律落在【空会话】,不跳进排第一的旧对话(用户裁定)
             var cvNormal = TryReadSource(Path.Combine("Views", "ChatView.cs"));
