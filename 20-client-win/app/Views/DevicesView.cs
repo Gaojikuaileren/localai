@@ -166,6 +166,10 @@ public sealed class DevicesView : UserControl
 
         return Ui.Card(Ui.Stack(
             Ui.Subtitle(Strings.Get("devices.this_device") + " · " + Environment.MachineName),
+            // ★ 显示 hub_id:同一个网络里可能有【不止一个主机】(合租、邻居、或自己装了两台),
+            //   只看 IP 分不清连的是哪一个 —— hub_id 是它的唯一身份(证书链也绑在它上面)。
+            Ui.Body($"已连主机:{(string.IsNullOrWhiteSpace(p.HubId) ? "(旧档案未记录)" : p.HubId)}"),
+            Ui.Caption("一台客户端只属于一个主机;要换主机得先解除配对再重新配对。"),
             Ui.Body($"中枢:{p.EdgeUrl}"),
             Ui.Body($"连接地址:{(string.IsNullOrWhiteSpace(p.Dial) ? "(旧档案未记录,建议重新配对)" : p.Dial)}", muted: true),
             Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {

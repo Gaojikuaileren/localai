@@ -763,6 +763,26 @@ public static class Selftest
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
 
+            // ---- 主机离线 / 一网多主机 ----
+            var puFolder2 = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puFolder2 is not null)
+            {
+                Assert(puFolder2.Contains("OpenFolderItem") && puFolder2.Contains("HostMachine"),
+                       "★ 打开文件夹尊重 HostMachine(远程项目不会误开本机同名目录)");
+                Assert(puFolder2.Contains("文件夹在其它机器上"), "远程文件夹如实拒绝并说明");
+                // 只能有一个实现(三处菜单共用),否则改一处漏两处
+                Assert(puFolder2.Split("ProjectCenter.OpenInExplorer(p.FolderPath)").Length - 1 == 1,
+                       "打开文件夹只有一处实现(三个菜单共用)");
+            }
+            var cvOff = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvOff is not null)
+                Assert(cvOff.Contains("主机未开启") && cvOff.Contains("HubState.Online"),
+                       "★ 主机离线时如实提示(消息先记本机,AI 要等主机上线)");
+            var dvHub = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+            if (dvHub is not null)
+                Assert(dvHub.Contains("已连主机") && dvHub.Contains("只属于一个主机"),
+                       "★ 显示 hub_id 并说明一客户端只属于一个主机(一网多主机时分得清)");
+
             // ---- 提升为共享:默认本机、单向不可收回、幽灵永不共享、任何机器都能删 ----
             {
                 var sc = new Services.ChatCenter();

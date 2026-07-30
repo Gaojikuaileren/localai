@@ -68,6 +68,35 @@ public static class ProjectUi
         }
     }
 
+    /// <summary>
+    /// 「在文件夹中打开」—— ★ 必须尊重 HostMachine:项目文件夹可能在【另一台机器】上。
+    /// 之前不看这个字段,会拿同一个路径去开【本机】的同名目录 —— 两台机器上有同名路径很常见,
+    /// 于是打开一个完全不相干的文件夹,而用户以为那就是项目内容。这是真会误导人的 bug。
+    /// 远程文件夹要能真正打开,得等中枢的文件通道(P4+);在那之前如实拒绝并说明。
+    /// </summary>
+    public static MenuItem OpenFolderItem(Project p)
+    {
+        var remote = !string.IsNullOrWhiteSpace(p.HostMachine);
+        var mi = new MenuItem { Header = remote ? "在文件夹中打开(在其它机器)" : "在文件夹中打开" };
+        mi.Click += (_, _) =>
+        {
+            if (remote)
+            {
+                ConfirmDialog.Show("文件夹在其它机器上",
+                    $"这个项目的文件夹在「{p.HostMachine}」上,不在本机:\n{p.FolderPath}\n\n" +
+                    "跨机器读写文件需要那台机器在线并接入中枢(P4+ 才有);现在无法直接打开。",
+                    confirmText: "好", cancelText: "关闭");
+                return;
+            }
+            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
+                ConfirmDialog.Show("打不开文件夹",
+                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。"
+                        : $"打不开文件夹:\n{p.FolderPath}\n(可能已被移动或删除)",
+                    confirmText: "好", cancelText: "关闭");
+        };
+        return mi;
+    }
+
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
     static ChatCenter Chat => ((LocalAI.Client.App)Application.Current).Chat;
 
@@ -89,15 +118,7 @@ public static class ProjectUi
 
         var m = new ContextMenu();
 
-        var open = new MenuItem { Header = "在文件夹中打开" };
-        open.Click += (_, _) =>
-        {
-            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                ConfirmDialog.Show("打不开文件夹",
-                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}\n(可能已被移动或删除)",
-                    confirmText: "好", cancelText: "关闭");
-        };
-        m.Items.Add(open);
+        m.Items.Add(OpenFolderItem(p));
 
         // 置顶(项目列表里也能置顶 —— 用户裁定)
         var pin = new MenuItem { Header = p.Pinned ? "取消置顶" : "置顶项目", IsChecked = p.Pinned };
@@ -177,15 +198,7 @@ public static class ProjectUi
     {
         var m = new ContextMenu();
 
-        var open = new MenuItem { Header = "在文件夹中打开" };
-        open.Click += (_, _) =>
-        {
-            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                ConfirmDialog.Show("打不开文件夹",
-                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
-                    confirmText: "好", cancelText: "关闭");
-        };
-        m.Items.Add(open);
+        m.Items.Add(OpenFolderItem(p));
         m.Items.Add(new Separator());
 
         var restore = new MenuItem { Header = "还原项目" };
@@ -261,15 +274,7 @@ public static class ProjectUi
         pin.Click += (_, _) => Projects.TogglePin(p.ProjectId);
         m.Items.Add(pin);
 
-        var open = new MenuItem { Header = "在文件夹中打开" };
-        open.Click += (_, _) =>
-        {
-            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                ConfirmDialog.Show("打不开文件夹",
-                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
-                    confirmText: "好", cancelText: "关闭");
-        };
-        m.Items.Add(open);
+        m.Items.Add(OpenFolderItem(p));
         return m;
     }
 

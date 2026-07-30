@@ -479,6 +479,16 @@ public sealed class ChatView : UserControl
         inputRow.Children.Add(_input);
 
         var area = new StackPanel();
+        // ★ 主机没开时如实说明(用户提问):本机会话照常可读可写,只是【AI 算不了】——
+        //   AI 在主机上跑。发出去的消息会先记在本机,主机上线后才可能有回答。
+        //   只在【已配对但连不上】时提示;没配对的情况左下角状态块已经常驻显示,不重复唠叨。
+        if (TheApp.Hub.IsPaired && TheApp.Hub.State != HubState.Online)
+        {
+            var off = Ui.Caption("主机未开启 —— 消息会先记在本机;AI 在主机上运行,要等它上线才能回答。");
+            off.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+            off.Margin = new Thickness(2, 0, 2, 6);
+            area.Children.Add(off);
+        }
         if (attachmentsBelow)
         {
             area.Children.Add(inputRow);
