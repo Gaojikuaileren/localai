@@ -97,11 +97,11 @@ public partial class App : Application
         Tasks.Add("(示例)翻译长文", "中 → 日 · 详细解释档", "translation", 0.72);
 
         // 项目田字格同理:没有项目就只剩空态,没法评审方块布局。标注「示例」。覆盖三种状态(准备中/进行中/已完成)。
-        Projects.Add(new Project("p1", "(示例)家庭旅行计划", "对话 · 12 条消息", "chat", ProjectScope.Family, DateTime.Now.AddMinutes(-8), Status: ProjectStatus.Active));
-        Projects.Add(new Project("p2", "(示例)客厅灯光方案", "资产 · 3 张草稿", "assets", ProjectScope.Family, DateTime.Now.AddHours(-2), Pinned: true, Status: ProjectStatus.Active, FolderPath: AppContext.BaseDirectory));
-        Projects.Add(new Project("p3", "(示例)日语课件 第 4 讲", "课件草稿 · 8 页", "courses", ProjectScope.Personal, DateTime.Now.AddHours(-5), Status: ProjectStatus.Preparing));
-        Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1), Status: ProjectStatus.Active));
-        Projects.Add(new Project("p5", "(示例)旧网站搬迁", "已收尾归档", "chat", ProjectScope.Personal, DateTime.Now.AddDays(-9), Status: ProjectStatus.Done));
+        Projects.Add(new Project("p1", "(示例)家庭旅行计划", "对话 · 12 条消息", "chat", ProjectScope.Family, DateTime.Now.AddMinutes(-8), Status: ProjectStatus.Active, OwnerMemberId: MemberContext.Current));
+        Projects.Add(new Project("p2", "(示例)客厅灯光方案", "资产 · 3 张草稿", "assets", ProjectScope.Family, DateTime.Now.AddHours(-2), Pinned: true, Status: ProjectStatus.Active, FolderPath: AppContext.BaseDirectory, OwnerMemberId: MemberContext.Current));
+        Projects.Add(new Project("p3", "(示例)日语课件 第 4 讲", "课件草稿 · 8 页", "courses", ProjectScope.Personal, DateTime.Now.AddHours(-5), Status: ProjectStatus.Preparing, OwnerMemberId: MemberContext.Current));
+        Projects.Add(new Project("p4", "(示例)论文摘要翻译", "中 → 日 · 详细解释", "translation", ProjectScope.Personal, DateTime.Now.AddDays(-1), Status: ProjectStatus.Active, OwnerMemberId: MemberContext.Current));
+        Projects.Add(new Project("p5", "(示例)旧网站搬迁", "已收尾归档", "chat", ProjectScope.Personal, DateTime.Now.AddDays(-9), Status: ProjectStatus.Done, OwnerMemberId: MemberContext.Current));
 
         // 聊天示例:一个普通会话、一个归在"家庭旅行计划"项目下的会话
         Chat.NewSession(null, "chat", ProjectScope.Personal, "(示例)随便问问");

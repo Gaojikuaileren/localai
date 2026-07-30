@@ -399,6 +399,72 @@ public static class Selftest
             cc3.SweepExpiredDeleted(DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
             Assert(cc3.Find(sa.SessionId) is null, "超过保留期自动清除(不可恢复)");
 
+            // ---- D45 可见范围过滤(fail-closed)----
+            {
+                const string me = "m-me", other = "m-other";
+                // 纯函数规则
+                Assert(Services.MemberContext.CanSee(Services.ProjectScope.Family, other, me), "家庭范围:别人建的也可见");
+                Assert(Services.MemberContext.CanSee(Services.ProjectScope.Personal, me, me), "个人范围:自己的可见");
+                Assert(!Services.MemberContext.CanSee(Services.ProjectScope.Personal, other, me), "★ 个人范围:别人的【不可见】");
+                Assert(!Services.MemberContext.CanSee(Services.ProjectScope.OnlyMe, other, me), "★ 仅本人:别人的【不可见】");
+                Assert(!Services.MemberContext.CanSee(Services.ProjectScope.Personal, null, me), "★ 所有者未知 -> 不可见(fail-closed)");
+                Assert(!Services.MemberContext.CanSee(Services.ProjectScope.OnlyMe, "", me), "★ 所有者为空串 -> 不可见(fail-closed)");
+                Assert(Services.MemberContext.CanSee(Services.ProjectScope.Family, null, me), "家庭范围即便所有者未知也可见(家庭本就共享)");
+
+                // 落到列表接口上:外来私人项目/会话绝不出现
+                var pv = new Services.ProjectCenter();
+                pv.Import(new List<Services.Project>
+                {
+                    new("a", "我的个人", "", "chat", Services.ProjectScope.Personal, DateTime.Now, OwnerMemberId: Services.MemberContext.Current),
+                    new("b", "别人的个人", "", "chat", Services.ProjectScope.Personal, DateTime.Now, OwnerMemberId: other),
+                    new("c", "家庭的", "", "chat", Services.ProjectScope.Family, DateTime.Now, OwnerMemberId: other),
+                    new("d", "别人的仅本人(已完成)", "", "chat", Services.ProjectScope.OnlyMe, DateTime.Now, Status: Services.ProjectStatus.Done, OwnerMemberId: other),
+                });
+                var vis = pv.Ongoing().Select(x => x.ProjectId).ToList();
+                Assert(vis.Contains("a") && vis.Contains("c"), "自己的个人 + 家庭的可见");
+                Assert(!vis.Contains("b"), "★ 别人的个人项目不出现在 Ongoing");
+                Assert(!pv.All().Any(x => x.ProjectId == "b"), "★ 别人的个人项目不出现在 All");
+                Assert(!pv.Completed().Any(x => x.ProjectId == "d"), "★ 别人的仅本人项目不出现在项目库");
+
+                var cv = new Services.ChatCenter();
+                cv.Import(new Services.ChatCenter.Snapshot(new List<Services.ChatSession>
+                {
+                    new("s1", "我的", null, Services.ProjectScope.Personal, DateTime.Now, OwnerMemberId: Services.MemberContext.Current),
+                    new("s2", "别人的", null, Services.ProjectScope.Personal, DateTime.Now, OwnerMemberId: other),
+                    new("s3", "家庭的", null, Services.ProjectScope.Family, DateTime.Now, OwnerMemberId: other),
+                    new("s4", "别人的(已删)", null, Services.ProjectScope.OnlyMe, DateTime.Now, DeletedAt: DateTime.Now, OwnerMemberId: other),
+                }, new List<Services.ChatMessage>()));
+                var sv = cv.NormalSessions("chat").Select(x => x.SessionId).ToList();
+                Assert(sv.Contains("s1") && sv.Contains("s3"), "自己的 + 家庭会话可见");
+                Assert(!sv.Contains("s2"), "★ 别人的私人会话不出现");
+                Assert(!cv.Deleted("chat").Any(x => x.SessionId == "s4"), "★ 别人的私人会话也不出现在回收站");
+                Assert(cv.DeletedCount("chat") == cv.Deleted("chat").Count(), "回收站计数与列表口径一致(都按可见性过滤)");
+
+                // 旧存档迁移:没有所有者的条目认领为本地成员(否则老用户的东西会集体隐身)
+                var legacy = new Services.ProjectCenter();
+                legacy.Import(new List<Services.Project>
+                {
+                    new("old", "旧存档项目", "", "chat", Services.ProjectScope.Personal, DateTime.Now),   // 无 OwnerMemberId
+                });
+                Assert(legacy.Items[0].OwnerMemberId == Services.MemberContext.LocalMemberId, "旧存档条目导入时认领为本地成员");
+                Assert(legacy.Ongoing().Any(x => x.ProjectId == "old"), "迁移后旧条目仍然可见(不会集体隐身)");
+
+                // 本地 Add 打所有者戳(否则静默不可见);Import 不打戳(外来条目保持原所有者)
+                var stamp = new Services.ProjectCenter();
+                stamp.Add(new Services.Project("z", "没写所有者", "", "chat", Services.ProjectScope.Personal, DateTime.Now));
+                Assert(stamp.Items[0].OwnerMemberId == Services.MemberContext.Current, "本地 Add 自动补当前成员(避免静默不可见)");
+                Assert(stamp.Ongoing().Any(x => x.ProjectId == "z"), "本地新增的个人项目可见");
+                Assert(pv.Items.First(x => x.ProjectId == "b").OwnerMemberId == other, "★ Import 不给外来条目打戳(所有者保持不变)");
+            }
+            var memSrc = TryReadSource(Path.Combine("Services", "MemberContext.cs"));
+            if (memSrc is not null)
+            {
+                // 只看【代码】,不看注释 —— 注释里正写着"绝不使用它",按整文件匹配会误判(同 ScrollIntoView 那次)
+                var memCode = string.Join("\n", memSrc.Split('\n').Where(l => !l.TrimStart().StartsWith("//")));
+                Assert(!memCode.Contains("CachedMemberDisplayName"),
+                       "★ 可见范围判定【不】读界面显示名缓存(铁律:主体只来自成员表)");
+            }
+
             // ---- 本地存档(明文,D21/D22 口径)----
             {
                 var store = new Services.ChatCenter();

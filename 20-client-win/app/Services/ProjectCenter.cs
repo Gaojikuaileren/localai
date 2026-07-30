@@ -36,7 +36,8 @@ public sealed record Project(
     ProjectStatus Status = ProjectStatus.Active,
     string? FolderPath = null,               // 实际本机文件夹(建时选)
     IReadOnlyList<string>? Attachments = null, // 可选附件文件夹(可多个)
-    AiPermission Ai = AiPermission.Ask);   // 给 AI 的权限(默认"需批准")
+    AiPermission Ai = AiPermission.Ask,    // 给 AI 的权限(默认"需批准")
+    string? OwnerMemberId = null);         // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
 
 public sealed class ProjectCenter
 {
@@ -46,7 +47,16 @@ public sealed class ProjectCenter
 
     public event Action? Changed;
 
-    public void Add(Project p) { _items.Add(p); Changed?.Invoke(); }
+    /// <summary>
+    /// 本地新增。★ 没带所有者就补成当前成员 —— 否则按 D45 的 fail-closed 规则它会【静默不可见】,
+    /// 是个很难查的坑。★ 同步下来的外来条目【不要走这里】,走 Import(那条路不打戳,保持原所有者)。
+    /// </summary>
+    public void Add(Project p)
+    {
+        _items.Add(string.IsNullOrWhiteSpace(p.OwnerMemberId)
+            ? p with { OwnerMemberId = MemberContext.Current } : p);
+        Changed?.Invoke();
+    }
 
     public static string NewId() => "prj-" + Guid.NewGuid().ToString("N")[..8];
 
@@ -54,7 +64,8 @@ public sealed class ProjectCenter
     public Project Create(string title, string? folder, IEnumerable<string>? attachments, ProjectScope scope, string workspaceKey = "chat")
     {
         var p = new Project(NewId(), title, "", workspaceKey, scope, DateTime.Now,
-            Status: ProjectStatus.Preparing, FolderPath: folder, Attachments: attachments?.ToList());
+            Status: ProjectStatus.Preparing, FolderPath: folder, Attachments: attachments?.ToList(),
+            OwnerMemberId: MemberContext.Current);   // D45:建的时候就定所有者
         _items.Add(p);
         Changed?.Invoke();
         return p;
@@ -102,7 +113,11 @@ public sealed class ProjectCenter
     ///   主页项目板块用【全部】(跨空间总览);各工作空间的项目选择器用【本空间】。</summary>
     public IEnumerable<Project> Ongoing(string? workspaceKey = null)
         => _items.Where(p => p.Status != ProjectStatus.Done && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+                 .Where(Visible)                                     // D45:别人的个人/仅本人项目绝不出现
                  .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+
+    /// <summary>D45 可见性:家庭范围全家可见;个人/仅本人只有所有者可见;所有者未知一律不可见。</summary>
+    public static bool Visible(Project p) => MemberContext.CanSee(p.Scope, p.OwnerMemberId);
 
     /// <summary>把项目【发送到另一个工作空间】。它名下的会话由调用方一并迁移(SetSessionsWorkspace)。</summary>
     public void MoveToWorkspace(string projectId, string workspaceKey)
@@ -113,11 +128,11 @@ public sealed class ProjectCenter
 
     /// <summary>已完成 —— 项目库用它。</summary>
     public IEnumerable<Project> Completed()
-        => _items.Where(p => p.Status == ProjectStatus.Done).OrderByDescending(p => p.LastOpened);
+        => _items.Where(p => p.Status == ProjectStatus.Done).Where(Visible).OrderByDescending(p => p.LastOpened);
 
     /// <summary>全部(项目抽屉里可能想全看,按状态分组)。</summary>
     public IEnumerable<Project> All()
-        => _items.OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+        => _items.Where(Visible).OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
 
     /// <summary>兼容旧调用:主页要的是"回到刚才那件事" —— 现等价于 Ongoing()。</summary>
     public IEnumerable<Project> Recent() => Ongoing();
@@ -129,7 +144,10 @@ public sealed class ProjectCenter
     {
         if (items is null) return;
         _items.Clear();
-        _items.AddRange(items);
+        // 旧存档没有 OwnerMemberId:那时只有本机本人能写这个存档,故认领为本地成员。
+        // ★ 迁移只在导入时做一次;【运行期规则仍是 fail-closed】(所有者空 -> 不可见)。
+        _items.AddRange(items.Select(p => string.IsNullOrWhiteSpace(p.OwnerMemberId)
+            ? p with { OwnerMemberId = MemberContext.LocalMemberId } : p));
         Changed?.Invoke();
     }
 

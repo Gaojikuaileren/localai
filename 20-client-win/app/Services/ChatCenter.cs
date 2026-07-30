@@ -34,7 +34,8 @@ public sealed record ChatSession(
     bool Pinned = false,
     string WorkspaceKey = "chat",    // 会话属于哪个工作空间(不跨空间共享;可发送到别的空间)
     bool Ghost = false,              // 幽灵会话:不保留记录、不纳入记忆,不进任何列表
-    DateTime? DeletedAt = null);     // 软删除:进"已删除",保留 30 天,过期自动清除
+    DateTime? DeletedAt = null,      // 软删除:进"已删除",保留 30 天,过期自动清除
+    string? OwnerMemberId = null);   // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
 
 public sealed class ChatCenter
 {
@@ -49,7 +50,8 @@ public sealed class ChatCenter
 
     public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null)
     {
-        var s = new ChatSession(NewId(), title ?? "新会话", projectId, scope, DateTime.Now, WorkspaceKey: workspaceKey);
+        var s = new ChatSession(NewId(), title ?? "新会话", projectId, scope, DateTime.Now,
+            WorkspaceKey: workspaceKey, OwnerMemberId: MemberContext.Current);   // D45:建的时候就定所有者
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -60,17 +62,23 @@ public sealed class ChatCenter
     /// <summary>某工作空间的【普通会话】(不含项目/幽灵/已删除)。</summary>
     public IEnumerable<ChatSession> NormalSessions(string workspaceKey)
         => _sessions.Where(s => s.ProjectId is null && !s.Ghost && s.DeletedAt is null && s.WorkspaceKey == workspaceKey)
+                    .Where(Visible)                                   // D45:别人的私人会话绝不出现
                     .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+
+    /// <summary>D45 可见性:家庭范围全家可见;个人/仅本人只有所有者可见;所有者未知一律不可见。</summary>
+    public static bool Visible(ChatSession s) => MemberContext.CanSee(s.Scope, s.OwnerMemberId);
 
     public IEnumerable<ChatSession> SessionsOf(string projectId)
         => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost && s.DeletedAt is null)
+                    .Where(Visible)
                     .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
 
     /// <summary>幽灵会话:不保留记录、不纳入记忆,不进任何列表。开一个新的前先清掉旧的幽灵。</summary>
     public ChatSession NewGhostSession(string workspaceKey)
     {
         PurgeGhosts();
-        var s = new ChatSession(NewId(), "幽灵会话", null, ProjectScope.OnlyMe, DateTime.Now, WorkspaceKey: workspaceKey, Ghost: true);
+        var s = new ChatSession(NewId(), "幽灵会话", null, ProjectScope.OnlyMe, DateTime.Now,
+            WorkspaceKey: workspaceKey, Ghost: true, OwnerMemberId: MemberContext.Current);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -140,13 +148,14 @@ public sealed class ChatCenter
     {
         SweepExpiredDeleted(asOf ?? DateTime.Now);
         return _sessions.Where(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey)
+                        .Where(Visible)
                         .OrderByDescending(s => s.DeletedAt);
     }
 
     public int DeletedCount(string workspaceKey)
     {
         SweepExpiredDeleted(DateTime.Now);
-        return _sessions.Count(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey);
+        return _sessions.Count(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey && Visible(s));
     }
 
     /// <summary>从"已删除"恢复(回到普通/项目会话)。</summary>
@@ -195,7 +204,10 @@ public sealed class ChatCenter
         _sessions.Clear();
         _messages.Clear();
         // 双保险:即便存档里混进了幽灵(不该发生),恢复时也丢掉
-        _sessions.AddRange(snap.Sessions.Where(s => !s.Ghost));
+        // 旧存档没有 OwnerMemberId:那时只有本机本人能写,故认领为本地成员(运行期规则仍 fail-closed)
+        _sessions.AddRange(snap.Sessions.Where(s => !s.Ghost)
+            .Select(s => string.IsNullOrWhiteSpace(s.OwnerMemberId)
+                ? s with { OwnerMemberId = MemberContext.LocalMemberId } : s));
         var ids = _sessions.Select(s => s.SessionId).ToHashSet();
         _messages.AddRange(snap.Messages.Where(m => ids.Contains(m.SessionId)));
         SweepExpiredDeleted(asOf ?? DateTime.Now);
