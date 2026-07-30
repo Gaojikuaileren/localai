@@ -2571,6 +2571,10 @@ public static class Selftest
                 //   其中两条分工最容易糊,所以单独钉死:
                 //   · 着重色 = 可以点的/被选中的(交互);主题色 = 这是哪套皮肤(身份);
                 //   · 着重色反色 = 指出位置(与着重色对立,才不会和选中态混淆)。
+                var calSec = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
+                if (calSec is not null)
+                    Assert(calSec.Contains("Border.BackgroundProperty, \"AccentSecondary\""),
+                           "★ 次着重色有真活:跨天全天的线与当日日程的点分色");
                 var mwBrand = TryReadSource("MainWindow.xaml");
                 if (mwBrand is not null)
                     Assert(mwBrand.Contains("Background=\"{DynamicResource ThemeColor}\""),
@@ -2600,7 +2604,7 @@ public static class Selftest
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",
-                               "BorderStrong", "FocusRing", "BgSunken", "FgOnSelected", "AccentInverse", "ThemeColor",
+                               "BorderStrong", "FocusRing", "BgSunken", "FgOnSelected", "AccentInverse", "ThemeColor", "AccentSecondary",
                                "RadiusSm", "RadiusMd", "RadiusLg" };
             // 开发/CI 环境下源码 Theme 目录在旁边,能逐皮肤核对令牌齐全;单文件发布里这些 xaml
             // 已编进程序集资源(磁盘上没有源码目录),此检查跳过 —— 运行时皮肤从 pack 资源正常加载。

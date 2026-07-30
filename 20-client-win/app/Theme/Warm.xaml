@@ -22,6 +22,8 @@
 
   <!-- ★ 主题色:暖萌偏深一档的陶土 —— 身份色要沉一点,才压得住一片奶油底。 -->
   <SolidColorBrush x:Key="ThemeColor"  Color="#B4553C"/>
+  <!-- ★ 次着重色。暖萌取一档柔和的黄褐:和陶土同族但不打架。 -->
+  <SolidColorBrush x:Key="AccentSecondary" Color="#C99A4E"/>
   <SolidColorBrush x:Key="Border"      Color="#E8D8C7"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#D3BBA5"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#E2725B"/>

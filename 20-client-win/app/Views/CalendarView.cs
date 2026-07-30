@@ -532,7 +532,10 @@ public sealed class CalendarView : UserControl
             IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
             CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
         };
-        bar.SetResourceReference(Border.BackgroundProperty, "Accent");
+        // ★ 用【次着重色】而不是着重色:同一格里既有当日日程的点、又有这条跨天线,
+        //   两者同色就分不出今天有事和这几天都在这件事里。
+        //   次着重色的职责正是同一类东西的另一种,不表示状态、也不表示危险。
+        bar.SetResourceReference(Border.BackgroundProperty, "AccentSecondary");
         return bar;
     }
 

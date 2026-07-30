@@ -6,6 +6,11 @@
      一个皮肤 = 把这六件事定下来,其余令牌都是它们的深浅变体:
        ① 背景色    BgWindow / BgSurface / BgSunken / BgNav —— 窗底、卡片、凹陷、导航
        ② 着重色    Accent(+ AccentHover)—— 主动作、选中、强调
+       ②' 次着重色 AccentSecondary —— 着重色之外的【第二个可用色】:
+          同一类东西的另一种(第二数据序列、次要强调)。
+          ★ 它【不表示状态、也不表示危险】—— 那是风险色的职责,别拿它当黄色警告用。
+          现成的例子:日历格里,当日日程用点(着重色)、跨天全天用线(次着重色),
+          否则同色就分不出今天有事和这几天都在这件事里。
        ③ 主题色    ThemeColor —— 皮肤的【身份色】(品牌标记、这套皮肤长什么样)。
           ★ 与着重色的分工是本词汇表里最容易糊的一条,所以写死:
             着重色 = "可以点的、被选中的"(交互);主题色 = "这是哪套皮肤"(身份)。
@@ -45,6 +50,9 @@
        着重色是"可以点的、被选中的"(交互),主题色是"这是哪套皮肤"(身份)。
        微风偏深一档的蓝:与可点的着重色拉开,免得品牌标记看着像个按钮。 -->
   <SolidColorBrush x:Key="ThemeColor"  Color="#1A5FD0"/>
+  <!-- ★ 次着重色:着重色之外的【第二个可用色】。用于同一类东西的另一种——
+       第二数据序列、次要强调。不表示状态,也不表示危险。微风取青绿:与蓝同冷但分得开。 -->
+  <SolidColorBrush x:Key="AccentSecondary" Color="#2AA198"/>
   <SolidColorBrush x:Key="Border"      Color="#DDE1E8"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#C3C9D4"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#2F6FE4"/>
