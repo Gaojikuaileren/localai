@@ -395,8 +395,13 @@ public static class Selftest
             Assert(cc3.NormalSessions("chat").First().SessionId == sb.SessionId, "置顶会话排最前(盖过更近的)");
             var pjS = cc3.NewSession("prjZ", "chat");
             cc3.DeleteProjectSessions("prjZ");
-            Assert(!cc3.NormalSessions("chat").Any(x => x.SessionId == pjS.SessionId) && cc3.Deleted("chat").Any(x => x.SessionId == pjS.SessionId),
-                   "删项目连会话一起进【已删除】");
+            // ★ 新语义:项目删除的会话【保留 ProjectId 跟随项目】,不进普通会话垃圾篓
+            Assert(!cc3.NormalSessions("chat").Any(x => x.SessionId == pjS.SessionId), "删项目后其会话离开普通列表");
+            Assert(!cc3.Deleted("chat").Any(x => x.SessionId == pjS.SessionId), "★ 项目会话不进【普通会话】垃圾篓(跟随项目)");
+            Assert(cc3.AllSessionsOf("prjZ").Any(x => x.SessionId == pjS.SessionId), "跟随项目的会话在 AllSessionsOf 里可见(只读浏览)");
+            cc3.RestoreProjectSessions("prjZ");
+            Assert(cc3.SessionsOf("prjZ").Any(x => x.SessionId == pjS.SessionId), "项目恢复时其会话一并恢复");
+            cc3.DeleteProjectSessions("prjZ");   // 复原到删除态,便于后续断言不受影响
             cc3.Delete(sa.SessionId);
             Assert(!cc3.NormalSessions("chat").Any(x => x.SessionId == sa.SessionId), "删除后离开普通列表");
             Assert(cc3.Deleted("chat").Any(x => x.SessionId == sa.SessionId) && cc3.MessagesOf(sa.SessionId).Any(), "★ 软删除:进已删除、消息仍在(可恢复)");
@@ -647,10 +652,72 @@ public static class Selftest
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
 
+            // ---- 项目:共享删除垃圾篓 / 已完成按空间 / 分支 / 可见范围(2026-07-30 用户裁定)----
+            {
+                var pc4 = new Services.ProjectCenter();
+                var a = pc4.Create("空间A项目", null, null, Services.ProjectScope.Personal, "chat");
+                var b = pc4.Create("空间B项目", null, null, Services.ProjectScope.Personal, "translation");
+                pc4.SetStatus(a.ProjectId, Services.ProjectStatus.Done);
+                pc4.SetStatus(b.ProjectId, Services.ProjectStatus.Done);
+                Assert(pc4.Completed("chat").Any(x => x.ProjectId == a.ProjectId) && !pc4.Completed("chat").Any(x => x.ProjectId == b.ProjectId),
+                       "★ 已完成项目【不共享】,按工作空间隔离");
+                // 删除:跨空间【共享】一个垃圾篓
+                pc4.Delete(a.ProjectId); pc4.Delete(b.ProjectId);
+                var trash = pc4.DeletedProjects().Select(x => x.ProjectId).ToList();
+                Assert(trash.Contains(a.ProjectId) && trash.Contains(b.ProjectId), "★ 已删除项目【跨工作空间共享】一个垃圾篓");
+                // 30 天自动清
+                pc4.SweepExpiredDeletedProjects(DateTime.Now.AddDays(Services.ProjectCenter.TrashRetentionDays + 1));
+                Assert(!pc4.DeletedProjects().Any(), "已删除项目超 30 天自动清除");
+
+                // 分支:复制成【准备中】的新项目(新 Id)
+                var src = pc4.Create("原项目", "F", new[] { "att1" }, Services.ProjectScope.Family, "chat");
+                pc4.SetStatus(src.ProjectId, Services.ProjectStatus.Done);
+                var br = pc4.Branch(src.ProjectId);
+                Assert(br.ProjectId != src.ProjectId && br.Status == Services.ProjectStatus.Preparing && br.FolderPath == "F",
+                       "开启分支 = 复制成新的准备中项目(同文件夹)");
+                Assert(pc4.Ongoing("chat").Any(x => x.ProjectId == br.ProjectId), "分支出的新项目进【进行中/准备中】");
+
+                // 可见范围可改
+                pc4.SetScope(src.ProjectId, Services.ProjectScope.Personal);
+                Assert(pc4.Find(src.ProjectId)!.Scope == Services.ProjectScope.Personal, "三点菜单可改可见范围(个人/家庭)");
+            }
+            var puScope = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puScope is not null)
+            {
+                Assert(puScope.Contains("SetScope") && puScope.Contains("可见范围"), "项目 ⋯ 菜单可改可见范围");
+                Assert(puScope.Contains("同一网络里其它 PC"), "家庭范围解释:同网其它 PC 共享可见可操作");
+            }
+            var pkBoard = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
+            if (pkBoard is not null)
+            {
+                Assert(pkBoard.Contains("ShowDeletedBoard") && pkBoard.Contains("ShowCompletedBoard"), "项目抽屉有【已删除/已完成项目】覆盖板块");
+                Assert(pkBoard.Contains("UpdateHint") && pkBoard.Contains("选择一个项目"), "常驻提示(未选时提示选项目;不挤排版)");
+                Assert(pkBoard.Contains("PinButton"), "项目方块用 hover 置顶按钮(像主页)");
+            }
+            var cvRO = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvRO is not null)
+            {
+                Assert(cvRO.Contains("BuildReadonlyProject") && cvRO.Contains("body.Opacity = 0.7"), "已删除/已完成项目:会话区灰色只读");
+                Assert(cvRO.Contains("恢复此项目") && cvRO.Contains("彻底删除此项目"), "已删除项目输入区 = 恢复/彻底删除");
+                Assert(cvRO.Contains("继续此项目") && cvRO.Contains("开启此项目分支"), "已完成项目输入区 = 继续/开分支");
+                Assert(cvRO.Contains("BuildTrashBoard") && cvRO.Contains("‹ 返回会话") && !cvRO.Contains("Flyout.Show(anchor, \"已删除会话\""),
+                       "已删除会话改成覆盖式板块(不再浮窗)");
+                Assert(cvRO.Contains("attachmentsBelow: true") && cvRO.Contains("overlayBanner: !hasMsgs"),
+                       "空态:附件放输入框下方、幽灵提示浮顶,不顶动居中框");
+            }
+
             var pcd = new Services.ProjectCenter();
             var pdel = pcd.Create("待删", Path.Combine(Path.GetTempPath(), "x"), null, Services.ProjectScope.Personal);
             pcd.Delete(pdel.ProjectId);
-            Assert(pcd.Find(pdel.ProjectId) is null, "删除项目记录(不动磁盘文件夹)");
+            // ★ 新语义:软删除 —— 进【已删除项目】共享垃圾篓,记录还在(可恢复),不动磁盘文件夹
+            Assert(pcd.Find(pdel.ProjectId)?.DeletedAt is not null, "删除项目 = 软删除(记录仍在、带 DeletedAt)");
+            Assert(!pcd.Ongoing().Any(x => x.ProjectId == pdel.ProjectId) && pcd.DeletedProjects().Any(x => x.ProjectId == pdel.ProjectId),
+                   "删除的项目离开进行中、进【已删除项目】");
+            pcd.RestoreProject(pdel.ProjectId);
+            Assert(pcd.Find(pdel.ProjectId)?.DeletedAt is null && pcd.Ongoing().Any(x => x.ProjectId == pdel.ProjectId), "可从已删除项目恢复");
+            pcd.Delete(pdel.ProjectId);
+            pcd.PurgeProject(pdel.ProjectId);
+            Assert(pcd.Find(pdel.ProjectId) is null, "彻底删除后记录才消失");
 
             // 会话三点菜单(取消右键)+ 项目删除的红色二次确认 + 圆角按钮 + 箭头在右
             if (chatSrc is not null)

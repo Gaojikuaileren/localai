@@ -37,7 +37,8 @@ public sealed record Project(
     string? FolderPath = null,               // 实际本机文件夹(建时选)
     IReadOnlyList<string>? Attachments = null, // 可选附件文件夹(可多个)
     AiPermission Ai = AiPermission.Ask,    // 给 AI 的权限(默认"需批准")
-    string? OwnerMemberId = null);         // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
+    string? OwnerMemberId = null,          // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
+    DateTime? DeletedAt = null);           // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
 
 public sealed class ProjectCenter
 {
@@ -97,22 +98,89 @@ public sealed class ProjectCenter
         if (i >= 0 && _items[i].Ai != ai) { _items[i] = _items[i] with { Ai = ai }; Changed?.Invoke(); }
     }
 
+    /// <summary>改可见范围:家庭 = 同网其它 PC 共享可见可操作;个人/仅本人 = 只在本机显示(D45)。</summary>
+    public void SetScope(string projectId, ProjectScope scope)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i >= 0 && _items[i].Scope != scope) { _items[i] = _items[i] with { Scope = scope }; Changed?.Invoke(); }
+    }
+
     public void Update(Project p)
     {
         var i = _items.FindIndex(x => x.ProjectId == p.ProjectId);
         if (i >= 0) { _items[i] = p; Changed?.Invoke(); }
     }
 
-    /// <summary>删除项目【记录】。★ 不动磁盘上的文件夹(那是用户的文件,绝不替他删)。会话由调用方移出。</summary>
+    /// <summary>已删除项目保留天数(与会话垃圾篓一致:30 天后自动清除,不可恢复)。</summary>
+    public const int TrashRetentionDays = 30;
+
+    /// <summary>软删除项目 —— 进【已删除项目】共享垃圾篓(保留 30 天)。★ 不动磁盘文件夹。
+    ///   它名下的会话由调用方随项目一起软删除(ChatCenter.DeleteProjectSessions,会话跟随项目)。</summary>
     public void Delete(string projectId)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i >= 0 && _items[i].DeletedAt is null) { _items[i] = _items[i] with { DeletedAt = DateTime.Now, Pinned = false }; Changed?.Invoke(); }
+    }
+
+    /// <summary>从【已删除项目】恢复(回到它原来的状态与工作空间)。会话由调用方一并恢复。</summary>
+    public void RestoreProject(string projectId)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i >= 0 && _items[i].DeletedAt is not null) { _items[i] = _items[i] with { DeletedAt = null }; Changed?.Invoke(); }
+    }
+
+    /// <summary>彻底删除项目【记录】(不可恢复)。★ 仍然不动磁盘文件夹。会话由调用方彻底删除。</summary>
+    public void PurgeProject(string projectId)
     {
         if (_items.RemoveAll(x => x.ProjectId == projectId) > 0) Changed?.Invoke();
     }
 
-    /// <summary>非已完成(准备中 + 进行中),置顶在前、再按最近。workspaceKey 给定则只取该空间的。
+    /// <summary>清掉超过保留期的已删除项目(30 天)。asOf 供测试注入。</summary>
+    public void SweepExpiredDeletedProjects(DateTime asOf)
+    {
+        var cut = asOf.AddDays(-TrashRetentionDays);
+        if (_items.RemoveAll(x => x.DeletedAt is { } d && d < cut) > 0) Changed?.Invoke();
+    }
+
+    /// <summary>【已删除项目】—— ★ 跨工作空间【共享】一个垃圾篓(用户裁定)。取时顺带清过期的。</summary>
+    public IEnumerable<Project> DeletedProjects(DateTime? asOf = null)
+    {
+        SweepExpiredDeletedProjects(asOf ?? DateTime.Now);
+        return _items.Where(p => p.DeletedAt is not null).Where(Visible).OrderByDescending(p => p.DeletedAt);
+    }
+
+    public int DeletedProjectsCount()
+    {
+        SweepExpiredDeletedProjects(DateTime.Now);
+        return _items.Count(p => p.DeletedAt is not null && Visible(p));
+    }
+
+    /// <summary>
+    /// 开启【项目分支】:把项目复制成一个新的【准备中】项目(新 Id、同文件夹/附件/权限/范围),
+    /// 放在同一个工作空间。用于"已完成项目 → 开启此项目分支"。返回新项目。
+    /// </summary>
+    public Project Branch(string projectId)
+    {
+        var src = Find(projectId) ?? throw new InvalidOperationException("项目不存在");
+        var copy = src with
+        {
+            ProjectId = NewId(),
+            Title = src.Title + "(分支)",
+            Status = ProjectStatus.Preparing,
+            DeletedAt = null,
+            Pinned = false,
+            LastOpened = DateTime.Now,
+            OwnerMemberId = MemberContext.Current,
+        };
+        _items.Add(copy);
+        Changed?.Invoke();
+        return copy;
+    }
+
+    /// <summary>非已完成(准备中 + 进行中)且未删除,置顶在前、再按最近。workspaceKey 给定则只取该空间的。
     ///   主页项目板块用【全部】(跨空间总览);各工作空间的项目选择器用【本空间】。</summary>
     public IEnumerable<Project> Ongoing(string? workspaceKey = null)
-        => _items.Where(p => p.Status != ProjectStatus.Done && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+        => _items.Where(p => p.Status != ProjectStatus.Done && p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
                  .Where(Visible)                                     // D45:别人的个人/仅本人项目绝不出现
                  .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
 
@@ -126,13 +194,14 @@ public sealed class ProjectCenter
         if (i >= 0 && _items[i].WorkspaceKey != workspaceKey) { _items[i] = _items[i] with { WorkspaceKey = workspaceKey }; Changed?.Invoke(); }
     }
 
-    /// <summary>已完成 —— 项目库用它。</summary>
-    public IEnumerable<Project> Completed()
-        => _items.Where(p => p.Status == ProjectStatus.Done).Where(Visible).OrderByDescending(p => p.LastOpened);
+    /// <summary>已完成(未删除)。★ 已完成项目【不共享】,按工作空间隔离(用户裁定);不传则全部。</summary>
+    public IEnumerable<Project> Completed(string? workspaceKey = null)
+        => _items.Where(p => p.Status == ProjectStatus.Done && p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+                 .Where(Visible).OrderByDescending(p => p.LastOpened);
 
-    /// <summary>全部(项目抽屉里可能想全看,按状态分组)。</summary>
+    /// <summary>全部未删除(项目抽屉里可能想全看,按状态分组)。</summary>
     public IEnumerable<Project> All()
-        => _items.Where(Visible).OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+        => _items.Where(p => p.DeletedAt is null).Where(Visible).OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
 
     /// <summary>兼容旧调用:主页要的是"回到刚才那件事" —— 现等价于 Ongoing()。</summary>
     public IEnumerable<Project> Recent() => Ongoing();

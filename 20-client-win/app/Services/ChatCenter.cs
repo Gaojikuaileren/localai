@@ -123,31 +123,63 @@ public sealed class ChatCenter
     /// <summary>已删除会话保留天数(用户裁定:30 天后自动清除,不可恢复)。</summary>
     public const int TrashRetentionDays = 30;
 
-    /// <summary>项目被删除时:【软删除】它名下的所有会话(进"已删除",清掉项目归属,恢复即为普通会话)。</summary>
+    /// <summary>
+    /// 项目被删除时:软删除它名下的会话,★【保留 ProjectId】—— 让这些会话【跟随项目】进"已删除项目",
+    /// 而不是跑进普通会话垃圾篓(用户裁定)。项目恢复时它们一并恢复(RestoreProjectSessions)。
+    /// </summary>
     public void DeleteProjectSessions(string projectId)
     {
         var any = false;
         for (int i = 0; i < _sessions.Count; i++)
             if (_sessions[i].ProjectId == projectId && _sessions[i].DeletedAt is null)
-            { _sessions[i] = _sessions[i] with { ProjectId = null, DeletedAt = DateTime.Now }; any = true; }
+            { _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now }; any = true; }   // 保留 ProjectId
         if (any) Changed?.Invoke();
     }
 
-    /// <summary>删除会话 = 【软删除】进"已删除"(保留 30 天;不弹确认)。幽灵会话直接抹掉。</summary>
+    /// <summary>项目恢复时:把随它一起删的会话恢复。</summary>
+    public void RestoreProjectSessions(string projectId)
+    {
+        var any = false;
+        for (int i = 0; i < _sessions.Count; i++)
+            if (_sessions[i].ProjectId == projectId && _sessions[i].DeletedAt is not null)
+            { _sessions[i] = _sessions[i] with { DeletedAt = null }; any = true; }
+        if (any) Changed?.Invoke();
+    }
+
+    /// <summary>项目被彻底删除时:连它的所有会话与消息一并抹掉。</summary>
+    public void PurgeProjectSessions(string projectId)
+    {
+        var ids = _sessions.Where(s => s.ProjectId == projectId).Select(s => s.SessionId).ToHashSet();
+        if (ids.Count == 0) return;
+        _sessions.RemoveAll(s => ids.Contains(s.SessionId));
+        _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        Changed?.Invoke();
+    }
+
+    /// <summary>某项目的【全部】会话(含已随项目删除的)—— 供"选中已删除/已完成项目"只读浏览。</summary>
+    public IEnumerable<ChatSession> AllSessionsOf(string projectId)
+        => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost)
+                    .Where(Visible)
+                    .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+
+    /// <summary>删除会话 = 【软删除】进"已删除"(保留 30 天;不弹确认)。
+    ///   ★ 单独删项目会话时【断开项目归属】(ProjectId=null),让它落到普通会话垃圾篓、不被孤立。
+    ///   幽灵会话直接抹掉。</summary>
     public void Delete(string sessionId)
     {
         var i = _sessions.FindIndex(x => x.SessionId == sessionId);
         if (i < 0) return;
         if (_sessions[i].Ghost) { _sessions.RemoveAt(i); _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); return; }
-        _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now, Pinned = false };
+        _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now, Pinned = false, ProjectId = null };
         Changed?.Invoke();
     }
 
-    /// <summary>某工作空间"已删除"的会话(最近删的在前)。取时顺带清掉过期的。</summary>
+    /// <summary>某工作空间"已删除"的【普通】会话(最近删的在前)。★ 排除跟随项目删除的(ProjectId!=null),
+    ///   那些在"已删除项目"里显示。取时顺带清掉过期的。</summary>
     public IEnumerable<ChatSession> Deleted(string workspaceKey, DateTime? asOf = null)
     {
         SweepExpiredDeleted(asOf ?? DateTime.Now);
-        return _sessions.Where(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey)
+        return _sessions.Where(s => s.DeletedAt is not null && s.ProjectId is null && s.WorkspaceKey == workspaceKey)
                         .Where(Visible)
                         .OrderByDescending(s => s.DeletedAt);
     }
@@ -155,7 +187,7 @@ public sealed class ChatCenter
     public int DeletedCount(string workspaceKey)
     {
         SweepExpiredDeleted(DateTime.Now);
-        return _sessions.Count(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey && Visible(s));
+        return _sessions.Count(s => s.DeletedAt is not null && s.ProjectId is null && s.WorkspaceKey == workspaceKey && Visible(s));
     }
 
     /// <summary>从"已删除"恢复(回到普通/项目会话)。</summary>
@@ -172,10 +204,10 @@ public sealed class ChatCenter
         if (removed) { _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); }
     }
 
-    /// <summary>清空某工作空间的"已删除"(手动清除,不可恢复)。</summary>
+    /// <summary>清空某工作空间的"已删除"【普通】会话(手动清除,不可恢复)。项目垃圾篓里的不受影响。</summary>
     public void ClearDeleted(string workspaceKey)
     {
-        var ids = _sessions.Where(s => s.DeletedAt is not null && s.WorkspaceKey == workspaceKey).Select(s => s.SessionId).ToHashSet();
+        var ids = _sessions.Where(s => s.DeletedAt is not null && s.ProjectId is null && s.WorkspaceKey == workspaceKey).Select(s => s.SessionId).ToHashSet();
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
