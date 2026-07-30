@@ -4,9 +4,13 @@
 //   页面切换时【顶部说明区】与【内容区】一起换,返回一律回到"进行中"网格:
 //
 //     进行中(默认)  ── 顶部:项目会话(未选 -> "选择一个项目";已选 -> "已选择「X」")
-//        ├─ 已完成项目  ── 顶部:解释"已完成项目是什么 + 能做什么" + 返回
-//        ├─ 已删除项目  ── 顶部:解释保留期 + 【多选彻底删除 / 全部彻底删除】+ 返回
+//        ├─ 已完成项目  ── 顶部:解释"已完成项目是什么 + 能做什么"
+//        ├─ 已删除项目  ── 顶部:解释保留期 + 【多选彻底删除 / 全部彻底删除】
 //        └─ 编辑/新建   ── 顶部:隐藏说明,专心填表;完成后回"进行中"
+//
+// ★ 左上角只有【一个】返回键,按层级逐级后退(用户裁定):
+//     已完成/已删除项目 → 进行中项目 → 普通会话
+//   说明框里不再单独放"返回项目"chip —— 返回只有一个入口,不会两处并存。
 //
 // 三种项目的【菜单不同】(见 ProjectUi):正常项目(全功能)/ 已删除项目(只有还原、彻底删除)。
 // 已完成项目在这里改状态后会【自动回到进行中网格】,不用手动返回(用户反馈)。
@@ -36,6 +40,7 @@ public sealed class ProjectPickerView : UserControl
     readonly Action<string> _onPick;
     readonly Action _onNormal;
     readonly StackPanel _root = new();
+    readonly ContentControl _backHost = new();  // 左上角返回键:按当前页面逐级后退
     readonly ContentControl _header = new();   // 顶部说明区:随页面切换
     readonly ContentControl _body = new();
     Page _page = Page.Grid;
@@ -55,14 +60,14 @@ public sealed class ProjectPickerView : UserControl
         _onPick = onPick;
         _onNormal = onNormal;
 
-        // 顶部固定条:返回普通会话 + 新建项目(任何页面都在)
+        // 顶部固定条:左边是【按层级逐级后退】的返回键,右边是新建项目(任何页面都在)。
+        //   层级(用户裁定):已完成/已删除项目 → 进行中项目 → 普通会话。
         var add = Ui.PlusButton(() => ShowEditor(null), "新建项目");
-        var normal = Chip("‹ 普通会话", () => { _current = null; ShowGrid(); _onNormal(); });
         var top = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
         DockPanel.SetDock(add, Dock.Right);
-        DockPanel.SetDock(normal, Dock.Left);
+        DockPanel.SetDock(_backHost, Dock.Left);
         top.Children.Add(add);
-        top.Children.Add(normal);
+        top.Children.Add(_backHost);
 
         _root.Children.Add(top);
         _root.Children.Add(_header);
@@ -99,6 +104,7 @@ public sealed class ProjectPickerView : UserControl
         _multi = false;
         _picked.Clear();
         _tiles.Clear();
+        UpdateBack();
 
         // 顶部:项目会话说明(常驻,未选也在 —— 不随选中与否挤动排版)
         FrameworkElement hint = _current is { } cur && TheApp.Projects.Find(cur) is { } proj
@@ -165,12 +171,11 @@ public sealed class ProjectPickerView : UserControl
         _picked.Clear();
         _tiles.Clear();
         _graceTimer.Stop();
+        UpdateBack();
 
         var items = TheApp.Projects.Completed(_wsKey).ToList();
         _header.Content = PageHeader("已完成项目", HeaderState.Done,
-            Ui.Stack(
-                Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"),
-                BackRow()));
+            Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"));
 
         var panel = new StackPanel();
         if (items.Count == 0) panel.Children.Add(Ui.Body("这个工作空间还没有已完成的项目。", muted: true));
@@ -189,6 +194,7 @@ public sealed class ProjectPickerView : UserControl
         _page = Page.Deleted;
         _tiles.Clear();
         _graceTimer.Stop();
+        UpdateBack();
 
         var items = TheApp.Projects.DeletedProjects().ToList();
         _picked.RemoveWhere(id => !items.Any(x => x.ProjectId == id));   // 清掉已消失的选中项
@@ -213,7 +219,6 @@ public sealed class ProjectPickerView : UserControl
     FrameworkElement DeletedActionRow(List<Project> items)
     {
         var row = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
-        row.Children.Add(Chip("‹ 返回项目", ShowGrid));
         if (items.Count == 0) return row;
 
         if (!_multi)
@@ -260,6 +265,18 @@ public sealed class ProjectPickerView : UserControl
     /// </summary>
     const double HeaderHeight = 132;
 
+    /// <summary>
+    /// 左上角返回键 —— ★ 按层级【逐级后退】(用户裁定,取代原来固定的"返回普通会话"):
+    ///   已完成 / 已删除项目 → 进行中项目 → 普通会话。
+    /// 编辑页也回到"进行中"(相当于取消)。
+    /// </summary>
+    void UpdateBack()
+    {
+        _backHost.Content = _page == Page.Grid
+            ? Chip("‹ 普通会话", () => { _current = null; ShowGrid(); _onNormal(); })
+            : Chip("‹ 返回项目", ShowGrid);
+    }
+
     /// <summary>说明框的三种状态。配色由【各皮肤自己定义】(State*Border / State*Fill),不在这里写死颜色。</summary>
     internal enum HeaderState { Ongoing, Done, Trash }
 
@@ -280,18 +297,12 @@ public sealed class ProjectPickerView : UserControl
         return card;
     }
 
-    FrameworkElement BackRow()
-    {
-        var row = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
-        row.Children.Add(Chip("‹ 返回项目", ShowGrid));
-        return row;
-    }
-
     // ---------------------------------------------------------------- 页面:编辑 / 新建
     void ShowEditor(Project? existing)
     {
         _page = Page.Editor;
         _graceTimer.Stop();
+        UpdateBack();
         _header.Content = null;   // 填表时不要说明框抢空间
         _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid, workspaceKey: _wsKey);
     }
