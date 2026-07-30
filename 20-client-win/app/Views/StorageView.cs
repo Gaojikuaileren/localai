@@ -148,8 +148,12 @@ public sealed class StorageView : UserControl
             {
                 try
                 {
+                    // ★ 删之前先记下有哪些会话有归档 —— 删完要给引用它们的记忆打上"原文已删除",
+                    //   否则以后从摘要点回原文是个死链(D52 补充里定的规则)。
+                    var affected = SessionArchive.ArchivedSessionIds();
                     System.IO.Directory.Delete(dir, recursive: true);
-                    done.Add("归档原文:已删除(摘要仍在记忆库)");
+                    TheApp.Memory.MarkOriginalsDeleted(affected);
+                    done.Add($"归档原文:已删除(涉及 {affected.Count} 个会话;摘要仍在记忆库,并已标注原文已删除)");
                 }
                 catch (Exception ex) { done.Add("归档原文:删除失败 —— " + ex.Message); }
             }

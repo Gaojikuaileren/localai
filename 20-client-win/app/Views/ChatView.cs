@@ -552,6 +552,17 @@ public sealed class ChatView : UserControl
             var msgs = new StackPanel();
             // ★ 新发出的消息要有出现动画(用户裁定):只给【这次新增的那几条】播,
             //   旧消息重建时不再重复动(否则每次刷新整屏乱跳)。
+            // ★ 分层存储:更早的消息在温层(另存文件),平时不加载 —— 顶部给个"加载更早"入口。
+            //   原文一直都在,只是不占内存/上下文(见 SessionArchive)。
+            var older = TheApp.Chat.UnloadedArchivedCount(_sessionId!);
+            if (older > 0)
+            {
+                var more = Chip($"↑ 加载更早的 {older} 条", "FgSecondary", () => TheApp.Chat.LoadArchived(_sessionId!));
+                more.HorizontalAlignment = HorizontalAlignment.Center;
+                more.Margin = new Thickness(0, 0, 0, 8);
+                msgs.Children.Add(more);
+            }
+
             var all = TheApp.Chat.MessagesOf(_sessionId!).ToList();
             var seenKey = _sessionId!;
             var seen = _seenMsgCount.TryGetValue(seenKey, out var n) ? n : all.Count;   // 首次进会话不animate

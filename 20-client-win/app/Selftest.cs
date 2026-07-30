@@ -855,6 +855,65 @@ public static class Selftest
                 Assert(puShare.Contains("提升为共享") && puShare.Contains("文件夹】仍在"),
                        "★ 项目提升说明:共享元数据,文件夹仍在原机");
 
+            // ---- 会话分层存储:热层 / 温层(归档不是删除)----
+            {
+                var stateDir = Path.Combine(Path.GetTempPath(), "localai-tier-" + Guid.NewGuid().ToString("N")[..6]);
+                var prevState = Environment.GetEnvironmentVariable(Services.AppPaths.StateEnvVar);
+                Environment.SetEnvironmentVariable(Services.AppPaths.StateEnvVar, stateDir);
+                try
+                {
+                    var tc = new Services.ChatCenter();
+                    var ts = tc.NewSession(null, "chat");
+                    for (int i = 0; i < 12; i++) tc.Send(ts.SessionId, "m" + i);   // 每次 Send 记 2 条(用户+系统)
+                    var total = tc.MessagesOf(ts.SessionId).Count();
+                    Assert(total == 24, $"发 12 次 = 24 条消息(实得 {total})");
+
+                    var moved = tc.ArchiveOldMessages(keepRecent: 10);
+                    Assert(moved == 14, $"超出热层的移到温层(实得 {moved})");
+                    Assert(tc.MessagesOf(ts.SessionId).Count() == 10, "热层只剩最近 10 条");
+                    Assert(tc.UnloadedArchivedCount(ts.SessionId) == 14, "界面能看到还有 14 条更早的没加载");
+
+                    // ★ 归档【不是删除】:原文还在温层文件里
+                    Assert(Services.SessionArchive.Count(ts.SessionId) == 14, "★ 原文仍在温层(归档不是删除)");
+                    // ★ 温层不进 Export —— 否则 chat.json 会和归档文件重复一份
+                    Assert(tc.Export().Messages.Count(m => m.SessionId == ts.SessionId) == 10,
+                           "★ 温层消息不写回 chat.json(热层才是该落盘的那份)");
+
+                    tc.LoadArchived(ts.SessionId);
+                    Assert(tc.MessagesOf(ts.SessionId).Count() == 24, "加载更早后能看到全部 24 条");
+                    Assert(tc.UnloadedArchivedCount(ts.SessionId) == 0, "加载后不再提示还有更早的");
+                    Assert(tc.Export().Messages.Count(m => m.SessionId == ts.SessionId) == 10,
+                           "★ 加载回来的温层消息仍不写回 chat.json(不会重复)");
+
+                    // 幽灵会话不参与归档(它压根不落盘)
+                    var tg = tc.NewGhostSession("chat");
+                    for (int i = 0; i < 15; i++) tc.Send(tg.SessionId, "g" + i);
+                    tc.ArchiveOldMessages(keepRecent: 5);
+                    Assert(Services.SessionArchive.Count(tg.SessionId) == 0, "★ 幽灵会话永不进温层");
+
+                    // 彻底删除会话 -> 温层一并清掉,不留孤儿归档
+                    tc.Delete(ts.SessionId);
+                    tc.PurgeDeleted(ts.SessionId);
+                    Assert(Services.SessionArchive.Count(ts.SessionId) == 0, "彻底删除会话时温层一并清除");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable(Services.AppPaths.StateEnvVar, prevState);
+                    try { Directory.Delete(stateDir, recursive: true); } catch { }
+                }
+            }
+            var svMark = TryReadSource(Path.Combine("Views", "StorageView.cs"));
+            if (svMark is not null)
+                Assert(svMark.Contains("MarkOriginalsDeleted") && svMark.Contains("ArchivedSessionIds"),
+                       "★ 删除归档原文后给相关记忆打上「原文已删除」(不留死链)");
+            var cvMore = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvMore is not null)
+                Assert(cvMore.Contains("加载更早的") && cvMore.Contains("UnloadedArchivedCount"),
+                       "会话顶部有【加载更早】入口");
+            var appArch = TryReadSource("App.xaml.cs");
+            if (appArch is not null)
+                Assert(appArch.Contains("ArchiveOldMessages"), "启动时把超出热层的旧消息归档(chat.json 保持有界)");
+
             // ---- 记忆库 + 存储清理(2026-07-30 用户裁定)----
             {
                 var mc = new Services.MemoryCenter();

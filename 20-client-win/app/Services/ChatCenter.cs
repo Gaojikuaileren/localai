@@ -176,6 +176,7 @@ public sealed class ChatCenter
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        foreach (var id in ids) { _loadedArchive.Remove(id); SessionArchive.Delete(id); }   // 温层一并清
         Changed?.Invoke();
     }
 
@@ -241,7 +242,13 @@ public sealed class ChatCenter
     public void PurgeDeleted(string sessionId)
     {
         var removed = _sessions.RemoveAll(x => x.SessionId == sessionId && x.DeletedAt is not null) > 0;
-        if (removed) { _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); }
+        if (removed)
+        {
+            _messages.RemoveAll(m => m.SessionId == sessionId);
+            _loadedArchive.Remove(sessionId);
+            SessionArchive.Delete(sessionId);   // 连温层一起清,别留孤儿归档
+            Changed?.Invoke();
+        }
     }
 
     /// <summary>清空某工作空间的"已删除"【普通】会话(手动清除,不可恢复)。项目垃圾篓里的不受影响。</summary>
@@ -297,8 +304,58 @@ public sealed class ChatCenter
         Changed?.Invoke();
     }
 
+    // ---------------------------------------------------------------- 分层存储(热层 / 温层)
+    // ★ 温层(已归档)的消息【不放进 _messages】,而是单独放这里 —— 否则 Export() 会把它们
+    //   又写回 chat.json,和归档文件重复一份。这样热层永远是"该落盘的那份"。
+    readonly Dictionary<string, List<ChatMessage>> _loadedArchive = new();
+
+    /// <summary>热层保留的消息条数:超出的部分归档到温层(仍是原文,只是换文件放)。</summary>
+    public const int HotMessages = 200;
+
     public IEnumerable<ChatMessage> MessagesOf(string sessionId)
-        => _messages.Where(m => m.SessionId == sessionId).OrderBy(m => m.At);
+    {
+        var hot = _messages.Where(m => m.SessionId == sessionId);
+        return _loadedArchive.TryGetValue(sessionId, out var warm)
+            ? warm.Concat(hot).OrderBy(m => m.At)   // 已加载的更早消息排在前面
+            : hot.OrderBy(m => m.At);
+    }
+
+    /// <summary>该会话还有多少条【更早的消息】没加载(界面据此显示"加载更早的 N 条")。</summary>
+    public int UnloadedArchivedCount(string sessionId)
+        => _loadedArchive.ContainsKey(sessionId) ? 0 : SessionArchive.Count(sessionId);
+
+    /// <summary>把该会话的温层消息读进来(用户点"加载更早")。</summary>
+    public void LoadArchived(string sessionId)
+    {
+        if (_loadedArchive.ContainsKey(sessionId)) return;
+        var older = SessionArchive.Load(sessionId);
+        if (older.Count == 0) return;
+        _loadedArchive[sessionId] = older;
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 把超出热层的旧消息移到温层。返回归档条数。
+    /// ★ 幽灵会话不参与(它不落盘);已加载温层的会话本轮跳过(避免把刚读回来的又写回去)。
+    /// </summary>
+    public int ArchiveOldMessages(int keepRecent = HotMessages)
+    {
+        if (keepRecent <= 0) return 0;
+        var ghosts = _sessions.Where(s => s.Ghost).Select(s => s.SessionId).ToHashSet();
+        var moved = 0;
+        foreach (var g in _messages.GroupBy(m => m.SessionId).ToList())
+        {
+            if (ghosts.Contains(g.Key) || _loadedArchive.ContainsKey(g.Key)) continue;
+            var ordered = g.OrderBy(m => m.At).ToList();
+            if (ordered.Count <= keepRecent) continue;
+            var older = ordered.Take(ordered.Count - keepRecent).ToList();
+            SessionArchive.Append(g.Key, older);
+            foreach (var m in older) _messages.Remove(m);
+            moved += older.Count;
+        }
+        if (moved > 0) Changed?.Invoke();
+        return moved;
+    }
 
     /// <summary>把会话移动到某项目(projectId=null 则变回普通会话)。</summary>
     public void MoveToProject(string sessionId, string? projectId)

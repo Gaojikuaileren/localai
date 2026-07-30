@@ -223,7 +223,11 @@ public partial class App : Application
         Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath));
         // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
         //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
-        return Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
+        var merged = Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
+        // ★ 分层存储:把超出热层的旧消息移到温层(仍是原文,只换文件放),让 chat.json 保持有界。
+        //   平时不加载,用户在会话顶部点"加载更早"才读回来。
+        var archived = Chat.ArchiveOldMessages() > 0;
+        return merged || archived;
     }
 
     // 变更 -> 防抖 400ms 后落盘。防抖是必要的:一次操作常触发多次 Changed(改状态 + 迁会话),
