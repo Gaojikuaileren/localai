@@ -407,13 +407,7 @@ public static class Selftest
                 Assert(!tc.Items.First(x => x.Id == a1).CreatedByAi, "手动建立不带 AI 标记");
                 Assert(tc.Items.First(x => x.Id == a2).CreatedByAi, "AI 建立带 AI 标记(界面据此显示星标)");
 
-                // 批量删除
-                var b1 = tc.Add(new Services.TodoItem("", "批删1", Services.TodoKind.Chore));
-                var b2 = tc.Add(new Services.TodoItem("", "批删2", Services.TodoKind.Chore));
-                tc.RemoveMany(new[] { b1, b2 });
-                Assert(!tc.Items.Any(x => x.Id == b1 || x.Id == b2), "批量删除一次删掉多条");
-
-                // 清空已完成:只清已完成,未完成的不动
+                // 立即删除全部已完成:只清已完成,未完成的不动(不再做选择性批量删除)
                 tc.Toggle(a2);
                 tc.ClearCompleted();
                 Assert(tc.Items.Any(x => x.Id == a1), "清空已完成不动未完成的");
@@ -436,9 +430,11 @@ public static class Selftest
             var arch = TryReadSource(Path.Combine("Views", "TodoArchiveView.cs"));
             if (arch is not null)
             {
-                Assert(arch.Contains("RemoveMany") && arch.Contains("全选"), "已完成抽屉有批量删除(含全选)");
+                Assert(arch.Contains("立即删除全部已完成") && !arch.Contains("RemoveMany") && !arch.Contains("全选"),
+                       "已完成抽屉只保留【一键删全部】,不做选择性批量删除(用户裁定)");
                 Assert(arch.Contains("TodoAutoPurgeDays") && arch.Contains("PurgeCompletedOlderThan"), "已完成抽屉可设自动清理天数");
-                Assert(arch.Contains("ConfirmDialog.Show"), "批量删除走自绘二次确认");
+                Assert(!arch.Contains("ComboBox"), "★ 保留期用分段按钮而非下拉框(修:下拉弹层穿透点到背后按钮)");
+                Assert(arch.Contains("ConfirmDialog.Show"), "删除全部走自绘二次确认");
             }
             var tlSrc = TryReadSource(Path.Combine("Views", "TodoList.cs"));
             if (tlSrc is not null)
@@ -578,6 +574,34 @@ public static class Selftest
                 Assert(Services.ClientStore.Load<List<Services.TodoItem>>(okPath)?.Count == 1, "存档可读回");
                 try { File.Delete(okPath); } catch { }
             }
+            // ---- 崩溃兜底 + 附件对话框健壮性(修"添加附件闪退")----
+            var appCrash = TryReadSource("App.xaml.cs");
+            if (appCrash is not null)
+            {
+                Assert(appCrash.Contains("DispatcherUnhandledException") && appCrash.Contains("ex.Handled = true"),
+                       "★ UI 线程异常有全局兜底(不再静默闪退)");
+                Assert(appCrash.Contains("AppDomain.CurrentDomain.UnhandledException") && appCrash.Contains("LogCrash"),
+                       "非 UI 线程异常也记日志(crash.log)");
+            }
+            var chatAtt = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (chatAtt is not null)
+            {
+                // Clipboard.GetImage() 必须在 try 内(它本身会抛)
+                var ci = chatAtt.IndexOf("Clipboard.GetImage()", StringComparison.Ordinal);
+                var tryPaste = chatAtt.IndexOf("void PasteClipboard()", StringComparison.Ordinal);
+                var tryPos = chatAtt.IndexOf("try", tryPaste, StringComparison.Ordinal);
+                Assert(ci > 0 && tryPos > 0 && tryPos < ci, "★ Clipboard.GetImage() 在 try 内(修:此前在 try 外直接闪退)");
+                Assert(chatAtt.Contains("打不开文件选择框"), "文件选择对话框异常被兜住并提示");
+                // ★ 移除附件按【对象】而非捕获下标(事件日志实锤:RemoveAt(旧idx) 越界 = "添加附件闪退")
+                var psStart = chatAtt.IndexOf("FrameworkElement PendingStrip()", StringComparison.Ordinal);
+                var psStop = chatAtt.IndexOf("FrameworkElement AttachChip", psStart, StringComparison.Ordinal);
+                var psText = chatAtt[psStart..psStop];
+                Assert(psText.Contains("_pending.Remove(item)") && !psText.Contains("RemoveAt"),
+                       "★ 移除待发附件按对象移除,不按捕获下标(修越界闪退)");
+            }
+            var puFolder = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puFolder is not null)
+                Assert(puFolder.Contains("打不开文件夹选择框"), "附件文件夹对话框异常被兜住并提示");
             var appSrc2 = TryReadSource("App.xaml.cs");
             if (appSrc2 is not null)
             {

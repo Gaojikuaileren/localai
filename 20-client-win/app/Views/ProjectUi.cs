@@ -38,8 +38,18 @@ public static class ProjectUi
     /// <summary>让用户选一个文件夹(项目实际目录 / 附件目录)。取消返回 null。</summary>
     public static string? PickFolder(string description)
     {
-        using var d = new WinForms.FolderBrowserDialog { Description = description, UseDescriptionForTitle = true };
-        return d.ShowDialog() == WinForms.DialogResult.OK ? d.SelectedPath : null;
+        // ★ 整段 try:文件夹对话框走 Windows 外壳(COM),个别机器/单文件发布下可能抛;
+        //   配合全局兜底,别再让"选择附件文件夹"闪退(用户反馈)。
+        try
+        {
+            using var d = new WinForms.FolderBrowserDialog { Description = description, UseDescriptionForTitle = true };
+            return d.ShowDialog() == WinForms.DialogResult.OK ? d.SelectedPath : null;
+        }
+        catch (Exception ex)
+        {
+            ConfirmDialog.Show("打不开文件夹选择框", ex.Message, confirmText: "好", cancelText: "关闭");
+            return null;
+        }
     }
 
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;

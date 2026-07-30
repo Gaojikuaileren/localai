@@ -583,23 +583,30 @@ public sealed class ChatView : UserControl
 
     void PickFile(bool imageOnly)
     {
-        var dlg = new Microsoft.Win32.OpenFileDialog
+        // ★ 整段 try:文件对话框走 Windows 外壳(COM),在个别机器/单文件发布下可能抛 —— 此前没兜,
+        //   加上之前没有全局兜底,于是表现为"点添加附件就闪退"(用户反馈)。
+        try
         {
-            Title = imageOnly ? "选择图片" : "选择文件",
-            Filter = imageOnly ? "图片|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|所有文件|*.*" : "所有文件|*.*",
-        };
-        if (dlg.ShowDialog() != true) return;
-        var name = System.IO.Path.GetFileName(dlg.FileName);
-        _pending.Add(new ChatAttachment(imageOnly ? AttachKind.Image : AttachKind.File, dlg.FileName, name));
-        BuildConversation();
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = imageOnly ? "选择图片" : "选择文件",
+                Filter = imageOnly ? "图片|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|所有文件|*.*" : "所有文件|*.*",
+            };
+            if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
+            var name = System.IO.Path.GetFileName(dlg.FileName);
+            _pending.Add(new ChatAttachment(imageOnly ? AttachKind.Image : AttachKind.File, dlg.FileName, name));
+            BuildConversation();
+        }
+        catch (Exception ex) { ConfirmDialog.Show("打不开文件选择框", ex.Message, confirmText: "好", cancelText: "关闭"); }
     }
 
     void PasteClipboard()
     {
-        var img = Clipboard.GetImage();
-        if (img is null) { ConfirmDialog.Show("剪贴板里没有图片", "先截个图再试。", confirmText: "好", cancelText: "关闭"); return; }
         try
         {
+            // ★ Clipboard.GetImage() 本身就可能抛(剪贴板被别的进程占用 -> COMException);之前它在 try 外,直接闪退。
+            var img = Clipboard.GetImage();
+            if (img is null) { ConfirmDialog.Show("剪贴板里没有图片", "先截个图再试。", confirmText: "好", cancelText: "关闭"); return; }
             // 落一份预览 png 到本机临时目录(仅供显示 + 给 AI 一个可读路径;不通过网络发送内容)
             var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "localai-clip-" + Guid.NewGuid().ToString("N")[..8] + ".png");
             using (var fs = System.IO.File.Create(tmp))
@@ -617,11 +624,13 @@ public sealed class ChatView : UserControl
     FrameworkElement PendingStrip()
     {
         var wrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
-        for (int k = 0; k < _pending.Count; k++)
+        foreach (var a in _pending.ToList())
         {
-            var a = _pending[k];
-            var idx = k;
-            var chip = AttachChip(a, onRemove: () => { _pending.RemoveAt(idx); BuildConversation(); });
+            // ★ 按【对象】移除,不按捕获的下标 —— 之前闭包抓的是构建时的 idx,列表一变就越界,
+            //   于是"移除附件"抛 ArgumentOutOfRange 把应用掀翻(事件日志实锤的"添加附件闪退"根因)。
+            //   Remove(item) 找不到就是无操作,永不越界。
+            var item = a;
+            var chip = AttachChip(item, onRemove: () => { _pending.Remove(item); BuildConversation(); });
             wrap.Children.Add(chip);
         }
         return wrap;

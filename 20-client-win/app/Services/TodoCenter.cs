@@ -115,15 +115,7 @@ public sealed class TodoCenter
                      .ThenBy(t => t.Title, StringComparer.CurrentCulture);
     }
 
-    /// <summary>批量删除:一次删掉给定的若干条(已完成抽屉的多选删除用它)。</summary>
-    public void RemoveMany(IEnumerable<string> ids)
-    {
-        var set = ids.ToHashSet();
-        if (set.Count == 0) return;
-        if (_items.RemoveAll(x => set.Contains(x.Id)) > 0) Changed?.Invoke();
-    }
-
-    /// <summary>清空全部已完成(批量删除的"全选"入口)。</summary>
+    /// <summary>立即删除全部已完成(用户裁定:不做选择性批量删除,只保留"一键删全部")。</summary>
     public void ClearCompleted()
     {
         if (_items.RemoveAll(x => x.Done) > 0) Changed?.Invoke();

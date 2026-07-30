@@ -25,6 +25,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import e1_detector as e1
+import e4_egress as e4
 import caller_identity
 import membership
 
@@ -427,6 +428,48 @@ async def chat_completions(request: Request):
             content={"error": {"message": f"未知别名 '{alias}'。可用:{sorted(k for k,v in REGISTRY.items() if v['kind'] in CHAT_KINDS)}",
                                "type": "unknown_alias"}},
         )
+    # ---- E4 出境载荷强制点(§5.6.2 · 五强制点 E4 · 在 kind 路由分类【之前】)----
+    #   出境后端(egress=true)= 内容将离开受控设备集,不可逆。故:
+    #     · 放在 kind 检查【之前】—— 安全强制点不被路由分类短路。
+    #     · 【不认 E1 override】—— override 只让内容进本地(可逆);出境没有放行按钮。
+    #     · 【与来源无关】—— 扫整个将发出的载荷(system/历史/assistant 都算,同 _scannable_text)。
+    #   当前 chat 路由里唯一的 egress=true 别名(escalate.cloud=chat_cloud)会在其后的 kind
+    #   检查处 400;E4 在此先行,是为它/未来云端别名接入时【闸已在位】(P3d 硬前置)。
+    if entry.get("egress"):
+        e4r = e4.scan(_scannable_text(body.get("messages")))
+        if e4r.blocked:
+            log_gate_rejection(session_id, e4r.categories, "egress_blocked")
+            msg = e4.block_message(e4r.categories)
+            hdrs = {"X-LocalAI-E4": "egress-blocked",
+                    "X-LocalAI-E4-Categories": ",".join(sorted(e4r.categories))}
+            # 同 E1:按客户端要的形态回(Open WebUI 默认 stream:true)
+            if bool(body.get("stream", False)):
+                def sse_e4():
+                    base = {"id": "e4-block", "object": "chat.completion.chunk",
+                            "created": int(time.time()), "model": f"{alias}(e4-egress-blocked)"}
+                    first = dict(base, choices=[{"index": 0, "finish_reason": None,
+                                                 "delta": {"role": "assistant", "content": msg}}])
+                    last = dict(base, choices=[{"index": 0, "finish_reason": "content_filter",
+                                                "delta": {}}])
+                    yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(last, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(sse_e4(), media_type="text/event-stream", headers=hdrs)
+            return JSONResponse(
+                status_code=200,
+                headers=hdrs,
+                content={
+                    "id": "e4-block", "object": "chat.completion",
+                    "created": int(time.time()), "model": f"{alias}(e4-egress-blocked)",
+                    "choices": [{
+                        "index": 0, "finish_reason": "content_filter",
+                        "message": {"role": "assistant", "content": msg},
+                    }],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "x_localai_e4": {"egress_blocked": True, "categories": sorted(e4r.categories)},
+                },
+            )
+
     if entry["kind"] not in CHAT_KINDS:
         return JSONResponse(
             status_code=400,

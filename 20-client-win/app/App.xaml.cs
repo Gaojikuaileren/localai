@@ -8,6 +8,7 @@ using System.Windows;
 using LocalAI.Client.I18n;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
+using LocalAI.Client.Views;
 using WinForms = System.Windows.Forms;
 
 namespace LocalAI.Client;
@@ -49,6 +50,19 @@ public partial class App : Application
         base.OnStartup(e);
 
         AppPaths.EnsureStateDir();
+
+        // ★ 全局异常兜底:此前没有任何处理 —— 任何未捕获异常 = 进程【静默闪退】(用户反馈"添加附件闪退"就是这类)。
+        //   UI 线程异常记日志 + 用我们的对话框如实告知,并【标记已处理】让应用活下来(多数是可恢复的,如某个对话框抛错);
+        //   非 UI 线程/进程级只能记日志(那时已无法挽救,但至少留下堆栈)。日志落 {state}\crash.log。
+        DispatcherUnhandledException += (_, ex) =>
+        {
+            LogCrash("ui", ex.Exception);
+            try { ConfirmDialog.Show("出错了(已记录)", ex.Exception.Message + "\n\n已写入 crash.log;应用会继续运行。", confirmText: "好", cancelText: "关闭"); } catch { }
+            ex.Handled = true;   // 别让一处异常掀翻整个应用
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, ex) => LogCrash("domain", ex.ExceptionObject as Exception);
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, ex) => { LogCrash("task", ex.Exception); ex.SetObserved(); };
+
         Settings = AppSettings.Load();
         Strings.Language = Settings.Language;
         ThemeManager.Initialize(Settings.Skin);
@@ -170,6 +184,18 @@ public partial class App : Application
         AllDay(2, 2, "(示例)公休日", "双方", "家庭", "家庭");
         AllDay(4, 6, "(示例)出差 · 柏林", "我", "个人", "工作");
         AllDay(9, 13, "(示例)家庭旅行", "双方", "家庭", "家庭");
+    }
+
+    // 崩溃日志:追加到 {state}\crash.log(带时间/来源/完整堆栈)。写日志本身绝不能再抛。
+    static void LogCrash(string source, Exception? ex)
+    {
+        try
+        {
+            AppPaths.EnsureStateDir();
+            var line = $"\n===== {DateTime.Now:yyyy-MM-dd HH:mm:ss} [{source}] =====\n{ex}\n";
+            File.AppendAllText(Path.Combine(AppPaths.StateDir, "crash.log"), line);
+        }
+        catch { }
     }
 
     // ---------------------------------------------------------------- 本地存档(明文,D21/D22 口径)
