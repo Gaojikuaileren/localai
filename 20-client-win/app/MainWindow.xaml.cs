@@ -523,22 +523,18 @@ public partial class MainWindow : Window
         else
             HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client");
 
-        // ---- 当前使用者显示栏 ----
-        // ★ D45 铁律:这只是【显示】,不做任何权限判定。名字取自主机下发并缓存的成员显示名(仅渲染);
-        //   没有则退回配对时填的设备名。★ "连接中枢" = Hub 在线(State==Online);否则一律显示"未连接中枢"。
-        var connected = TheApp.Hub.State == HubState.Online;
-        var who = connected
-            ? (!string.IsNullOrWhiteSpace(TheApp.Settings.CachedMemberDisplayName)
-                ? TheApp.Settings.CachedMemberDisplayName!    // 主机下发的成员显示名(仅渲染)
-                : Environment.MachineName)                     // 还没下发就先用机器名兜底
-            : "未连接中枢";
-        MemberText.Text = who;
-        MemberText.SetResourceReference(TextBlock.ForegroundProperty, connected ? "FgPrimary" : "FgMuted");
+        // ---- 当前使用者(推测)----
+        // ★ 用户裁定:这一格显示【推测的使用者身份】,不是连接状态 —— 连接状态只在右边 token 块里说,
+        //   两处都写"未连接中枢"是重复。主机没连上就【沿用上次推测的缓存】。
+        // ★ D45 铁律:仅用于显示,任何权限/可见范围判定都不读它(见 IdentityGuess 顶部说明)。
+        var who = IdentityGuess.Current(TheApp.Hub, TheApp.Settings);
+        MemberText.Text = who.DisplayName;
+        // 已被主机确认 = 正常字色;还只是推测/缓存 = 弱化,别让人误以为身份已确认
+        MemberText.SetResourceReference(TextBlock.ForegroundProperty, who.IsGuess ? "FgSecondary" : "FgPrimary");
         MemberText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;   // 收起时只留头像
-        // 头像里放名字首字;未连接则放一个占位符,并用低饱和底色以示"离线"
-        MemberInitial.Text = connected ? FirstGlyph(who) : "·";
-        MemberAvatar.SetResourceReference(Border.BackgroundProperty, connected ? "BgSelected" : "BgSunken");
-        MemberBlock.ToolTip = connected ? $"当前使用者:{who}" : "未连接中枢(名字待主机下发)";
+        MemberInitial.Text = FirstGlyph(who.DisplayName);
+        MemberAvatar.SetResourceReference(Border.BackgroundProperty, who.IsGuess ? "BgSunken" : "BgSelected");
+        MemberBlock.ToolTip = $"当前使用者:{who.DisplayName}({who.SourceNote})";
 
         // ★ token 用量尚未接入 -> 如实标注"待接入",绝不编数字(见 TokenUsage)。
         TokenText.Text = TokenUsage.Connected

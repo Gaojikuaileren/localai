@@ -256,9 +256,12 @@ public static class Selftest
                 Assert(mwStatus.Contains("ThisMachineIsHub"), "状态块显示本机是否为主机");
                 Assert(mwStatus.Contains("OnOpenUsage") && mwStatus.Contains("usage.title"), "点状态块弹出 token 用量表");
                 // 用户裁定(2026-07-30):token 块左边加【当前使用者】显示栏,未连接中枢时显示"未连接中枢"
-                Assert(mwStatus.Contains("MemberText.Text") && mwStatus.Contains("未连接中枢"), "token 块左边有当前使用者显示栏");
-                Assert(mwStatus.Contains("HubState.Online") && mwStatus.Contains("CachedMemberDisplayName"),
-                       "使用者名取自主机下发缓存(仅渲染);连接判据 = Hub 在线");
+                Assert(mwStatus.Contains("MemberText.Text") && mwStatus.Contains("IdentityGuess.Current"),
+                       "token 块左边显示【推测的当前使用者】");
+                // ★ "未连接中枢"只该出现在 token 块那一侧(role 串),左边身份格不该重复写一遍
+                // 只看【代码】,不看注释 —— 注释里正解释"为什么不再写它"(同 CachedMemberDisplayName 那次)
+                var mwCode = string.Join("\n", mwStatus.Split('\n').Where(l => !l.TrimStart().StartsWith("//")));
+                Assert(!mwCode.Contains("未连接中枢"), "★ 左边身份格不再重复显示【未连接中枢】(连接状态只在 token 块)");
             }
 
             // token 用量按钮:用 Button(Click)而非 Border(MouseLeftButtonUp),否则会"关一下又弹开"
@@ -854,6 +857,28 @@ public static class Selftest
             if (puShare is not null)
                 Assert(puShare.Contains("提升为共享") && puShare.Contains("文件夹】仍在"),
                        "★ 项目提升说明:共享元数据,文件夹仍在原机");
+
+            // ---- 当前使用者推测(仅显示;连不上就沿用缓存)----
+            {
+                var idSet = new Services.AppSettings();
+                var idHub = new Services.HubClient();   // 未配对 -> State=NotPaired
+                var g1 = Services.IdentityGuess.Current(idHub, idSet);
+                Assert(g1.Source == Services.IdentitySource.Local && g1.IsGuess, "没缓存也没连上 -> 退回本机账户名,并标注为推测");
+                Assert(!string.IsNullOrWhiteSpace(g1.DisplayName), "推测出的名字不为空");
+
+                Services.IdentityGuess.Remember(idSet, "阿泽");
+                var g2 = Services.IdentityGuess.Current(idHub, idSet);
+                Assert(g2.DisplayName == "阿泽" && g2.Source == Services.IdentitySource.Cache,
+                       "★ 主机没连上时【沿用上次推测的缓存】,而不是显示未连接");
+                Assert(g2.IsGuess, "缓存来源仍算推测(界面弱化显示)");
+            }
+            var idSrc = TryReadSource(Path.Combine("Services", "IdentityGuess.cs"));
+            if (idSrc is not null)
+            {
+                Assert(idSrc.Contains("MemberContext") == false || idSrc.Contains("这个类连 MemberContext 都不碰"),
+                       "★ 身份推测不参与任何权限判定(D45 铁律)");
+                Assert(idSrc.Contains("IdentitySource.Local") && idSrc.Contains("推测"), "来源如实标注(Hub/Cache/Local)");
+            }
 
             // ---- 会话分层存储:热层 / 温层(归档不是删除)----
             {
