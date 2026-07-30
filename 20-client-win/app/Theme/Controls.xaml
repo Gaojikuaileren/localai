@@ -129,6 +129,57 @@
     </Setter>
   </Style>
 
+  <!-- ================= 滑条 =================
+       自绘:细轨道 + 已选段用强调色 + 圆形滑块。和其它控件一样走令牌,不用系统外观。 -->
+  <Style TargetType="Slider">
+    <Setter Property="MinHeight" Value="24"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Slider">
+          <Grid Height="24" VerticalAlignment="Center">
+            <Border Height="4" CornerRadius="2" VerticalAlignment="Center"
+                    Background="{DynamicResource BgSunken}"
+                    BorderBrush="{DynamicResource Border}" BorderThickness="1"/>
+            <Track x:Name="PART_Track">
+              <Track.DecreaseRepeatButton>
+                <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                  <RepeatButton.Template>
+                    <ControlTemplate TargetType="RepeatButton">
+                      <Border Height="4" CornerRadius="2" VerticalAlignment="Center"
+                              Background="{DynamicResource Accent}"/>
+                    </ControlTemplate>
+                  </RepeatButton.Template>
+                </RepeatButton>
+              </Track.DecreaseRepeatButton>
+              <Track.Thumb>
+                <Thumb Focusable="False">
+                  <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb">
+                      <Grid Width="16" Height="16" Background="Transparent">
+                        <Ellipse Fill="{DynamicResource Accent}"/>
+                        <Ellipse Margin="4" Fill="{DynamicResource FgOnAccent}"/>
+                      </Grid>
+                    </ControlTemplate>
+                  </Thumb.Template>
+                </Thumb>
+              </Track.Thumb>
+              <Track.IncreaseRepeatButton>
+                <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                  <RepeatButton.Template>
+                    <ControlTemplate TargetType="RepeatButton">
+                      <Border Background="Transparent"/>
+                    </ControlTemplate>
+                  </RepeatButton.Template>
+                </RepeatButton>
+              </Track.IncreaseRepeatButton>
+            </Track>
+          </Grid>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- ================= 悬停提示:全局关闭 =================
        用户裁定(2026-07-30):取消所有"鼠标悬停弹小窗"的提示 —— 界面本身要能说明白,
        靠 tip 补说明既打断视线又遮内容。

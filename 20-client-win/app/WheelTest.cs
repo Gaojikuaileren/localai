@@ -144,6 +144,18 @@ public static class WheelTest
         }
         Save(Themed(trashTiles), Path.Combine(outDir, "trash-tiles.png"), 420, 150);
 
+        // 滑条:自绘模板必须真能画出来(轨道 + 已选段 + 圆滑块),否则设置页一开就是空白
+        ThemeManager.Initialize(Skin.Breeze);
+        var sl = new StackPanel { Width = 360 };
+        foreach (var (label, val) in new[] { ("整理阈值 120k", 0.28), ("总量上限 中档", 0.5), ("满档", 1.0) })
+        {
+            var t = new TextBlock { Text = label, FontSize = 12, Margin = new Thickness(0, 6, 0, 2) };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            sl.Children.Add(t);
+            sl.Children.Add(new Slider { Minimum = 0, Maximum = 1, Value = val, Width = 320, HorizontalAlignment = HorizontalAlignment.Left });
+        }
+        Save(Themed(sl), Path.Combine(outDir, "slider.png"), 380, 180);
+
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;
     }

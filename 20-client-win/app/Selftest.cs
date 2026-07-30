@@ -485,6 +485,10 @@ public static class Selftest
                        "★ 发出的消息有出现动画,且只给新增的那几条播(旧消息重建不重复动)");
             }
 
+            var ctlSlider = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+            if (ctlSlider is not null)
+                Assert(ctlSlider.Contains("TargetType=\"Slider\""), "滑条有主题化样式(不用系统外观)");
+
             var ctlTip = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
             if (ctlTip is not null)
                 Assert(ctlTip.Contains("TargetType=\"ToolTip\"") && ctlTip.Contains("Visibility\" Value=\"Collapsed"),
@@ -985,8 +989,16 @@ public static class Selftest
             var svSrc = TryReadSource(Path.Combine("Views", "StorageView.cs"));
             if (svSrc is not null)
             {
-                Assert(svSrc.Contains("一键清爽") && svSrc.Contains("TidyClearCache") && svSrc.Contains("TidyDeleteArchivedOriginals"),
-                       "一键清爽 + 勾选决定执行哪些动作");
+                Assert(svSrc.Contains("清理缓存 & 自动整理") && svSrc.Contains("执行上述勾选项"), "板块与按钮用新措辞");
+                Assert(!svSrc.Contains("一键清爽"), "旧措辞「一键清爽」已去掉");
+                Assert(svSrc.Contains("TidyClearCache") && svSrc.Contains("TidyDeleteArchivedOriginals"), "勾选决定执行哪些动作");
+                // 三块合并成一张卡:整张视图只有一个 Ui.Card
+                Assert(svSrc.Split("Ui.Card(").Length - 1 == 1, "★ 缓存/摘要/记忆库合并为同一个板块(只有一张卡)");
+                Assert(svSrc.Contains("new Slider") && svSrc.Contains("IsSnapToTickEnabled = true"), "阈值与总量上限用滑条(吸附到档)");
+                Assert(svSrc.Contains("ThresholdMax = 400_000"), "整理阈值滑条上限 400k 字符(≈128K token 级)");
+                Assert(svSrc.Contains("MemoryCaps = { 0, 50, 100, 250, 500, 1024, 2048 }"), "记忆库总量上限是阶段值");
+                Assert(svSrc.Contains("(\"一年\", 365)") && svSrc.Contains("(\"三年\", 1095)"), "保留期改成选时间(7/30/90 天、一年/两年/三年)");
+                Assert(svSrc.Contains("StorageUsage.Snapshot"), "同板块内显示当前缓存等占用大小");
                 Assert(svSrc.Contains("AI 尚未接入"), "★ 整理摘要在 AI 未接入时【不做事】并如实说明(不拼假摘要)");
                 Assert(svSrc.Contains("不可逆") && svSrc.Contains("ConfirmDialog.Show(\"删除归档原文\""),
                        "★ 删除归档原文单独二次确认(勾了也要再确认)");
