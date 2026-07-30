@@ -1045,11 +1045,15 @@ public sealed class ChatView : UserControl
         b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
         b.ToolTip = "添加文件 / 文件夹(截图可直接在输入框粘贴)";
 
+        // ★ 菜单项里【不要当场】弹模态对话框:那会在菜单还没关完的时候把消息循环接管走,
+        //   回来又整块重建输入区 —— 菜单挂靠的按钮没了,那次 Closed 就可能永远不来,
+        //   于是"菜单还开着"的状态卡死,主窗口把此后每一次点击都吞掉(2026-07-30 实测点不动)。
+        //   延到 Background 优先级执行:让菜单先关干净,再弹对话框。
         var menu = new ContextMenu();
         var mFile = new MenuItem { Header = "选择文件…" };
-        mFile.Click += (_, _) => PickFiles();
+        mFile.Click += (_, _) => Dispatcher.BeginInvoke(new Action(PickFiles), System.Windows.Threading.DispatcherPriority.Background);
         var mFolder = new MenuItem { Header = "选择文件夹…" };
-        mFolder.Click += (_, _) => PickChatFolder();
+        mFolder.Click += (_, _) => Dispatcher.BeginInvoke(new Action(PickChatFolder), System.Windows.Threading.DispatcherPriority.Background);
         menu.Items.Add(mFile);
         menu.Items.Add(mFolder);
         b.MouseLeftButtonUp += (_, e) => { e.Handled = true; MenuHost.Show(menu, b, System.Windows.Controls.Primitives.PlacementMode.Top); };

@@ -459,17 +459,61 @@ public static class Selftest
             if (pkHit is not null)
                 Assert(pkHit.Contains("ProjectUi.JustClosedMenu()"), "抽屉方块点击前先判菜单是否刚关");
             // ★ 浮层/菜单开着时,点背后【只关它】,不该顺带按到背后的按钮 —— 统一在主窗口拦
+            // ★★ 行为断言:直接复现"点不动"那个事故。
+            //   造一个菜单,只发 Opened、【永远不发 Closed】(孤儿弹窗就是这样),
+            //   然后要求 MenuHost 仍然认为"没有菜单开着" —— 否则主窗口会把之后每一次点击都吞掉。
+            //   ★ 结构断言证明不了这条:计数器版本的源码里同样有 SwallowClick 三个字。
+            {
+                var orphan = new System.Windows.Controls.ContextMenu();
+                Views.MenuHost.Track(orphan);
+                orphan.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.ContextMenu.OpenedEvent));
+                Assert(!Views.MenuHost.IsOpen, "★ 只发 Opened 不发 Closed(孤儿弹窗)不会把界面锁死");
+                Assert(!Views.MenuHost.SwallowClick, "★ 孤儿弹窗不会让主窗口一直吞点击");
+
+                // 重复登记同一个菜单实例("+"附件键就是复用同一个)不该攒出状态
+                Views.MenuHost.Track(orphan);
+                Views.MenuHost.Track(orphan);
+                Assert(!Views.MenuHost.IsOpen, "同一菜单重复登记不会攒出「开着」的假象");
+
+                // 总闸能把账清干净,且不留 300ms 宽限把紧接着的点击也吞掉
+                Views.MenuHost.CloseAll();
+                Assert(!Views.MenuHost.SwallowClick, "★ CloseAll 之后立刻就能点(宽限期一并清掉)");
+            }
             var mhSrc = TryReadSource(Path.Combine("Views", "MenuHost.cs"));
             if (mhSrc is not null)
-                Assert(mhSrc.Contains("SwallowClick") && mhSrc.Contains("_openCount"), "MenuHost 记录菜单开/刚关状态");
+            {
+                Assert(mhSrc.Contains("SwallowClick"), "MenuHost 记录菜单开/刚关状态");
+                // ★★ 事故教训:状态【不许攒】。原先用计数器记"开着几个",只要漏一次 Closed
+                //   就永远回不到 0 -> 主窗口把此后每一次点击都吞掉,整个界面点不动。
+                Assert(!Body(mhSrc).Contains("_openCount"), "★ 菜单状态不用计数器(漏一次 Closed 就会把界面永久锁死)");
+                Assert(mhSrc.Contains("if (!m.IsOpen)") && mhSrc.Contains("_tracked.RemoveAt(i)"),
+                       "★ 每次实地查验菜单自己开没开,顺手清账");
+                Assert(mhSrc.Contains("fe.IsLoaded"), "★ 孤儿弹窗(挂靠按钮已被重建摘掉)要就地关掉,不能一直挡着点击");
+                Assert(mhSrc.Contains("public static void CloseAll()"), "留一个总闸,Esc 能强行救回来");
+            }
             var mwSwallow = TryReadSource("MainWindow.xaml.cs");
             if (mwSwallow is not null)
             {
+                // Esc 是总闸:浮层和菜单都要能关。只管浮层的话,菜单状态一卡住就只能杀进程。
+                var esc = mwSwallow[mwSwallow.IndexOf("Key.Escape", StringComparison.Ordinal)..];
+                esc = esc[..400];
+                Assert(esc.Contains("Overlay.CloseActive()") && esc.Contains("MenuHost.CloseAll()"),
+                       "★ Esc 同时关浮层与菜单(留一条自救路径)");
                 Assert(mwSwallow.Contains("MenuHost.SwallowClick") && mwSwallow.Contains("me.Handled = true"),
                        "★ 菜单开着时点背后:主窗口一次性吞掉这次点击(只关菜单)");
                 var pmd = mwSwallow[mwSwallow.IndexOf("PreviewMouseDown +=", StringComparison.Ordinal)..];
                 Assert(pmd.IndexOf("MenuHost.SwallowClick", StringComparison.Ordinal) < pmd.IndexOf("if (!Overlay.IsOpen) return;", StringComparison.Ordinal),
                        "菜单判断排在 Overlay 之前(菜单不在 Overlay 体系里,漏判就会穿透)");
+            }
+            // ★ 菜单项里【不许当场】弹模态对话框:菜单还没关完就接管消息循环,回来又重建界面,
+            //   那次 Closed 就可能永远不来 —— 正是 2026-07-30"点不动"事故的触发路径。
+            var cvMenu = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvMenu is not null)
+            {
+                var ab = cvMenu[cvMenu.IndexOf("var mFile = new MenuItem", StringComparison.Ordinal)..];
+                ab = ab[..700];
+                Assert(ab.Contains("DispatcherPriority.Background") && !ab.Contains("mFile.Click += (_, _) => PickFiles();"),
+                       "★ 附件菜单的选文件/选文件夹延后执行(先让菜单关干净再弹对话框)");
             }
             // 所有菜单都必须走 MenuHost,不能各自 IsOpen=true(否则漏登记 -> 又会穿透)
             foreach (var f in new[] { Path.Combine("Views", "ChatView.cs"), Path.Combine("Views", "HomeView.cs"), Path.Combine("Views", "ProjectUi.cs") })
@@ -971,6 +1015,11 @@ public static class Selftest
                 Assert(!Body(tbSrc).Contains("DragDrop.DoDragDrop"), "★ 语言拖动不用 OLE 拖放(那个不跟手)");
                 Assert(tbSrc.Contains("CaptureMouse()") && tbSrc.Contains("_ghost") && tbSrc.Contains("Canvas.SetLeft(_ghost"),
                        "★ 拖动跟手:浮层气泡跟着指针走");
+                // ★ 手动捕获鼠标最怕"捕获收不回来"—— 那会把整个窗口的点击都吸走(同"点不动"事故)
+                Assert(tbSrc.Contains("if (!CaptureMouse()) return;"), "★ 抓不到鼠标就不开始拖(不留半拖状态)");
+                var unl = tbSrc[tbSrc.IndexOf("Unloaded += (_, _) =>", StringComparison.Ordinal)..];
+                unl = unl[..400];
+                Assert(unl.Contains("FinishDrag(null)"), "★ 拖到一半被重建时释放鼠标捕获(否则整窗点不动)");
                 Assert(tbSrc.Contains("Hit(_targetBox, e)) TheApp.Translation.AddTarget"), "语言池 -> 目标池 = 加入");
                 Assert(tbSrc.Contains("Hit(_poolBox, e)) TheApp.Translation.RemoveTarget"), "★ 目标池取消 = 拖回语言池(用户裁定)");
                 Assert(tbSrc.Contains("Chip(\"清空\"") && tbSrc.Contains("Targets.ToList()) TheApp.Translation.RemoveTarget"),

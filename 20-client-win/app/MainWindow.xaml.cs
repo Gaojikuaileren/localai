@@ -38,7 +38,14 @@ public partial class MainWindow : Window
         RefreshMember();
         BuildChromeIcons();
         // 浮层开着时按 Esc 关闭
-        PreviewKeyDown += (_, ke) => { if (ke.Key == System.Windows.Input.Key.Escape && Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; } };
+        // ★ Esc 是【总闸】:浮层和菜单都归它管。以前只管浮层 —— 万一菜单状态卡住,
+        //   界面点不动而 Esc 又救不了,用户就只能杀进程(实际发生过一次)。
+        PreviewKeyDown += (_, ke) =>
+        {
+            if (ke.Key != System.Windows.Input.Key.Escape) return;
+            if (Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; }
+            if (MenuHost.IsOpen) { MenuHost.CloseAll(); ke.Handled = true; }
+        };
 
         // ★ 全局拦截(用户裁定):浮层开着时,窗口里【任何】按钮的第一次点击都只负责关闭浮层,
         //   不触发那个按钮本身。此前是在各个入口按钮里各调一次 ConsumeClick —— 漏一个就穿透,

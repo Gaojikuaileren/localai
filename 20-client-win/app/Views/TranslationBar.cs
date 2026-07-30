@@ -65,7 +65,14 @@ public sealed class TranslationBar : UserControl
 
         Refresh();
         Loaded += (_, _) => { TheApp.Translation.Changed += Refresh; TheApp.Notes.Changed += Refresh; };
-        Unloaded += (_, _) => { TheApp.Translation.Changed -= Refresh; TheApp.Notes.Changed -= Refresh; };
+        // ★ 卸载时必须把拖拽善后掉:界面在拖到一半时被重建的话,鼠标捕获会跟着这个已经不在
+        //   可视树上的控件走 —— 那之后整个窗口的点击都到不了别处(与"点不动"同一类事故)。
+        Unloaded += (_, _) =>
+        {
+            TheApp.Translation.Changed -= Refresh;
+            TheApp.Notes.Changed -= Refresh;
+            FinishDrag(null);
+        };
     }
 
     void Refresh() { RefreshPools(); RefreshLevel(); RefreshNotes(); }
@@ -235,11 +242,13 @@ public sealed class TranslationBar : UserControl
 
     void BeginDrag(Border source, Lang l, bool fromTarget, MouseButtonEventArgs e)
     {
+        // ★ 抓不到鼠标就【别开始拖】:抓不到的话松开事件不一定回到我们身上,
+        //   处理器就会一直挂着、状态清不掉。宁可这一下不拖,也不要留个半拖状态。
+        if (!CaptureMouse()) return;
         _dragLang = l;
         _dragFromTarget = fromTarget;
         _dragging = false;
         _dragStart = e.GetPosition(this);
-        CaptureMouse();
         MouseMove += OnDragMove;
         MouseLeftButtonUp += OnDragEnd;
         LostMouseCapture += OnDragLost;
