@@ -1161,6 +1161,22 @@ public static class Selftest
                 Assert(ac.MessagesOf(asid).First(m => m.MessageId == qid).ChoiceAnswer == "ja", "记的是第一次那个答案");
                 Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, tmp);
             }
+            var cvJump = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvJump is not null)
+            {
+                Assert(cvJump.Contains("_suppressScrollToEnd = true;") && cvJump.Contains("if (!skipEnd) scroll.ScrollToEnd()"),
+                       "★ 从历史跳过去时不再滚到底(否则跳转结果会被 ScrollToEnd 覆盖)");
+                Assert(cvJump.Contains("all[i].StableKey != want"),
+                       "★ 按消息的稳定标识定位,不按下标(归档来回一次下标就全变了)");
+            }
+            var hbSrc = TryReadSource(Path.Combine("Views", "HistoryBoardView.cs"));
+            if (hbSrc is not null)
+            {
+                // ★ 一个元素不能同时是两个父节点的子元素 —— 切换筛选时重建整块会当场抛异常
+                Assert(!Body(hbSrc).Contains("Content = Ui.Page(Build())"),
+                       "★ 切换「只看收藏」不重建整块(重复挂载会抛异常)");
+                Assert(hbSrc.Contains("_toggle!.Content = ToggleText();"), "只改按钮文案与列表内容");
+            }
             var cvCascade = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvCascade is not null)
             {
@@ -1234,6 +1250,9 @@ public static class Selftest
                 Assert(tbSrc.Contains("全部历史") && tbSrc.Contains("new HistoryBoardView()"),
                        "★ 右上角按钮改成「全部历史」,拉开抽屉看完整列表");
                 Assert(tbSrc.Contains("_favoritesOnly = !_favoritesOnly"), "标题边上的星:只看收藏");
+                Assert(tbSrc.Contains("const int HistoryPreviewCount = 5")
+                       && tbSrc.Contains("Card(_notesPreview, \"翻译历史\", action: actions, scroll: false)"),
+                       "★ 板块里最多五条,不滚动不翻页(更多点「全部历史」)");
                 // ★ 第三轮裁定的排版:程度【竖排】,目标池与语言池【并列同宽】
                 Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && !Body(tbSrc).Contains("IsDirectionReversed"),
                        "★ 翻译程度竖排且【从下往上】递进:直译在底,越往上越详(设了 IsDirectionReversed 就反了)");

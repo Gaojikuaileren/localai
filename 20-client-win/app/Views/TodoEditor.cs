@@ -67,7 +67,8 @@ public static class TodoEditor
         foreach (var o in owners) owner.Items.Add(o);
         owner.SelectedIndex = Math.Max(0, Array.IndexOf(owners, existing?.Owner ?? "我"));
 
-        var scopes = new[] { Strings.Get("visibility.family"), Strings.Get("visibility.personal"), Strings.Get("visibility.only_me") };
+        // ★ 同日程:"个人"与"仅本人"对待办来说是同一件事,不并排列两条(用户反馈:看着像重复)。
+        var scopes = new[] { Strings.Get("visibility.family"), Strings.Get("visibility.personal") };
         var scope = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var sc in scopes) scope.Items.Add(sc);
         scope.SelectedIndex = Math.Max(0, Array.IndexOf(scopes, existing?.Scope ?? scopes[0]));

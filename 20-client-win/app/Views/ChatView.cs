@@ -657,6 +657,8 @@ public sealed class ChatView : UserControl
 
     /// <summary>正要跳去的那条消息(跳完清空)。用稳定标识,归档来回之后仍指向同一条。</summary>
     string? _jumpToKey;
+    /// <summary>这次重建是跳到某条历史引起的,别再滚到最末尾。</summary>
+    bool _suppressScrollToEnd;
 
     /// <summary>
     /// 从翻译历史点一条 -> 选中它所在的会话、重建、滚到那条消息并闪一下。
@@ -858,9 +860,11 @@ public sealed class ChatView : UserControl
         dock.Children.Add(inputWrap);
         dock.Children.Add(scroll);
 
+        var skipEnd = _suppressScrollToEnd;
+        _suppressScrollToEnd = false;
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            scroll.ScrollToEnd();                 // ★ 必须排在下面那句 return 之前
+            if (!skipEnd) scroll.ScrollToEnd();   // ★ 必须排在下面那句 return 之前
             if (!slideFromCenter) return;
             // ★ 从"空会话居中输入框"变成"底部输入框"时给一段动画,而不是硬切(用户裁定):
             //   输入框从原来的居中位置【滑到底部】,消息区同时淡入。
@@ -917,6 +921,9 @@ public sealed class ChatView : UserControl
         if (_jumpToKey is { } want)
         {
             _jumpToKey = null;
+            // ★ 跳转这一次【不要再滚到底】:DockWithInput 也排了一个 ScrollToEnd,
+            //   两者同优先级、它排在后面,不压住的话跳过去又被拽回最末尾(用户实测)。
+            _suppressScrollToEnd = true;
             for (int i = 0; i < all.Count; i++)
             {
                 if (all[i].StableKey != want) continue;

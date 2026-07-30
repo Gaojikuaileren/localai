@@ -42,6 +42,8 @@ public sealed class TranslationBar : UserControl
     const double SlotHeight = 30;
     /// <summary>四个板块之间统一的间距。</summary>
     const double Gap = 10;
+    /// <summary>板块里预览几条历史。再多要点「全部历史」——这里不滚动、不翻页。</summary>
+    const int HistoryPreviewCount = 5;
 
     // 负的下边距吃掉【最后一行气泡】的 6px 外边距 —— 否则内容比可视区高 6px,
     // ScrollViewer 就会挂出一条多余的滚动条(渲染诊断里看得一清二楚)。
@@ -580,7 +582,7 @@ public sealed class TranslationBar : UserControl
         actions.Children.Add(new Border { Width = 6 });
         actions.Children.Add(all);
 
-        var card = Card(_notesPreview, "翻译历史", action: actions);
+        var card = Card(_notesPreview, "翻译历史", action: actions, scroll: false);
         // 间距统一由列宽给(见构造函数的 Gap),这里不再自带边距,否则会叠加成两倍
         return card;
     }
@@ -588,7 +590,9 @@ public sealed class TranslationBar : UserControl
     void RefreshNotes()
     {
         _notesPreview.Children.Clear();
-        var latest = TheApp.History.Latest(5, _favoritesOnly);
+        // ★ 板块里最多五条,不滚动不翻页(用户裁定)——要看更多点「全部历史」。
+        //   下半条高度是固定的,塞进滚动区只会挤成一条缝。
+        var latest = TheApp.History.Latest(HistoryPreviewCount, _favoritesOnly);
         if (latest.Count == 0)
         {
             _notesPreview.Children.Add(Ui.Caption(_favoritesOnly

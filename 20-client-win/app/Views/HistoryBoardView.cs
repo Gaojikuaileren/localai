@@ -17,36 +17,41 @@ public sealed class HistoryBoardView : UserControl
     static App TheApp => (App)Application.Current;
 
     readonly StackPanel _list = new();
+    readonly Button _toggle;
     bool _favoritesOnly;
 
     public HistoryBoardView(bool favoritesOnly = false)
     {
         _favoritesOnly = favoritesOnly;
-        var filter = Ui.Stack();
-        Content = Ui.Page(Build());
-        Loaded += (_, _) => TheApp.History.Changed += Refresh;
-        Unloaded += (_, _) => TheApp.History.Changed -= Refresh;
-    }
 
-    FrameworkElement Build()
-    {
-        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
-        var toggle = Ui.Secondary(_favoritesOnly ? "显示全部" : "只看收藏", (_, _) =>
+        // ★★ 界面只建【一次】,之后只改内容。
+        //   此前是每次切换都 Content = Ui.Page(Build()),而 Build() 会把同一个 _list
+        //   再挂到一个新面板上 —— WPF 不允许一个元素同时是两个父节点的子元素,当场抛异常
+        //   ("没有收藏时打开收藏夹会报错"就是这么来的,和有没有收藏其实无关,
+        //     是切换那一下重建触发的)。
+        _toggle = Ui.Secondary(ToggleText(), (_, _) =>
         {
             _favoritesOnly = !_favoritesOnly;
+            _toggle!.Content = ToggleText();
             Refresh();
-            if (Content is FrameworkElement) Content = Ui.Page(Build());
         });
-        DockPanel.SetDock(toggle, Dock.Right);
-        head.Children.Add(toggle);
+
+        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
+        DockPanel.SetDock(_toggle, Dock.Right);
+        head.Children.Add(_toggle);
 
         var box = new StackPanel();
         box.Children.Add(head);
         box.Children.Add(Ui.Caption("点一条跳回它在会话里的位置;星标收藏。★ 历史就是会话本身 —— 这里不提供删除,要删请删那条会话。"));
         box.Children.Add(_list);
+        Content = Ui.Page(box);
+
         Refresh();
-        return box;
+        Loaded += (_, _) => TheApp.History.Changed += Refresh;
+        Unloaded += (_, _) => TheApp.History.Changed -= Refresh;
     }
+
+    string ToggleText() => _favoritesOnly ? "显示全部" : "只看收藏";
 
     void Refresh()
     {
@@ -57,10 +62,8 @@ public sealed class HistoryBoardView : UserControl
             _list.Children.Add(Ui.Caption(_favoritesOnly ? "还没有收藏。" : "还没有翻译记录。"));
             return;
         }
-        foreach (var e in items) _list.Children.Add(Row(e));
+        foreach (var e in items) _list.Children.Add(HistoryRow(e, showTime: true));
     }
-
-    FrameworkElement Row(HistoryEntry e) => HistoryRow(e, showTime: true);
 
     /// <summary>
     /// 一条历史。点正文跳回原位;点星标收藏。

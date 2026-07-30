@@ -46,20 +46,50 @@ public static class CalendarEditor
 
         var endEdited = existing is not null;   // 用户手动动过结束就不再自动跟随
 
-        var (endTimeEl, setEndTime) = WheelPicker.Time(endAt, v => { endAt = v; endEdited = true; });
-        var (startTimeEl, _) = WheelPicker.Time(startAt, v =>
+        // ★★ 开始必须早于结束 —— 这条在【编辑器里当场纠正】,并且让另一个转盘【动给你看】。
+        //   此前只在保存时悄悄夹一下(结束早于开始就改成开始+1 小时):
+        //   界面上你看到的是"9:00 → 8:00",存进去的却是别的东西 —— 所见非所得,
+        //   而这份数据是要同步给 Apple 的,一条起止颠倒/被悄悄改过的日程在那边就是一次错。
+        Action<TimeSpan>? setStartTime = null;
+        Action<TimeSpan>? setEnd = null;
+
+        var (endTimeEl, setEndTime) = WheelPicker.Time(endAt, v =>
+        {
+            endAt = v;
+            endEdited = true;
+            // 结束被拨到开始之前 -> 把开始一起往前带,保持同样的时长;带不动就贴到 0:00
+            if (endAt > startAt) return;
+            var want = endAt - DefaultDuration;
+            startAt = want >= TimeSpan.Zero ? want : TimeSpan.Zero;
+            setStartTime?.Invoke(startAt);
+        });
+        setEnd = setEndTime;
+
+        var (startTimeEl, setStart) = WheelPicker.Time(startAt, v =>
         {
             startAt = v;
-            if (endEdited) return;
-            // 改开始 -> 结束自动跟到 +1 小时(夹在当天内)
+            // 改开始 -> 结束自动跟到 +1 小时(夹在当天内)。
+            // ★ 即使用户已经手动改过结束,只要开始越过了它,也必须把结束推开 ——
+            //   "尊重用户改过的结束"不能凌驾于"起止不许颠倒"。
+            if (endEdited && startAt < endAt) return;
             var next = startAt + DefaultDuration;
             endAt = next < TimeSpan.FromDays(1) ? next : WheelPicker.Snap(TimeSpan.FromHours(23.5));
-            setEndTime(endAt);   // 内部改值不回调,不会被误判成"用户手动改过"
+            setEnd?.Invoke(endAt);   // 内部改值不回调,不会被误判成"用户手动改过"
         });
+        setStartTime = setStart;
 
         var timedRow = TwoUp("开始", startTimeEl, "结束", endTimeEl);
-        var allDayRow = TwoUp("开始日期", WheelPicker.Date(startDay, d => startDay = d),
-                              "结束日期", WheelPicker.Date(endDay, d => endDay = d));
+        // 全天同理:结束日期不能早于开始日期。日期转盘没有 Set 回调,所以这里【就地夹住】
+        // 并在下面的提示里如实说明 —— 至少不会存进一条颠倒的日程。
+        var allDayRow = TwoUp("开始日期", WheelPicker.Date(startDay, d =>
+                              {
+                                  startDay = d;
+                                  if (endDay < startDay) endDay = startDay;
+                              }),
+                              "结束日期", WheelPicker.Date(endDay, d =>
+                              {
+                                  endDay = d < startDay ? startDay : d;
+                              }));
 
         // ★ 互斥显示。上一轮我在重写时把这段连带删掉了,导致两组转盘一直同时显示。
         void SyncMode()
@@ -91,7 +121,10 @@ public static class CalendarEditor
         foreach (var o in owners) owner.Items.Add(o);
         owner.SelectedIndex = Math.Max(0, Array.IndexOf(owners, existing?.Owner ?? "我"));
 
-        var scopes = new[] { Strings.Get("visibility.family"), Strings.Get("visibility.personal"), Strings.Get("visibility.only_me") };
+        // ★ 只给两项:"个人"与"仅本人"对日程来说是同一件事(都只在本机、不共享),
+        //   两条并排出现只会让人以为有区别(用户反馈:看着像重复)。
+        //   仅本人保留在枚举里给会话/D45 用 —— 那里它是有意义的。
+        var scopes = new[] { Strings.Get("visibility.family"), Strings.Get("visibility.personal") };
         var scope = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var sc in scopes) scope.Items.Add(sc);
         scope.SelectedIndex = Math.Max(0, Array.IndexOf(scopes, existing?.Scope ?? scopes[0]));
