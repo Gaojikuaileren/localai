@@ -156,10 +156,9 @@ public sealed class DevicesView : UserControl
         var p = TheApp.Hub.Profile!;
         var unpair = Ui.Danger("解除本机配对", (_, _) =>
         {
-            var r = MessageBox.Show(
-                "解除后本机将无法访问中枢,需要重新配对才能恢复。\n\n注意:这只清除本机凭据;主机侧的成员条目请在主机上一并解除。",
-                Strings.Get("app.title"), MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-            if (r != MessageBoxResult.OK) return;
+            if (!ConfirmDialog.Show("解除本机配对",
+                    "解除后本机将无法访问中枢,需要重新配对才能恢复。\n\n注意:这只清除本机凭据;主机侧的成员条目请在主机上一并解除。",
+                    confirmText: "解除配对", danger: true)) return;
             TheApp.Hub.UnpairLocal();
             Build();
             (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
@@ -248,10 +247,9 @@ public sealed class DevicesView : UserControl
             var row = new DockPanel { Margin = new Thickness(0, 6, 0, 6), LastChildFill = true };
             var revoke = Ui.Danger(Strings.Get("devices.revoke"), async (_, _) =>
             {
-                var r = MessageBox.Show(
-                    Strings.Get("devices.revoke_confirm", ("device", d.DisplayName)),
-                    Strings.Get("app.title"), MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-                if (r != MessageBoxResult.OK) return;
+                if (!ConfirmDialog.Show(Strings.Get("devices.revoke"),
+                        Strings.Get("devices.revoke_confirm", ("device", d.DisplayName)),
+                        confirmText: Strings.Get("devices.revoke"), danger: true)) return;
                 await TheApp.Hub.RevokeDeviceAsync(d.DeviceId);
                 Build();
             });

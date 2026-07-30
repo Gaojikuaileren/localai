@@ -129,6 +129,117 @@
     </Setter>
   </Style>
 
+  <!-- ================= 菜单(三个点拉出的下拉)=================
+       原生 ContextMenu/MenuItem 是系统外观(方角、系统蓝高亮),与整体脱节(用户反馈"太系统原生")。
+       这里整套换成走令牌:圆角卡片 + 投影 · 项圆角 hover BgHover · 勾选画自绘对勾 · 子菜单自绘小箭头。
+       HasDropShadow=True 是为了让弹窗允许透明(否则圆角四角会露出方角底);阴影由我们自己画。 -->
+  <Style TargetType="ContextMenu">
+    <Setter Property="Background" Value="{DynamicResource BgSurface}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="HasDropShadow" Value="True"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ContextMenu">
+          <Border Margin="10" Background="Transparent">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="{DynamicResource RadiusMd}"
+                    Padding="5" SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Opacity="0.26" Color="Black"/>
+              </Border.Effect>
+              <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+            </Border>
+          </Border>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="MenuItem">
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="Padding" Value="9,6,9,6"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="MenuItem">
+          <Grid>
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="{DynamicResource RadiusSm}"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="16"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <!-- 勾选标记:自绘对勾,不用系统的方框 -->
+                <Path x:Name="Check" Grid.Column="0" Visibility="Collapsed" Margin="0,0,6,0"
+                      Data="M0,4 L3,7 L9,0" Stroke="{DynamicResource Accent}" StrokeThickness="1.8"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                      VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True"
+                                  VerticalAlignment="Center"/>
+                <!-- 子菜单箭头 -->
+                <Path x:Name="Arrow" Grid.Column="2" Visibility="Collapsed" Margin="14,0,0,0"
+                      Data="M0,0 L4,4 L0,8" Stroke="{DynamicResource FgMuted}" StrokeThickness="1.4"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" VerticalAlignment="Center"/>
+              </Grid>
+            </Border>
+            <Popup x:Name="PART_Popup" AllowsTransparency="True" Focusable="False"
+                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                   Placement="Right" HorizontalOffset="-6" VerticalOffset="-6"
+                   PopupAnimation="Fade">
+              <Border Margin="10" Background="Transparent">
+                <Border Background="{DynamicResource BgSurface}" BorderBrush="{DynamicResource Border}"
+                        BorderThickness="1" CornerRadius="{DynamicResource RadiusMd}" Padding="5">
+                  <Border.Effect>
+                    <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Opacity="0.26" Color="Black"/>
+                  </Border.Effect>
+                  <StackPanel IsItemsHost="True"/>
+                </Border>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+            </Trigger>
+            <Trigger Property="IsSubmenuOpen" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+            </Trigger>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="Role" Value="SubmenuHeader">
+              <Setter TargetName="Arrow" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="{DynamicResource FgMuted}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- 菜单里的分隔线:一根细线,不用系统的立体凹槽 -->
+  <Style TargetType="Separator">
+    <Setter Property="Height" Value="1"/>
+    <Setter Property="Margin" Value="6,4,6,4"/>
+    <Setter Property="Background" Value="{DynamicResource Border}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Separator">
+          <Border Height="1" Background="{TemplateBinding Background}" SnapsToDevicePixels="True"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- ================= 输入控件 =================
        原生 WPF 的 TextBox/ComboBox/CheckBox 是方角灰边的系统外观,与整体脱节(用户反馈)。
        这里全部换成走令牌的样式:底色 BgSunken · 描边 Border · 圆角 RadiusSm(随皮肤)·

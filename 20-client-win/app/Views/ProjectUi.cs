@@ -42,27 +42,13 @@ public static class ProjectUi
         return d.ShowDialog() == WinForms.DialogResult.OK ? d.SelectedPath : null;
     }
 
-    /// <summary>右键菜单:在 Explorer 里打开项目文件夹(未设/不存在则给提示)。挂到任意元素上。</summary>
-    public static void AttachOpenFolder(FrameworkElement host, Project p)
-    {
-        var menu = new ContextMenu();
-        var open = new MenuItem { Header = "在文件夹中打开" };
-        open.Click += (_, _) =>
-        {
-            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                MessageBox.Show(
-                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}\n(可能已被移动或删除)",
-                    "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information);
-        };
-        menu.Items.Add(open);
-        host.ContextMenu = menu;
-    }
-
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
     static ChatCenter Chat => ((LocalAI.Client.App)Application.Current).Chat;
 
-    /// <summary>项目的下拉菜单(用户裁定:取消右键,改成【三个点】按钮拉出这个菜单)。
-    ///   在文件夹打开 · 改状态 · 改 AI 权限 · 编辑项目(重定向路径)。onEdit 打开项目编辑器。</summary>
+    /// <summary>
+    /// 项目的下拉菜单(用户裁定:不用右键,改成【三个点】按钮拉出这个菜单)。
+    ///   在文件夹打开 · 置顶 · 改状态 · 发送到工作空间 · AI 权限 · 编辑(重定向路径) · 删除项目。
+    /// </summary>
     public static ContextMenu BuildMenu(Project p, Action onEdit, FrameworkElement? anchor = null)
     {
         var m = new ContextMenu();
@@ -71,10 +57,16 @@ public static class ProjectUi
         open.Click += (_, _) =>
         {
             if (!ProjectCenter.OpenInExplorer(p.FolderPath))
-                MessageBox.Show(string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
-                    "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information);
+                ConfirmDialog.Show("打不开文件夹",
+                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}\n(可能已被移动或删除)",
+                    confirmText: "好", cancelText: "关闭");
         };
         m.Items.Add(open);
+
+        // 置顶(项目列表里也能置顶 —— 用户裁定)
+        var pin = new MenuItem { Header = p.Pinned ? "取消置顶" : "置顶项目", IsChecked = p.Pinned };
+        pin.Click += (_, _) => Projects.TogglePin(p.ProjectId);
+        m.Items.Add(pin);
 
         m.Items.Add(new Separator());
         foreach (var st in new[] { ProjectStatus.Preparing, ProjectStatus.Active, ProjectStatus.Done })
@@ -97,11 +89,11 @@ public static class ProjectUi
         }
         m.Items.Add(ai);
 
-        m.Items.Add(new Separator());
+        // 发送到别的工作空间(项目不跨空间共享;会话跟着走)
         var toWs = new MenuItem { Header = "发送到工作空间" };
         foreach (var w in Workspaces.All)
         {
-            if (w.Key == p.WorkspaceKey) continue;   // 不列当前所在空间
+            if (w.Key == p.WorkspaceKey) continue;
             var mi = new MenuItem { Header = I18n.Strings.Get(w.TitleKey) };
             var key = w.Key;
             mi.Click += (_, _) => { Projects.MoveToWorkspace(p.ProjectId, key); Chat.SetSessionsWorkspace(p.ProjectId, key); };
@@ -120,25 +112,20 @@ public static class ProjectUi
         return m;
     }
 
-    // 删除项目的【二次确认】(自绘浮窗,红色按钮)。★ 只删客户端里的项目与其会话,【不动磁盘文件夹】。
-    //   会话进"已删除"(30 天内可恢复)。★ 延到菜单彻底关闭后再弹 —— 否则 StaysOpen=false 的浮窗
-    //   会被"菜单关闭那一下"顺带关掉,表现为"点了没反应/没有确认框"(用户反馈)。
+    // 删除项目的【二次确认】。★ 只删客户端里的项目与其会话,【不动磁盘文件夹】;会话进"已删除"(30 天可恢复)。
+    // ★ 用独立模态窗(ConfirmDialog)而不是浮窗:浮窗要登记 Overlay,会把抽屉一起关掉、锚点随之消失,
+    //   结果"点了删除没反应"(用户两次反馈的真正成因)。延到菜单关闭后再弹,避免菜单关闭抢焦点。
     static void ConfirmDelete(Project p, FrameworkElement? anchor)
     {
-        if (anchor is null) return;
-        var chat = ((LocalAI.Client.App)Application.Current).Chat;
         Application.Current.Dispatcher.BeginInvoke(new Action(() =>
         {
-            var del = Ui.DangerFilled("删除项目", (_, _) => { Overlay.CloseActive(); chat.DeleteProjectSessions(p.ProjectId); Projects.Delete(p.ProjectId); });
-            var cancel = Ui.Secondary("取消", (_, _) => Overlay.CloseActive());
-            var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
-            btns.Children.Add(del);
-            btns.Children.Add(new Border { Child = cancel, Margin = new Thickness(10, 0, 0, 0) });
-            var body = Ui.Stack(
-                Ui.Body($"删除项目「{p.Title}」?"),
-                Ui.Caption("不会删除磁盘上的项目文件夹;只从客户端移除这个项目及其所有会话(会话进「已删除」,30 天内可恢复)。"),
-                btns);
-            Flyout.Show(anchor, "删除项目", body, width: 300);
+            var ok = ConfirmDialog.Show("删除项目",
+                $"删除项目「{p.Title}」?\n\n不会删除磁盘上的项目文件夹;只从客户端移除这个项目及其所有会话" +
+                $"(会话进「已删除」,{ChatCenter.TrashRetentionDays} 天内可恢复)。",
+                confirmText: "删除项目", danger: true);
+            if (!ok) return;
+            Chat.DeleteProjectSessions(p.ProjectId);
+            Projects.Delete(p.ProjectId);
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 

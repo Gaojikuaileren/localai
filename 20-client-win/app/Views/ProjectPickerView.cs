@@ -93,7 +93,16 @@ public sealed class ProjectPickerView : UserControl
         var body = new StackPanel();
         body.Children.Add(folder);
         body.Children.Add(name);
-        body.Children.Add(ProjectUi.StatusChip(p.Status));
+        var footer = new StackPanel { Orientation = Orientation.Horizontal };
+        if (p.Pinned)
+        {
+            // 置顶标记:小圆点(置顶的项目排最前,见 ProjectCenter.Ongoing)
+            var pinDot = new System.Windows.Shapes.Ellipse { Width = 5, Height = 5, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center };
+            pinDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "Accent");
+            footer.Children.Add(pinDot);
+        }
+        footer.Children.Add(ProjectUi.StatusChip(p.Status));
+        body.Children.Add(footer);
 
         // 三个点(右上角),点开菜单;编辑项目 -> 在本抽屉内用编辑器取代网格
         var dots = ProjectUi.DotsButton(p, () => ShowEditor(p));

@@ -26,6 +26,7 @@ public sealed class ChatView : UserControl
 
     readonly TextBlock _ctxTitle = new() { FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly StackPanel _backBtnHost = new() { Orientation = Orientation.Horizontal };
+    readonly ContentControl _ghostHost = new();   // 幽灵按钮:仅普通会话显示,且随幽灵状态换实线/虚线
     readonly StackPanel _sessions = new();
     readonly ContentControl _conv = new();   // 会话区(空态居中 / 有消息则底部输入)
     TextBox _input = new();
@@ -40,20 +41,25 @@ public sealed class ChatView : UserControl
         _ctxTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         _ctxTitle.FontWeight = FontWeights.SemiBold;
 
-        // ---- 右:会话列表(常驻)。顶部:上下文标题 + 幽灵会话(仅聊天)+ 新建 ----
+        // ---- 右:会话列表(常驻)。★ 标题独占上面一行(可换行显示两排,长项目名不再被截断);
+        //      交互按钮(返回普通 / 幽灵 / 新建)放在标题【下面】一行(用户裁定)。
+        _ctxTitle.TextWrapping = TextWrapping.Wrap;
+        _ctxTitle.MaxHeight = 42;                      // 约两行
+        _ctxTitle.TextTrimming = TextTrimming.CharacterEllipsis;
+        _ctxTitle.Margin = new Thickness(2, 0, 2, 6);
+
         var newBtn = Ui.PlusButton(NewSession, "新建会话");
-        var head = new DockPanel { LastChildFill = true, Margin = new Thickness(2, 0, 0, 6) };
+        var actions = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
         DockPanel.SetDock(newBtn, Dock.Right);
-        head.Children.Add(newBtn);
-        if (_wsKey == "chat")
-        {
-            var ghostBtn = GhostButton();
-            DockPanel.SetDock(ghostBtn, Dock.Right);
-            head.Children.Add(ghostBtn);
-        }
-        DockPanel.SetDock(_backBtnHost, Dock.Right);
-        head.Children.Add(_backBtnHost);
+        actions.Children.Add(newBtn);
+        DockPanel.SetDock(_ghostHost, Dock.Right);
+        actions.Children.Add(_ghostHost);
+        DockPanel.SetDock(_backBtnHost, Dock.Left);
+        actions.Children.Add(_backBtnHost);
+
+        var head = new StackPanel();
         head.Children.Add(_ctxTitle);
+        head.Children.Add(actions);
 
         var sessDock = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(head, Dock.Top);
@@ -185,6 +191,9 @@ public sealed class ChatView : UserControl
         BuildConversation();
     }
 
+    /// <summary>当前是否处在幽灵会话里。</summary>
+    bool InGhost => _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
+
     void UpdateContext()
     {
         var inProject = _projectId is not null;
@@ -193,12 +202,16 @@ public sealed class ChatView : UserControl
         _ctxTitle.SetResourceReference(TextBlock.ForegroundProperty, inProject ? "Accent" : "FgPrimary");
         _backBtnHost.Children.Clear();
         if (inProject) _backBtnHost.Children.Add(BackChip());
+
+        // 幽灵按钮:★ 只在【普通会话】上下文显示(项目会话里不给);图标在幽灵中转【实线】,退出后回【虚线】。
+        _ghostHost.Content = (_wsKey == "chat" && !inProject) ? GhostButton(InGhost) : null;
     }
 
     // ---------------------------------------------------------------- 会话列表
     void BuildSessions()
     {
         UpdateContext();
+        RefreshTrashCount();
         _sessions.Children.Clear();
         _sessionRows.Clear();
         var list = (_projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions(_wsKey)).ToList();
@@ -208,6 +221,14 @@ public sealed class ChatView : UserControl
             return;
         }
         foreach (var s in list) { var row = SessionRow(s); _sessionRows[s.SessionId] = row; _sessions.Children.Add(row); }
+    }
+
+    /// <summary>刷新底部"已删除 (N)"的计数(顺带清掉过期项)。</summary>
+    void RefreshTrashCount()
+    {
+        if (_trashLabel is null) return;
+        var n = TheApp.Chat.DeletedCount(_wsKey);
+        _trashLabel.Text = n > 0 ? $"已删除 ({n})" : "已删除";
     }
 
     FrameworkElement SessionRow(ChatSession s)
@@ -506,7 +527,7 @@ public sealed class ChatView : UserControl
             _sessionId = empty.SessionId;
             BuildSessions();
             BuildConversation();
-            if (_sessionRows.TryGetValue(empty.SessionId, out var row)) Shake(row);
+            if (_sessionRows.TryGetValue(empty.SessionId, out var row)) Ui.Shake(row);
             _input.Focus();
             return;
         }
@@ -517,22 +538,6 @@ public sealed class ChatView : UserControl
         BuildSessions();
         BuildConversation();
         _input.Focus();
-    }
-
-    // 左右小幅震荡,提示"这个空会话已经在了,别重复建"。用往返 + 重复的位移动画,结束回原位。
-    static void Shake(FrameworkElement el)
-    {
-        var t = new TranslateTransform();
-        el.RenderTransform = t;
-        var a = new System.Windows.Media.Animation.DoubleAnimation
-        {
-            From = -6, To = 6,
-            Duration = TimeSpan.FromMilliseconds(55),
-            AutoReverse = true,
-            RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(3),
-            FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop,   // 结束回到基值 0
-        };
-        t.BeginAnimation(TranslateTransform.XProperty, a);
     }
 
     void SendCurrent()
@@ -592,7 +597,7 @@ public sealed class ChatView : UserControl
     void PasteClipboard()
     {
         var img = Clipboard.GetImage();
-        if (img is null) { MessageBox.Show("剪贴板里没有图片。先截个图再试。", "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (img is null) { ConfirmDialog.Show("剪贴板里没有图片", "先截个图再试。", confirmText: "好", cancelText: "关闭"); return; }
         try
         {
             // 落一份预览 png 到本机临时目录(仅供显示 + 给 AI 一个可读路径;不通过网络发送内容)
@@ -606,7 +611,7 @@ public sealed class ChatView : UserControl
             _pending.Add(new ChatAttachment(AttachKind.Clipboard, tmp, "剪贴板截图"));
             BuildConversation();
         }
-        catch (Exception ex) { MessageBox.Show("读取剪贴板图片失败:" + ex.Message, "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information); }
+        catch (Exception ex) { ConfirmDialog.Show("读取剪贴板图片失败", ex.Message, confirmText: "好", cancelText: "关闭"); }
     }
 
     FrameworkElement PendingStrip()
@@ -684,12 +689,13 @@ public sealed class ChatView : UserControl
         var chev = new System.Windows.Shapes.Path
         {
             Data = Geometry.Parse("M7 1 L1 7 L7 13"),
-            Stretch = Stretch.Uniform, Width = 8, Height = 15, StrokeThickness = 1.8,
+            Stretch = Stretch.Uniform, Width = 6, Height = 13, StrokeThickness = 1.6,
             StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round,
             IsHitTestVisible = false, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
         chev.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
-        var b = new Border { Child = chev, Width = 26, Height = 120, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = "选择项目" };
+        // 宽度砍半(13),高度不变(用户裁定)
+        var b = new Border { Child = chev, Width = 13, Height = 120, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = "选择项目" };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         b.SetResourceReference(Border.BorderBrushProperty, "Border");
         b.BorderThickness = new Thickness(1);
@@ -708,26 +714,35 @@ public sealed class ChatView : UserControl
         (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer("项目", picker, IconName.Folder);
     }
 
-    // 幽灵会话按钮(仅聊天):虚线小圈,开一个不留痕的会话
-    FrameworkElement GhostButton()
+    // 幽灵会话按钮:虚线小圈 = 未进入;【实线】= 正在幽灵会话中(再按一次退出,用户裁定)。
+    FrameworkElement GhostButton(bool active)
     {
         var ring = new System.Windows.Shapes.Ellipse
         {
-            Width = 13, Height = 13, StrokeThickness = 1.4,
-            StrokeDashArray = new DoubleCollection { 2, 1.6 },
+            Width = 13, Height = 13, StrokeThickness = active ? 1.8 : 1.4,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
         };
-        ring.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
-        var b = new Border { Child = ring, Width = 26, Height = 26, Margin = new Thickness(0, 0, 4, 0), Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = "幽灵会话:不保留记录、不纳入记忆" };
+        if (!active) ring.StrokeDashArray = new DoubleCollection { 2, 1.6 };   // 未进入 = 虚线
+        ring.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, active ? "Accent" : "FgSecondary");
+
+        var b = new Border
+        {
+            Child = ring, Width = 26, Height = 26, Margin = new Thickness(0, 0, 4, 0),
+            Cursor = Cursors.Hand, Background = Brushes.Transparent,
+            ToolTip = active ? "退出幽灵会话(回到普通会话)" : "幽灵会话:不保留记录、不纳入记忆",
+        };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        if (active) b.SetResourceReference(Border.BackgroundProperty, "BgSelected");
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
-        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
-        b.MouseLeftButtonUp += (_, _) => StartGhost();
+        b.MouseLeave += (_, _) => { if (active) b.SetResourceReference(Border.BackgroundProperty, "BgSelected"); else b.Background = Brushes.Transparent; };
+        b.MouseLeftButtonUp += (_, _) => ToggleGhost();
         return b;
     }
 
-    void StartGhost()
+    /// <summary>进入 / 退出幽灵会话。退出即抹除该会话并回到普通会话(可退出 —— 用户反馈"按下之后无法退出")。</summary>
+    void ToggleGhost()
     {
+        if (InGhost) { ToNormal(); return; }   // ToNormal 会 PurgeGhosts + 选回普通会话
         var g = TheApp.Chat.NewGhostSession(_wsKey);
         _sessionId = g.SessionId;
         BuildSessions();

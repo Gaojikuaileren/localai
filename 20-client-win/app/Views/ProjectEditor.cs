@@ -78,7 +78,7 @@ public static class ProjectEditor
         var save = Ui.Primary(existing is null ? "创建项目" : "保存", (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(name.Text)) { name.Focus(); return; }
-            if (folder is null) { MessageBox.Show("请先为项目选择一个文件夹。", "本地 AI 中枢", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+            if (folder is null) { ConfirmDialog.Show("还没选文件夹", "请先为项目选择一个文件夹。", confirmText: "好", cancelText: "关闭"); return; }
             var ai = (AiPermission)Math.Max(0, aiPerm.SelectedIndex);
             var atts = attachSlots.Select(x => x.Get()).Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v!).ToList();
             if (existing is null)

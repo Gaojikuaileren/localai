@@ -434,8 +434,8 @@ public partial class MainWindow : Window
     public void NavigateToProject(string workspaceKey, string projectId)
     {
         Navigate(workspaceKey);
+        // 所有工作空间现在都是 ChatView(会话/项目外壳),不再有 PlaceholderView 分支
         if (ContentHost.Content is ChatView cv) cv.SelectProject(projectId);
-        else if (ContentHost.Content is PlaceholderView ph) ph.ShowPendingProject(projectId);
         TheApp.Projects.Touch(projectId);
     }
 

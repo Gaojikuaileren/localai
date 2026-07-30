@@ -335,6 +335,7 @@ public static class Selftest
                 Assert(picker.Contains("IconName.Folder") && picker.Contains("UniformGrid"), "项目选择器用田字形文件夹图标");
                 Assert(picker.Contains("ProjectUi.DotsButton") && picker.Contains("ShowEditor"), "项目用三个点菜单;编辑取代网格");
                 Assert(picker.Contains("_onPick(p.ProjectId)") && !picker.Contains("Overlay.CloseActive(); _onPick"), "选中项目不自动关抽屉(用户确认)");
+                Assert(picker.Contains("p.Pinned"), "项目选择器显示置顶标记");
             }
             var editorSrc = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
             if (editorSrc is not null)
@@ -353,6 +354,12 @@ public static class Selftest
                 Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PasteClipboard") && chatSrc.Contains("PickFile"), "可加附件/图片/剪贴板截图");
                 Assert(chatSrc.Contains("GhostButton") && chatSrc.Contains("虚线") || chatSrc.Contains("StrokeDashArray"), "幽灵会话:虚线边框会话面板");
                 Assert(chatSrc.Contains("OpenTrash") && chatSrc.Contains("已删除"), "会话列表底部有【已删除】入口");
+                // 幽灵会话可退出:按钮是开关,状态决定实线/虚线,且只在普通会话上下文出现
+                Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal(); return; }"), "幽灵按钮可【退出】(再按回普通会话)");
+                Assert(chatSrc.Contains("GhostButton(bool active)") && chatSrc.Contains("if (!active) ring.StrokeDashArray"), "幽灵中=实线,未进入=虚线");
+                Assert(chatSrc.Contains("(_wsKey == \"chat\" && !inProject) ? GhostButton(InGhost) : null"), "项目会话下不显示幽灵按钮");
+                Assert(chatSrc.Contains("_ctxTitle.MaxHeight = 42") && chatSrc.Contains("_ctxTitle.TextWrapping = TextWrapping.Wrap"), "长项目名可显示两排,交互按钮另起一行");
+                Assert(chatSrc.Contains("Width = 13, Height = 120"), "项目箭头宽度砍半、高度不变");
             }
 
             // 附件:只带路径/剪贴板指令,不真发内容;发送记录附件且仍不伪造回复
@@ -402,7 +409,20 @@ public static class Selftest
             }
             var projUi = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
             if (projUi is not null)
-                Assert(projUi.Contains("删除项目") && projUi.Contains("DangerFilled"), "项目菜单含删除项目 + 红色二次确认");
+            {
+                Assert(projUi.Contains("删除项目") && projUi.Contains("ConfirmDialog.Show"), "项目菜单含删除项目 + 自绘二次确认(修:点了没反应)");
+                Assert(projUi.Contains("置顶项目"), "项目菜单可置顶");
+                Assert(!projUi.Contains("MessageBox.Show"), "项目菜单不再用系统弹窗");
+            }
+            var dlg = TryReadSource(Path.Combine("Views", "ConfirmDialog.cs"));
+            if (dlg is not null)
+                Assert(dlg.Contains("WindowStyle.None") && dlg.Contains("DangerFilled"), "确认框是自绘窗口(非系统 MessageBox)");
+            var ctlMenu = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+            if (ctlMenu is not null)
+            {
+                Assert(ctlMenu.Contains("TargetType=\"ContextMenu\"") && ctlMenu.Contains("TargetType=\"MenuItem\""), "三点菜单走我们的风格(不再系统原生)");
+                Assert(ctlMenu.Contains("TargetType=\"Separator\""), "菜单分隔线也主题化");
+            }
             var ctl2 = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
             if (ctl2 is not null)
                 Assert(ctl2.Contains("TargetType=\"Button\""), "按钮有统一圆角样式(发送等按钮不再方角)");
