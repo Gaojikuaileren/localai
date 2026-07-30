@@ -95,6 +95,9 @@ public sealed class SettingsView : UserControl
 
             AppleSyncCard(),
 
+            // 存储与清理 + 记忆库编辑(用户裁定:一键清爽 + 勾选执行内容;记忆可预览删减)
+            new StorageView(),
+
             // 连接与设备:已配对的电脑、配对/解除 —— 从独立导航项并入设置(用户裁定)
             Ui.Subtitle(Strings.Get("devices.title")),
             new DevicesView(embedded: true)

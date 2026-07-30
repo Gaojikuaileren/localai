@@ -763,6 +763,66 @@ public static class Selftest
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
 
+            // ---- 记忆库 + 存储清理(2026-07-30 用户裁定)----
+            {
+                var mc = new Services.MemoryCenter();
+                var old = new Services.MemoryEntry(Services.MemoryCenter.NewId(), "很久没用的摘要", "正文", Services.MemoryKind.Summary,
+                    Services.ProjectScope.Personal, Services.MemberContext.Current, null, new[] { "s-1" }, DateTime.Now.AddDays(-90));
+                var pinned = new Services.MemoryEntry(Services.MemoryCenter.NewId(), "置顶的老摘要", "正文", Services.MemoryKind.Summary,
+                    Services.ProjectScope.Personal, Services.MemberContext.Current, null, null, DateTime.Now.AddDays(-90), Pinned: true);
+                var pref = new Services.MemoryEntry(Services.MemoryCenter.NewId(), "老偏好", "正文", Services.MemoryKind.Preference,
+                    Services.ProjectScope.Personal, Services.MemberContext.Current, null, null, DateTime.Now.AddDays(-90));
+                var fresh = new Services.MemoryEntry(Services.MemoryCenter.NewId(), "刚用过", "正文", Services.MemoryKind.Summary,
+                    Services.ProjectScope.Personal, Services.MemberContext.Current, null, null, DateTime.Now.AddDays(-90), LastUsedAt: DateTime.Now);
+                foreach (var m in new[] { old, pinned, pref, fresh }) mc.Add(m);
+
+                var plan = mc.PlanAutoClean(30, 0);
+                Assert(plan.Any(x => x.Id == old.Id), "自动清理:长期没用到的摘要进清单");
+                Assert(!plan.Any(x => x.Id == pinned.Id), "★ 置顶的永不自动清理");
+                Assert(!plan.Any(x => x.Id == pref.Id), "★ 偏好/事实类永不自动清理(只清摘要)");
+                Assert(!plan.Any(x => x.Id == fresh.Id), "最近用过的不清");
+                Assert(mc.Items.Count == 4, "★ 预演不动数据(先列清单、确认后才删)");
+                Assert(mc.ApplyClean(plan) == plan.Count && mc.Items.Count == 3, "确认后才真的删");
+                Assert(mc.PlanAutoClean(0, 0).Count == 0, "两条规则都为 0 = 关闭,不清任何东西");
+
+                // 原文被删 -> 记忆标注出来(避免以后点回原文是死链)
+                var m2 = new Services.MemoryEntry(Services.MemoryCenter.NewId(), "带来源的", "正文", Services.MemoryKind.Summary,
+                    Services.ProjectScope.Personal, Services.MemberContext.Current, "prj-1", new[] { "s-9" }, DateTime.Now);
+                mc.Add(m2);
+                mc.MarkOriginalsDeleted(new[] { "s-9" });
+                Assert(mc.Find(m2.Id)!.SourceOriginalsDeleted, "★ 原文删除后记忆标注「原文已删除」(不留死链)");
+
+                // D45:别人的个人记忆不出现
+                mc.Add(new Services.MemoryEntry(Services.MemoryCenter.NewId(), "别人的私人记忆", "正文", Services.MemoryKind.Summary,
+                    Services.ProjectScope.Personal, "m-other", null, null, DateTime.Now));
+                Assert(!mc.Visible().Any(x => x.Title == "别人的私人记忆"), "★ 记忆库同样守 D45(别人的私人记忆不出现)");
+
+                // JSON 往返
+                var mj = System.Text.Json.JsonSerializer.Serialize(mc.Export(), StoreJson);
+                var mb = new Services.MemoryCenter();
+                mb.Import(System.Text.Json.JsonSerializer.Deserialize<List<Services.MemoryEntry>>(mj, StoreJson));
+                Assert(mb.Items.Count == mc.Items.Count, "记忆库 JSON 往返");
+                Assert(mc.Bytes() > 0, "记忆库占用可计算(真算字节,不估)");
+            }
+            Assert(Services.StorageUsage.Human(-1) == "—", "没有的项显示「—」而不是 0");
+            Assert(Services.StorageUsage.Human(1536).StartsWith("1.5"), "占用按 KB/MB 可读显示");
+            var svSrc = TryReadSource(Path.Combine("Views", "StorageView.cs"));
+            if (svSrc is not null)
+            {
+                Assert(svSrc.Contains("一键清爽") && svSrc.Contains("TidyClearCache") && svSrc.Contains("TidyDeleteArchivedOriginals"),
+                       "一键清爽 + 勾选决定执行哪些动作");
+                Assert(svSrc.Contains("AI 尚未接入"), "★ 整理摘要在 AI 未接入时【不做事】并如实说明(不拼假摘要)");
+                Assert(svSrc.Contains("不可逆") && svSrc.Contains("ConfirmDialog.Show(\"删除归档原文\""),
+                       "★ 删除归档原文单独二次确认(勾了也要再确认)");
+                Assert(svSrc.Contains("记忆库是空的"), "记忆库空态如实说明是因为 AI 未接入");
+            }
+            var setDefaults = new Services.AppSettings();
+            Assert(setDefaults.TidyDeleteArchivedOriginals == false, "★「删除归档原文」默认【不勾】(危险项不能默认开)");
+            Assert(setDefaults.TidyClearCache && setDefaults.TidySummarize, "安全项默认勾上");
+            Assert(setDefaults.MemoryAutoCleanDays == 0 && setDefaults.MemoryMaxMB == 0, "记忆库自动清理默认关闭");
+            Assert(setDefaults.SummaryTrigger == "ai", "摘要默认由 AI 自行判断何时整理");
+            Assert(setDefaults.SummaryThresholdChars > 0, "整理阈值有默认值且可在设置里改");
+
             // ---- 项目文件夹唯一性:同路径只能一个项目;子路径不算;跨机器不算 ----
             {
                 var root = Path.Combine(Path.GetTempPath(), "localai-uniq-" + Guid.NewGuid().ToString("N")[..6]);

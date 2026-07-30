@@ -78,6 +78,29 @@ public sealed class AppSettings
     /// <summary>主页待办板块当前显示的分类(all/today/personal/chore/shopping)。每台设备各自的偏好。</summary>
     public string HomeTodoFilter { get; set; } = "all";
 
+    // ---- 会话整理 / 记忆库(用户裁定 2026-07-30)----
+    /// <summary>摘要触发方式:"ai" = AI 自己判断何时整理(默认);"manual" = 只在设置里手动点。</summary>
+    public string SummaryTrigger { get; set; } = "ai";
+
+    /// <summary>
+    /// 会话整理阈值。★ 真正的约束是模型上下文窗口,但模型未接入(P4),先用【字符数估算】顶着,
+    /// 接入后换成真 tokenizer 计数。用户可在设置里改。0 = 不按阈值提醒。
+    /// </summary>
+    public int SummaryThresholdChars { get; set; } = 120_000;
+
+    /// <summary>记忆库自动清理:超过 X 天没被用到就清(0 = 关闭)。★ 置顶与 事实/偏好 类永不清。</summary>
+    public int MemoryAutoCleanDays { get; set; }
+
+    /// <summary>记忆库总量上限 MB,超了从最旧的开始清(0 = 不限)。</summary>
+    public int MemoryMaxMB { get; set; }
+
+    // ---- 「一键清爽」按钮执行哪些动作(用户勾选;危险项默认不勾)----
+    public bool TidyClearCache { get; set; } = true;         // 安全
+    public bool TidySummarize { get; set; } = true;          // 安全(只增不减);AI 未接入时不做事
+    public bool TidyCleanMemory { get; set; }                 // 按上面的规则,先预演再删
+    /// <summary>★ 不可逆:删除已归档的会话原文。默认【不勾】,勾了执行前仍要单独确认。</summary>
+    public bool TidyDeleteArchivedOriginals { get; set; }
+
     /// <summary>
     /// 自动删除【超过 X 天】的已完成待办。0 = 不自动删除(默认,保守:不替用户丢东西)。
     /// 在"待办 › 已完成"抽屉里设置。
