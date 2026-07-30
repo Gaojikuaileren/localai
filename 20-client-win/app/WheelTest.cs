@@ -84,8 +84,33 @@ public static class WheelTest
         }
         Save(Themed(icons), Path.Combine(outDir, "icons.png"), 340, 80);
 
-        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png");
+        // ★ 墨白皮肤下"选中项目"的可读性核对(用户反馈曾黑底黑字)。切到 Ink 皮肤渲染选中 vs 未选中两块。
+        ThemeManager.Initialize(Skin.Ink);
+        var pair = new StackPanel { Orientation = Orientation.Horizontal };
+        pair.Children.Add(InkTile("家庭旅行计划", selected: true));
+        pair.Children.Add(new Border { Width = 12 });
+        pair.Children.Add(InkTile("客厅灯光方案", selected: false));
+        Save(Themed(pair), Path.Combine(outDir, "ink-selected-tile.png"), 300, 150);
+
+        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;
+    }
+
+    // 复刻 ProjectPickerView.FolderTile 的选中/未选中观感,用来在墨白皮肤下核对对比度。
+    static FrameworkElement InkTile(string title, bool selected)
+    {
+        var body = new StackPanel();
+        body.Children.Add(Icons.Make(IconName.Folder, 34, selected ? "FgOnSelected" : "FgSecondary"));
+        var nm = new TextBlock { Text = title, Margin = new Thickness(0, 6, 0, 0), FontSize = 12 };
+        nm.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : "FgPrimary");
+        body.Children.Add(nm);
+        var chip = ProjectUi.StatusChip(ProjectStatus.Active, selected ? "FgOnSelected" : null);
+        body.Children.Add(chip);
+        var tile = new Border { Child = body, Width = 120, Height = 100, Padding = new Thickness(12), BorderThickness = new Thickness(selected ? 2 : 1) };
+        tile.SetResourceReference(Border.BackgroundProperty, selected ? "BgSelected" : "BgSurface");
+        tile.SetResourceReference(Border.BorderBrushProperty, selected ? "Accent" : "Border");
+        tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        return tile;
     }
 
     // 用皮肤的窗口底色垫一层,还原真实观感(而不是纯白)

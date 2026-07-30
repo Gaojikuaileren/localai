@@ -777,23 +777,32 @@ public sealed class ChatView : UserControl
             IsHitTestVisible = false, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
         chev.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
-        // 宽度砍半(13),高度不变(用户裁定)
-        var b = new Border { Child = chev, Width = 13, Height = 120, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = "选择项目" };
-        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        // ★ 用户裁定:不要高度居中的小按钮,而是【整条竖直的窄把手】——
+        //   视觉上像"右边露出一小节没完全展开的面板",点到任意处都拉开项目抽屉。
+        //   注意:这只是【视觉暗示】,本体就是一个按钮(不是真的把抽屉内容漏在这里,
+        //   否则改窗口大小会露馅)。左侧圆角 + 面板底色,像一块被右缘截断的面板边。
+        var b = new Border
+        {
+            Child = chev, Width = 16, Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Stretch,   // 撑满整个会话区高度
+            Cursor = Cursors.Hand, CornerRadius = new CornerRadius(8, 0, 0, 8),
+            BorderThickness = new Thickness(1, 1, 0, 1),      // 右缘不描边 = 像延伸出画面
+            ToolTip = "项目 · 点击展开",
+        };
+        b.SetResourceReference(Border.BackgroundProperty, "BgSunken");   // 面板感底色,非透明
         b.SetResourceReference(Border.BorderBrushProperty, "Border");
-        b.BorderThickness = new Thickness(1);
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
-        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeave += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgSunken");
         b.MouseLeftButtonUp += (_, _) => OpenPicker();
         return b;
     }
 
     void OpenPicker()
     {
-        // 选中不自动关抽屉(用户裁定)—— 切上下文即可,关闭交给用户点关闭/点外部。
+        // 用户裁定:选【项目】不关抽屉(让用户确认选了哪个);选【普通会话】直接收起抽屉。
         var picker = new ProjectPickerView(_wsKey, _projectId,
             onPick: SelectProject,
-            onNormal: ToNormal);
+            onNormal: () => { ToNormal(); Overlay.CloseActive(); });
         (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer("项目", picker, IconName.Folder);
     }
 
@@ -806,7 +815,8 @@ public sealed class ChatView : UserControl
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
         };
         if (!active) ring.StrokeDashArray = new DoubleCollection { 2, 1.6 };   // 未进入 = 虚线
-        ring.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, active ? "Accent" : "FgSecondary");
+        // 进入态底色是 BgSelected(墨白近黑),圈色走 FgOnSelected 才不会黑底黑圈(统一高亮规则)
+        ring.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, active ? "FgOnSelected" : "FgSecondary");
 
         var b = new Border
         {

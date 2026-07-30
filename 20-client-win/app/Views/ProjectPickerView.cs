@@ -63,16 +63,32 @@ public sealed class ProjectPickerView : UserControl
     {
         _editing = false;
         var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 只看本工作空间的项目
+
+        var panel = new StackPanel();
+        // ★ 选中某项目后给出文字提示:选择不关抽屉,用这句告诉用户"接下来就是基于它开会话"(用户裁定)。
+        if (_current is not null)
+        {
+            var proj = TheApp.Projects.Find(_current);
+            var hint = Ui.Panel("已选择项目",
+                Ui.Stack(
+                    Ui.Body($"「{proj?.Title ?? "项目"}」", muted: false),
+                    Ui.Caption("已切到该项目会话 —— 右侧新建/发送即【基于该项目开始会话】。选好后点空白处或关闭按钮收起。")),
+                IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+            panel.Children.Add(hint);
+        }
+
         if (items.Count == 0)
         {
-            _body.Content = Ui.Stack(
-                Ui.Body("还没有进行中的项目。", muted: true),
-                Ui.Caption("点右上角 + 新建;已完成的在主页「项目库」。"));
-            return;
+            panel.Children.Add(Ui.Body("还没有进行中的项目。", muted: true));
+            panel.Children.Add(Ui.Caption("点右上角 + 新建;已完成的在主页「项目库」。"));
         }
-        var grid = new UniformGrid { Columns = 2 };
-        foreach (var p in items) grid.Children.Add(FolderTile(p));
-        _body.Content = grid;
+        else
+        {
+            var grid = new UniformGrid { Columns = 2 };
+            foreach (var p in items) grid.Children.Add(FolderTile(p));
+            panel.Children.Add(grid);
+        }
+        _body.Content = panel;
     }
 
     void ShowEditor(Project? existing)
@@ -83,11 +99,14 @@ public sealed class ProjectPickerView : UserControl
 
     FrameworkElement FolderTile(Project p)
     {
-        var folder = Icons.Make(IconName.Folder, 34, _current == p.ProjectId ? "Accent" : "FgSecondary");
+        // ★ 墨白皮肤统一高亮规则:选中态底色是 BgSelected(近黑),前景一律走 FgOnSelected(白),
+        //   否则就是"黑底黑字看不清"(用户反馈)。图标/标题/置顶点/状态字都照此。
+        var sel = _current == p.ProjectId;
+        var folder = Icons.Make(IconName.Folder, 34, sel ? "FgOnSelected" : "FgSecondary");
         folder.HorizontalAlignment = HorizontalAlignment.Left;
 
         var name = new TextBlock { Text = p.Title, TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.Wrap, MaxHeight = 34, Margin = new Thickness(0, 6, 0, 0) };
-        name.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        name.SetResourceReference(TextBlock.ForegroundProperty, sel ? "FgOnSelected" : "FgPrimary");
         name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
         var body = new StackPanel();
@@ -98,10 +117,10 @@ public sealed class ProjectPickerView : UserControl
         {
             // 置顶标记:小圆点(置顶的项目排最前,见 ProjectCenter.Ongoing)
             var pinDot = new System.Windows.Shapes.Ellipse { Width = 5, Height = 5, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center };
-            pinDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "Accent");
+            pinDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, sel ? "FgOnSelected" : "Accent");
             footer.Children.Add(pinDot);
         }
-        footer.Children.Add(ProjectUi.StatusChip(p.Status));
+        footer.Children.Add(ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null));
         body.Children.Add(footer);
 
         // 三个点(右上角),点开菜单;编辑项目 -> 在本抽屉内用编辑器取代网格

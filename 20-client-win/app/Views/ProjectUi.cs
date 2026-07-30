@@ -164,14 +164,14 @@ public static class ProjectUi
         return b;
     }
 
-    /// <summary>状态小圆点 + 文字,用于项目行/方块。</summary>
-    public static StackPanel StatusChip(ProjectStatus s)
+    /// <summary>状态小圆点 + 文字,用于项目行/方块。fgKey 非空时文字用它(选中态传 FgOnSelected 才不黑底黑字)。</summary>
+    public static StackPanel StatusChip(ProjectStatus s, string? fgKey = null)
     {
         var (label, key) = Status(s);
         var dot = new System.Windows.Shapes.Ellipse { Width = 7, Height = 7, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center };
-        dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, key);
+        dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, fgKey ?? key);
         var t = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center };
-        t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        t.SetResourceReference(TextBlock.ForegroundProperty, fgKey ?? "FgMuted");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         row.Children.Add(dot);

@@ -345,6 +345,8 @@ public static class Selftest
                 Assert(picker.Contains("ProjectUi.DotsButton") && picker.Contains("ShowEditor"), "项目用三个点菜单;编辑取代网格");
                 Assert(picker.Contains("_onPick(p.ProjectId)") && !picker.Contains("Overlay.CloseActive(); _onPick"), "选中项目不自动关抽屉(用户确认)");
                 Assert(picker.Contains("p.Pinned"), "项目选择器显示置顶标记");
+                Assert(picker.Contains("sel ? \"FgOnSelected\""), "★ 墨白皮肤:选中项目的图标/标题/状态走 FgOnSelected(不再黑底黑字)");
+                Assert(picker.Contains("基于该项目开始会话"), "选中项目后抽屉里提示【基于该项目开始会话】");
             }
             var editorSrc = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
             if (editorSrc is not null)
@@ -363,12 +365,14 @@ public static class Selftest
                 Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PickFiles") && chatSrc.Contains("OnInputPaste"), "可加附件(选文件/文件夹)+ 输入框粘贴截图");
                 Assert(chatSrc.Contains("GhostButton") && chatSrc.Contains("虚线") || chatSrc.Contains("StrokeDashArray"), "幽灵会话:虚线边框会话面板");
                 Assert(chatSrc.Contains("OpenTrash") && chatSrc.Contains("已删除"), "会话列表底部有【已删除】入口");
+                Assert(chatSrc.Contains("VerticalAlignment.Stretch") && chatSrc.Contains("CornerRadius(8, 0, 0, 8)"), "项目把手是整条竖直窄条(非高度居中小按钮)");
+                Assert(chatSrc.Contains("ToNormal(); Overlay.CloseActive()"), "选普通会话直接收起抽屉(选项目则不收)");
                 // 幽灵会话可退出:按钮是开关,状态决定实线/虚线,且只在普通会话上下文出现
                 Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal(); return; }"), "幽灵按钮可【退出】(再按回普通会话)");
                 Assert(chatSrc.Contains("GhostButton(bool active)") && chatSrc.Contains("if (!active) ring.StrokeDashArray"), "幽灵中=实线,未进入=虚线");
                 Assert(chatSrc.Contains("(_wsKey == \"chat\" && !inProject) ? GhostButton(InGhost) : null"), "项目会话下不显示幽灵按钮");
                 Assert(chatSrc.Contains("_ctxTitle.MaxHeight = 42") && chatSrc.Contains("_ctxTitle.TextWrapping = TextWrapping.Wrap"), "长项目名可显示两排,交互按钮另起一行");
-                Assert(chatSrc.Contains("Width = 13, Height = 120"), "项目箭头宽度砍半、高度不变");
+                Assert(chatSrc.Contains("Width = 16,") && chatSrc.Contains("BorderThickness = new Thickness(1, 1, 0, 1)"), "项目把手:窄条 + 右缘不描边(像被截断的面板)");
             }
 
             // 附件:只带路径/剪贴板指令,不真发内容;发送记录附件且仍不伪造回复
