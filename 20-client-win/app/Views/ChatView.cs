@@ -32,6 +32,7 @@ public sealed class ChatView : UserControl
     readonly DockPanel _actionsRow = new() { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
     bool _trashOpen;      // 已删除会话【覆盖板块】开着(覆盖普通会话列表,可返回)
     bool _wasEmptyState;  // 上一次会话区是"空态居中输入框"—— 用于居中→底部的滑动动画
+    readonly Dictionary<string, int> _seenMsgCount = new();   // 会话 -> 已经出现过的消息条数(只给新增的播动画)
     readonly StackPanel _sessions = new();
     readonly ContentControl _conv = new();   // 会话区(空态居中 / 有消息则底部输入)
     TextBox _input = new();
@@ -314,7 +315,7 @@ public sealed class ChatView : UserControl
         }
         var b = new Border { Child = d, Width = 26, Height = 26, Cursor = Cursors.Hand, Background = Brushes.Transparent };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; var menu = BuildSessionMenu(s, b); menu.PlacementTarget = b; menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom; menu.IsOpen = true; };
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; MenuHost.Show(BuildSessionMenu(s, b), b); };
         return b;
     }
 
@@ -473,7 +474,18 @@ public sealed class ChatView : UserControl
         {
             var inputArea = BuildInputArea(attachmentsBelow: false);
             var msgs = new StackPanel();
-            foreach (var m in TheApp.Chat.MessagesOf(_sessionId!)) msgs.Children.Add(Bubble(m));
+            // ★ 新发出的消息要有出现动画(用户裁定):只给【这次新增的那几条】播,
+            //   旧消息重建时不再重复动(否则每次刷新整屏乱跳)。
+            var all = TheApp.Chat.MessagesOf(_sessionId!).ToList();
+            var seenKey = _sessionId!;
+            var seen = _seenMsgCount.TryGetValue(seenKey, out var n) ? n : all.Count;   // 首次进会话不animate
+            for (int i = 0; i < all.Count; i++)
+            {
+                var bubble = Bubble(all[i]);
+                if (i >= seen) AnimateIn(bubble, delayMs: (i - seen) * 70);   // 用户消息 + 随后的系统说明依次浮现
+                msgs.Children.Add(bubble);
+            }
+            _seenMsgCount[seenKey] = all.Count;
             var scroll = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
             scroll.PassThrough();
             var dock = new DockPanel { LastChildFill = true };
@@ -596,6 +608,20 @@ public sealed class ChatView : UserControl
         branch.Margin = new Thickness(10, 0, 0, 0);
         row.Children.Add(branch);
         return row;
+    }
+
+    /// <summary>新消息浮现:从下方微微上移 + 淡入(缓出)。delayMs 让连着的几条依次出现。</summary>
+    static void AnimateIn(FrameworkElement el, int delayMs)
+    {
+        var t = new TranslateTransform { Y = 10 };
+        el.RenderTransform = t;
+        el.Opacity = 0;
+        var begin = TimeSpan.FromMilliseconds(delayMs);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        t.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(10, 0, TimeSpan.FromMilliseconds(260)) { BeginTime = begin, EasingFunction = ease });
+        el.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(260)) { BeginTime = begin, EasingFunction = ease });
     }
 
     // 会话面板外壳:普通=实心卡;幽灵=虚线边框 + 提示(不保留记录、不纳入记忆)。
@@ -763,7 +789,7 @@ public sealed class ChatView : UserControl
         mFolder.Click += (_, _) => PickChatFolder();
         menu.Items.Add(mFile);
         menu.Items.Add(mFolder);
-        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; menu.PlacementTarget = b; menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top; menu.IsOpen = true; };
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; MenuHost.Show(menu, b, System.Windows.Controls.Primitives.PlacementMode.Top); };
         return b;
     }
 

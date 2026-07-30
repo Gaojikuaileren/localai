@@ -74,11 +74,8 @@ public static class ProjectUi
     // ★ 菜单开着时点方块,应该【只关菜单】,不该顺势点进项目(用户反馈)。
     //   成因:关菜单发生在鼠标【按下】,而方块的动作挂在【松开】上 —— 松开那下就落到方块上了。
     //   办法:记下菜单关闭的时刻;方块在极短时间内(300ms)收到的点击一律忽略。
-    static DateTime _menuClosedAt = DateTime.MinValue;
-    static void NoteMenuClosed() => _menuClosedAt = DateTime.Now;
-
-    /// <summary>菜单刚关掉(300ms 内)—— 这一次点击只用于关菜单,调用方应直接 return。</summary>
-    public static bool JustClosedMenu() => (DateTime.Now - _menuClosedAt).TotalMilliseconds < 300;
+    /// <summary>菜单开着或刚关掉 —— 这一次点击只用于关菜单,调用方应直接 return(统一由 MenuHost 判)。</summary>
+    public static bool JustClosedMenu() => MenuHost.SwallowClick;
 
     /// <summary>
     /// 项目的下拉菜单(用户裁定:不用右键,改成【三个点】按钮拉出这个菜单)。
@@ -269,10 +266,7 @@ public static class ProjectUi
         {
             e.Handled = true;
             var menu = homeMenu ? BuildHomeMenu(p) : BuildMenu(p, onEdit, b, onNavigate);
-            menu.Closed += (_, _) => NoteMenuClosed();   // 关菜单那一下不要落到方块上
-            menu.PlacementTarget = b;
-            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
-            menu.IsOpen = true;
+            MenuHost.Show(menu, b);   // 统一出口:开/关状态由 MenuHost 记,点外部由主窗口一次性拦掉
         };
         return b;
     }

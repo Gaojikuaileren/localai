@@ -625,9 +625,7 @@ public sealed class HomeView : UserControl
                 };
                 m.Items.Add(mi);
             }
-            m.PlacementTarget = b;
-            m.Placement = PlacementMode.Bottom;
-            m.IsOpen = true;
+            MenuHost.Show(m, b);
         };
         return b;
     }

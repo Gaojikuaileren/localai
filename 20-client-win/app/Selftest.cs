@@ -443,7 +443,7 @@ public static class Selftest
             var puHit = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
             if (puHit is not null)
             {
-                Assert(puHit.Contains("JustClosedMenu") && puHit.Contains("menu.Closed"), "★ 菜单关闭那一下不会穿透到方块(不会顺势进项目)");
+                Assert(puHit.Contains("MenuHost.Show"), "★ 菜单统一走 MenuHost 出口(开关状态集中记录)");
                 Assert(puHit.Contains("Width = 34, Height = 30"), "三点按钮命中区放大");
                 Assert(puHit.Contains("PreviewMouseLeftButtonDown += (_, e) => e.Handled = true"), "按钮吃掉【按下】,避免松开落到方块");
             }
@@ -453,6 +453,33 @@ public static class Selftest
             var pkHit = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
             if (pkHit is not null)
                 Assert(pkHit.Contains("ProjectUi.JustClosedMenu()"), "抽屉方块点击前先判菜单是否刚关");
+            // ★ 浮层/菜单开着时,点背后【只关它】,不该顺带按到背后的按钮 —— 统一在主窗口拦
+            var mhSrc = TryReadSource(Path.Combine("Views", "MenuHost.cs"));
+            if (mhSrc is not null)
+                Assert(mhSrc.Contains("SwallowClick") && mhSrc.Contains("_openCount"), "MenuHost 记录菜单开/刚关状态");
+            var mwSwallow = TryReadSource("MainWindow.xaml.cs");
+            if (mwSwallow is not null)
+            {
+                Assert(mwSwallow.Contains("MenuHost.SwallowClick") && mwSwallow.Contains("me.Handled = true"),
+                       "★ 菜单开着时点背后:主窗口一次性吞掉这次点击(只关菜单)");
+                var pmd = mwSwallow[mwSwallow.IndexOf("PreviewMouseDown +=", StringComparison.Ordinal)..];
+                Assert(pmd.IndexOf("MenuHost.SwallowClick", StringComparison.Ordinal) < pmd.IndexOf("if (!Overlay.IsOpen) return;", StringComparison.Ordinal),
+                       "菜单判断排在 Overlay 之前(菜单不在 Overlay 体系里,漏判就会穿透)");
+            }
+            // 所有菜单都必须走 MenuHost,不能各自 IsOpen=true(否则漏登记 -> 又会穿透)
+            foreach (var f in new[] { Path.Combine("Views", "ChatView.cs"), Path.Combine("Views", "HomeView.cs"), Path.Combine("Views", "ProjectUi.cs") })
+            {
+                var src = TryReadSource(f);
+                if (src is null) continue;
+                Assert(!src.Contains("IsOpen = true"), $"{Path.GetFileName(f)} 不再自行开菜单(统一走 MenuHost)");
+            }
+            var cvAnim = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvAnim is not null)
+            {
+                Assert(cvAnim.Contains("AnimateIn(bubble") && cvAnim.Contains("_seenMsgCount"),
+                       "★ 发出的消息有出现动画,且只给新增的那几条播(旧消息重建不重复动)");
+            }
+
             var ctlTip = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
             if (ctlTip is not null)
                 Assert(ctlTip.Contains("TargetType=\"ToolTip\"") && ctlTip.Contains("Visibility\" Value=\"Collapsed"),

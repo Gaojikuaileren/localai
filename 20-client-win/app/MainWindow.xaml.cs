@@ -47,6 +47,10 @@ public partial class MainWindow : Window
         //   抽屉在本窗口内,故需放行落在抽屉内部的点击。
         PreviewMouseDown += (_, me) =>
         {
+            // ★ 菜单(三个点/分类等)开着或刚被这一下关掉:同样只关菜单,吞掉这次点击。
+            //   ContextMenu 是独立 Popup,WPF 在【按下】就把它关了,而按钮多挂在【松开】上,
+            //   不吞的话一次点击会顺带按到背后的按钮(用户反馈)。统一在这里拦,不靠各按钮自己判。
+            if (MenuHost.SwallowClick) { me.Handled = true; return; }
             if (!Overlay.IsOpen) return;
             if (me.OriginalSource is DependencyObject d && IsInsideDrawer(d)) return;   // 抽屉内部照常操作
             Overlay.CloseActive();
