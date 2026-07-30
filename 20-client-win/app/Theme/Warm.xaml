@@ -19,6 +19,9 @@
   <SolidColorBrush x:Key="AccentHover" Color="#C85B45"/>
   <!-- ★ 着重色反色。暖萌的着重色是陶土橙,反色取青 —— 在一片暖色里最跳。 -->
   <SolidColorBrush x:Key="AccentInverse" Color="#2E8B8B"/>
+
+  <!-- ★ 主题色:暖萌偏深一档的陶土 —— 身份色要沉一点,才压得住一片奶油底。 -->
+  <SolidColorBrush x:Key="ThemeColor"  Color="#B4553C"/>
   <SolidColorBrush x:Key="Border"      Color="#E8D8C7"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#D3BBA5"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#E2725B"/>

@@ -2567,6 +2567,16 @@ public static class Selftest
             //   一旦结构按皮肤分叉,任何改动都要在三套里各验一遍,而且必然有一套被忘掉。
             Assert(new Services.AppSettings().Skin == Services.Skin.Breeze, "★ 默认皮肤 = 微风(苹果风)");
             {
+                // ★ 皮肤的七个基色是【契约】:少一个,换肤时就会有地方拿不到颜色。
+                //   其中两条分工最容易糊,所以单独钉死:
+                //   · 着重色 = 可以点的/被选中的(交互);主题色 = 这是哪套皮肤(身份);
+                //   · 着重色反色 = 指出位置(与着重色对立,才不会和选中态混淆)。
+                var mwBrand = TryReadSource("MainWindow.xaml");
+                if (mwBrand is not null)
+                    Assert(mwBrand.Contains("Background=\"{DynamicResource ThemeColor}\""),
+                           "★ 品牌标记用主题色(身份),不用着重色 —— 否则看着像个能点的按钮");
+            }
+            {
                 // 结构性的按皮肤分叉必须【屈指可数且登记在案】。新增一处就会让这条挂掉,
                 // 逼着人回来确认"这真的必须按皮肤分结构吗,还是换个颜色令牌就够了"。
                 var forks = new List<string>();
@@ -2590,7 +2600,7 @@ public static class Selftest
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",
-                               "BorderStrong", "FocusRing", "BgSunken", "FgOnSelected", "AccentInverse",
+                               "BorderStrong", "FocusRing", "BgSunken", "FgOnSelected", "AccentInverse", "ThemeColor",
                                "RadiusSm", "RadiusMd", "RadiusLg" };
             // 开发/CI 环境下源码 Theme 目录在旁边,能逐皮肤核对令牌齐全;单文件发布里这些 xaml
             // 已编进程序集资源(磁盘上没有源码目录),此检查跳过 —— 运行时皮肤从 pack 资源正常加载。

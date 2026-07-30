@@ -92,7 +92,9 @@
 
         <!-- 品牌 -->
         <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
-          <Border Width="16" Height="16" CornerRadius="4" Background="{DynamicResource Accent}" Margin="0,0,9,0"/>
+          <!-- 品牌方块用【主题色】而不是着重色:它表示"这是哪套皮肤/哪个应用",不是一个可点的东西。
+               着重色留给"能点、被选中"的语义 —— 两者混用久了,用户会以为哪儿都能点。 -->
+          <Border Width="16" Height="16" CornerRadius="4" Background="{DynamicResource ThemeColor}" Margin="0,0,9,0"/>
           <TextBlock Text="本地 AI 中枢" FontWeight="SemiBold" FontSize="12.5"
                      Foreground="{DynamicResource FgPrimary}" VerticalAlignment="Center"/>
         </StackPanel>
