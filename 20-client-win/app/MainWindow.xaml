@@ -155,6 +155,7 @@
 
             <!-- 右:主副机 + token(点开用量表) -->
             <Button x:Name="StatusBlock" Cursor="Hand" Click="OnOpenUsage" ToolTip="查看 token 用量"
+                    Focusable="False" IsTabStop="False"
                     HorizontalContentAlignment="Stretch">
               <Button.Template>
                 <ControlTemplate TargetType="Button">
@@ -176,7 +177,7 @@
               </StackPanel>
             </Button>
           </DockPanel>
-          <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>
+          <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0" Focusable="False"/>
 
           <!-- 系统组【贴底】:扩展 / 设置。位于显存条上方、工作空间下方(用户裁定) -->
           <StackPanel x:Name="NavSystemPanel" DockPanel.Dock="Bottom" Margin="10,0,10,6"/>

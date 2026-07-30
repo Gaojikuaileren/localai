@@ -46,6 +46,12 @@ public partial class MainWindow : Window
         //   自己的按键处理(而且 TextBox 本来就把方向键标记为已处理,根本触发不到导航)。
         //   按钮/复选框设成不可聚焦之后方向键已无处可去,这条属于保险丝。
         KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None);
+        // ★★ Tab 导航【整棵树关死】。此前只靠拦 Tab 键 —— 用户实测焦点仍会跑到显存/token 那块上去,
+        //   而追到底是哪个控件漏了是没有尽头的(Control 的 Focusable 默认就是 true,
+        //   随便一个 ContentControl、一个内联模板的 Button 都算)。
+        //   这一句把 WPF 自己的 Tab 导航整体停掉,焦点只由 FocusPolicy 驱动 —— 从机制上断掉,不再打地鼠。
+        KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.None);
+        KeyboardNavigation.SetControlTabNavigation(this, KeyboardNavigationMode.None);
 
         // ★★ Tab 由我们自己接管:只在【可编辑的输入框】之间走(见 FocusPolicy)。
         //   为什么不靠给控件设 IsTabStop=False —— 那是打地鼠:Control 的 Focusable 默认就是 true,

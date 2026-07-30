@@ -83,13 +83,13 @@ public sealed class TranslationBar : UserControl
         Content = root;
 
         Refresh();
-        Loaded += (_, _) => { TheApp.Translation.Changed += Refresh; TheApp.Notes.Changed += Refresh; };
+        Loaded += (_, _) => { TheApp.Translation.Changed += Refresh; TheApp.History.Changed += Refresh; };
         // ★ 卸载时必须把拖拽善后掉:界面在拖到一半时被重建的话,鼠标捕获会跟着这个已经不在
         //   可视树上的控件走 —— 那之后整个窗口的点击都到不了别处(与"点不动"同一类事故)。
         Unloaded += (_, _) =>
         {
             TheApp.Translation.Changed -= Refresh;
-            TheApp.Notes.Changed -= Refresh;
+            TheApp.History.Changed -= Refresh;
             FinishDrag(null);
         };
     }
@@ -290,7 +290,7 @@ public sealed class TranslationBar : UserControl
         // 第一个空坑放「+」当作进设置的入口。
         _poolWrap.Children.Clear();
         var avail = TheApp.Settings.TranslationPool
-            .Where(c => !st.Contains(c) && Languages.Find(c) is not null)
+            .Where(c => !st.Contains(c) && c != _liftedFromPool && Languages.Find(c) is not null)
             .Take(PoolSlots)
             .ToList();
         for (int i = 0; i < PoolSlots; i++)
@@ -430,6 +430,12 @@ public sealed class TranslationBar : UserControl
     Border? _ghost;          // 跟着指针走的浮层气泡
     Lang? _dragLang;
     bool _dragFromTarget;
+    /// <summary>这次是从目标池拿起来的(落空要放回目标池)。</summary>
+    bool _liftedFromTarget;
+    /// <summary>正被拿在手上的语言池语言 —— 拖动期间它不出现在语言池里(已经在你手上了)。</summary>
+    string? _liftedFromPool;
+    Size _dragSize;
+    Point _dragOffset;
     bool _dragging;
     Point _dragStart;
 
@@ -438,6 +444,8 @@ public sealed class TranslationBar : UserControl
         // ★ 抓不到鼠标就【别开始拖】:抓不到的话松开事件不一定回到我们身上,
         //   处理器就会一直挂着、状态清不掉。宁可这一下不拖,也不要留个半拖状态。
         if (!CaptureMouse()) return;
+        _dragSize = new Size(source.ActualWidth, source.ActualHeight);   // 当场量,保证跟手上那张一样大
+        _dragOffset = e.GetPosition(source);                              // 抓在卡片的哪一点上
         _dragLang = l;
         _dragFromTarget = fromTarget;
         _dragging = false;
@@ -457,14 +465,31 @@ public sealed class TranslationBar : UserControl
             // 超过一点距离才算拖动 —— 否则轻轻一点也会被当成拖
             if (Math.Abs(p.X - _dragStart.X) < 4 && Math.Abs(p.Y - _dragStart.Y) < 4) return;
             _dragging = true;
+
+            // ★ 一旦真的开始拖,就把这个语言从【原板块】里拿掉,其余语言补位(用户裁定)。
+            //   手上那张卡才真是"被拿起来的那一张" —— 否则同一个语言会同时出现在两个地方,
+            //   看着像复制而不是搬运。落空了在 FinishDrag 里原样放回去。
+            _liftedFromTarget = _dragFromTarget;
+            if (_dragFromTarget) TheApp.Translation.RemoveTarget(_dragLang.Code);
+            else { _liftedFromPool = _dragLang.Code; RefreshPools(); }
+
+            // ★ 手上那张卡要和坑里那张【一模一样大】(用户裁定):
+            //   尺寸从被拿起的那个元素当场量,不是重新算一个 —— 差一点点就会露馅,
+            //   看着像另生成了一张卡,而不是我把这张拿起来了。
             _ghost = Bubble(_dragLang, _dragFromTarget);
+            _ghost.Width = _dragSize.Width;
+            _ghost.Height = _dragSize.Height;
+            _ghost.Margin = new Thickness(0);
+            _ghost.HorizontalAlignment = HorizontalAlignment.Left;
+            _ghost.VerticalAlignment = VerticalAlignment.Top;
             _ghost.Opacity = 0.9;
             _ghost.IsHitTestVisible = false;
             _overlay.Children.Add(_ghost);
         }
         if (_ghost is null) return;
-        Canvas.SetLeft(_ghost, p.X - 28);      // 让气泡大致贴在指针下方偏左,像被捏住
-        Canvas.SetTop(_ghost, p.Y - 14);
+        // 按【抓取时手指落在卡片上的那一点】偏移 —— 卡片不会在手里跳一下位置
+        Canvas.SetLeft(_ghost, p.X - _dragOffset.X);
+        Canvas.SetTop(_ghost, p.Y - _dragOffset.Y);
 
         // 目标高亮:指针落在哪个池子上就点亮哪个
         var overTarget = Hit(_targetBox, e);
@@ -498,21 +523,52 @@ public sealed class TranslationBar : UserControl
         _dragging = false;
 
         if (_ghost is not null) { _overlay.Children.Remove(_ghost); _ghost = null; }
-        if (lang is null || !wasDragging || e is null) return;
 
-        // 落点决定去留:语言池 -> 目标池 = 加;目标池 -> 语言池 = 移出(用户裁定:取消也是拖回去)
+        // 没真正拖起来(只是点了一下),或者拖到一半失去捕获 -> 原样还回去,不能把语言弄丢
+        if (lang is null || !wasDragging || e is null)
+        {
+            if (lang is not null && wasDragging && _liftedFromTarget) TheApp.Translation.AddTarget(lang.Code);
+            _liftedFromPool = null;
+            RefreshPools();
+            return;
+        }
+
+        // 拖起来的那一刻已经把它从原板块摘掉了,所以这里只决定【放到哪】:
+        //   · 落在目标池 -> 放进去;
+        //   · 落在语言池,或者落空 -> 回到语言池(= 不在目标池里,自然就在语言池里)。
+        // 语言池是"目标池之外的全部",不需要显式塞回去 —— 清掉暂借标记就恢复了。
         var landed = false;
-        if (!fromTarget && Hit(_targetBox, e)) landed = TheApp.Translation.AddTarget(lang.Code);
-        else if (fromTarget && Hit(_poolBox, e)) { TheApp.Translation.RemoveTarget(lang.Code); landed = true; }
-        if (landed) PlayLanding(e.GetPosition(this));   // 落地才有反馈,落空了没有
+        var toTarget = Hit(_targetBox, e);
+        if (toTarget) landed = TheApp.Translation.AddTarget(lang.Code);
+        else if (fromTarget && Hit(_poolBox, e)) landed = true;   // 目标池 -> 语言池:摘掉即完成
+
+        _liftedFromPool = null;                                   // 暂借结束,语言池恢复完整
+        RefreshPools();
+        if (landed) PlayLanding(e.GetPosition(this));             // 落地才有反馈,落空了没有
     }
 
-    // ---------------------------------------------------------------- 学习笔记(预览)
+    // ---------------------------------------------------------------- 翻译历史(预览)
+    // ★ 历史不另存原文,它是会话消息的一个【视图】(见 Services/TranslationHistory)——
+    //   原文已经在会话里,再存一份就有两份真相,删了会话历史还在,迟早对不上。
+    bool _favoritesOnly;
+
     FrameworkElement NotesCard()
     {
-        var card = Card(_notesPreview, "学习笔记",
-            action: Chip("全部", () => (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
-                "学习笔记", new NotesBoardView(), IconName.Translation)));
+        // 标题边上的星:切换"只看收藏"。右上角「全部历史」拉开抽屉看完整列表。
+        var star = Chip("★", () =>
+        {
+            _favoritesOnly = !_favoritesOnly;
+            RefreshNotes();
+        });
+        star.ToolTip = "只看收藏";
+        var all = Chip("全部历史", () => (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
+            "全部历史", new HistoryBoardView(), IconName.Translation));
+        var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(star);
+        actions.Children.Add(new Border { Width = 6 });
+        actions.Children.Add(all);
+
+        var card = Card(_notesPreview, "翻译历史", action: actions);
         // 间距统一由列宽给(见构造函数的 Gap),这里不再自带边距,否则会叠加成两倍
         return card;
     }
@@ -520,19 +576,15 @@ public sealed class TranslationBar : UserControl
     void RefreshNotes()
     {
         _notesPreview.Children.Clear();
-        var latest = TheApp.Notes.Items.OrderByDescending(n => n.CreatedAt ?? DateTime.MinValue).Take(4).ToList();
+        var latest = TheApp.History.Latest(5, _favoritesOnly);
         if (latest.Count == 0)
         {
-            _notesPreview.Children.Add(Ui.Caption("翻译结果右侧点收藏,就会存到这里(按语言分类)。"));
+            _notesPreview.Children.Add(Ui.Caption(_favoritesOnly
+                ? "还没有收藏 —— 在「全部历史」里点每条后面的星。"
+                : "翻过的内容会直接出现在这里,点一条跳回它在会话里的位置。"));
             return;
         }
-        foreach (var n in latest)
-        {
-            var line = new TextBlock { Text = $"[{Languages.NameOf(n.Lang)}] {n.Translation}", TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 0, 3) };
-            line.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            line.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            _notesPreview.Children.Add(line);
-        }
+        foreach (var e in latest) _notesPreview.Children.Add(HistoryBoardView.HistoryRow(e, showTime: false));
     }
 
     // ---------------------------------------------------------------- 小工具

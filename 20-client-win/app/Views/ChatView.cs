@@ -107,11 +107,13 @@ public sealed class ChatView : UserControl
         // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
         TheApp.Translation.Changed += RefreshSendEnabled;
+        TheApp.History.JumpRequested += OnJumpToHistory;
         Unloaded += (_, _) =>
         {
             TheApp.Chat.Changed -= OnChatChanged;
             TheApp.Projects.Changed -= UpdateContext;
             TheApp.Translation.Changed -= RefreshSendEnabled;
+            TheApp.History.JumpRequested -= OnJumpToHistory;
             TheApp.Chat.PurgeGhosts();
         };
     }
@@ -653,6 +655,23 @@ public sealed class ChatView : UserControl
         _sendBtn.Opacity = ok ? 1 : 0.45;
     }
 
+    /// <summary>正要跳去的那条消息(跳完清空)。用稳定标识,归档来回之后仍指向同一条。</summary>
+    string? _jumpToKey;
+
+    /// <summary>
+    /// 从翻译历史点一条 -> 选中它所在的会话、重建、滚到那条消息并闪一下。
+    /// ★ 用消息的稳定标识而不是下标:温层归档来回一次,下标就全变了。
+    /// </summary>
+    void OnJumpToHistory(string sessionId, string key)
+    {
+        if (_wsKey != "translation") return;          // 只有翻译空间的历史,别的空间不该被它牵着走
+        if (TheApp.Chat.Find(sessionId) is null) return;
+        _sessionId = sessionId;
+        _jumpToKey = key;
+        BuildSessions();
+        BuildConversation();
+    }
+
     void FocusInputIfPresent()
     {
         if (_input.IsLoaded) _input.Focus();
@@ -893,6 +912,26 @@ public sealed class ChatView : UserControl
             msgs.Children.Add(bubble);
         }
         if (animate) _seenMsgCount[sessionId] = all.Count;
+
+        // 从翻译历史跳过来的:滚到那一条并闪一下,不然用户不知道自己落在哪
+        if (_jumpToKey is { } want)
+        {
+            _jumpToKey = null;
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (all[i].StableKey != want) continue;
+                var target = msgs.Children[msgs.Children.Count - all.Count + i] as FrameworkElement;
+                if (target is null) break;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    target.BringIntoView();
+                    var flash = new DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
+                    { AutoReverse = true, RepeatBehavior = new RepeatBehavior(2) };
+                    target.BeginAnimation(OpacityProperty, flash);
+                }), System.Windows.Threading.DispatcherPriority.Loaded);
+                break;
+            }
+        }
     }
 
     /// <summary>消息区的滚动壳。★ 必须 PassThrough:嵌套 ScrollViewer 会把滚轮吃掉。</summary>

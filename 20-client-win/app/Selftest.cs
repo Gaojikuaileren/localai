@@ -1200,11 +1200,22 @@ public static class Selftest
                 var unl = tbSrc[tbSrc.IndexOf("Unloaded += (_, _) =>", StringComparison.Ordinal)..];
                 unl = unl[..400];
                 Assert(unl.Contains("FinishDrag(null)"), "★ 拖到一半被重建时释放鼠标捕获(否则整窗点不动)");
-                var drop = Slice(tbSrc, "// 落点决定去留", "if (landed)");
-                Assert(drop is not null && drop.Contains("Hit(_targetBox, e)) landed = TheApp.Translation.AddTarget"),
-                       "语言池 -> 目标池 = 加入");
-                Assert(drop is not null && drop.Contains("Hit(_poolBox, e)) { TheApp.Translation.RemoveTarget"),
-                       "★ 目标池取消 = 拖回语言池(用户裁定)");
+                // ★ 拖起来那一刻就把语言从原板块摘掉(用户裁定),所以落点只决定【放到哪】
+                var lift = Slice(tbSrc, "_liftedFromTarget = _dragFromTarget;", "_ghost = Bubble");
+                Assert(lift is not null && lift.Contains("RemoveTarget(_dragLang.Code)") && lift.Contains("_liftedFromPool = _dragLang.Code"),
+                       "★ 一开始拖就把该语言从原板块拿掉,其余补位");
+                var drop = Slice(tbSrc, "// 拖起来的那一刻已经把它从原板块摘掉了", "if (landed) PlayLanding");
+                Assert(drop is not null && drop.Contains("if (toTarget) landed = TheApp.Translation.AddTarget"),
+                       "落在目标池 = 放进去");
+                Assert(drop is not null && drop.Contains("_liftedFromPool = null"),
+                       "★ 落空或拖回语言池:清掉暂借标记就自动回到语言池");
+                var restore = Slice(tbSrc, "if (lang is null || !wasDragging || e is null)", "return;");
+                Assert(restore is not null && restore.Contains("_liftedFromTarget) TheApp.Translation.AddTarget"),
+                       "★ 拖到一半失去捕获也不能把语言弄丢(原样还回去)");
+                Assert(tbSrc.Contains("_ghost.Width = _dragSize.Width") && tbSrc.Contains("_dragSize = new Size(source.ActualWidth"),
+                       "★ 手上那张卡与坑里那张一样大(尺寸当场量,不重新算)");
+                Assert(tbSrc.Contains("Canvas.SetLeft(_ghost, p.X - _dragOffset.X)"),
+                       "按抓取点跟手,卡片不会在手里跳一下");
                 Assert(tbSrc.Contains("Chip(\"清空\"") && tbSrc.Contains("Targets.ToList()) TheApp.Translation.RemoveTarget"),
                        "目标池有【清空】按钮,一键全送回语言池");
                 Assert(tbSrc.Contains("CornerRadius(playful ? 8 : 14)"),
@@ -1217,7 +1228,12 @@ public static class Selftest
                        "两个池子各自用自己的宽度");
                 Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 3)", StringComparison.Ordinal) > 0,
                        "★ 学习笔记占剩余空间(比两个池子宽)");
-                Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(4)"), "右下角学习笔记预览最新几条");
+                // ★ 学习笔记板块换成【翻译历史】(用户裁定):翻过的直接出现在这,点一条跳回原位
+                Assert(tbSrc.Contains("翻译历史") && tbSrc.Contains("TheApp.History.Latest"),
+                       "右下角是翻译历史预览");
+                Assert(tbSrc.Contains("全部历史") && tbSrc.Contains("new HistoryBoardView()"),
+                       "★ 右上角按钮改成「全部历史」,拉开抽屉看完整列表");
+                Assert(tbSrc.Contains("_favoritesOnly = !_favoritesOnly"), "标题边上的星:只看收藏");
                 // ★ 第三轮裁定的排版:程度【竖排】,目标池与语言池【并列同宽】
                 Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && !Body(tbSrc).Contains("IsDirectionReversed"),
                        "★ 翻译程度竖排且【从下往上】递进:直译在底,越往上越详(设了 IsDirectionReversed 就反了)");
@@ -2354,6 +2370,19 @@ public static class Selftest
                 bare.Measure(new System.Windows.Size(800, 800));
                 Assert(Views.FocusPolicy.FindChatInput(bare) is null, "没有 AI 输入框的页面:找不到落点");
                 Assert(Views.FocusPolicy.Toggle(null, null) is null, "★ 没有输入框就不聚焦任何东西");
+
+                // ★ "什么都不聚焦"必须【连逻辑焦点一起清】:只清键盘焦点的话,
+                //   焦点范围里还指着那个输入框,WPF 下一次输入就把焦点还回去 ——
+                //   表现就是输入框看着没选中(灰的),打字照样进去、还能回车发出去(用户实测)。
+                var fpSrc = TryReadSource(Path.Combine("Views", "FocusPolicy.cs"));
+                if (fpSrc is not null)
+                {
+                    var cf = Slice(fpSrc, "public static void ClearFocus(", "    }");
+                    Assert(cf is not null && cf.Contains("FocusManager.SetFocusedElement(scope, null)") && cf.Contains("Keyboard.ClearFocus()"),
+                           "★ 取消聚焦时逻辑焦点与键盘焦点一起清");
+                    Assert(!Body(fpSrc).Contains("{ Keyboard.ClearFocus(); return; }"),
+                           "不再有「只清键盘焦点」的写法");
+                }
 
                 // 藏起来的输入框不该被 Tab 到
                 var hidden = new System.Windows.Controls.Grid();

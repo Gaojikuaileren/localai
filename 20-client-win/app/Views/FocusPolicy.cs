@@ -67,7 +67,20 @@ public static class FocusPolicy
     public static void HandleTab(DependencyObject? scope)
     {
         var target = Toggle(FindChatInput(scope), Keyboard.FocusedElement);
-        if (target is null) { Keyboard.ClearFocus(); return; }
+        if (target is null) { ClearFocus(scope); return; }
         target.Focus();
+    }
+
+    /// <summary>
+    /// 真正地什么都不聚焦。
+    /// ★★ 只调 Keyboard.ClearFocus() 是【不够的】—— 它清掉的是键盘焦点,
+    ///   而【逻辑焦点】还留在焦点范围里指着那个输入框;WPF 会在下一次输入/激活时把键盘焦点
+    ///   还给它。表现就是:输入框看着没被选中(灰的),打字却照样进去、还能回车发出去
+    ///   (用户实测的 bug)。所以必须把焦点范围里的逻辑焦点也一并清掉。
+    /// </summary>
+    public static void ClearFocus(DependencyObject? scope)
+    {
+        if (scope is not null) FocusManager.SetFocusedElement(scope, null);
+        Keyboard.ClearFocus();
     }
 }

@@ -91,6 +91,15 @@ public sealed class ChatCenter
                     .Where(Visible)                                   // D45:别人的私人会话绝不出现
                     .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
 
+    /// <summary>
+    /// 翻译工作空间里【所有可见的】会话(含项目会话,不含幽灵与已删除)——翻译历史从这里取。
+    /// ★ 幽灵会话不进历史:它的承诺就是不留痕。
+    /// </summary>
+    public IEnumerable<ChatSession> AllTranslationSessions()
+        => _sessions.Where(s => s.WorkspaceKey == "translation" && !s.Ghost && s.DeletedAt is null)
+                    .Where(Visible)
+                    .OrderByDescending(s => s.LastActive);
+
     /// <summary>D45 可见性:家庭范围全家可见;个人/仅本人只有所有者可见;所有者未知一律不可见。</summary>
     public static bool Visible(ChatSession s) => MemberContext.CanSee(s.Scope, s.OwnerMemberId);
 
