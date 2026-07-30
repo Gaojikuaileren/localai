@@ -1996,6 +1996,108 @@ public static class Selftest
             }
             finally { Strings.LanguageChanged -= OnLang; }
 
+            // ---- 焦点纪律:键盘焦点只归【可编辑的输入位】(用户裁定 2026-07-30)----
+            // ★★ 这里做的是【行为断言】而不是数样式表:真的 new 出控件、真的把主题字典挂上去、
+            //   再读它【解析之后】的 Focusable / IsTabStop。数 Setter 证明不了任何事 ——
+            //   一个元素只要带了显式 Style,隐式样式就整条不参与查找(主窗口那三个标题栏按钮
+            //   正是这种情况,清点时差点漏掉)。
+            {
+                if (System.Windows.Application.Current is null) new System.Windows.Application();
+                var app = System.Windows.Application.Current;
+                var before = app.Resources.MergedDictionaries.Count;
+                var ctrls = new System.Windows.ResourceDictionary
+                {
+                    Source = new Uri("pack://application:,,,/Theme/Controls.xaml", UriKind.Absolute),
+                };
+                app.Resources.MergedDictionaries.Add(ctrls);
+                try
+                {
+                    // ★ 必须真的排一次版:代码 new 出来的控件在【进树并测量】之前不会去解析隐式样式,
+                    //   直接读 Focusable 拿到的是框架默认值,断言会假失败(第一版就栽在这)。
+                    //   带显式 Style 的(PlainTextBox)不受影响 —— 这个差别本身就是本次要防的坑。
+                    var host = new System.Windows.Controls.StackPanel();
+                    T Live<T>(T el) where T : System.Windows.UIElement { host.Children.Add(el); return el; }
+
+                    // 纯鼠标件:整个退出焦点体系
+                    var btn = Live(new System.Windows.Controls.Button());
+
+                    var cb = Live(new System.Windows.Controls.CheckBox());
+
+                    // 下拉框:退出 Tab 序,但【保留可聚焦】—— 鼠标点开后上下键/首字母仍可用
+                    var combo = Live(new System.Windows.Controls.ComboBox());
+
+                    // 可编辑输入位:这是唯一保留 Tab 的一类
+                    var tb = Live(new System.Windows.Controls.TextBox());
+
+                    // 只读正文(聊天气泡):退出 Tab 序,但保留可聚焦(鼠标拖选 + Ctrl+C 全靠它)
+                    var plain = Live(new System.Windows.Controls.TextBox
+                    {
+                        Style = (System.Windows.Style)ctrls["PlainTextBox"],
+                    });
+                    host.Measure(new System.Windows.Size(1000, 1000));   // ← 这一下才真正让样式生效
+
+                    Assert(!btn.Focusable && !btn.IsTabStop, "★ 按钮退出焦点体系(Tab 不会停在按钮上)");
+                    Assert(btn.FocusVisualStyle is null, "★ 按钮不画系统焦点虚线框");
+                    Assert(!cb.Focusable && !cb.IsTabStop, "★ 复选框退出焦点体系");
+                    Assert(!combo.IsTabStop, "★ 下拉框不在 Tab 序里");
+                    Assert(combo.Focusable, "★ 下拉框仍可聚焦(点开之后键盘选项照常)");
+                    Assert(tb.Focusable && tb.IsTabStop, "★ 输入框保留可聚焦、保留 Tab —— 纪律的唯一白名单");
+                    Assert(!plain.IsTabStop, "★ 消息正文不在 Tab 序里(否则一条长会话要按上百次 Tab)");
+                    Assert(plain.Focusable, "★ 消息正文仍可聚焦 —— 可选中复制是它存在的唯一理由");
+                    Assert(plain.IsReadOnly, "消息正文是只读的");
+
+                    // 滑条:本来就不可聚焦(纪律对它是追认现状,不是新损失)
+                    var sl = Live(new System.Windows.Controls.Slider());
+                    Assert(!sl.Focusable, "滑条不参与焦点(既有行为)");
+                }
+                finally
+                {
+                    while (app.Resources.MergedDictionaries.Count > before)
+                        app.Resources.MergedDictionaries.RemoveAt(app.Resources.MergedDictionaries.Count - 1);
+                }
+            }
+            // 主窗口那三个标题栏按钮走 keyed 样式 —— 隐式样式对它们【整条不生效】,必须各补一遍
+            var mwCap = TryReadSource("MainWindow.xaml");
+            if (mwCap is not null)
+            {
+                var cap = Slice(mwCap, "x:Key=\"CaptionButton\"", "</Style>");
+                Assert(cap is not null && cap.Contains("\"Focusable\" Value=\"False\"") && cap.Contains("\"IsTabStop\" Value=\"False\""),
+                       "★ 标题栏按钮也退出焦点体系(带显式 Style 的元素不吃隐式样式)");
+                Assert(mwCap.Contains("KeyboardNavigation.TabNavigation=\"Cycle\""),
+                       "Tab 圈在抽屉里(编辑器多个输入格之间跳,但不跑到抽屉外)");
+            }
+            var mwFocus = TryReadSource("MainWindow.xaml.cs");
+            if (mwFocus is not null)
+            {
+                Assert(mwFocus.Contains("KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None)"),
+                       "★ 方向键不移动焦点(走导航层)");
+                // ★★ 最高危陷阱:方向键【绝不能】在窗口的隧道事件里吞掉 ——
+                //   主窗口先于输入框收到按键,一吞就把输入框的光标移动/跨行/Home/End 全废了。
+                var pkd = Slice(mwFocus, "PreviewKeyDown +=", "PreviewMouseDown");
+                Assert(pkd is not null && !pkd.Contains("Key.Left") && !pkd.Contains("Key.Right")
+                       && !pkd.Contains("Key.Up") && !pkd.Contains("Key.Down"),
+                       "★ 窗口隧道层【不许】吞方向键(吞了输入框就废了)");
+            }
+            var cvFocus = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvFocus is not null)
+            {
+                Assert(cvFocus.Contains("if (_input.IsLoaded) _input.Focus();"),
+                       "★ 没有输入框的页面不聚焦任何东西(不对从未进树的控件 Focus)");
+                Assert(cvFocus.Contains("var refocus = _input.IsKeyboardFocusWithin;"),
+                       "★ 会话区重建后把焦点还给输入框(每发一条消息 _input 就被换掉一次)");
+                var ren = Slice(cvFocus, "void RenameSession(", "Flyout.Show(");
+                Assert(ren is not null && ren.Contains("Key.Escape"),
+                       "★ 重命名浮窗自己收 Esc(主窗口那条总闸够不到独立 Popup)");
+            }
+            var cdSrc = TryReadSource(Path.Combine("Views", "ConfirmDialog.cs"));
+            if (cdSrc is not null)
+                Assert(cdSrc.Contains("e.Key == Key.Enter && !danger"),
+                       "★ 危险确认不认 Enter(惯性回车不该删掉不可回收的东西)");
+            var mvSrc = TryReadSource(Path.Combine("Views", "ModelsView.cs"));
+            if (mvSrc is not null)
+                Assert(mvSrc.Contains("path.LostFocus += (_, _) => Commit();") && mvSrc.Contains("Unloaded += (_, _) => Commit();"),
+                       "★ 模型路径不只靠失焦提交(焦点收窄后这页只剩它一个可聚焦控件)");
+
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",

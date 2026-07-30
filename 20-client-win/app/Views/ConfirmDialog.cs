@@ -74,11 +74,15 @@ public static class ConfirmDialog
         };
         win.Content = shadowHost;
 
-        // Esc 取消 / Enter 确认 —— 键盘也能操作,不只靠鼠标
+        // Esc 取消 / Enter 确认 —— 键盘也能操作,不只靠鼠标。
+        // ★ 但危险确认(danger:删除项目、清空记忆、彻底删除…)【不认 Enter】:
+        //   这类框往往是在用户连按回车的节奏里弹出来的,一个惯性回车就把东西删了,
+        //   而这些操作恰恰是不可回收的。危险的那一下必须用鼠标点,Esc 取消照常。
+        //   (挂在 win.KeyDown 上是【冒泡】事件,按钮退出焦点体系后焦点停在 win 自身,依旧收得到。)
         win.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Escape) { e.Handled = true; win.Close(); }
-            else if (e.Key == Key.Enter) { e.Handled = true; result = true; win.Close(); }
+            else if (e.Key == Key.Enter && !danger) { e.Handled = true; result = true; win.Close(); }
         };
 
         win.ShowDialog();

@@ -446,7 +446,15 @@ public sealed class ChatView : UserControl
     {
         var box = new TextBox { Text = s.Title, Padding = new Thickness(8, 6, 8, 6), Width = 220 };
         void Save() { var v = box.Text.Trim(); if (v.Length > 0) TheApp.Chat.Rename(s.SessionId, v); Overlay.CloseActive(); }
-        box.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; Save(); } };
+        // ★ Esc 必须在这里自己收:主窗口那条 Esc 总闸【够不到】这里 —— Flyout 的 Popup
+        //   从未加入任何可视/逻辑树(PlacementTarget 只是定位提示,不建立父子关系),
+        //   焦点在 box 里时按键的路由终点就是这个 Popup,压根不经过主窗口;
+        //   而普通 Popup 又不像 ContextMenu 那样自带 Esc 关闭 —— 于是重命名浮窗按 Esc 关不掉。
+        box.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter) { e.Handled = true; Save(); }
+            else if (e.Key == Key.Escape) { e.Handled = true; Overlay.CloseActive(); }
+        };
         var save = Ui.Primary("保存", (_, _) => Save());
         var body = Ui.Stack(box, new Border { Height = 8 }, save);
         Flyout.Show(anchor, "重命名会话", body, width: 260);
@@ -584,7 +592,30 @@ public sealed class ChatView : UserControl
         return area;
     }
 
+    /// <summary>
+    /// 把焦点交给输入框 —— 但只在它【真的在可视树上】的时候。
+    /// ★ 占位工作空间(assets/courses/...)从来不建输入区,_input 是构造时那个从未进树的空控件,
+    ///   对它 Focus() 只会静默返回 false,焦点落空 = 整页键盘敲不进任何地方(纪律里"没有输入框就不聚焦"
+    ///   说的正是这种情况:不聚焦,而不是聚焦到一个不存在的东西上)。
+    /// </summary>
+    void FocusInputIfPresent()
+    {
+        if (_input.IsLoaded) _input.Focus();
+    }
+
     void BuildConversation()
+    {
+        // ★ 焦点纪律(用户裁定):键盘焦点只归【可编辑的输入位】。会话区一重建,_input 就是一个
+        //   全新的 TextBox(494 行),旧的那个被丢弃 —— 而 Chat.Send 是【同步】触发 Changed
+        //   -> OnChatChanged -> 这里重建,所以每发一条消息焦点持有者就换一次。
+        //   不接住的话:发完第一条就得重新点一下输入框才能发第二条。
+        //   ★ 只在【焦点原本就在旧输入框里】时才还回去 —— 否则会从别处(比如抽屉里的编辑器)抢焦点。
+        var refocus = _input.IsKeyboardFocusWithin;
+        BuildConversationCore();
+        if (refocus) Dispatcher.BeginInvoke(new Action(FocusInputIfPresent), System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    void BuildConversationCore()
     {
         // ★★ 顺序不能动:只读是【数据状态】,和在哪个工作空间无关,所以必须排在工作空间分流【之前】。
         //   排在后面出过事:翻译空间(以及其余占位空间)先 return 掉,只读判断永远轮不到 ——
@@ -999,7 +1030,7 @@ public sealed class ChatView : UserControl
             BuildSessions();
             BuildConversation();
             if (_sessionRows.TryGetValue(empty.SessionId, out var row)) Ui.Shake(row);
-            _input.Focus();
+            FocusInputIfPresent();
             return;
         }
 
@@ -1008,7 +1039,7 @@ public sealed class ChatView : UserControl
         _sessionId = s2.SessionId;
         BuildSessions();
         BuildConversation();
-        _input.Focus();
+        FocusInputIfPresent();
     }
 
     void SendCurrent()
@@ -1368,12 +1399,12 @@ public sealed class ChatView : UserControl
     void ToggleGhost()
     {
         // 退出幽灵 -> 回普通会话的空态(ToNormal 已经保证落在空会话上)
-        if (InGhost) { ToNormal(); _input.Focus(); return; }
+        if (InGhost) { ToNormal(); FocusInputIfPresent(); return; }
         var g = TheApp.Chat.NewGhostSession(_wsKey);
         _sessionId = g.SessionId;
         BuildSessions();
         BuildConversation();
-        _input.Focus();
+        FocusInputIfPresent();
     }
 
     FrameworkElement BackChip()

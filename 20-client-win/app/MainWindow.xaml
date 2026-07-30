@@ -19,6 +19,12 @@
   <Window.Resources>
     <!-- 窗口按钮:方形、无边框、hover 才显底色;关闭键 hover 用恒定风险红(设计 §7 风险语义色皮肤禁改) -->
     <Style x:Key="CaptionButton" TargetType="Button">
+      <!-- ★ 焦点纪律要在这里【再写一遍】:元素一旦有显式 Style,Controls.xaml 里那条隐式
+           Button 样式就【整条不参与查找】——不是"覆盖某几个 Setter"。最小化/最大化/关闭
+           这三个键走的正是这条 keyed 样式,漏掉它们 Tab 就还能停在窗口按钮上。 -->
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Setter Property="Width" Value="46"/>
       <Setter Property="Height" Value="38"/>
       <Setter Property="Background" Value="Transparent"/>
@@ -278,7 +284,10 @@
                   Background="Transparent" BorderThickness="0" Click="OnCloseDrawer"/>
         </Grid>
         <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Border}"/>
-        <ContentControl x:Name="SideDrawerHost" Margin="20,14,20,18"/>
+        <!-- Tab 圈在抽屉里:笔记编辑器有 7 个输入格、日程 4 个,Tab 在格子之间跳是有用的;
+             但抽屉和主界面同属一棵可视树,不圈住的话 Tab 会从最后一格跑到抽屉外面去。 -->
+        <ContentControl x:Name="SideDrawerHost" Margin="20,14,20,18"
+                        KeyboardNavigation.TabNavigation="Cycle"/>
       </DockPanel>
     </Border>
 

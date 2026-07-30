@@ -27,11 +27,19 @@ public sealed class ModelsView : UserControl
             Margin = new Thickness(0, 4, 0, 6),
             Padding = new Thickness(9, 6, 9, 6),
         };
-        path.LostFocus += (_, _) =>
+        // ★ 不能只靠 LostFocus 提交:焦点纪律收窄后,这一页里可聚焦的控件【只剩这个框】——
+        //   点复选框、点下拉、点按钮都不会夺走焦点(它们都不可聚焦了),Tab 也没有第二个框可去。
+        //   而切页面时元素是被整体摘出可视树的,那种情况下 WPF 触不触发 LostFocus 并不可靠
+        //   (就是 UpdateSourceTrigger=LostFocus 在切标签页时丢数据的老毛病)。
+        //   所以:失焦时提交【照留】,再补一次卸载时提交,两条路任意一条到达都算数(Commit 幂等)。
+        //   ★ 不用 TextChanged:那是每敲一个字符就往盘上写一次路径,没必要。
+        void Commit()
         {
             var v = string.IsNullOrWhiteSpace(path.Text) ? null : path.Text.Trim();
             if (v != s.ModelStorePath) { s.ModelStorePath = v; s.Save(); }
-        };
+        }
+        path.LostFocus += (_, _) => Commit();
+        Unloaded += (_, _) => Commit();
 
         // ② 启用的模型
         var modelList = new StackPanel();

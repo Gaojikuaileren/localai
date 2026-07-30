@@ -5,6 +5,7 @@
 
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
@@ -38,6 +39,14 @@ public partial class MainWindow : Window
         RefreshMember();
         BuildChromeIcons();
         // 浮层开着时按 Esc 关闭
+        // ★★ 方向键不移动焦点(用户裁定)。这里是【焦点导航层】的开关,不是按键层 ——
+        //   千万别改成在 PreviewKeyDown 里吞掉 Left/Right/Up/Down:那是【隧道】事件,
+        //   主窗口先于输入框收到按键,一吞就把输入框里的左右移光标、上下跨行、Home/End
+        //   全废掉了。DirectionalNavigation 只管"方向键要不要挪焦点",完全不碰 TextBox
+        //   自己的按键处理(而且 TextBox 本来就把方向键标记为已处理,根本触发不到导航)。
+        //   按钮/复选框设成不可聚焦之后方向键已无处可去,这条属于保险丝。
+        KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None);
+
         // ★ Esc 是【总闸】:浮层和菜单都归它管。以前只管浮层 —— 万一菜单状态卡住,
         //   界面点不动而 Esc 又救不了,用户就只能杀进程(实际发生过一次)。
         PreviewKeyDown += (_, ke) =>

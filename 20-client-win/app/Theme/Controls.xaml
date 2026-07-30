@@ -99,6 +99,12 @@
        用 TemplateBinding 取 Background/BorderBrush/Thickness -> Ui.Primary/Secondary/Danger 各自的配色照常生效;
        内容对齐走 HorizontalContentAlignment,导航项(靠左)不受影响。hover/按下用透明度反馈。 -->
   <Style TargetType="Button">
+    <!-- 焦点纪律(用户裁定 2026-07-30):键盘焦点只归【可编辑的输入位】。
+         按钮/复选框纯鼠标件 -> 整个退出焦点体系;FocusVisualStyle 清空,免得冒出系统虚线框
+         (实测:Button/CheckBox/ComboBox 的默认焦点框是非 null 的,TextBox 的才是 null)。 -->
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="IsTabStop" Value="False"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
     <Setter Property="Template">
@@ -353,6 +359,11 @@
        这里连边框带底色一起去掉,只留承载文字的 PART_ContentHost。
        Background 用 Transparent 而不是 null:null 不参与命中测试,就选不中了。 -->
   <Style x:Key="PlainTextBox" TargetType="TextBox">
+    <!-- ★ 只读正文【退出 Tab 序,但保留可聚焦】:不加这句的话 Tab 会停在【每一条消息】上,
+         一条长会话要按上百次才轮到输入框,而且 TextBox 的默认焦点框是 null ——
+         完全没有视觉反馈,用起来就像"Tab 键坏了"。
+         保留 Focusable 是因为鼠标拖选/Ctrl+C 全靠它,那正是这个只读框存在的唯一理由。 -->
+    <Setter Property="IsTabStop" Value="False"/>
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
     <Setter Property="Padding" Value="0"/>
@@ -375,6 +386,10 @@
 
   <!-- 复选框:自绘方框 + 勾,不用系统外观 -->
   <Style TargetType="CheckBox">
+    <!-- 同 Button:纯鼠标件,退出焦点体系(空格勾选随之取消,鼠标不受影响) -->
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="IsTabStop" Value="False"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
     <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
     <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
     <Setter Property="Cursor" Value="Hand"/>
@@ -436,6 +451,12 @@
 
   <!-- 下拉框:自绘按钮 + 弹出列表,与文本框同一套描边/圆角/底色 -->
   <Style TargetType="ComboBox">
+    <!-- ★ 下拉框与按钮不同:【退出 Tab 序,但保留可聚焦】。
+         Tab 永远不会跳到它上面;而鼠标点开之后它照样能拿到焦点,
+         于是上下键选项、首字母跳转仍然可用 —— 两头都不丢。
+         判据不是"是不是输入控件",而是"Tab 该不该停在这"。 -->
+    <Setter Property="IsTabStop" Value="False"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
     <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
     <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
     <Setter Property="Cursor" Value="Hand"/>
