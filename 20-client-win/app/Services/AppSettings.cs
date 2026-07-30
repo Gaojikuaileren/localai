@@ -81,6 +81,12 @@ public sealed class AppSettings
     /// <summary>翻译工作空间的【常用语言池】(可在设置里增删)。默认只有中/日/英/德/韩。</summary>
     public List<string> TranslationPool { get; set; } = Languages.DefaultPool.ToList();
 
+    /// <summary>
+    /// 界面音效(拖动卡片落地的闷响等)。默认开。★ 每台设备各自的偏好,不同步。
+    /// 只管【声音】—— 落地扬尘属于暖萌皮肤的观感,不受它影响(关声音不该把动效也一起关掉)。
+    /// </summary>
+    public bool SoundEffects { get; set; } = true;
+
     // ---- 会话整理 / 记忆库(用户裁定 2026-07-30)----
     /// <summary>摘要触发方式:"ai" = AI 自己判断何时整理(默认);"manual" = 只在设置里手动点。</summary>
     public string SummaryTrigger { get; set; } = "ai";

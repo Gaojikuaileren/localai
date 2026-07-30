@@ -297,7 +297,7 @@ public sealed class TranslationBar : UserControl
     {
         if (ThemeManager.Current != Skin.Warm) return;
 
-        Services.Sfx.PlayDrop();
+        if (TheApp.Settings.SoundEffects) Services.Sfx.PlayDrop();   // 设置里可关;关声音不影响扬尘
 
         // 六粒尘:向外上方散开,同时变大变淡。用 Canvas 层画,不影响布局。
         for (int i = 0; i < 6; i++)

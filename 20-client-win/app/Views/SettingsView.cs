@@ -46,6 +46,16 @@ public sealed class SettingsView : UserControl
             }
         };
 
+        // ---- 界面音效 ----
+        var sfx = new CheckBox
+        {
+            Content = "界面音效",
+            IsChecked = s.SoundEffects,
+            Margin = new Thickness(0, 12, 0, 0),
+        };
+        sfx.Checked += (_, _) => { s.SoundEffects = true; s.Save(); };
+        sfx.Unchecked += (_, _) => { s.SoundEffects = false; s.Save(); };
+
         // ---- 开机自启(用户明确要求)----
         var auto = new CheckBox
         {
@@ -80,8 +90,10 @@ public sealed class SettingsView : UserControl
                 Ui.Body(Strings.Get("settings.skin")), skin,
                 new Border { Height = 12 },
                 Ui.Body(Strings.Get("settings.language")), lang,
+                sfx,
+                Ui.Caption("拖动语言卡片落地时的轻响。★ 只有暖萌皮肤会出声 —— 微风与墨白本来就是克制的。"),
                 new Border { Height = 8 },
-                Ui.Caption("皮肤与语言是**每台设备**各自的选择,不会同步到其它电脑。")
+                Ui.Caption("皮肤、语言与音效都是**每台设备**各自的选择,不会同步到其它电脑。")
             )),
 
             Ui.Card(Ui.Stack(

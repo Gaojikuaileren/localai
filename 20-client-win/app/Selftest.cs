@@ -1019,7 +1019,29 @@ public static class Selftest
                        "单声道 16bit");
                 Assert(BitConverter.ToInt32(wav, 40) == wav.Length - 44, "数据块长度与实际字节数一致");
                 Assert(Services.Sfx.BuildDrop().SequenceEqual(wav), "★ 每次合成完全一样(固定种子,不要随机音色)");
+
+                // 音效开关:默认开,可关,且【只管声音】—— 关了不该把落地扬尘一起关掉
+                var sfxSet = new Services.AppSettings();
+                Assert(sfxSet.SoundEffects, "界面音效默认开");
+                sfxSet.SoundEffects = false;
+                sfxSet.Save();
+                Assert(!Services.AppSettings.Load().SoundEffects, "★ 音效开关能存下来(每台设备各自的偏好)");
+                sfxSet.SoundEffects = true;
+                sfxSet.Save();
             }
+            var tbSfx = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+            if (tbSfx is not null)
+            {
+                var land = Slice(tbSfx, "void PlayLanding(Point at)", "// 六粒尘");
+                Assert(land is not null && land.Contains("if (TheApp.Settings.SoundEffects) Services.Sfx.PlayDrop();"),
+                       "★ 音效受设置开关控制");
+                Assert(land is not null && !land.Contains("SoundEffects) return"),
+                       "★ 关掉音效不影响落地扬尘(动效属于皮肤观感,不是声音)");
+            }
+            var setSfx = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (setSfx is not null)
+                Assert(setSfx.Contains("Content = \"界面音效\"") && setSfx.Contains("s.SoundEffects = false"),
+                       "设置里能关界面音效");
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
