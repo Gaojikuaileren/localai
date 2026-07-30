@@ -1175,6 +1175,11 @@ public static class Selftest
                 var ia = Slice(cvTrans, "FrameworkElement BuildInputArea(", "FrameworkElement PendingStrip()");
                 Assert(ia is not null && !Body(ia).Contains("TheApp.Translation"),
                        "★ 共享输入区不再直接摸翻译状态(分层泄漏归零)");
+                // ★ 空态盒子必须 Stretch + MaxWidth:写死 Width 会在窄窗口撑破卡片、裁掉发送键;
+                //   用 Center 又会按最宽的子元素收缩,输入行缩成标题那么宽。两个坑都渲染诊断里现过形。
+                Assert(cvTrans.Contains("HorizontalAlignment = HorizontalAlignment.Stretch, MaxWidth = spec.HeroWidth"),
+                       "★ 空态内容盒取满宽度到上限为止,窄了自己缩");
+                Assert(!Body(cvTrans).Contains("inputArea.Width ="), "空态输入框不写死宽度");
                 Assert(cvTrans.Contains("_wasEmptyState = heroNow;"),
                        "★ 空态记账按【居中态】算,不是按有没有消息 —— 贴底态没有\"从居中滑下来\"这一说");
                 // 发送按钮:放大镜要【居中不被裁】(固定尺寸的 Grid 容器 + 去掉按钮内边距)

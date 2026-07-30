@@ -197,6 +197,33 @@ public static class WheelTest
         }
         ThemeManager.Initialize(Skin.Breeze);
 
+        // ★★ 统一之后的会话面板:直接把【真的 ChatView】画出来。
+        //   重构的验收点是"聊天空间逐像素不变",无头断言一个像素也验不了。
+        //   这里连带覆盖了 Bubble() 内部三条从未被画过的路径:
+        //   折叠 toggle 的取色、附件缩略图、系统消息居中说明。
+        try
+        {
+            ClearTargets(app);
+            var seeded = app.Chat.NewSession(null, "chat");
+            app.Chat.Send(seeded.SessionId, "帮我看看这段代码为什么会闪退");
+            app.Chat.Send(seeded.SessionId, string.Join(Environment.NewLine,
+                Enumerable.Range(1, 40).Select(i => $"第 {i} 行:这是一条很长的消息,用来触发默认折叠")));
+            foreach (var (skin, file) in new[] { (Skin.Breeze, "conv-breeze.png"),
+                                                 (Skin.Ink, "conv-ink.png"),
+                                                 (Skin.Warm, "conv-warm.png") })
+            {
+                ThemeManager.Initialize(skin);
+                var cv = new ChatView("chat") { Width = 900, Height = 560 };
+                Save(Themed(cv), Path.Combine(outDir, file), 940, 600);
+            }
+            ThemeManager.Initialize(Skin.Breeze);
+        }
+        catch (Exception ex)
+        {
+            // 画不出来不该让整套诊断挂掉 —— 如实说一声,别静默跳过
+            Console.WriteLine("wheeltest: 会话面板渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // 放大镜发送键:画的就是界面里那一个(SearchSendButton),不是复刻件
         var sendRow = new StackPanel { Orientation = Orientation.Horizontal };
         var sendOn = ChatView.SearchSendButton(() => { }); sendOn.Height = 40;

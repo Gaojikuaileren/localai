@@ -748,7 +748,10 @@ public sealed class ChatView : UserControl
 
         if (!hasMsgs)
         {
-            var box = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = spec.HeroWidth };
+            // ★ Stretch + MaxWidth 而不是 Center:取满可用宽度、到 HeroWidth 封顶,窄了自己缩。
+            //   用 Center 的话盒子会按【最宽的那个子元素】收缩,输入行就缩成标题那么宽;
+            //   用固定 Width 又会在窄窗口下撑破卡片、把发送键裁出去。两个坑都在渲染诊断里现过形。
+            var box = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch, MaxWidth = spec.HeroWidth };
             if (heroNow) box.VerticalAlignment = VerticalAlignment.Center;   // 居中态才竖直居中
             else box.Margin = new Thickness(0, 24, 0, 0);
 
@@ -781,7 +784,10 @@ public sealed class ChatView : UserControl
             if (heroNow)
             {
                 box.Children.Add(new Border { Height = 16 });
-                inputArea.Width = spec.HeroWidth;
+                // ★ 只给【上限】不给固定宽度:写死 Width 的话窗口一窄就撑破卡片,
+                //   发送键被裁在外面(渲染诊断当场看到;最小窗口尺寸下必现)。
+                //   宽度由 box 的 MaxWidth 兜着,窄了自己缩。
+                inputArea.HorizontalAlignment = HorizontalAlignment.Stretch;
                 box.Children.Add(inputArea);
                 inner = box;
             }
