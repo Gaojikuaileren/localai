@@ -523,7 +523,13 @@ public sealed class ChatView : UserControl
         // ★ 标记它是【AI 交流输入框】—— Tab 唯一认的落点(用户第二轮裁定)。
         //   用显式标记而不是"树里第一个 TextBox":输入区每次重建都是新对象,标记跟着控件走最可靠。
         FocusPolicy.SetIsChatInput(_input, true);
-        _input.TextChanged += (_, _) => _draft = _input.Text;
+        _input.TextChanged += (_, _) =>
+        {
+            _draft = _input.Text;
+            // ★ 形态实时上报:长文本要把语法/例句两档灰掉,总不能等按了发送才告诉用户。
+            //   附件里的内容一律按"带格式的长文本"算 —— 它的段落是用户自己排的。
+            spec.OnDraftChanged?.Invoke(_draft, _pending.Any(a => a.Kind != AttachKind.Image));
+        };
         _input.PreviewKeyDown += (_, e) =>
         {
             // ★ Ctrl+V 必须在【按键层】处理,不能只靠 DataObject.Pasting:
@@ -745,6 +751,8 @@ public sealed class ChatView : UserControl
         /// 这里只是把"谁来执行"接上。
         /// </summary>
         public Func<ChatView, string, bool>? Fallback { get; init; }
+        /// <summary>草稿变了(文本 + 是否挂着非图片附件)。翻译空间据此判断输入形态。</summary>
+        public Action<string, bool>? OnDraftChanged { get; init; }
     }
 
     /// <summary>_wsKey -> ConvSpec 的【唯一】映射点。别处不再拿 _wsKey 和字面量比。</summary>
@@ -763,6 +771,8 @@ public sealed class ChatView : UserControl
             CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0,
             BottomAccessory = () => new TranslationBar(),
             BlockReason = TranslationBlockReason,
+            OnDraftChanged = (draft, hasFileAttachment) =>
+                ((App)Application.Current).Translation.SetShape(TextShapes.Classify(draft, hasFileAttachment)),
             Fallback = (view, draft) => view.RunTranslationFallback(draft),
         },
         _ => new ConvSpec(),                 // 聊天:全默认

@@ -133,16 +133,29 @@ public sealed class TranslationBar : UserControl
             var capturedLevel = level;
             cell.MouseEnter += (_, _) => ShowTip(cell, $"{LabelFor(capturedLevel)} —— {DescFor(capturedLevel)}");
             cell.MouseLeave += (_, _) => HideTip();
-            cell.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Translation.SetLevel(capturedLevel); };
+            cell.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                if (!TextShapes.Allows(TheApp.Translation.Shape, capturedLevel)) return;   // 灰着的点不动
+                TheApp.Translation.SetLevel(capturedLevel);
+            };
             Grid.SetRow(cell, i);
             rows.Children.Add(cell);
             _levelLabels.Add((level, t));
         }
 
-        var body = new DockPanel { LastChildFill = true };
+        _shapeNote.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _shapeNote.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var picker = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(_levelSlider, Dock.Left);
-        body.Children.Add(_levelSlider);
-        body.Children.Add(rows);
+        picker.Children.Add(_levelSlider);
+        picker.Children.Add(rows);
+
+        var body = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(_shapeNote, Dock.Bottom);
+        body.Children.Add(_shapeNote);
+        body.Children.Add(picker);
 
         var card = Card(body, "翻译程度", scroll: false);
         // ★ 滚轮可调档(用户裁定)。收在【整块卡片】上而不是滑条本身 ——
@@ -155,6 +168,8 @@ public sealed class TranslationBar : UserControl
             var max = TranslationLevels.All.Length - 1;
             // 竖排是【下简上详】:往上滚 = 更详细
             var next = Math.Clamp(lv + (e.Delta > 0 ? 1 : -1), 0, max);
+            // 滚到灰着的档就停住 —— 不要滚过去又被弹回来,那种手感像卡住了
+            if (!TextShapes.Allows(TheApp.Translation.Shape, (TranslationLevel)next)) return;
             if (next != lv) TheApp.Translation.SetLevel((TranslationLevel)next);
         };
         card.Width = LevelWidth;
@@ -170,12 +185,26 @@ public sealed class TranslationBar : UserControl
 
     string DescFor(TranslationLevel l) => TranslationLevels.DescOf(l);
 
+    /// <summary>长文本时如实说明这次按什么来(不闷声改档)。</summary>
+    readonly TextBlock _shapeNote = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+
     void RefreshLevel()
     {
-        var lv = TheApp.Translation.Level;
+        var st = TheApp.Translation;
+        var lv = st.Level;
         if ((int)_levelSlider.Value != (int)lv) _levelSlider.Value = (int)lv;
-        // 第二阶的名字跟着目标池走(全是英/德 -> 词根;全是中日韩 -> 读音;混着 -> 两个都写)
-        foreach (var (level, label) in _levelLabels) label.Text = LabelFor(level);
+        foreach (var (level, label) in _levelLabels)
+        {
+            // 第二阶的名字跟着目标池走(全英德 -> 词根;全中日韩 -> 读音;混着 -> 词解)
+            label.Text = LabelFor(level);
+            // ★ 长文本下语法/例句不可用 —— 【当场灰掉】,而不是等按了发送才回退。
+            //   逐句讲语法、给整篇另造例句,都是"做得出但没人要"的东西。
+            var ok = TextShapes.Allows(st.Shape, level);
+            label.Opacity = ok ? 1 : 0.35;
+            if (label.Parent is Border cell) cell.Cursor = ok ? Cursors.Hand : Cursors.Arrow;
+        }
+        _shapeNote.Text = TextShapes.Explain(lv, st.Shape) ?? "";
+        _shapeNote.Visibility = _shapeNote.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>自绘的小气泡提示(全局 ToolTip 已关,但这里用户明确要提示)。</summary>
@@ -338,8 +367,6 @@ public sealed class TranslationBar : UserControl
     /// </summary>
     Border Bubble(Lang l, bool selected, int stackIndex = 0)
     {
-        var playful = ThemeManager.Current == Skin.Warm;
-
         var t = new TextBlock
         {
             Text = l.Name, VerticalAlignment = VerticalAlignment.Center,
@@ -351,70 +378,33 @@ public sealed class TranslationBar : UserControl
         var b = new Border
         {
             Child = t,
-            Padding = playful ? new Thickness(8, 7, 8, 7) : new Thickness(8, 5, 8, 5),
-            // 标签在格子里【拉伸填满】(1×3 / 2×3 是真的格子)。
-            // 暖萌:上边距为负 -> 后一张压住前一张,叠成一摞;克制皮肤下规规矩矩留空。
-            Margin = playful ? new Thickness(0, stackIndex < 2 ? 0 : -5, 6, 6) : new Thickness(0, 0, 6, 6),
+            Padding = new Thickness(8, 5, 8, 5),
+            // 标签在格子里【拉伸填满】(1×3 / 2×3 是真的格子)
+            Margin = new Thickness(0, 0, 6, 6),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             // ★ 固定高度 + 顶对齐:UniformGrid 会把每个格子撑满可用高度,
             //   不钉住的话标签会被拉成一根高条(渲染诊断里当场看到)。
             VerticalAlignment = VerticalAlignment.Top,
             Height = SlotHeight,
-            CornerRadius = new CornerRadius(playful ? 8 : 14),   // 卡片是方一点的圆角,胶囊才是大圆角
+            CornerRadius = new CornerRadius(14),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
         };
         b.SetResourceReference(Border.BackgroundProperty, selected ? "Accent" : "BgSurface");
         b.SetResourceReference(Border.BorderBrushProperty, selected ? "Accent" : "Border");
 
-        if (playful)
-        {
-            // 每张歪一点点(角度按序号定,不随机 —— 重建时不能跳来跳去),并让后面的压在上层
-            b.RenderTransformOrigin = new Point(0.5, 1);
-            b.RenderTransform = new RotateTransform(TiltFor(stackIndex));
-            Panel.SetZIndex(b, stackIndex);
-            b.Effect = new DropShadowEffect
-            {
-                BlurRadius = 6, ShadowDepth = 1.5, Direction = 270, Opacity = 0.22,
-                Color = Colors.Black, RenderingBias = RenderingBias.Performance,
-            };
-            // 悬停时"抽出来一点",提示它可以被拿走
-            b.MouseEnter += (_, _) => Lift(b, -3);
-            b.MouseLeave += (_, _) => Lift(b, 0);
-        }
-
+        b.Tag = l.Code;   // 重排后靠它认出"这还是同一张卡"(FLIP 动画要配对前后位置)
         b.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(b, l, selected, e);
         return b;
     }
 
-    /// <summary>一摞卡片的歪斜角:按序号在 ±2.5° 之间来回,不用随机 —— 界面重建时不能跳。</summary>
-    static double TiltFor(int i) => (i % 3) switch { 0 => -2.2, 1 => 1.6, _ => 2.6 };
-
-    static void Lift(Border card, double dy)
-    {
-        var tt = card.RenderTransform as TransformGroup;
-        if (tt is null)
-        {
-            var g = new TransformGroup();
-            g.Children.Add(card.RenderTransform ?? new RotateTransform(0));
-            g.Children.Add(new TranslateTransform());
-            card.RenderTransform = g;
-            tt = g;
-        }
-        if (tt.Children[^1] is TranslateTransform tr)
-            tr.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(dy, TimeSpan.FromMilliseconds(120))
-                { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
-    }
-
     /// <summary>
-    /// 落地:在落点扬起一小撮灰 + 一声闷响。★ 只在暖萌皮肤下发生(用户裁定)——
-    /// 微风与墨白要克制,不出声也不扬尘。
+    /// 落地:在落点扬起一小撮灰 + 一声闷响。
+    /// ★ 不按皮肤分(用户裁定砍掉堆叠卡片之后):落地反馈是【交互反馈】,不是视觉身份 ——
+    ///   身份走颜色令牌,交互手感三套皮肤应当一致。声音在设置里可单独关。
     /// </summary>
     void PlayLanding(Point at)
     {
-        if (ThemeManager.Current != Skin.Warm) return;
-
         if (TheApp.Settings.SoundEffects) Services.Sfx.PlayDrop();   // 设置里可关;关声音不影响扬尘
 
         // 六粒尘:向外上方散开,同时变大变淡。用 Canvas 层画,不影响布局。
@@ -536,7 +526,12 @@ public sealed class TranslationBar : UserControl
         _dragLang = null;
         _dragging = false;
 
-        if (_ghost is not null) { _overlay.Children.Remove(_ghost); _ghost = null; }
+        // ★ 幽灵先不撤 —— 它还要飞到目的地(用户裁定:松手不能秒跳过去)
+        var ghost = _ghost;
+        _ghost = null;
+
+        // 动之前记下每张卡在哪(FLIP 的 F:First)
+        var before = SnapshotCards();
 
         // 没真正拖起来(只是点了一下),或者拖到一半失去捕获 -> 原样还回去,不能把语言弄丢
         if (lang is null || !wasDragging || e is null)
@@ -544,6 +539,7 @@ public sealed class TranslationBar : UserControl
             if (lang is not null && wasDragging && _liftedFromTarget) TheApp.Translation.AddTarget(lang.Code);
             _liftedFromPool = null;
             RefreshPools();
+            if (ghost is not null) _overlay.Children.Remove(ghost);
             return;
         }
 
@@ -558,7 +554,81 @@ public sealed class TranslationBar : UserControl
 
         _liftedFromPool = null;                                   // 暂借结束,语言池恢复完整
         RefreshPools();
-        if (landed) PlayLanding(e.GetPosition(this));             // 落地才有反馈,落空了没有
+
+        var dropAt = e.GetPosition(this);
+        var soundOnArrive = landed;
+        // 排完版才知道各张卡的新位置(FLIP 的 L:Last)
+        Dispatcher.BeginInvoke(new Action(() => AfterReflow(before, lang.Code, ghost, dropAt, soundOnArrive)),
+                               System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    /// <summary>记下当前每张语言卡的位置(相对本控件)。key = 语言码。</summary>
+    Dictionary<string, Point> SnapshotCards()
+    {
+        var map = new Dictionary<string, Point>();
+        foreach (var (code, el) in Cards())
+        {
+            if (!el.IsArrangeValid || el.ActualWidth <= 0) continue;
+            map[code] = el.TranslatePoint(new Point(0, 0), this);
+        }
+        return map;
+    }
+
+    IEnumerable<(string Code, Border El)> Cards()
+    {
+        foreach (Panel wrap in new Panel[] { _targetWrap, _poolWrap })
+            foreach (var child in wrap.Children)
+                if (child is Border { Tag: string code } b) yield return (code, b);
+    }
+
+    /// <summary>
+    /// 重排之后统一做动画:
+    ///   · 被挤动的卡片 —— 先用差值推回旧位置,再动画归零(看起来就是滑过去的);
+    ///   · 手上那张 —— 幽灵从松手处飞到它的新坑里,到位了才把真卡显出来、才响那一声。
+    /// ★ 落点是"新坑的位置",不是松手的位置 —— 所以必须等排完版才算得出来。
+    /// </summary>
+    void AfterReflow(Dictionary<string, Point> before, string landedCode, Border? ghost, Point dropAt, bool playSound)
+    {
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var dur = TimeSpan.FromMilliseconds(200);
+
+        Border? landedCard = null;
+        foreach (var (code, el) in Cards())
+        {
+            var now = el.TranslatePoint(new Point(0, 0), this);
+            if (code == landedCode) { landedCard = el; continue; }
+            if (!before.TryGetValue(code, out var was)) continue;
+            var dx = was.X - now.X;
+            var dy = was.Y - now.Y;
+            if (Math.Abs(dx) < 0.5 && Math.Abs(dy) < 0.5) continue;
+
+            var tt = new TranslateTransform(dx, dy);
+            el.RenderTransform = tt;
+            tt.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(dx, 0, dur) { EasingFunction = ease });
+            tt.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(dy, 0, dur) { EasingFunction = ease });
+        }
+
+        if (ghost is null) return;
+
+        // 目的地:落进去了就飞到那张新卡的位置;没落进去(拖回语言池/落空)也飞到它现在所在的坑
+        var dest = landedCard is not null
+            ? landedCard.TranslatePoint(new Point(0, 0), this)
+            : new Point(Canvas.GetLeft(ghost), Canvas.GetTop(ghost));
+
+        if (landedCard is not null) landedCard.Opacity = 0;   // 飞到之前先藏起来,免得同时看到两张
+
+        var fromX = Canvas.GetLeft(ghost);
+        var fromY = Canvas.GetTop(ghost);
+        var ax = new DoubleAnimation(fromX, dest.X, dur) { EasingFunction = ease };
+        var ay = new DoubleAnimation(fromY, dest.Y, dur) { EasingFunction = ease };
+        ay.Completed += (_, _) =>
+        {
+            _overlay.Children.Remove(ghost);
+            if (landedCard is not null) landedCard.Opacity = 1;
+            if (playSound) PlayLanding(dest);                  // ★ 到位才响,不是松手就响
+        };
+        ghost.BeginAnimation(Canvas.LeftProperty, ax);
+        ghost.BeginAnimation(Canvas.TopProperty, ay);
     }
 
     // ---------------------------------------------------------------- 翻译历史(预览)

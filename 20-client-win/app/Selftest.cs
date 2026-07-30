@@ -1204,6 +1204,70 @@ public static class Selftest
                        "解释在下次成功发送/目标池变化后消失");
             }
 
+            // ---- 待翻译内容的【形态】与它对档位的约束(用户裁定 2026-07-30)----
+            {
+                var S = Services.TextShapes.Classify;
+                Assert(S("apple", false) == Services.TextShape.Word, "单个词 = 单词");
+                Assert(S("你好", false) == Services.TextShape.Word, "中文单词");
+                Assert(S("今天天气不错,我们出去走走。", false) == Services.TextShape.Phrase, "一两句 = 短句");
+                Assert(S("hello world", false) == Services.TextShape.Phrase, "带空格就不是单词了");
+                Assert(S(new string('字', 400), false) == Services.TextShape.LongText, "超过阈值 = 长文本");
+                Assert(S("第一段" + Environment.NewLine + new string('字', 60), false) == Services.TextShape.FormattedLongText,
+                       "★ 有换行的长内容按【带格式】处理(段落是用户自己排的)");
+                Assert(S("短", true) == Services.TextShape.FormattedLongText,
+                       "★ 来自附件的内容一律按带格式长文本,不看长度 —— 它的结构不该被翻译抹平");
+
+                // 长文本:语法/例句不可用,自动回退到直译;直译/词解照旧
+                foreach (var shape in new[] { Services.TextShape.LongText, Services.TextShape.FormattedLongText })
+                {
+                    Assert(!Services.TextShapes.Allows(shape, Services.TranslationLevel.Grammar), "长文本禁用语法");
+                    Assert(!Services.TextShapes.Allows(shape, Services.TranslationLevel.Example), "长文本禁用例句");
+                    Assert(Services.TextShapes.Allows(shape, Services.TranslationLevel.Plain), "长文本可直译");
+                    Assert(Services.TextShapes.Allows(shape, Services.TranslationLevel.Reading), "长文本可词解");
+                    Assert(Services.TextShapes.Effective(Services.TranslationLevel.Grammar, shape) == Services.TranslationLevel.Plain,
+                           "★ 长文本 + 语法 -> 自动回退到直译");
+                    Assert(Services.TextShapes.Effective(Services.TranslationLevel.Example, shape) == Services.TranslationLevel.Plain,
+                           "★ 长文本 + 例句 -> 自动回退到直译");
+                    Assert(Services.TextShapes.Effective(Services.TranslationLevel.Reading, shape) == Services.TranslationLevel.Reading,
+                           "长文本 + 词解 -> 仍是词解(但含义不同,见字段)");
+                }
+
+                // 短内容不受限
+                foreach (var lv in new[] { Services.TranslationLevel.Grammar, Services.TranslationLevel.Example })
+                    Assert(Services.TextShapes.Effective(lv, Services.TextShape.Phrase) == lv, "短句不限档");
+
+                // ★ 长文本 + 词解 = 译文 + 末尾的重点词表(不是逐词标注)
+                var f = Services.TextShapes.FieldsFor(Services.TranslationLevel.Reading, Services.TextShape.LongText, "ja");
+                Assert(f.Contains("译文") && f.Any(x => x.Contains("重点词表")),
+                       "★ 长文本 + 词解 = 译文 + 末尾单独列出的重点词");
+                Assert(!f.Contains("读音"), "长文本下不逐词标读音(那是一堵墙)");
+                var f2 = Services.TextShapes.FieldsFor(Services.TranslationLevel.Grammar, Services.TextShape.FormattedLongText, "de");
+                Assert(f2.Contains("保留原文结构"), "★ 附件长文本要保留原文的段落结构");
+                Assert(!f2.Any(x => x.Contains("语法")), "回退之后不再要求产出语法");
+                // 短内容仍走原来那套四档字段
+                var f3 = Services.TextShapes.FieldsFor(Services.TranslationLevel.Grammar, Services.TextShape.Word, "ja");
+                Assert(f3.Contains("语法") && f3.Contains("例句"), "单词/短句照旧给全套");
+
+                // 界面要如实说明,不闷声改档
+                Assert(Services.TextShapes.Explain(Services.TranslationLevel.Grammar, Services.TextShape.LongText) is { Length: > 0 },
+                       "★ 回退时如实告诉用户为什么");
+                Assert(Services.TextShapes.Explain(Services.TranslationLevel.Grammar, Services.TextShape.Word) is null,
+                       "短内容不必解释");
+            }
+            var tsWire = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+            if (tsWire is not null)
+            {
+                Assert(tsWire.Contains("TextShapes.Allows(st.Shape, level)") && tsWire.Contains("label.Opacity = ok ? 1 : 0.35"),
+                       "★ 不可用的档【当场灰掉】,不是等按了发送才回退");
+                Assert(tsWire.Contains("if (!TextShapes.Allows(TheApp.Translation.Shape, capturedLevel)) return;"),
+                       "灰着的档点不动");
+                Assert(tsWire.Contains("TextShapes.Explain(lv, st.Shape)"), "长文本下如实说明这次按什么来");
+            }
+            var cvShape = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvShape is not null)
+                Assert(cvShape.Contains("spec.OnDraftChanged?.Invoke") && cvShape.Contains("TextShapes.Classify(draft, hasFileAttachment)"),
+                       "★ 形态随输入实时上报(总不能等按了发送才告诉用户)");
+
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
@@ -1220,7 +1284,7 @@ public static class Selftest
                 var lift = Slice(tbSrc, "_liftedFromTarget = _dragFromTarget;", "_ghost = Bubble");
                 Assert(lift is not null && lift.Contains("RemoveTarget(_dragLang.Code)") && lift.Contains("_liftedFromPool = _dragLang.Code"),
                        "★ 一开始拖就把该语言从原板块拿掉,其余补位");
-                var drop = Slice(tbSrc, "// 拖起来的那一刻已经把它从原板块摘掉了", "if (landed) PlayLanding");
+                var drop = Slice(tbSrc, "// 拖起来的那一刻已经把它从原板块摘掉了", "var dropAt = e.GetPosition");
                 Assert(drop is not null && drop.Contains("if (toTarget) landed = TheApp.Translation.AddTarget"),
                        "落在目标池 = 放进去");
                 Assert(drop is not null && drop.Contains("_liftedFromPool = null"),
@@ -1230,12 +1294,22 @@ public static class Selftest
                        "★ 拖到一半失去捕获也不能把语言弄丢(原样还回去)");
                 Assert(tbSrc.Contains("_ghost.Width = _dragSize.Width") && tbSrc.Contains("_dragSize = new Size(source.ActualWidth"),
                        "★ 手上那张卡与坑里那张一样大(尺寸当场量,不重新算)");
+                // ★ 松手不是秒跳:手上那张飞到新坑,被挤动的卡片各自滑过去(FLIP)
+                Assert(tbSrc.Contains("Dictionary<string, Point> SnapshotCards()") && tbSrc.Contains("void AfterReflow("),
+                       "★ 松手后走 FLIP:先记旧位置,排完版再动画到新位置");
+                var reflow = Slice(tbSrc, "void AfterReflow(", "if (ghost is null) return;");
+                Assert(reflow is not null && reflow.Contains("new TranslateTransform(dx, dy)"),
+                       "★ 被挤动的其它语言也有动画(先推回旧位置再归零)");
+                Assert(tbSrc.Contains("if (playSound) PlayLanding(dest);"),
+                       "★ 到位才响那一声,不是松手就响");
+                Assert(tbSrc.Contains("landedCard.Opacity = 0"),
+                       "飞到之前先把真卡藏起来,免得同时看到两张");
+                Assert(tbSrc.Contains("b.Tag = l.Code;"), "卡片带语言码,重排后才认得出是同一张");
                 Assert(tbSrc.Contains("Canvas.SetLeft(_ghost, p.X - _dragOffset.X)"),
                        "按抓取点跟手,卡片不会在手里跳一下");
                 Assert(tbSrc.Contains("Chip(\"清空\"") && tbSrc.Contains("Targets.ToList()) TheApp.Translation.RemoveTarget"),
                        "目标池有【清空】按钮,一键全送回语言池");
-                Assert(tbSrc.Contains("CornerRadius(playful ? 8 : 14)"),
-                       "克制皮肤下是大圆角胶囊,暖萌下是方一点的卡片;池子都是方形板块");
+                Assert(tbSrc.Contains("CornerRadius(14)"), "语言是大圆角胶囊,池子是方形板块");
                 Assert(tbSrc.Contains("new Slider") && tbSrc.Contains("IsSnapToTickEnabled = true"), "★ 翻译程度是滑条(四档吸附)");
                 Assert(tbSrc.Contains("ShowTip(cell") && tbSrc.Contains("_tipBubble"), "★ 每个档位节点 hover 有解释气泡");
                 Assert(tbSrc.Contains("var poolDisabled = st.IsFull") && tbSrc.Contains("_poolBox.IsHitTestVisible = !poolDisabled"),
@@ -1294,14 +1368,13 @@ public static class Selftest
                 Assert(!Body(tbSrc).Contains("_targetBox.Margin = new Thickness(0, 8, 0, 0)"),
                        "目标池不再靠上边距压在程度下面");
                 // ★ 堆叠卡片 + 落地扬尘 + 音效【只给暖萌】,微风/墨白克制(用户裁定)
-                Assert(tbSrc.Contains("var playful = ThemeManager.Current == Skin.Warm;"),
-                       "★ 堆叠卡片的观感按皮肤分档");
+                // ★ 暖萌的堆叠卡片已砍(用户裁定):三套皮肤结构一致,只差颜色。
+                Assert(!Body(tbSrc).Contains("Skin.Warm"), "★ 语言卡不再按皮肤分结构");
                 var landing = Slice(tbSrc, "void PlayLanding(Point at)", "// 六粒尘");
-                Assert(landing is not null && landing.Contains("if (ThemeManager.Current != Skin.Warm) return;"),
-                       "★ 落地扬尘与音效只在暖萌下发生(微风/墨白不出声不扬尘)");
-                Assert(tbSrc.Contains("if (landed) PlayLanding("), "★ 落地才有反馈,拖空了没有");
-                Assert(tbSrc.Contains("static double TiltFor(int i)") && !tbSrc.Contains("new Random()"),
-                       "卡片歪斜角按序号定,不用随机(界面重建时不能跳)");
+                Assert(landing is not null && !landing.Contains("ThemeManager.Current"),
+                       "★ 落地反馈是交互反馈、不是视觉身份 —— 三套皮肤一致(声音仍可在设置里关)");
+                Assert(tbSrc.Contains("var soundOnArrive = landed;"), "★ 落地才有反馈,拖空了没有");
+                Assert(!Body(tbSrc).Contains("TiltFor"), "叠牌用的歪斜角一并撤掉(卡片已砍)");
             }
             var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvTrans is not null)
@@ -2595,8 +2668,11 @@ public static class Selftest
                             if (t.Contains("ThemeManager.Current =")) forks.Add(Path.GetFileName(f));
                         }
                     var distinct = forks.Distinct().OrderBy(x => x).ToList();
-                    Assert(distinct.Count <= 1 && (distinct.Count == 0 || distinct[0] == "TranslationBar.cs"),
-                           "★ 按皮肤分【结构】的地方只有登记在案的那一处(其余皮肤差异一律走颜色令牌)"
+                    // ★ 收紧到【零】:暖萌的堆叠卡片砍掉之后,Views 下不该再有按皮肤分结构的地方。
+                    //   皮肤差异一律走颜色令牌(八个基色),结构三套一致 —— 这正是"每个皮肤改一点会
+                    //   导致混乱"的解法:改一次,三套同时对。
+                    Assert(distinct.Count == 0,
+                           "★ 按皮肤分【结构】的地方一处都不该有(皮肤差异一律走颜色令牌)"
                            + (distinct.Count > 0 ? " 现有:" + string.Join(",", distinct) : ""));
                 }
             }

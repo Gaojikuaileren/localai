@@ -259,13 +259,35 @@ public sealed class SettingsView : UserControl
     ///   而且闪透明度改的是内容本身,我们只想【指出位置】—— 所以改用装饰层画框,
     ///   不进布局、不改被指的元素一个像素。
     /// </summary>
+    /// <summary>
+    /// 把某块滚到滚动区的【正中】。
+    /// ★ BringIntoView 只保证看得见 —— 它滚的是最小距离,于是一块高卡片会贴着视口顶边停住,
+    ///   看起来就是把目标栏的顶部放在了中间(用户实测)。要居中就得自己算偏移量。
+    /// </summary>
+    static void CenterInView(FrameworkElement card)
+    {
+        var sv = FindScrollHost(card);
+        if (sv is null) { card.BringIntoView(); return; }
+
+        var top = card.TransformToAncestor(sv).Transform(new Point(0, 0)).Y + sv.VerticalOffset;
+        var target = top - (sv.ViewportHeight - card.ActualHeight) / 2;   // 让卡片中心对上视口中心
+        sv.ScrollToVerticalOffset(Math.Max(0, Math.Min(target, sv.ScrollableHeight)));
+    }
+
+    static ScrollViewer? FindScrollHost(DependencyObject? node)
+    {
+        for (var n = node; n is not null; n = System.Windows.Media.VisualTreeHelper.GetParent(n))
+            if (n is ScrollViewer sv) return sv;
+        return null;
+    }
+
     void Reveal(FrameworkElement? card)
     {
         if (card is null) return;
 
         void Go()
         {
-            card.BringIntoView();          // 滚到【这一块】,不是滚回设置页顶部
+            CenterInView(card);            // ★ 放到【视觉中心】,不是刚好露出来
             RevealHighlight.Show(card);
         }
 

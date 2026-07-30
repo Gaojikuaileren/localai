@@ -38,6 +38,22 @@ public sealed class TranslationState
 
     public TranslationLevel Level { get; private set; } = TranslationLevel.Reading;
 
+    /// <summary>
+    /// 当前待翻译内容的形态(由输入框实时更新)。★ 长文本会禁掉语法/例句两档 ——
+    /// 所以程度条要知道现在打的是一个词还是一整篇。
+    /// </summary>
+    public TextShape Shape { get; private set; } = TextShape.Word;
+
+    /// <summary>实际生效的档位:长文本下语法/例句自动回退到直译(用户裁定)。</summary>
+    public TranslationLevel EffectiveLevel => TextShapes.Effective(Level, Shape);
+
+    public void SetShape(TextShape shape)
+    {
+        if (Shape == shape) return;
+        Shape = shape;
+        Changed?.Invoke();
+    }
+
     public event Action? Changed;
 
     public bool IsFull => _targets.Count >= Languages.MaxTargets;
