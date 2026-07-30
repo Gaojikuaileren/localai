@@ -369,6 +369,9 @@ public sealed class ChatView : UserControl
         _input = new TextBox { Text = _draft, Padding = new Thickness(11, 9, 11, 9), VerticalContentAlignment = VerticalAlignment.Center };
         _input.TextChanged += (_, _) => _draft = _input.Text;
         _input.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; SendCurrent(); } };
+        // ★ 在输入框里直接【粘贴截图】(Ctrl+V):剪贴板是图片就收进附件栏,而不是当文本贴进去。
+        //   用户裁定:去掉"+"菜单里的剪贴板项,改成这里粘贴。文本粘贴不受影响(仅在剪贴板是图片时拦截)。
+        DataObject.AddPastingHandler(_input, OnInputPaste);
         var send = Ui.Primary("发送", (_, _) => SendCurrent());
         send.Height = 40;
         var attach = AttachButton();
@@ -547,14 +550,20 @@ public sealed class ChatView : UserControl
         if (_sessionId is null) NewSession();
         if (_sessionId is null) return;
         var atts = _pending.Count > 0 ? _pending.ToList() : null;
-        if (TheApp.Chat.Send(_sessionId, text, atts))
-        {
-            _draft = "";
-            _pending.Clear();   // Changed -> 重建;draft/pending 已清
-        }
+        // ★ 先清空本地待发状态,再发送 —— Chat.Send 会【同步】触发 Changed → 重建会话区;
+        //   若此时 _pending 还没清,重建就会把【已经发出去】的附件又挂回输入框上(用户反馈的 bug)。
+        _pending.Clear();
+        _draft = "";
+        TheApp.Chat.Send(_sessionId, text, atts);
     }
 
-    // 附件按钮:点开菜单 —— 选择文件 / 选择图片 / 粘贴剪贴板截图。★ 只带路径/剪贴板指令,不真发内容。
+    // 附件上限与"上下文吃紧"阈值(用户裁定):最多 99 个;超过 5 个提示、且只展开显示前 5 个。
+    const int MaxAttachments = 99;
+    const int SoftAttachLimit = 5;
+    static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" };
+
+    // "+"按钮:点开【选择文件(可多选) / 选择文件夹】。★ 图片/文件已合并为一个"选择文件";
+    //   剪贴板截图改成在输入框里 Ctrl+V(见 OnInputPaste)。只带路径,不真发内容。
     FrameworkElement AttachButton()
     {
         var t = new TextBlock { Text = "+", FontSize = 18, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Center };
@@ -565,48 +574,82 @@ public sealed class ChatView : UserControl
         b.BorderThickness = new Thickness(1);
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
         b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
-        b.ToolTip = "添加附件 / 图片 / 剪贴板截图";
+        b.ToolTip = "添加文件 / 文件夹(截图可直接在输入框粘贴)";
 
         var menu = new ContextMenu();
-        var mFile = new MenuItem { Header = "选择文件…" };
-        mFile.Click += (_, _) => PickFile(false);
-        var mImg = new MenuItem { Header = "选择图片…" };
-        mImg.Click += (_, _) => PickFile(true);
-        var mClip = new MenuItem { Header = "粘贴剪贴板截图" };
-        mClip.Click += (_, _) => PasteClipboard();
+        var mFile = new MenuItem { Header = "选择文件…(可多选)" };
+        mFile.Click += (_, _) => PickFiles();
+        var mFolder = new MenuItem { Header = "选择文件夹…" };
+        mFolder.Click += (_, _) => PickChatFolder();
         menu.Items.Add(mFile);
-        menu.Items.Add(mImg);
-        menu.Items.Add(mClip);
+        menu.Items.Add(mFolder);
         b.MouseLeftButtonUp += (_, e) => { e.Handled = true; menu.PlacementTarget = b; menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top; menu.IsOpen = true; };
         return b;
     }
 
-    void PickFile(bool imageOnly)
+    static AttachKind KindOf(string path)
+        => ImageExts.Contains(System.IO.Path.GetExtension(path).ToLowerInvariant()) ? AttachKind.Image : AttachKind.File;
+
+    void PickFiles()
     {
-        // ★ 整段 try:文件对话框走 Windows 外壳(COM),在个别机器/单文件发布下可能抛 —— 此前没兜,
-        //   加上之前没有全局兜底,于是表现为"点添加附件就闪退"(用户反馈)。
         try
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
             {
-                Title = imageOnly ? "选择图片" : "选择文件",
-                Filter = imageOnly ? "图片|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|所有文件|*.*" : "所有文件|*.*",
+                Title = "选择文件(可多选)", Multiselect = true, Filter = "所有文件|*.*",
             };
             if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
-            var name = System.IO.Path.GetFileName(dlg.FileName);
-            _pending.Add(new ChatAttachment(imageOnly ? AttachKind.Image : AttachKind.File, dlg.FileName, name));
-            BuildConversation();
+            AddPaths(dlg.FileNames);
         }
         catch (Exception ex) { ConfirmDialog.Show("打不开文件选择框", ex.Message, confirmText: "好", cancelText: "关闭"); }
     }
 
-    void PasteClipboard()
+    void PickChatFolder()
+    {
+        var f = ProjectUi.PickFolder("选择要作为附件的文件夹");
+        if (f is not null) AddPaths(new[] { f });
+    }
+
+    // 统一入库:文件按扩展名分图片/普通,目录记为文件夹;去重;超过 99 个截断并提示。
+    void AddPaths(IEnumerable<string> paths)
+    {
+        var existing = _pending.Select(p => p.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var dropped = false;
+        foreach (var raw in paths)
+        {
+            var path = raw?.Trim() ?? "";
+            if (path.Length == 0 || !existing.Add(path)) continue;
+            if (_pending.Count >= MaxAttachments) { dropped = true; break; }
+            var isDir = System.IO.Directory.Exists(path);
+            var kind = isDir ? AttachKind.Folder : KindOf(path);
+            var display = isDir ? new System.IO.DirectoryInfo(path).Name : System.IO.Path.GetFileName(path);
+            _pending.Add(new ChatAttachment(kind, path, display));
+        }
+        BuildConversation();
+        if (dropped)
+            ConfirmDialog.Show("附件已达上限", $"一次最多挂载 {MaxAttachments} 个附件,多出的已略过。", confirmText: "好", cancelText: "关闭");
+    }
+
+    // 在输入框里粘贴:剪贴板是图片就收进附件栏(而不是把图片/乱码贴成文本);纯文本粘贴照常。
+    void OnInputPaste(object sender, DataObjectPastingEventArgs e)
     {
         try
         {
-            // ★ Clipboard.GetImage() 本身就可能抛(剪贴板被别的进程占用 -> COMException);之前它在 try 外,直接闪退。
+            var hasImage = e.SourceDataObject?.GetDataPresent(DataFormats.Bitmap) == true || Clipboard.ContainsImage();
+            var hasText = e.SourceDataObject?.GetDataPresent(DataFormats.UnicodeText) == true;
+            if (!hasImage || hasText) return;   // 有文本就走正常文本粘贴;只有图片才收进附件
+            e.CancelCommand();                  // 别把图片贴成文本
+            AddClipboardImage();
+        }
+        catch { /* 粘贴出错不该影响输入 */ }
+    }
+
+    void AddClipboardImage()
+    {
+        try
+        {
             var img = Clipboard.GetImage();
-            if (img is null) { ConfirmDialog.Show("剪贴板里没有图片", "先截个图再试。", confirmText: "好", cancelText: "关闭"); return; }
+            if (img is null) return;
             // 落一份预览 png 到本机临时目录(仅供显示 + 给 AI 一个可读路径;不通过网络发送内容)
             var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "localai-clip-" + Guid.NewGuid().ToString("N")[..8] + ".png");
             using (var fs = System.IO.File.Create(tmp))
@@ -615,28 +658,69 @@ public sealed class ChatView : UserControl
                 enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(img));
                 enc.Save(fs);
             }
-            _pending.Add(new ChatAttachment(AttachKind.Clipboard, tmp, "剪贴板截图"));
+            if (_pending.Count < MaxAttachments)
+                _pending.Add(new ChatAttachment(AttachKind.Clipboard, tmp, "粘贴的截图"));
             BuildConversation();
         }
-        catch (Exception ex) { ConfirmDialog.Show("读取剪贴板图片失败", ex.Message, confirmText: "好", cancelText: "关闭"); }
+        catch (Exception ex) { ConfirmDialog.Show("粘贴截图失败", ex.Message, confirmText: "好", cancelText: "关闭"); }
     }
 
     FrameworkElement PendingStrip()
     {
-        var wrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
-        foreach (var a in _pending.ToList())
+        var box = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+
+        // 顶行:计数 + 【一键清空】。超过软上限时提示"上下文吃紧"。
+        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 4) };
+        var count = new TextBlock { Text = $"附件 {_pending.Count}", VerticalAlignment = VerticalAlignment.Center };
+        count.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        count.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        DockPanel.SetDock(count, Dock.Left);
+        head.Children.Add(count);
+        var clearAll = Chip("清空", "RiskDanger", () => { _pending.Clear(); BuildConversation(); });
+        DockPanel.SetDock(clearAll, Dock.Right);
+        head.Children.Add(clearAll);
+        box.Children.Add(head);
+
+        if (_pending.Count > SoftAttachLimit)
         {
-            // ★ 按【对象】移除,不按捕获的下标 —— 之前闭包抓的是构建时的 idx,列表一变就越界,
-            //   于是"移除附件"抛 ArgumentOutOfRange 把应用掀翻(事件日志实锤的"添加附件闪退"根因)。
-            //   Remove(item) 找不到就是无操作,永不越界。
-            var item = a;
-            var chip = AttachChip(item, onRemove: () => { _pending.Remove(item); BuildConversation(); });
-            wrap.Children.Add(chip);
+            var warn = new TextBlock
+            {
+                Text = $"已挂载 {_pending.Count} 个,超过 {SoftAttachLimit} 个后上下文会吃紧;下面仅展开前 {SoftAttachLimit} 个。",
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4),
+            };
+            warn.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+            warn.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            box.Children.Add(warn);
         }
-        return wrap;
+
+        // 只展开前 5 个;其余折叠成一个"+N"卡(避免占满输入区)。
+        var wrap = new WrapPanel();
+        var shown = Math.Min(_pending.Count, SoftAttachLimit);
+        for (int k = 0; k < shown; k++)
+        {
+            var item = _pending[k];   // 按对象移除,不按下标(下标闭包越界曾致闪退)
+            wrap.Children.Add(AttachChip(item, onRemove: () => { _pending.Remove(item); BuildConversation(); }));
+        }
+        if (_pending.Count > shown)
+            wrap.Children.Add(MoreChip(_pending.Count - shown));
+        box.Children.Add(wrap);
+        return box;
     }
 
-    // 附件小卡:图片显缩略图,文件显图标+名;右上角 × 可移除(仅待发列表用)
+    // 折叠卡:显示"还有 N 个",点它一次性移除被折叠的那些(留下展开的前 5 个)。
+    FrameworkElement MoreChip(int more)
+    {
+        var t = new TextBlock { Text = $"+{more}", FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        var card = new Border { Child = t, Width = 84, Height = 84, Margin = new Thickness(0, 0, 8, 0), ToolTip = $"另有 {more} 个附件未展开" };
+        card.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        card.SetResourceReference(Border.BorderBrushProperty, "Border");
+        card.BorderThickness = new Thickness(1);
+        card.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        return card;
+    }
+
+    // 附件小卡:图片显缩略图;文件夹/PDF/其它文件显对应图标 + 名;右上角 × 可移除。
     FrameworkElement AttachChip(ChatAttachment a, Action? onRemove)
     {
         FrameworkElement inner;
@@ -646,11 +730,14 @@ public sealed class ChatView : UserControl
         }
         else
         {
-            var ic = Icons.Make(IconName.Folder, 18, "FgSecondary");
+            var icon = a.Kind == AttachKind.Folder ? IconName.Folder
+                     : IsPdf(a.Path) ? IconName.Pdf
+                     : IconName.File;
+            var ic = Icons.Make(icon, 18, "FgSecondary");
             var nm = new TextBlock { Text = a.Display, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 120, Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
             nm.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             nm.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4) };
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6) };
             row.Children.Add(ic); row.Children.Add(nm);
             inner = row;
         }
@@ -659,7 +746,7 @@ public sealed class ChatView : UserControl
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.BorderThickness = new Thickness(1);
         card.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        card.ToolTip = a.Kind == AttachKind.Clipboard ? "剪贴板截图(发送的是读取指令,不是内容)" : a.Path;
+        card.ToolTip = a.Kind == AttachKind.Clipboard ? "粘贴的截图(发送的是读取指令,不是内容)" : a.Path;
 
         if (onRemove is null) return card;
         var x = new TextBlock { Text = "×", FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -673,6 +760,8 @@ public sealed class ChatView : UserControl
         g.Children.Add(xb);
         return g;
     }
+
+    static bool IsPdf(string path) => System.IO.Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
 
     static System.Windows.Media.ImageSource? Thumb(string path, int decodeWidth)
     {

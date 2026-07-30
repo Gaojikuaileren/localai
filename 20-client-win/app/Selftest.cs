@@ -360,7 +360,7 @@ public static class Selftest
                 Assert(chatSrc.Contains("\"FgOnSelected\""), "会话选中态字色用 FgOnSelected(墨白不再黑底黑字)");
                 Assert(chatSrc.Contains("Accent") && chatSrc.Contains("inProject"), "项目会话标题着重色区分普通会话");
                 Assert(chatSrc.Contains("ChatOpener") && chatSrc.Contains("VerticalAlignment.Center"), "空态输入框竖直居中(像 GPT)+ 开场问候");
-                Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PasteClipboard") && chatSrc.Contains("PickFile"), "可加附件/图片/剪贴板截图");
+                Assert(chatSrc.Contains("AttachButton") && chatSrc.Contains("PickFiles") && chatSrc.Contains("OnInputPaste"), "可加附件(选文件/文件夹)+ 输入框粘贴截图");
                 Assert(chatSrc.Contains("GhostButton") && chatSrc.Contains("虚线") || chatSrc.Contains("StrokeDashArray"), "幽灵会话:虚线边框会话面板");
                 Assert(chatSrc.Contains("OpenTrash") && chatSrc.Contains("已删除"), "会话列表底部有【已删除】入口");
                 // 幽灵会话可退出:按钮是开关,状态决定实线/虚线,且只在普通会话上下文出现
@@ -577,6 +577,34 @@ public static class Selftest
                 Assert(Services.ClientStore.Load<List<Services.TodoItem>>(okPath)?.Count == 1, "存档可读回");
                 try { File.Delete(okPath); } catch { }
             }
+            // ---- 附件栏重做(2026-07-30 用户裁定)----
+            var cvAtt = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvAtt is not null)
+            {
+                // ★ 发送前先清空 _pending,再 Send —— 否则 Send 同步触发 Changed 重建会把已发附件挂回输入框
+                var sc = cvAtt.IndexOf("void SendCurrent()", StringComparison.Ordinal);
+                var scEnd = cvAtt.IndexOf("FrameworkElement AttachButton", sc, StringComparison.Ordinal);
+                var scBody = cvAtt[sc..scEnd];
+                Assert(scBody.IndexOf("_pending.Clear()", StringComparison.Ordinal) < scBody.IndexOf("TheApp.Chat.Send", StringComparison.Ordinal),
+                       "★ 发送前先清空待发附件(修:发出后附件还挂在输入框)");
+                // 合并选择器:文件(可多选)+ 文件夹;去掉"选择图片"与"剪贴板"菜单项
+                Assert(cvAtt.Contains("选择文件…(可多选)") && cvAtt.Contains("选择文件夹…"), "选择器合并为【选择文件(多选)+ 选择文件夹】");
+                Assert(!cvAtt.Contains("选择图片…") && !cvAtt.Contains("粘贴剪贴板截图"), "去掉独立的选择图片 / 剪贴板菜单项");
+                Assert(cvAtt.Contains("Multiselect = true"), "文件对话框支持多选");
+                Assert(cvAtt.Contains("MaxAttachments = 99") && cvAtt.Contains("SoftAttachLimit = 5"), "上限 99、软阈值 5");
+                // 输入框内粘贴截图
+                Assert(cvAtt.Contains("DataObject.AddPastingHandler") && cvAtt.Contains("OnInputPaste"), "★ 输入框内 Ctrl+V 粘贴截图进附件栏");
+                Assert(cvAtt.Contains("CancelCommand()"), "剪贴板是图片时取消文本粘贴(不贴成乱码)");
+                // 超阈值提示 + 折叠 + 一键清空
+                Assert(cvAtt.Contains("上下文会吃紧"), "超过 5 个提示上下文吃紧");
+                Assert(cvAtt.Contains("MoreChip"), "超出部分折叠成 +N,不铺满输入区");
+                Assert(cvAtt.Contains("_pending.Clear(); BuildConversation();") && cvAtt.Contains("\"清空\""), "有一键清空附件");
+                // 按类型预览
+                Assert(cvAtt.Contains("IconName.Pdf") && cvAtt.Contains("IconName.File") && cvAtt.Contains("AttachKind.Folder"),
+                       "按类型预览:图片缩略图 / PDF 图标 / 文件图标 / 文件夹图标");
+            }
+            Assert(Enum.IsDefined(typeof(Services.AttachKind), "Folder"), "附件种类含 Folder");
+
             // ---- 崩溃兜底 + 附件对话框健壮性(修"添加附件闪退")----
             var appCrash = TryReadSource("App.xaml.cs");
             if (appCrash is not null)
@@ -589,11 +617,11 @@ public static class Selftest
             var chatAtt = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (chatAtt is not null)
             {
-                // Clipboard.GetImage() 必须在 try 内(它本身会抛)
-                var ci = chatAtt.IndexOf("Clipboard.GetImage()", StringComparison.Ordinal);
-                var tryPaste = chatAtt.IndexOf("void PasteClipboard()", StringComparison.Ordinal);
-                var tryPos = chatAtt.IndexOf("try", tryPaste, StringComparison.Ordinal);
-                Assert(ci > 0 && tryPos > 0 && tryPos < ci, "★ Clipboard.GetImage() 在 try 内(修:此前在 try 外直接闪退)");
+                // Clipboard.GetImage() 必须在 try 内(它本身会抛);现位于 AddClipboardImage
+                var acStart = chatAtt.IndexOf("void AddClipboardImage()", StringComparison.Ordinal);
+                var ci = acStart >= 0 ? chatAtt.IndexOf("Clipboard.GetImage()", acStart, StringComparison.Ordinal) : -1;
+                var tryPos = acStart >= 0 ? chatAtt.IndexOf("try", acStart, StringComparison.Ordinal) : -1;
+                Assert(acStart >= 0 && ci > 0 && tryPos > 0 && tryPos < ci, "★ Clipboard.GetImage() 在 try 内(修:此前在 try 外直接闪退)");
                 Assert(chatAtt.Contains("打不开文件选择框"), "文件选择对话框异常被兜住并提示");
                 // ★ 移除附件按【对象】而非捕获下标(事件日志实锤:RemoveAt(旧idx) 越界 = "添加附件闪退")
                 var psStart = chatAtt.IndexOf("FrameworkElement PendingStrip()", StringComparison.Ordinal);

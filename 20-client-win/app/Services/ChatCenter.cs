@@ -11,7 +11,7 @@ namespace LocalAI.Client.Services;
 
 public enum ChatRole { User, Assistant, System }
 
-public enum AttachKind { File, Image, Clipboard }
+public enum AttachKind { File, Image, Clipboard, Folder }
 
 /// <summary>
 /// 一个附件引用。★ 本机运行,不真的"发文件":只带【路径】(文件/图片)或【读剪贴板图片】的指令,

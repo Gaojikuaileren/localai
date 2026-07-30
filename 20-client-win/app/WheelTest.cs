@@ -72,7 +72,7 @@ public static class WheelTest
 
         // 图标核对:财务管理(钱包)vs 投资(走势图)要能一眼区分
         var icons = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var ic in new[] { IconName.Ai, IconName.Folder, IconName.Model, IconName.Finance, IconName.Chat })
+        foreach (var ic in new[] { IconName.Ai, IconName.File, IconName.Pdf, IconName.Folder, IconName.Model })
         {
             var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
             var el = Icons.Make(ic, 34, "FgPrimary");
@@ -82,7 +82,7 @@ public static class WheelTest
             box.Children.Add(lab);
             icons.Children.Add(box);
         }
-        Save(Themed(icons), Path.Combine(outDir, "icons.png"), 320, 80);
+        Save(Themed(icons), Path.Combine(outDir, "icons.png"), 340, 80);
 
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png");
         return 0;
