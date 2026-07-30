@@ -804,6 +804,8 @@ public static class Selftest
                 Assert(pkBoard.Contains("ShowDeletedBoard") && pkBoard.Contains("ShowCompletedBoard"), "项目抽屉有【已删除/已完成项目】覆盖板块");
                 Assert(pkBoard.Contains("_header") && pkBoard.Contains("选择一个项目"), "常驻提示(未选时提示选项目;不挤排版)");
                 Assert(pkBoard.Contains("PinButton"), "项目方块用 hover 置顶按钮(像主页)");
+                Assert(pkBoard.Contains("OriginLabel") && pkBoard.Contains("page == Page.Deleted"),
+                       "★ 已删除项目方块标出【来自哪个工作空间】(回收站跨空间共用)");
                 Assert(pkBoard.Contains("void UpdateBack()") && pkBoard.Contains("_page == Page.Grid"),
                        "★ 左上角返回键按层级逐级后退(已完成/已删除 → 进行中 → 普通会话)");
                 Assert(pkBoard.Split("‹ 返回项目").Length - 1 == 1, "「返回项目」只有一个入口(说明框里不再重复放)");

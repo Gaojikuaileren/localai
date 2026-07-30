@@ -324,12 +324,16 @@ public sealed class ProjectPickerView : UserControl
         name.SetResourceReference(TextBlock.ForegroundProperty, sel ? "FgOnSelected" : "FgPrimary");
         name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        var status = ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null);
-        status.Margin = new Thickness(0, 0, 30, 0);   // 给右下角的三点让位
+        // 底行:一般显示状态;★【已删除】页改显示【来自哪个工作空间】——
+        //   垃圾桶是所有工作空间共用的,不标出处就分不清这项目原本属于谁(用户裁定)。
+        FrameworkElement bottom = page == Page.Deleted
+            ? OriginLabel(p, sel)
+            : ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null);
+        bottom.Margin = new Thickness(0, 0, 30, 0);   // 给右下角的三点让位
         var body = new StackPanel();
         body.Children.Add(folder);
         body.Children.Add(name);
-        body.Children.Add(status);
+        body.Children.Add(bottom);
 
         var overlay = new Grid();
         overlay.Children.Add(body);
@@ -381,6 +385,32 @@ public sealed class ProjectPickerView : UserControl
         };
         _tiles[p.ProjectId] = tile;
         return tile;
+    }
+
+    /// <summary>
+    /// 【已删除项目】方块底行:标出它来自哪个工作空间 —— 回收站跨空间共用,不标出处就分不清。
+    /// 用该工作空间自己的图标 + 名字,和左导航一眼对得上。
+    /// </summary>
+    internal static FrameworkElement OriginLabelPreview(Project p) => OriginLabel(p, false);
+
+    static FrameworkElement OriginLabel(Project p, bool sel)
+    {
+        var def = Workspaces.All.FirstOrDefault(w => w.Key == p.WorkspaceKey);
+        var fg = sel ? "FgOnSelected" : "FgMuted";
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var ic = Icons.Make(def?.Icon ?? IconName.Chat, 12, fg);
+        ic.Margin = new Thickness(0, 0, 5, 0);
+        ic.VerticalAlignment = VerticalAlignment.Center;
+        row.Children.Add(ic);
+        var t = new TextBlock
+        {
+            Text = def is null ? p.WorkspaceKey : I18n.Strings.Get(def.TitleKey),
+            VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        t.SetResourceReference(TextBlock.ForegroundProperty, fg);
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        row.Children.Add(t);
+        return row;
     }
 
     // 置顶按钮(水滴 pin,与主页同款):右上角;平时隐藏,hover 显示;已置顶常亮 + 强调色。

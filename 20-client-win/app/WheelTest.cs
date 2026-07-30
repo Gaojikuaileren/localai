@@ -122,6 +122,28 @@ public static class WheelTest
             Save(Themed(heads), Path.Combine(outDir, file), 420, 560);
         }
 
+        // 已删除项目方块:底行应显示【来自哪个工作空间】(回收站跨空间共用)
+        ThemeManager.Initialize(Skin.Breeze);
+        var trashTiles = new System.Windows.Controls.Primitives.UniformGrid { Columns = 2, Width = 400 };
+        foreach (var (title, wsKey) in new[] { ("家庭旅行计划", "chat"), ("论文摘要翻译", "translation") })
+        {
+            var inner = new StackPanel();
+            inner.Children.Add(Icons.Make(IconName.Folder, 30, "FgSecondary"));
+            var lab = new TextBlock { Text = title, FontSize = 12, Margin = new Thickness(0, 6, 26, 0) };
+            lab.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            inner.Children.Add(lab);
+            var pr = new Project("x", title, "", wsKey, ProjectScope.Personal, DateTime.Now, DeletedAt: DateTime.Now);
+            var origin = ProjectPickerView.OriginLabelPreview(pr);
+            origin.Margin = new Thickness(0, 0, 30, 0);
+            inner.Children.Add(origin);
+            var tb = new Border { Child = inner, Height = 100, Padding = new Thickness(12), Margin = new Thickness(4), BorderThickness = new Thickness(1) };
+            tb.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+            tb.SetResourceReference(Border.BorderBrushProperty, "Border");
+            tb.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+            trashTiles.Children.Add(tb);
+        }
+        Save(Themed(trashTiles), Path.Combine(outDir, "trash-tiles.png"), 420, 150);
+
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;
     }
