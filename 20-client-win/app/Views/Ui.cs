@@ -49,21 +49,55 @@ public static class Ui
     /// <summary>
     /// 带标题(可选图标)的统一板块。并列板块用它,标题栏高度与排版完全一致。
     /// </summary>
+    /// <param name="iconAction">
+    /// 给了就让【标题图标】可点:鼠标移上去变成【齿轮】,点一下执行它(用户裁定:日历/待办的图标
+    /// hover 变齿轮,点进对应的设置)。不给则图标只是装饰。
+    /// </param>
     public static Border Panel(string title, UIElement body, Theme.IconName? icon = null, Thickness? margin = null,
-                               bool compact = false, FrameworkElement? headerAction = null)
+                               bool compact = false, FrameworkElement? headerAction = null, Action? iconAction = null,
+                               string? iconActionTip = null, FrameworkElement? titleAction = null)
     {
         // 标题(图标 + 文字)靠左
         var titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         if (icon is { } ic)
         {
-            var el = Theme.Icons.Make(ic, 16, "FgMuted");
-            el.Margin = new Thickness(0, 0, 8, 0);
-            el.VerticalAlignment = VerticalAlignment.Center;
-            titleRow.Children.Add(el);
+            if (iconAction is null)
+            {
+                var el = Theme.Icons.Make(ic, 16, "FgMuted");
+                el.Margin = new Thickness(0, 0, 8, 0);
+                el.VerticalAlignment = VerticalAlignment.Center;
+                titleRow.Children.Add(el);
+            }
+            else
+            {
+                // hover 换齿轮:两个图标叠在一起切显隐,比重建元素稳(重建会丢 hover 状态)
+                var normal = Theme.Icons.Make(ic, 16, "FgMuted");
+                var gear = Theme.Icons.Make(Theme.IconName.Settings, 16, "Accent");
+                gear.Visibility = Visibility.Collapsed;
+                var stack = new Grid { Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+                stack.Children.Add(normal);
+                stack.Children.Add(gear);
+                var hit = new Border
+                {
+                    Child = stack, Background = System.Windows.Media.Brushes.Transparent,
+                    Cursor = System.Windows.Input.Cursors.Hand, Padding = new Thickness(2),
+                    ToolTip = iconActionTip ?? "设置",
+                };
+                hit.MouseEnter += (_, _) => { normal.Visibility = Visibility.Collapsed; gear.Visibility = Visibility.Visible; };
+                hit.MouseLeave += (_, _) => { normal.Visibility = Visibility.Visible; gear.Visibility = Visibility.Collapsed; };
+                hit.MouseLeftButtonUp += (_, e) => { e.Handled = true; iconAction(); };
+                titleRow.Children.Add(hit);
+            }
         }
         var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         t.Dyn(TextBlock.ForegroundProperty, "FgPrimary").Dyn(TextBlock.FontSizeProperty, "FontSubtitle");
         titleRow.Children.Add(t);
+        // 紧跟标题右侧的小控件(如待办的"分类下拉箭头")
+        if (titleAction is not null)
+        {
+            titleAction.VerticalAlignment = VerticalAlignment.Center;
+            titleRow.Children.Add(titleAction);
+        }
 
         // 可选的右侧动作(如"+"新增)—— 标题行用 DockPanel,动作贴右,标题占满其余
         var head = new DockPanel { Margin = new Thickness(0, 0, 0, compact ? 6 : 10), LastChildFill = true };

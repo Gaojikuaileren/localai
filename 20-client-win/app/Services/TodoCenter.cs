@@ -14,7 +14,7 @@
 
 namespace LocalAI.Client.Services;
 
-public enum TodoKind { Personal, Chore }              // 待办 / 家务
+public enum TodoKind { Personal, Chore, Shopping }    // 待办 / 家务 / 采购清单(仿提醒事项的分类)
 public enum TodoPriority { None, Low, Medium, High }  // 无 / 低 / 中 / 高(仿提醒事项)
 
 /// <summary>

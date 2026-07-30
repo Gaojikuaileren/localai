@@ -75,6 +75,9 @@ public sealed class AppSettings
 
     bool AddHiddenPanel(string key) { HiddenPanels.Add(key); return true; }
 
+    /// <summary>主页待办板块当前显示的分类(all/today/personal/chore/shopping)。每台设备各自的偏好。</summary>
+    public string HomeTodoFilter { get; set; } = "all";
+
     /// <summary>
     /// 自动删除【超过 X 天】的已完成待办。0 = 不自动删除(默认,保守:不替用户丢东西)。
     /// 在"待办 › 已完成"抽屉里设置。

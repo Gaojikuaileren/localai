@@ -493,11 +493,15 @@ public sealed class ChatView : UserControl
                 var h = _conv.ActualHeight;
                 var startY = -Math.Max(0, (h - inputWrap.ActualHeight) / 2 - 10);   // 居中处相对底部的偏移
                 if (startY >= -1) return;                                            // 高度还没算出来就别硬演
+                // 慢一点、更丝滑:缓入缓出(EaseInOut),消息区稍晚淡入,避免"抢在输入框前面出现"
                 var t = new TranslateTransform { Y = startY };
                 inputWrap.RenderTransform = t;
                 t.BeginAnimation(TranslateTransform.YProperty,
-                    new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(320)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
-                scroll.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(320)));
+                    new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(520))
+                    { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
+                scroll.BeginAnimation(OpacityProperty,
+                    new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(420))
+                    { BeginTime = TimeSpan.FromMilliseconds(120), EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
             }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
         _wasEmptyState = !hasMsgs;

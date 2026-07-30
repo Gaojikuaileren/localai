@@ -446,6 +446,14 @@ public partial class MainWindow : Window
     /// <summary>右侧抽屉打开【项目库】(已完成项目)。</summary>
     public void OpenProjectLibrary() => OpenSideDrawer("项目库", new ProjectLibraryView(), IconName.Tasks);
 
+    /// <summary>主页日历/待办的图标(hover 变齿轮)点进来:跳到设置里的「与 Apple 同步」并高亮那一块。</summary>
+    public void OpenAppleSyncSettings()
+    {
+        Overlay.CloseActive();      // 可能有抽屉开着,先收起再跳页
+        Navigate("settings");
+        (ContentHost.Content as SettingsView)?.RevealAppleSync();
+    }
+
     /// <summary>从项目抽屉/主页进入某项目的项目聊天:关抽屉 -> 切到聊天 -> 选中该项目上下文。</summary>
     public void OpenProjectInChat(string projectId)
     {

@@ -415,6 +415,49 @@ public static class Selftest
             cc3.SweepExpiredDeleted(DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
             Assert(cc3.Find(sa.SessionId) is null, "超过保留期自动清除(不可恢复)");
 
+            // ---- 待办分类(仿提醒事项)+ 图标齿轮 -> Apple 同步设置 + 主页精简菜单 ----
+            {
+                var fc = new Services.TodoCenter();
+                fc.Add(new Services.TodoItem("", "个人的", Services.TodoKind.Personal));
+                fc.Add(new Services.TodoItem("", "家务的", Services.TodoKind.Chore));
+                fc.Add(new Services.TodoItem("", "买牛奶", Services.TodoKind.Shopping));
+                fc.Add(new Services.TodoItem("", "今天到期", Services.TodoKind.Personal, Due: DateTime.Today.AddHours(20)));
+                fc.Add(new Services.TodoItem("", "下周到期", Services.TodoKind.Personal, Due: DateTime.Today.AddDays(7)));
+                Assert(Enum.IsDefined(typeof(Services.TodoKind), "Shopping"), "待办种类含【采购清单】");
+                var fcActive = fc.Active().ToList();
+                Assert(fcActive.Count(x => x.Kind == Services.TodoKind.Shopping) == 1, "采购清单项可正常建立");
+                // "今天" = 有截止且今天或更早(逾期也算)
+                var fcToday = fcActive.Where(x => x.Due is { } d && d.Date <= DateTime.Today).ToList();
+                Assert(fcToday.Count == 1 && fcToday[0].Title == "今天到期", "「今天」分类= 今天或更早到期(不含以后的)");
+            }
+            var hvFilter = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (hvFilter is not null)
+            {
+                Assert(hvFilter.Contains("TodoFilterCaret") && hvFilter.Contains("采购清单") && hvFilter.Contains("\"today\""),
+                       "待办标题右侧有分类下拉(全部/今天/待办/家务/采购清单)");
+                Assert(hvFilter.Contains("HomeTodoFilter"), "所选分类记在本机偏好里");
+                Assert(hvFilter.Contains("OpenAppleSyncSettings"), "日历/待办图标点齿轮 -> Apple 同步设置");
+                Assert(hvFilter.Contains("homeMenu: true"), "★ 主页项目方块用精简菜单(只置顶 + 打开文件夹)");
+            }
+            var uiPanel = TryReadSource(Path.Combine("Views", "Ui.cs"));
+            if (uiPanel is not null)
+                Assert(uiPanel.Contains("iconAction") && uiPanel.Contains("IconName.Settings"), "面板标题图标可 hover 变齿轮并点击");
+            var puHome = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puHome is not null)
+            {
+                Assert(puHome.Contains("BuildHomeMenu"), "存在主页精简菜单");
+                var hm = puHome[puHome.IndexOf("BuildHomeMenu", StringComparison.Ordinal)..];
+                hm = hm[..hm.IndexOf("public static FrameworkElement DotsButton", StringComparison.Ordinal)];
+                Assert(!hm.Contains("删除项目") && !hm.Contains("AI 权限") && !hm.Contains("发送到工作空间"),
+                       "★ 主页菜单不含删除/AI权限/发送空间(去工作空间设置)");
+            }
+            var setSync = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (setSync is not null)
+            {
+                Assert(setSync.Contains("与 Apple 同步") && setSync.Contains("尚未接入"), "设置里有【与 Apple 同步】预留板块且如实标注未接入");
+                Assert(setSync.Contains("RevealAppleSync"), "可从主页齿轮跳转并高亮该板块");
+            }
+
             // ---- 待办:批量删除 / 自动清理 / AI 建立标记 ----
             {
                 var tc = new Services.TodoCenter();

@@ -215,8 +215,32 @@ public static class ProjectUi
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
-    /// <summary>三个点按钮:左键点开上面的菜单(替代右键)。</summary>
-    public static FrameworkElement DotsButton(Project p, Action onEdit, Action? onNavigate = null)
+    /// <summary>
+    /// 主页项目方块的【精简菜单】(用户裁定):只有 置顶/取消置顶 + 在文件夹中打开。
+    /// 更细的设置(状态、可见范围、AI 权限、发送空间、编辑、删除)请到对应工作空间的项目抽屉里做 ——
+    /// 主页是"回到刚才那件事"的入口,不该承担项目管理。
+    /// </summary>
+    public static ContextMenu BuildHomeMenu(Project p)
+    {
+        var m = new ContextMenu();
+        var pin = new MenuItem { Header = p.Pinned ? "取消置顶" : "置顶项目", IsChecked = p.Pinned };
+        pin.Click += (_, _) => Projects.TogglePin(p.ProjectId);
+        m.Items.Add(pin);
+
+        var open = new MenuItem { Header = "在文件夹中打开" };
+        open.Click += (_, _) =>
+        {
+            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
+                ConfirmDialog.Show("打不开文件夹",
+                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
+                    confirmText: "好", cancelText: "关闭");
+        };
+        m.Items.Add(open);
+        return m;
+    }
+
+    /// <summary>三个点按钮:左键点开菜单(替代右键)。homeMenu=true 用主页的精简菜单。</summary>
+    public static FrameworkElement DotsButton(Project p, Action onEdit, Action? onNavigate = null, bool homeMenu = false)
     {
         var dots = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         for (int k = 0; k < 3; k++)
@@ -232,7 +256,7 @@ public static class ProjectUi
         b.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            var menu = BuildMenu(p, onEdit, b, onNavigate);
+            var menu = homeMenu ? BuildHomeMenu(p) : BuildMenu(p, onEdit, b, onNavigate);
             menu.PlacementTarget = b;
             menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
             menu.IsOpen = true;

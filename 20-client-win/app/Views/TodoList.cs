@@ -67,7 +67,7 @@ public static class TodoList
             tb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             sub.Children.Add(tb);
         }
-        Meta(t.Kind == TodoKind.Chore ? "家务" : "待办", "FgMuted");
+        Meta(t.Kind switch { TodoKind.Chore => "家务", TodoKind.Shopping => "采购", _ => "待办" }, "FgMuted");
         // ★ AI 建立的用小星标区分(用户裁定:要能一眼看出是手动建的还是 AI 建的)
         if (t.CreatedByAi)
         {

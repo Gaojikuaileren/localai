@@ -72,6 +72,7 @@ public sealed class HomeView : UserControl
 
     public HomeView()
     {
+        _todoFilter = TheApp.Settings.HomeTodoFilter;   // 读回上次选的分类
         _calVisible = TheApp.Settings.IsPanelVisible("calendar");
         _todoVisible = TheApp.Settings.IsPanelVisible("todo");
         _weatherVisible = TheApp.Settings.IsPanelVisible("weather");
@@ -105,7 +106,9 @@ public sealed class HomeView : UserControl
         {
             // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
             var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
-            calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12));
+            calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
+                iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
+                iconActionTip: "与 Apple 家庭共享日历同步的设置");
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
             if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
             _root.Children.Add(calPanel);
@@ -131,7 +134,11 @@ public sealed class HomeView : UserControl
 
         _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
-            headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"));
+            headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"),
+            // 图标 hover 变齿轮 -> 跳到"与 Apple 同步"设置(用户裁定)
+            iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
+            iconActionTip: "与 Apple 提醒事项同步的设置",
+            titleAction: TodoFilterCaret());
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮(日历本体 + 标题行与内边距 ≈ 62)。
         _todoPanel.Height = CalendarView.PanelHeight + 62;
         if (_todoVisible)
@@ -547,16 +554,94 @@ public sealed class HomeView : UserControl
             existing is null ? "新建待办事项" : "编辑待办事项", body, IconName.Member);
     }
 
+    // ---------------------------------------------------------------- 待办分类(仿提醒事项)
+    // 全部 / 今天 / 待办 / 家务 / 采购清单。选择存在本机偏好里,下次打开还是这个分类。
+    string _todoFilter = "all";   // 由 Build() 从 AppSettings 读回
+
+    static readonly (string Key, string Label)[] TodoFilters =
+    {
+        ("all", "全部"), ("today", "今天"), ("personal", "待办"), ("chore", "家务"), ("shopping", "采购清单"),
+    };
+
+    static string TodoFilterLabel(string key) => TodoFilters.FirstOrDefault(f => f.Key == key).Label ?? "全部";
+
+    TextBlock? _todoFilterLabel;   // 标题右侧胶囊里的分类名(切换时就地改,不重建面板)
+
+    IEnumerable<TodoItem> FilterTodos(IEnumerable<TodoItem> src) => _todoFilter switch
+    {
+        // 今天 = 有截止且【今天或更早】(逾期的当然也要看见)
+        "today" => src.Where(t => t.Due is { } d && d.Date <= DateTime.Today),
+        "personal" => src.Where(t => t.Kind == TodoKind.Personal),
+        "chore" => src.Where(t => t.Kind == TodoKind.Chore),
+        "shopping" => src.Where(t => t.Kind == TodoKind.Shopping),
+        _ => src,
+    };
+
+    // 标题右侧的分类胶囊:显示当前分类 + 下拉箭头(仿提醒事项换清单)
+    FrameworkElement TodoFilterCaret()
+    {
+        _todoFilterLabel = new TextBlock { Text = TodoFilterLabel(_todoFilter), VerticalAlignment = VerticalAlignment.Center };
+        _todoFilterLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        _todoFilterLabel.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var caret = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M0,0 L8,0 L4,5 Z"),
+            Width = 8, Height = 5, Stretch = Stretch.Fill, IsHitTestVisible = false,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 1, 0, 0),
+        };
+        caret.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgMuted");
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(_todoFilterLabel);
+        row.Children.Add(caret);
+
+        var b = new Border
+        {
+            Child = row, Padding = new Thickness(7, 2, 7, 2), Margin = new Thickness(8, 1, 0, 0),
+            Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
+            BorderThickness = new Thickness(1), ToolTip = "切换分类(全部 / 今天 / 待办 / 家务 / 采购清单)",
+        };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            var m = new ContextMenu();
+            foreach (var (key, label) in TodoFilters)
+            {
+                var mi = new MenuItem { Header = label, IsChecked = _todoFilter == key };
+                var captured = key;
+                mi.Click += (_, _) =>
+                {
+                    if (_todoFilter == captured) return;
+                    _todoFilter = captured;
+                    TheApp.Settings.HomeTodoFilter = captured;
+                    TheApp.Settings.Save();
+                    if (_todoFilterLabel is not null) _todoFilterLabel.Text = TodoFilterLabel(captured);
+                    BuildTodos();   // 只重建列表,面板不动
+                };
+                m.Items.Add(mi);
+            }
+            m.PlacementTarget = b;
+            m.Placement = PlacementMode.Bottom;
+            m.IsOpen = true;
+        };
+        return b;
+    }
+
     void BuildTodos()
     {
         _todoList.Children.Clear();
         _todoRows.Clear();
         _todoAnimatingOut.Clear();   // 整表重建 -> 旧的划出动画作废(元素已被清掉)
-        var items = TheApp.Todos.Active().ToList();
+        var items = FilterTodos(TheApp.Todos.Active()).ToList();
         if (items.Count == 0)
         {
-            _todoList.Children.Add(Ui.Body("没有待办事项了。", muted: true));
-            _todoList.Children.Add(Ui.Caption("点右上角 + 新建;或「提醒我…」建个人待办、「提醒我们…」建家庭事务。"));
+            _todoList.Children.Add(Ui.Body(_todoFilter == "all" ? "没有待办事项了。" : $"「{TodoFilterLabel(_todoFilter)}」里没有事项。", muted: true));
+            _todoList.Children.Add(Ui.Caption("点右上角 + 新建;点标题旁的箭头可切换分类。"));
         }
         else
         {
@@ -730,7 +815,8 @@ public sealed class HomeView : UserControl
         var pinBtn = PinButton(p);
         pinBtn.HorizontalAlignment = HorizontalAlignment.Right;
         pinBtn.VerticalAlignment = VerticalAlignment.Top;
-        var dots = ProjectUi.DotsButton(p, () => (Application.Current.MainWindow as MainWindow)?.OpenProjectEditor(p));
+        // 主页只给精简菜单(置顶 / 在文件夹中打开);详细设置去对应工作空间的项目抽屉(用户裁定)
+        var dots = ProjectUi.DotsButton(p, () => { }, homeMenu: true);
         dots.Opacity = 0;
         dots.HorizontalAlignment = HorizontalAlignment.Right;
         dots.VerticalAlignment = VerticalAlignment.Bottom;

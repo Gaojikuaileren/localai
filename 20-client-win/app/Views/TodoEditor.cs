@@ -23,10 +23,10 @@ public static class TodoEditor
         var title = Field(existing?.Title ?? "");
 
         // ---- 类型:待办 / 家务 ----
-        var kinds = new[] { "待办", "家务" };
+        var kinds = new[] { "待办", "家务", "采购清单" };
         var kind = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
         foreach (var k in kinds) kind.Items.Add(k);
-        kind.SelectedIndex = existing?.Kind == TodoKind.Chore ? 1 : 0;
+        kind.SelectedIndex = existing?.Kind switch { TodoKind.Chore => 1, TodoKind.Shopping => 2, _ => 0 };
 
         // ---- 截止:可选。先"是否设截止",再"是否含具体时间";都用竖直转盘 ----
         var hasDue = new CheckBox { Content = "设置截止", IsChecked = existing?.Due is not null, Margin = new Thickness(0, 2, 0, 6) };
@@ -94,7 +94,7 @@ public static class TodoEditor
             return new TodoItem(
                 Id: existing?.Id ?? "",
                 Title: string.IsNullOrWhiteSpace(title.Text) ? "(无标题)" : title.Text.Trim(),
-                Kind: kind.SelectedIndex == 1 ? TodoKind.Chore : TodoKind.Personal,
+                Kind: kind.SelectedIndex switch { 1 => TodoKind.Chore, 2 => TodoKind.Shopping, _ => TodoKind.Personal },
                 Done: existing?.Done ?? false,
                 Due: due,
                 DueHasTime: dueHasTime,

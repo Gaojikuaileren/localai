@@ -93,9 +93,50 @@ public sealed class SettingsView : UserControl
                 Ui.Caption("勾选后点窗口的 × 只是收起窗口,程序继续在托盘运行;要真正退出请用托盘图标右键 →「退出」。")
             )),
 
+            AppleSyncCard(),
+
             // 连接与设备:已配对的电脑、配对/解除 —— 从独立导航项并入设置(用户裁定)
             Ui.Subtitle(Strings.Get("devices.title")),
             new DevicesView(embedded: true)
         );
+    }
+
+    /// <summary>
+    /// 与 Apple 同步(日历 / 提醒事项)。★ 目前是【预留板块】:接入方式与所需字段还没定,
+    /// 这里如实说明现状与规则,不放假开关、不谎称已连接。主页日历/待办的图标 hover 变齿轮点进来。
+    /// </summary>
+    public Border AppleSyncCard()
+    {
+        var card = Ui.Card(Ui.Stack(
+            Ui.Subtitle("与 Apple 同步(日历 / 提醒事项)"),
+            Ui.Body("尚未接入。", muted: true),
+            new Border { Height = 6 },
+            Ui.Body("现在:日历与待办都是【本机数据】,新增/编辑当场生效并保存在本机。"),
+            Ui.Caption("接入后按【增量合并】双向同步,不是全局覆盖:已有的不重复加、没有的才加、" +
+                       "★ 绝不用空日程覆盖已有;本机独有的反向推给 Apple(见决议 D50 补充)。"),
+            new Border { Height = 10 },
+            Ui.Body("接入前还需要确定(留待后续):"),
+            Ui.Caption("· 用哪条通路(CalDAV / 本机 Apple 应用桥接)与相应的凭据保管方式;"),
+            Ui.Caption("· 同步哪些日历组 / 提醒事项清单,以及冲突时以哪边为准;"),
+            Ui.Caption("· 与对方相关的日程只发邀请/修改建议,遵守 D45 的可见范围规则。")
+        ));
+        _appleSyncCard = card;
+        return card;
+    }
+
+    Border? _appleSyncCard;
+
+    /// <summary>从主页齿轮跳进来时:把"与 Apple 同步"这块滚到可视区并高亮一下,让人知道跳到哪了。</summary>
+    public void RevealAppleSync()
+    {
+        if (_appleSyncCard is null) return;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _appleSyncCard.BringIntoView();
+            // 轻微闪一下描边:不改布局(避免跳动),只是提示"就是这一块"
+            var flash = new System.Windows.Media.Animation.DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
+            { AutoReverse = true, RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(2) };
+            _appleSyncCard.BeginAnimation(OpacityProperty, flash);
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 }
