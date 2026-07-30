@@ -52,7 +52,12 @@ public sealed class RevealHighlight : Adorner
         foreach (var a in layer.GetAdorners(target) ?? Array.Empty<Adorner>())
             if (a is RevealHighlight old) old.Remove();
 
-        var stroke = target.TryFindResource("RiskWarning") as Brush ?? Brushes.Orange;
+        // ★ 用【着重色反色】而不是写死的橙:标记色的职责是"指出位置",
+        //   它必须与该皮肤的着重色对立才不会和选中态/按钮混淆 ——
+        //   苹果风的着重色是蓝,反色正好落在橙上;换皮肤时它自己会跟着变。
+        var stroke = target.TryFindResource("AccentInverse") as Brush
+                     ?? target.TryFindResource("RiskWarning") as Brush
+                     ?? Brushes.Orange;
         layer.Add(new RevealHighlight(target, stroke));
     }
 

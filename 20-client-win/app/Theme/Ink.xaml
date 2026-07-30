@@ -17,6 +17,9 @@
 
   <SolidColorBrush x:Key="Accent"      Color="#0A0A0A"/>
   <SolidColorBrush x:Key="AccentHover" Color="#333333"/>
+  <!-- ★ 着重色反色。墨白的着重色是黑 —— 字面上的反色是白,而白在浅底上等于看不见。
+       这里取"与黑白体系最不相干"的一个色:标记色的职责是【跳出来】,不是好看。 -->
+  <SolidColorBrush x:Key="AccentInverse" Color="#D2691E"/>
   <SolidColorBrush x:Key="Border"      Color="#D6D6D6"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#0A0A0A"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#0A0A0A"/>

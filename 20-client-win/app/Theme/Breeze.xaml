@@ -1,5 +1,21 @@
-<!-- 皮肤:微风 Breeze(苹果风,默认)。清爽留白 · 柔和蓝 · 克制。
-     ★ 全部实色 —— 设计 §7 明令禁止大面积半透明/毛玻璃(显存压力)。 -->
+<!-- 皮肤:微风 Breeze(苹果风)。★ 这是【标准默认皮肤】——
+     所有主要设计对着它做,其它皮肤原则上只换色 + 微调(用户裁定:每个皮肤改一点会导致混乱)。
+     ★ 全部实色 —— 设计 §7 明令禁止大面积半透明/毛玻璃(显存压力)。
+
+     ================= 皮肤的六个基色(用户裁定的划分)=================
+     一个皮肤 = 把这六件事定下来,其余令牌都是它们的深浅变体:
+       ① 背景色    BgWindow / BgSurface / BgSunken / BgNav —— 窗底、卡片、凹陷、导航
+       ② 着重色    Accent(+ AccentHover)—— 主动作、选中、强调
+       ③ 主题色    ← 尚未单列(见下)
+       ④ 文字色    FgPrimary / FgSecondary / FgMuted —— 正文、次要、更弱
+       ⑤ 文字反色  FgOnAccent —— 压在着重色上的字;FgOnSelected 是压在选中底上的字
+       ⑥ 着重色反色 AccentInverse —— 【指出位置】用(跳到某个设置/某条历史的虚线框)。
+          它必须与着重色对立,才不会和选中态、按钮混淆:
+          蓝的对面取暖橙 —— 也就是之前写死的那个橙,现在由皮肤自己给。
+
+     ★ 另有两组【跨皮肤恒定、禁改】的语义色,不属于皮肤自由发挥的范围(见 Tokens.xaml):
+       风险色(危险/警告/安全)与可见范围色(家庭/个人/仅本人)。
+       它们表达的是这件事有多危险谁能看见,换皮肤不该改变这类判断。 -->
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
@@ -17,6 +33,9 @@
 
   <SolidColorBrush x:Key="Accent"      Color="#2F6FE4"/>
   <SolidColorBrush x:Key="AccentHover" Color="#255CC4"/>
+  <!-- ★ 着重色【反色】:用来"指出位置"而不是"表示状态"(跳到某个设置、跳到某条历史)。
+       与着重色对立,所以永远不会和选中态、按钮混淆。蓝的对面取暖橙。 -->
+  <SolidColorBrush x:Key="AccentInverse" Color="#E8873A"/>
   <SolidColorBrush x:Key="Border"      Color="#DDE1E8"/>
   <SolidColorBrush x:Key="BorderStrong" Color="#C3C9D4"/>
   <SolidColorBrush x:Key="FocusRing"   Color="#2F6FE4"/>
