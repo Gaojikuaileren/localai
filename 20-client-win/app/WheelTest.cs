@@ -21,7 +21,14 @@ public static class WheelTest
         Directory.CreateDirectory(outDir);
 
         // 需要一个 Application + 皮肤字典,DynamicResource 才解析得到颜色(圆圈/强调色等)。
-        if (Application.Current is null) { _ = new Application(); ThemeManager.Initialize(Skin.Warm); }
+        // ★ 必须是 App 而不是裸 Application:界面里到处 (App)Application.Current 取各个中心
+        //   (翻译下半条就是),裸 Application 会当场 InvalidCastException。这里只构造、不跑
+        //   OnStartup —— 各个中心是字段初始化器建的,拿到的就是一份干净的空数据。
+        if (Application.Current is null)
+        {
+            _ = new App(SingleInstance.Acquire(), startHidden: true);
+            ThemeManager.Initialize(Skin.Warm);
+        }
 
         var (timeEl, _) = WheelPicker.Time(new TimeSpan(9, 35, 0), _ => { });
         Save(Frame("非全天:时间转盘", timeEl, 220), Path.Combine(outDir, "wheel-time.png"), 240, 150);
@@ -156,8 +163,39 @@ public static class WheelTest
         }
         Save(Themed(sl), Path.Combine(outDir, "slider.png"), 380, 180);
 
-        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
+        // 翻译工作空间下半条:程度滑条 + 目标池 + 语言池 + 学习笔记。
+        // 无头断言验不了"目标池刚好放得下三个气泡""放大镜有没有被裁""笔记够不够宽",只能画出来看。
+        ThemeManager.Initialize(Skin.Breeze);
+        var app = (App)Application.Current!;
+        ClearTargets(app);
+        Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-empty.png"), 1000, (int)TranslationBar.BarHeight + 48);
+        foreach (var c in new[] { "ja", "en", "de" }) app.Translation.AddTarget(c);
+        Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-full.png"), 1000, (int)TranslationBar.BarHeight + 48);
+        ClearTargets(app);
+
+        // 放大镜发送键:画的就是界面里那一个(SearchSendButton),不是复刻件
+        var sendRow = new StackPanel { Orientation = Orientation.Horizontal };
+        var sendOn = ChatView.SearchSendButton(() => { }); sendOn.Height = 40;
+        var sendOff = ChatView.SearchSendButton(() => { }); sendOff.Height = 40;
+        sendOff.IsEnabled = false; sendOff.Opacity = 0.45; sendOff.Margin = new Thickness(16, 0, 0, 0);
+        sendRow.Children.Add(sendOn);
+        sendRow.Children.Add(sendOff);
+        Save(Themed(sendRow), Path.Combine(outDir, "search-send.png"), 160, 70);
+
+        Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png / translation-bar-*.png / search-send.png");
         return 0;
+    }
+
+    static void ClearTargets(App app)
+    {
+        foreach (var c in app.Translation.Targets.ToList()) app.Translation.RemoveTarget(c);
+    }
+
+    /// <summary>翻译下半条按真实宽度量一遍 —— 三列的宽度分配只有排出来才看得见。</summary>
+    static FrameworkElement SizedBar()
+    {
+        var bar = new TranslationBar { Width = 940 };
+        return bar;
     }
 
     // 复刻 ProjectPickerView.FolderTile 的选中/未选中观感,用来在墨白皮肤下核对对比度。

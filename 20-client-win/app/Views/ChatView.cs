@@ -464,6 +464,27 @@ public sealed class ChatView : UserControl
     // 输入区(含附件按钮 + 待发附件预览 + 输入框 + 发送),空态与有消息态共用。
     // ★ 空态(输入框居中):附件放在输入框【下方】,不把居中的输入框往上顶(用户裁定);
     //   有消息态(输入框在底):附件仍在输入框【上方】。
+    /// <summary>
+    /// 翻译空间的「查翻译」按钮。★ 放大镜要【居中且不被裁】:按钮自带内边距会把图标挤出去,
+    /// 所以内边距清零、内容对齐居中,再用一个固定尺寸的容器裹住图标。
+    /// 抽成静态是为了让渲染诊断(--wheeltest)画的就是这一个,不是复刻件。
+    /// </summary>
+    internal static Button SearchSendButton(Action onClick)
+    {
+        var mag = Icons.Make(IconName.Search, 17, "FgOnAccent");
+        mag.HorizontalAlignment = HorizontalAlignment.Center;
+        mag.VerticalAlignment = VerticalAlignment.Center;
+        var magBox = new Grid { Width = 22, Height = 22 };
+        magBox.Children.Add(mag);
+        var b = Ui.Primary("", (_, _) => onClick());
+        b.Content = magBox;
+        b.Padding = new Thickness(0);
+        b.HorizontalContentAlignment = HorizontalAlignment.Center;
+        b.VerticalContentAlignment = VerticalAlignment.Center;
+        b.Width = 46;
+        return b;
+    }
+
     FrameworkElement BuildInputArea(bool attachmentsBelow = false, bool searchIcon = false)
     {
         // ★ 输入框(用户反馈的三条一起修):
@@ -503,17 +524,16 @@ public sealed class ChatView : UserControl
         DataObject.AddPastingHandler(_input, OnInputPaste);
         // 翻译空间的发送 = 放大镜(是"查翻译"不是"发消息",用户裁定)
         Button send;
-        if (searchIcon)
-        {
-            var mag = Icons.Make(IconName.Search, 18, "FgOnAccent");
-            mag.HorizontalAlignment = HorizontalAlignment.Center;
-            mag.VerticalAlignment = VerticalAlignment.Center;
-            send = Ui.Primary("", (_, _) => SendCurrent());
-            send.Content = mag;
-            send.Width = 46;
-        }
+
+        if (searchIcon) send = SearchSendButton(SendCurrent);
         else send = Ui.Primary("发送", (_, _) => SendCurrent());
         send.Height = 40;
+        // ★ 翻译空间:目标池空 = 不知道要翻成什么,发送禁用(用户裁定)
+        if (searchIcon && TheApp.Translation.Targets.Count == 0)
+        {
+            send.IsEnabled = false;
+            send.Opacity = 0.45;
+        }
         var attach = AttachButton();
 
         var inputRow = new DockPanel { LastChildFill = true };
@@ -894,8 +914,22 @@ public sealed class ChatView : UserControl
         }
         if (m.Text.Length > 0)
         {
-            var tb = new TextBlock { TextWrapping = TextWrapping.Wrap };
-            tb.SetResourceReference(TextBlock.ForegroundProperty, user ? "FgOnAccent" : "FgPrimary");
+            // ★ 用【只读 TextBox】而不是 TextBlock:WPF 的 TextBlock 不能选中,
+            //   于是对话内容没法复制(用户反馈)。只读 TextBox 去掉边框底色后外观一致,但可选可复制。
+            var tb = new TextBox
+            {
+                IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap,
+                BorderThickness = new Thickness(0),
+                Background = Brushes.Transparent,
+                Padding = new Thickness(0),
+                IsReadOnlyCaretVisible = false,
+                // 让它像文本一样,不抢滚轮、不显示自己的滚动条
+                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            };
+            tb.SetResourceReference(TextBox.ForegroundProperty, user ? "FgOnAccent" : "FgPrimary");
+            tb.SetResourceReference(TextBox.SelectionBrushProperty, user ? "FgOnAccent" : "Accent");
 
             // ★ 超长文本【默认折叠】(用户裁定):只显示前 N 行,点一下展开,再点收起。
             //   ——【只是显示折叠】。给 AI 的永远是全文(m.Text 一个字都没少),折叠不影响数据。
@@ -983,8 +1017,8 @@ public sealed class ChatView : UserControl
     /// <summary>输入框最多长到几行,再多就在框内滚动(用户裁定:3 行)。</summary>
     const int InputMaxLines = 3;
 
-    /// <summary>消息超过这么多行就【默认折叠】显示(用户裁定:50 行)。★ 只折叠显示,给 AI 的仍是全文。</summary>
-    const int CollapseLines = 50;
+    /// <summary>消息超过这么多行就【默认折叠】显示(用户裁定:30 行)。★ 只折叠显示,给 AI 的仍是全文。</summary>
+    const int CollapseLines = 30;
 
     const int MaxAttachments = 99;
     const int SoftAttachLimit = 5;
@@ -1124,8 +1158,11 @@ public sealed class ChatView : UserControl
     {
         try
         {
-            var img = Clipboard.GetImage();
-            if (img is null) return;
+            var raw = Clipboard.GetImage();
+            if (raw is null) return;
+            // ★ 剪贴板截图的 alpha 常常整条是 0(DIB 没有真 alpha)—— 直接存 png 会得到一张
+            //   【完全透明】的图:附件挂上了、预览却是空白(用户反馈)。这里先把它修成不透明。
+            var img = ClipboardImageFix.Normalize(raw);
             // 落一份预览 png 到本机临时目录(仅供显示 + 给 AI 一个可读路径;不通过网络发送内容)
             var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "localai-clip-" + Guid.NewGuid().ToString("N")[..8] + ".png");
             using (var fs = System.IO.File.Create(tmp))
@@ -1185,9 +1222,12 @@ public sealed class ChatView : UserControl
     FrameworkElement AttachChip(ChatAttachment a, Action? onRemove)
     {
         FrameworkElement inner;
-        if (a.IsImage)
+        // 缩略图读不出来时【不要留一个空白方块】——那看起来就是"预览坏了"却什么也没说;
+        // 退回图标 + 名字,至少让人知道附件在、只是画不出预览。
+        var thumb = a.IsImage ? Thumb(a.Path, 120) : null;
+        if (thumb is not null)
         {
-            inner = new Image { Source = Thumb(a.Path, 120), Stretch = Stretch.UniformToFill, Width = 84, Height = 84 };
+            inner = new Image { Source = thumb, Stretch = Stretch.UniformToFill, Width = 84, Height = 84 };
         }
         else
         {
@@ -1202,7 +1242,7 @@ public sealed class ChatView : UserControl
             row.Children.Add(ic); row.Children.Add(nm);
             inner = row;
         }
-        var card = new Border { Child = inner, Margin = new Thickness(0, 0, 8, 0), Padding = a.IsImage ? new Thickness(0) : new Thickness(4), ClipToBounds = true };
+        var card = new Border { Child = inner, Margin = new Thickness(0, 0, 8, 0), Padding = thumb is not null ? new Thickness(0) : new Thickness(4), ClipToBounds = true };
         card.SetResourceReference(Border.BackgroundProperty, "BgSunken");
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.BorderThickness = new Thickness(1);

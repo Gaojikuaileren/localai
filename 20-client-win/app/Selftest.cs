@@ -742,7 +742,7 @@ public static class Selftest
             var cvFold = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvFold is not null)
             {
-                Assert(cvFold.Contains("CollapseLines = 50"), "超过 50 行的消息默认折叠");
+                Assert(cvFold.Contains("CollapseLines = 30"), "超过 30 行的消息默认折叠");
                 Assert(cvFold.Contains("展开全部(") && cvFold.Contains("\"收起\""), "可展开、可再次收起");
                 Assert(cvFold.Contains("_expandedBubbles"), "展开状态按会话+序号记住(重建后不丢)");
                 // ★ 折叠只影响显示 —— 发送与存储用的都是 m.Text 全文;截行只发生在渲染那一句
@@ -967,11 +967,24 @@ public static class Selftest
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
-                Assert(tbSrc.Contains("DragDrop.DoDragDrop") && tbSrc.Contains("AllowDrop = true"), "语言气泡可拖进目标池");
+                // ★ 跟手拖拽必须是【自己捕获鼠标 + 浮层气泡】—— OLE 拖放根本不移动元素(反复踩过的坑)
+                Assert(!Body(tbSrc).Contains("DragDrop.DoDragDrop"), "★ 语言拖动不用 OLE 拖放(那个不跟手)");
+                Assert(tbSrc.Contains("CaptureMouse()") && tbSrc.Contains("_ghost") && tbSrc.Contains("Canvas.SetLeft(_ghost"),
+                       "★ 拖动跟手:浮层气泡跟着指针走");
+                Assert(tbSrc.Contains("Hit(_targetBox, e)) TheApp.Translation.AddTarget"), "语言池 -> 目标池 = 加入");
+                Assert(tbSrc.Contains("Hit(_poolBox, e)) TheApp.Translation.RemoveTarget"), "★ 目标池取消 = 拖回语言池(用户裁定)");
+                Assert(tbSrc.Contains("Chip(\"清空\"") && tbSrc.Contains("Targets.ToList()) TheApp.Translation.RemoveTarget"),
+                       "目标池有【清空】按钮,一键全送回语言池");
                 Assert(tbSrc.Contains("CornerRadius(14)"), "语言是【气泡】(大圆角),池子是方形板块");
-                Assert(tbSrc.Contains("LevelColumn") && tbSrc.Contains("TranslationLevels.All.Reverse()"), "翻译程度是上下竖条(四档)");
-                Assert(tbSrc.Contains("OpenLanguagePoolSettings"), "★ 语言池旁的齿轮通到设置");
-                Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(3)"), "右下角学习笔记预览最新几条");
+                Assert(tbSrc.Contains("new Slider") && tbSrc.Contains("IsSnapToTickEnabled = true"), "★ 翻译程度是滑条(四档吸附)");
+                Assert(tbSrc.Contains("ShowTip(cell") && tbSrc.Contains("_tipBubble"), "★ 每个档位节点 hover 有解释气泡");
+                Assert(tbSrc.Contains("var poolDisabled = st.IsFull") && tbSrc.Contains("_poolBox.IsHitTestVisible = !poolDisabled"),
+                       "★ 目标池满 3 个 -> 语言池灰掉禁用");
+                Assert(tbSrc.Contains("const double PoolWidth") && tbSrc.Contains("_targetBox.Width = PoolWidth"),
+                       "目标池宽度 = 三个气泡刚好放满");
+                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 2)", StringComparison.Ordinal) > 0,
+                       "★ 学习笔记占剩余空间(比两个池子宽)");
+                Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(4)"), "右下角学习笔记预览最新几条");
             }
             var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvTrans is not null)
@@ -983,12 +996,79 @@ public static class Selftest
                 var bt = cvTrans[cvTrans.IndexOf("FrameworkElement BuildTranslationLayout()", StringComparison.Ordinal)..];
                 bt = bt[..bt.IndexOf("// 只读浏览", StringComparison.Ordinal)];
                 Assert(!bt.Contains("VerticalAlignment.Center"), "★ 翻译空间输入框始终在底部,不居中(用户裁定)");
+                // 发送按钮:放大镜要【居中不被裁】(固定尺寸的 Grid 容器 + 去掉按钮内边距)
+                var sendBlk = cvTrans[cvTrans.IndexOf("internal static Button SearchSendButton", StringComparison.Ordinal)..];
+                sendBlk = sendBlk[..900];
+                Assert(sendBlk.Contains("new Grid { Width = 22, Height = 22 }") && sendBlk.Contains("Padding = new Thickness(0)")
+                       && sendBlk.Contains("HorizontalContentAlignment = HorizontalAlignment.Center"),
+                       "★ 放大镜居中且不被裁(定尺容器 + 零内边距 + 内容居中)");
+                Assert(cvTrans.Contains("searchIcon && TheApp.Translation.Targets.Count == 0"),
+                       "★ 目标池为空 -> 发送按钮灰掉禁用");
             }
             var setLang = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (setLang is not null)
                 Assert(setLang.Contains("翻译语言池") && setLang.Contains("RevealLanguagePool"), "设置里可增删语言池的语言");
             Assert(Services.Languages.DefaultPool.SequenceEqual(new[] { "zh", "ja", "en", "de", "ko" }),
                    "★ 默认语言池只有中/日/英/德/韩(用户裁定)");
+
+            // ★ 对话内容必须能选中复制 —— TextBlock 选不了,所以气泡里用只读 TextBox
+            var cvSel = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvSel is not null)
+            {
+                var bub = cvSel[cvSel.IndexOf("FrameworkElement Bubble(ChatMessage m", StringComparison.Ordinal)..];
+                bub = bub[..3000];
+                Assert(bub.Contains("new TextBox") && bub.Contains("IsReadOnly = true") && bub.Contains("SelectionBrushProperty"),
+                       "★ 对话内容可选中复制(只读 TextBox,不是 TextBlock)");
+                Assert(bub.Contains("BorderThickness = new Thickness(0)") && bub.Contains("Background = Brushes.Transparent"),
+                       "可选中的同时看起来仍是纯文本(无边框/透明底)");
+            }
+            Assert(Body(cvSel ?? "").Contains("const int CollapseLines = 30;"), "★ 超长消息折叠阈值 = 30 行(用户裁定,原为 50)");
+
+            // ★ 剪贴板截图:DIB 没有真 alpha,整条是 0 -> 存出来的 png 完全透明,
+            //   于是"附件挂上了、预览却是空白"(用户反馈)。补成不透明;真有透明度的图不许动。
+            {
+                var allZero = new byte[] { 1, 2, 3, 0, 4, 5, 6, 0 };
+                Assert(Services.ClipboardImageFix.MakeOpaqueIfFullyTransparent(allZero), "全 0 alpha 被认出来");
+                Assert(allZero[3] == 255 && allZero[7] == 255, "★ 全透明的截图被补成不透明(否则预览是空白)");
+                Assert(allZero[0] == 1 && allZero[4] == 4, "只动 alpha,颜色一个字节都不改");
+
+                var realAlpha = new byte[] { 1, 2, 3, 0, 4, 5, 6, 128 };
+                Assert(!Services.ClipboardImageFix.MakeOpaqueIfFullyTransparent(realAlpha), "真带透明度的图不被认成坏图");
+                Assert(realAlpha[3] == 0 && realAlpha[7] == 128, "★ 真有 alpha 的图原样保留(不乱改用户的图)");
+
+                Assert(!Services.ClipboardImageFix.MakeOpaqueIfFullyTransparent(Array.Empty<byte>()), "空缓冲不误判");
+
+                // 端到端:造一张【和剪贴板截图一样】的 Bgra32 全 0 alpha 位图,
+                // 走一遍 Normalize -> 编码 png -> 再解码,断言存出来的图【不是全透明】。
+                // 单测字节扫描证明不了这条链;而"预览空白"正是断在这条链上。
+                const int w = 4, h = 4, stride = w * 4;
+                var raw = new byte[stride * h];
+                for (int i = 0; i < raw.Length; i += 4) { raw[i] = 200; raw[i + 1] = 40; raw[i + 2] = 30; raw[i + 3] = 0; }
+                var src = System.Windows.Media.Imaging.BitmapSource.Create(
+                    w, h, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, raw, stride);
+                var normalized = Services.ClipboardImageFix.Normalize(src);
+                using var ms = new MemoryStream();
+                var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(normalized));
+                enc.Save(ms);
+                ms.Position = 0;
+                var decoded = new System.Windows.Media.Imaging.PngBitmapDecoder(ms,
+                    System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat,
+                    System.Windows.Media.Imaging.BitmapCacheOption.OnLoad).Frames[0];
+                var decodedBgra = new System.Windows.Media.Imaging.FormatConvertedBitmap(
+                    decoded, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+                var outBuf = new byte[stride * h];
+                decodedBgra.CopyPixels(outBuf, stride, 0);
+                Assert(outBuf[3] == 255, "★ 截图存成 png 后不是全透明的(预览真画得出来)");
+                Assert(outBuf[0] == 200 && outBuf[1] == 40 && outBuf[2] == 30, "修 alpha 没把颜色改掉");
+            }
+            var cvClip = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvClip is not null)
+            {
+                Assert(cvClip.Contains("ClipboardImageFix.Normalize(raw)"), "粘贴截图时真的走了 alpha 修正");
+                Assert(cvClip.Contains("var thumb = a.IsImage ? Thumb(a.Path, 120) : null") && cvClip.Contains("thumb is not null"),
+                       "★ 缩略图读不出来时退回图标+名字,不留空白方块");
+            }
 
             // ★ 回普通会话一律落在【空会话】,不跳进排第一的旧对话(用户裁定)
             var cvNormal = TryReadSource(Path.Combine("Views", "ChatView.cs"));
@@ -1871,6 +1951,13 @@ public static class Selftest
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
         return fail > 0 ? 1 : 0;
     }
+
+    /// <summary>
+    /// 去掉注释行再做结构匹配。★ 已经踩过三次:断言"某处提到 X"结果匹配到的是【注释里】的 X,
+    /// 代码其实早就没了 —— 凡是"不该再出现某写法"的断言,一律先过这一遍。
+    /// </summary>
+    static string Body(string src) =>
+        string.Join(Environment.NewLine, src.Split('\n').Where(l => !l.TrimStart().StartsWith("//")));
 
     /// <summary>
     /// 读源码文件(开发/CI 环境)。发布环境没有源码 -> 返回 null,调用方跳过接线自检。
