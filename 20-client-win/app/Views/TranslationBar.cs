@@ -143,6 +143,18 @@ public sealed class TranslationBar : UserControl
         body.Children.Add(rows);
 
         var card = Card(body, "翻译程度", scroll: false);
+        // ★ 滚轮可调档(用户裁定)。收在【整块卡片】上而不是滑条本身 ——
+        //   滑条只有一条细轨道,要求用户先对准它再滚,不如整块都认。
+        //   ★ 必须 e.Handled = true:不然滚轮会继续往上冒泡,把外面的会话区一起滚了。
+        card.PreviewMouseWheel += (_, e) =>
+        {
+            e.Handled = true;
+            var lv = (int)TheApp.Translation.Level;
+            var max = TranslationLevels.All.Length - 1;
+            // 竖排是【下简上详】:往上滚 = 更详细
+            var next = Math.Clamp(lv + (e.Delta > 0 ? 1 : -1), 0, max);
+            if (next != lv) TheApp.Translation.SetLevel((TranslationLevel)next);
+        };
         card.Width = LevelWidth;
         card.HorizontalAlignment = HorizontalAlignment.Left;
         return card;

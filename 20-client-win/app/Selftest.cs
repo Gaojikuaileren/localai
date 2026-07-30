@@ -1238,6 +1238,11 @@ public static class Selftest
                 Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && !Body(tbSrc).Contains("IsDirectionReversed"),
                        "★ 翻译程度竖排且【从下往上】递进:直译在底,越往上越详(设了 IsDirectionReversed 就反了)");
                 Assert(tbSrc.Contains("TranslationLevels.All.Reverse()"), "档位标签跟着倒排,行 0 是最详的那档");
+                var wheel = Slice(tbSrc, "card.PreviewMouseWheel +=", "card.Width = LevelWidth");
+                Assert(wheel is not null && wheel.Contains("e.Handled = true"),
+                       "★ 滚轮调档,且收下事件(否则会顺带把外面的会话区滚了)");
+                Assert(wheel is not null && wheel.Contains("e.Delta > 0 ? 1 : -1"),
+                       "往上滚 = 更详细(与竖排的下简上详一致)");
                 Assert(tbSrc.Contains("Grid.SetColumn(target, 1)") && tbSrc.Contains("Grid.SetColumn(pool, 2)"),
                        "★ 目标池与语言池左右并列(不再一上一下)");
                 Assert(tbSrc.Contains("const double LangPoolWidth = TargetPoolWidth * 2;"),
