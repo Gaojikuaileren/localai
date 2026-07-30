@@ -103,10 +103,10 @@ public sealed class ProjectPickerView : UserControl
         // 顶部:项目会话说明(常驻,未选也在 —— 不随选中与否挤动排版)
         FrameworkElement hint = _current is { } cur && TheApp.Projects.Find(cur) is { } proj
             ? Ui.Stack(Ui.Body($"已选择「{proj.Title}」"),
-                       Ui.Caption("右侧新建/发送即【基于该项目开始会话】。点空白处或关闭按钮收起抽屉。"))
+                       Ui.Caption("右侧新建/发送即【基于该项目开始会话】。"))
             : Ui.Stack(Ui.Body("选择一个项目"),
-                       Ui.Caption("选中某个项目 = 基于它开始项目会话;想聊普通会话点左上「‹ 普通会话」。"));
-        _header.Content = Ui.Panel("项目会话", hint, IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+                       Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"));
+        _header.Content = PageHeader("项目会话", "RiskSafe", hint);
 
         var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 含"刚完成还在 3 秒宽限"的
         var panel = new StackPanel();
@@ -167,12 +167,10 @@ public sealed class ProjectPickerView : UserControl
         _graceTimer.Stop();
 
         var items = TheApp.Projects.Completed(_wsKey).ToList();
-        _header.Content = Ui.Panel("已完成项目",
+        _header.Content = PageHeader("已完成项目", "FgMuted",
             Ui.Stack(
-                Ui.Caption("这里是本工作空间已收尾的项目。选中可【只读浏览】它的会话记录;"),
-                Ui.Caption("在会话区可【继续此项目】(移回进行中)或【开启此项目分支】(复制成新的准备中项目)。"),
-                BackRow()),
-            IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+                Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"),
+                BackRow()));
 
         var panel = new StackPanel();
         if (items.Count == 0) panel.Children.Add(Ui.Body("这个工作空间还没有已完成的项目。", muted: true));
@@ -195,12 +193,10 @@ public sealed class ProjectPickerView : UserControl
         var items = TheApp.Projects.DeletedProjects().ToList();
         _picked.RemoveWhere(id => !items.Any(x => x.ProjectId == id));   // 清掉已消失的选中项
 
-        _header.Content = Ui.Panel("已删除项目",
+        _header.Content = PageHeader("已删除项目", "RiskDanger",
             Ui.Stack(
-                Ui.Caption($"所有工作空间共享一个回收站,保留 {ProjectCenter.TrashRetentionDays} 天后自动清除(不可恢复)。"),
-                Ui.Caption("选中可【只读浏览】;在会话区可【恢复此项目】或【彻底删除】。"),
-                DeletedActionRow(items)),
-            IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+                Ui.Caption($"所有工作空间共享,保留 {ProjectCenter.TrashRetentionDays} 天后自动清除。选中可只读浏览。"),
+                DeletedActionRow(items)));
 
         var panel = new StackPanel();
         if (items.Count == 0) panel.Children.Add(Ui.Body("没有已删除的项目。", muted: true));
@@ -256,6 +252,21 @@ public sealed class ProjectPickerView : UserControl
         }, _picked.Count > 0 ? "RiskDanger" : "FgMuted"));
         row.Children.Add(Chip("退出多选", () => { _multi = false; _picked.Clear(); ShowDeletedBoard(); }));
         return row;
+    }
+
+    /// <summary>
+    /// 各页面顶部说明框:★ 尺寸【统一】(固定高),这样切页时下面的项目方块位置不动、好对齐(用户裁定);
+    /// 描边按页面区分,跟随皮肤令牌:进行中=RiskSafe(绿) · 已完成=FgMuted(淡) · 已删除=RiskDanger(红)。
+    /// </summary>
+    const double HeaderHeight = 132;
+
+    internal static Border PageHeader(string title, string borderKey, UIElement content)
+    {
+        var card = Ui.Panel(title, content, IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+        card.Height = HeaderHeight;                 // 统一高度 -> 各页方块起始位置一致
+        card.BorderThickness = new Thickness(1.4);  // 比常规卡略粗,让颜色读得出来
+        card.SetResourceReference(Border.BorderBrushProperty, borderKey);
+        return card;
     }
 
     FrameworkElement BackRow()

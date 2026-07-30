@@ -740,6 +740,11 @@ public static class Selftest
                 Assert(pkBoard.Contains("ShowDeletedBoard") && pkBoard.Contains("ShowCompletedBoard"), "项目抽屉有【已删除/已完成项目】覆盖板块");
                 Assert(pkBoard.Contains("_header") && pkBoard.Contains("选择一个项目"), "常驻提示(未选时提示选项目;不挤排版)");
                 Assert(pkBoard.Contains("PinButton"), "项目方块用 hover 置顶按钮(像主页)");
+                Assert(pkBoard.Contains("HeaderHeight") && pkBoard.Contains("card.Height = HeaderHeight"),
+                       "★ 各页面说明框【统一高度】(切页时项目方块位置不动、好对齐)");
+                Assert(pkBoard.Contains("PageHeader(\"项目会话\", \"RiskSafe\"") && pkBoard.Contains("PageHeader(\"已完成项目\", \"FgMuted\"")
+                       && pkBoard.Contains("PageHeader(\"已删除项目\", \"RiskDanger\""),
+                       "说明框描边按页面区分(进行中绿 / 已完成淡 / 已删除红,均走皮肤令牌)");
             }
             var cvRO = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvRO is not null)

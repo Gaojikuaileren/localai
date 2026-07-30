@@ -92,6 +92,19 @@ public static class WheelTest
         pair.Children.Add(InkTile("客厅灯光方案", selected: false));
         Save(Themed(pair), Path.Combine(outDir, "ink-selected-tile.png"), 300, 150);
 
+        // 项目抽屉三个页面的顶部说明框:高度必须一致、内容不能被固定高截断、描边颜色要能区分
+        ThemeManager.Initialize(Skin.Breeze);
+        var heads = new StackPanel { Width = 400 };
+        heads.Children.Add(ProjectPickerView.PageHeader("项目会话", "RiskSafe",
+            Ui.Stack(Ui.Body("选择一个项目"), Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"))));
+        heads.Children.Add(ProjectPickerView.PageHeader("已完成项目", "FgMuted",
+            Ui.Stack(Ui.Caption("本空间已收尾的项目。选中可只读浏览;会话区可继续或开分支。"),
+                     ChipRow("‹ 返回项目"))));
+        heads.Children.Add(ProjectPickerView.PageHeader("已删除项目", "RiskDanger",
+            Ui.Stack(Ui.Caption("所有工作空间共享,保留 30 天后自动清除。选中可只读浏览。"),
+                     ChipRow("‹ 返回项目", "全选", "彻底删除所选 (2)", "退出多选"))));
+        Save(Themed(heads), Path.Combine(outDir, "drawer-headers.png"), 420, 440);
+
         Console.WriteLine("wheeltest: 已输出 wheel-time.png / wheel-date-dual.png / todo-panel.png / greeting.png / icons.png / ink-selected-tile.png");
         return 0;
     }
@@ -111,6 +124,22 @@ public static class WheelTest
         tile.SetResourceReference(Border.BorderBrushProperty, selected ? "Accent" : "Border");
         tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
         return tile;
+    }
+
+    // 模拟抽屉说明框里的 chip 行(与 ProjectPickerView.Chip 同样的尺寸口径)
+    static FrameworkElement ChipRow(params string[] labels)
+    {
+        var wrap = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 0) };
+        foreach (var l in labels)
+        {
+            var t = new TextBlock { Text = l, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            var b = new Border { Child = t, Padding = new Thickness(9, 4, 9, 4), Margin = new Thickness(0, 0, 6, 4), BorderThickness = new Thickness(1) };
+            b.SetResourceReference(Border.BorderBrushProperty, "Border");
+            b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            wrap.Children.Add(b);
+        }
+        return wrap;
     }
 
     // 用皮肤的窗口底色垫一层,还原真实观感(而不是纯白)
