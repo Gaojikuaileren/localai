@@ -77,9 +77,11 @@ public static class WheelTest
         gbox.Children.Add(gs);
         Save(Themed(gbox), Path.Combine(outDir, "greeting.png"), 340, 130);
 
-        // 图标核对:财务管理(钱包)vs 投资(走势图)要能一眼区分
+        // 图标核对。★ 用【微风】画:它是标准皮肤,而且是描边风格 —— 描边最能看出路径画错没有
+        //   (暖萌是实心的,一条画歪的路径填出来可能只是个看不出问题的黑块)。
+        ThemeManager.Initialize(Skin.Breeze);
         var icons = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var ic in new[] { IconName.Ai, IconName.File, IconName.Pdf, IconName.Folder, IconName.Model })
+        foreach (var ic in new[] { IconName.Translation, IconName.Mic, IconName.Dots, IconName.Star, IconName.Ai, IconName.File, IconName.Folder })
         {
             var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
             var el = Icons.Make(ic, 34, "FgPrimary");

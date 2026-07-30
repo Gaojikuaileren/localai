@@ -1301,6 +1301,15 @@ public static class Selftest
                 Assert(!ip2.SpeakTranslation,
                        "★ 实时翻译输出【不】自动恢复 —— 不能因为上次开着就自动接管你的麦克风");
             }
+            // ★ 三套皮肤各画各的图标 —— 新加一个图标只加了一套,换肤时那里就会空着。
+            //   这条把三套都得有钉死,不用等换肤时肉眼发现。
+            {
+                var noIcon = new List<string>();
+                foreach (Theme.IconName ic in Enum.GetValues(typeof(Theme.IconName)))
+                    foreach (var skin in new[] { Services.Skin.Breeze, Services.Skin.Ink, Services.Skin.Warm })
+                        if (string.IsNullOrWhiteSpace(Theme.Icons.PathFor(ic, skin))) noIcon.Add($"{ic}/{skin}");
+                Assert(noIcon.Count == 0, "★ 每个图标在三套皮肤里都有画" + (noIcon.Count > 0 ? " 缺:" + string.Join(",", noIcon) : ""));
+            }
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {

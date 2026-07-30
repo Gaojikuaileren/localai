@@ -21,7 +21,7 @@ public enum IconName
 {
     Home, Chat, Assets, Translation, Courses, Computer, Investment,
     Finance, Model, Folder, Ai, File, Pdf, Search, Extensions, Settings, Devices, Calendar, Tasks, Weather, Clock,
-    Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star,
+    Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots,
 }
 
 public static class Icons
@@ -43,6 +43,10 @@ public static class Icons
         [IconName.Folder] = "M3.5 9 V7 H9 L11 9 H20.5 V18 H3.5 Z",
         [IconName.Ai] = "M12 3 L13.8 9.4 L20 11.5 L13.8 13.6 L12 20 L10.2 13.6 L4 11.5 L10.2 9.4 Z",
         [IconName.Star] = "M12 3.5 L14.6 9.3 L21 10.1 L16.3 14.4 L17.6 20.6 L12 17.5 L6.4 20.6 L7.7 14.4 L3 10.1 L9.4 9.3 Z",
+        // 同传:麦克风 + 两侧声波(说与听是同一件事的两端)
+        [IconName.Mic] = "M9.5 4 H14.5 V12 H9.5 Z M6.5 11 V12 A5.5 5.5 0 0 0 17.5 12 V11 M12 17.5 V20.5 M9 20.5 H15 M3.5 9 V14 M20.5 9 V14",
+        // 未定:三个点
+        [IconName.Dots] = "M6 12 A0.9 0.9 0 1 0 5.99 12 M12 12 A0.9 0.9 0 1 0 11.99 12 M18 12 A0.9 0.9 0 1 0 17.99 12",
         [IconName.File] = "M7 3.5 H14 L17.5 7 V20.5 H7 Z M14 3.5 V7 H17.5",
         [IconName.Search] = "M10.5 3.5 A7 7 0 1 0 10.5 17.5 A7 7 0 1 0 10.5 3.5 M15.6 15.6 L20.5 20.5",
         [IconName.Pdf] = "M7 3.5 H14 L17.5 7 V20.5 H7 Z M14 3.5 V7 H17.5 M9.5 12.5 H15 M9.5 15.5 H15",
@@ -75,6 +79,8 @@ public static class Icons
         [IconName.Model] = "M8 7.6 H16 A0.4 0.4 0 0 1 16.4 8 V16 A0.4 0.4 0 0 1 16 16.4 H8 A0.4 0.4 0 0 1 7.6 16 V8 A0.4 0.4 0 0 1 8 7.6 Z M4.5 10 H7.6 M4.5 14 H7.6 M16.4 10 H19.5 M16.4 14 H19.5 M10 4.5 V7.6 M14 4.5 V7.6 M10 16.4 V19.5 M14 16.4 V19.5",
         [IconName.Folder] = "M4 9 V7.6 A1.4 1.4 0 0 1 5.4 6.2 H8.8 A1.4 1.4 0 0 1 9.9 6.7 L11.4 8.4 H18.6 A1.4 1.4 0 0 1 20 9.8 V16.6 A1.4 1.4 0 0 1 18.6 18 H5.4 A1.4 1.4 0 0 1 4 16.6 Z",
         [IconName.Star] = "M12 4 L14.4 9.3 L20.2 10 L15.9 13.9 L17.1 19.6 L12 16.8 L6.9 19.6 L8.1 13.9 L3.8 10 L9.6 9.3 Z",
+        [IconName.Mic] = "M12 3.8 A2.5 2.5 0 0 1 14.5 6.3 V11.6 A2.5 2.5 0 0 1 9.5 11.6 V6.3 A2.5 2.5 0 0 1 12 3.8 Z M6.8 11.6 A5.2 5.2 0 0 0 17.2 11.6 M12 16.8 V20.4 M9.2 20.4 H14.8 M3.6 9.4 A6 6 0 0 0 3.6 14 M20.4 9.4 A6 6 0 0 1 20.4 14",
+        [IconName.Dots] = "M6.2 12 A1 1 0 1 0 6.19 12 M12 12 A1 1 0 1 0 11.99 12 M17.8 12 A1 1 0 1 0 17.79 12",
         [IconName.Ai] = "M12 3.4 C12.6 7.2 14.8 9.4 18.6 10 C14.8 10.6 12.6 12.8 12 16.6 C11.4 12.8 9.2 10.6 5.4 10 C9.2 9.4 11.4 7.2 12 3.4 Z M17.4 15 C17.7 16.6 18.4 17.3 20 17.6 C18.4 17.9 17.7 18.6 17.4 20.2 C17.1 18.6 16.4 17.9 14.8 17.6 C16.4 17.3 17.1 16.6 17.4 15 Z",
         [IconName.Search] = "M10.6 4 A6.6 6.6 0 1 0 10.6 17.2 A6.6 6.6 0 1 0 10.6 4 M15.4 15.4 L20 20",
         [IconName.File] = "M7 3.6 H13.8 A0.8 0.8 0 0 1 14.4 3.9 L17.2 6.7 A0.8 0.8 0 0 1 17.5 7.3 V19.6 A0.9 0.9 0 0 1 16.6 20.5 H7.8 A0.9 0.9 0 0 1 6.9 19.6 V4.5 A0.9 0.9 0 0 1 7 3.6 Z M13.8 3.6 V6.6 A0.8 0.8 0 0 0 14.6 7.4 H17.5",
@@ -108,6 +114,8 @@ public static class Icons
         [IconName.Model] = "M8 7.4 H16 A1.4 1.4 0 0 1 17.4 8.8 V15.2 A1.4 1.4 0 0 1 16 16.6 H8 A1.4 1.4 0 0 1 6.6 15.2 V8.8 A1.4 1.4 0 0 1 8 7.4 Z M4.6 9.4 H6.6 V10.6 H4.6 Z M4.6 13.4 H6.6 V14.6 H4.6 Z M17.4 9.4 H19.4 V10.6 H17.4 Z M17.4 13.4 H19.4 V14.6 H17.4 Z M9.4 4.6 H10.6 V6.6 H9.4 Z M13.4 4.6 H14.6 V6.6 H13.4 Z M9.4 17.4 H10.6 V19.4 H9.4 Z M13.4 17.4 H14.6 V19.4 H13.4 Z",
         [IconName.Folder] = "M4 8.5 A2 2 0 0 1 6 6.5 H9 A2 2 0 0 1 10.6 7.3 L11.8 8.9 H18 A2 2 0 0 1 20 10.9 V16.5 A2 2 0 0 1 18 18.5 H6 A2 2 0 0 1 4 16.5 Z",
         [IconName.Star] = "M12 4.2 L14.3 9.2 L19.8 9.9 L15.7 13.6 L16.8 19 L12 16.3 L7.2 19 L8.3 13.6 L4.2 9.9 L9.7 9.2 Z",
+        [IconName.Mic] = "M12 3.6 A2.9 2.9 0 0 1 14.9 6.5 V11.4 A2.9 2.9 0 0 1 9.1 11.4 V6.5 A2.9 2.9 0 0 1 12 3.6 Z M6.6 11.6 A5.4 5.4 0 0 0 17.4 11.6 M12 17 V20.4 M9 20.4 H15 M3.4 9.6 A5.6 5.6 0 0 0 3.4 13.8 M20.6 9.6 A5.6 5.6 0 0 1 20.6 13.8",
+        [IconName.Dots] = "M6.4 12 A1.2 1.2 0 1 0 6.39 12 Z M12 12 A1.2 1.2 0 1 0 11.99 12 Z M17.6 12 A1.2 1.2 0 1 0 17.59 12 Z",
         [IconName.Ai] = "M12 2.8 A1 1 0 0 1 12.9 3.5 C13.6 7 15 8.4 18.5 9.1 A1 1 0 0 1 18.5 11.1 C15 11.8 13.6 13.2 12.9 16.7 A1 1 0 0 1 11.1 16.7 C10.4 13.2 9 11.8 5.5 11.1 A1 1 0 0 1 5.5 9.1 C9 8.4 10.4 7 11.1 3.5 A1 1 0 0 1 12 2.8 Z M17.6 14.6 A1 1 0 0 1 18.5 15.3 C18.7 16.5 19.1 16.9 20.3 17.1 A1 1 0 0 1 20.3 19.1 C19.1 19.3 18.7 19.7 18.5 20.9 A1 1 0 0 1 16.7 20.9 C16.5 19.7 16.1 19.3 14.9 19.1 A1 1 0 0 1 14.9 17.1 C16.1 16.9 16.5 16.5 16.7 15.3 A1 1 0 0 1 17.6 14.6 Z",
         [IconName.Search] = "M10.8 4.2 A6.4 6.4 0 1 0 10.8 17 A6.4 6.4 0 1 0 10.8 4.2 M15.3 15.3 A1 1 0 0 1 16.7 15.3 L19.8 18.4 A1 1 0 0 1 18.4 19.8 L15.3 16.7 A1 1 0 0 1 15.3 15.3 Z",
         [IconName.File] = "M7.5 3.8 H13.6 A1 1 0 0 1 14.3 4.1 L17.2 7 A1 1 0 0 1 17.5 7.7 V19.2 A1.3 1.3 0 0 1 16.2 20.5 H7.5 A1.3 1.3 0 0 1 6.2 19.2 V5.1 A1.3 1.3 0 0 1 7.5 3.8 Z M13.6 3.8 V6.7 A1 1 0 0 0 14.6 7.7 H17.5",
@@ -176,6 +184,16 @@ public static class Icons
         host.Tag = (t.Item1, foregroundKey);
         Fill(host);
     }
+
+    /// <summary>
+    /// 当前皮肤下这个图标的路径;没画就是 null。
+    /// ★ 给自检用:新加图标很容易只加一套皮肤,换肤时那里就空着 —— 这个口子让它当场被抓到。
+    /// </summary>
+    public static string? PathFor(IconName name) => PathFor(name, ThemeManager.Current);
+
+    /// <summary>指定皮肤下的路径。★ 不碰 ThemeManager,自检可以直接查而不换肤(换肤要 Application 在场)。</summary>
+    public static string? PathFor(IconName name, Skin skin)
+        => SetFor(skin).TryGetValue(name, out var d) ? d : null;
 
     static void Fill(ContentControl host)
     {

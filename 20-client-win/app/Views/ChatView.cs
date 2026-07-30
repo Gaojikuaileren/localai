@@ -788,21 +788,32 @@ public sealed class ChatView : UserControl
     FrameworkElement ModeSwitcher()
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
-        foreach (var (mode, name, tip) in new[]
+        foreach (var (mode, icon, name) in new[]
                  {
-                     (TranslationMode.Text, "文字翻译", "打字或粘贴内容,翻成目标池里的语言。"),
-                     (TranslationMode.Interpret, "同声传译", "会议实时口译:我说的话译给对方,对方的话生成字幕。"),
-                     (TranslationMode.Reserved, "…", "第三个场景尚未确定 —— 入口先留着。"),
+                     (TranslationMode.Text, IconName.Translation, "文字翻译"),
+                     (TranslationMode.Interpret, IconName.Mic, "同声传译"),
+                     (TranslationMode.Reserved, IconName.Dots, "未定"),
                  })
         {
             var on = TheApp.Interpret.Mode == mode;
-            var t = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center };
-            t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
-            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+            // ★ 图标按钮的老问题:没有文字就没人知道它是什么。本项目的全局悬停提示是【关掉】的
+            //   (用户裁定),所以不能靠 ToolTip 兜底 —— 改成【选中的那个把名字显出来】:
+            //   平时是一排干净的图标,当前在哪个场景一眼可读,也不用把三个名字都摊开占地方。
+            var inner = new StackPanel { Orientation = Orientation.Horizontal };
+            inner.Children.Add(Icons.Make(icon, 16, on ? "FgOnAccent" : "FgSecondary"));
+            if (on)
+            {
+                var t = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+                t.SetResourceReference(TextBlock.ForegroundProperty, "FgOnAccent");
+                t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+                inner.Children.Add(t);
+            }
+
             var b = new Border
             {
-                Child = t, Padding = new Thickness(11, 5, 11, 5), Margin = new Thickness(0, 0, 6, 0),
-                Cursor = Cursors.Hand, BorderThickness = new Thickness(1), ToolTip = tip,
+                Child = inner, Padding = new Thickness(on ? 10 : 8, 5, on ? 11 : 8, 5), Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand, BorderThickness = new Thickness(1),
             };
             b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
             if (on)
