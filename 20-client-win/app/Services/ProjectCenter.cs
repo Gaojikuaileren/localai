@@ -40,7 +40,8 @@ public sealed record Project(
     string? OwnerMemberId = null,          // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
     DateTime? DeletedAt = null,            // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
     DateTime? CompletedAt = null,          // 标记完成的时刻(用于"完成后停留 3 秒再划走"的宽限)
-    string? HostMachine = null);           // 项目文件夹在哪台机器上(null/空 = 本机);跨 PC 项目用
+    string? HostMachine = null,            // 项目文件夹在哪台机器上(null/空 = 本机);跨 PC 项目用
+    bool Shared = false);                  // ★ 是否已【提升为共享】。默认只在本机;单向,不可收回
 
 public sealed class ProjectCenter
 {
@@ -138,6 +139,23 @@ public sealed class ProjectCenter
     {
         var i = _items.FindIndex(x => x.ProjectId == p.ProjectId);
         if (i >= 0) { _items[i] = p; Changed?.Invoke(); }
+    }
+
+    // ---------------------------------------------------------------- 提升为共享(单向,不可收回)
+    /// <summary>能否提升:没删除、且还没共享过。</summary>
+    public static bool CanShare(Project p) => p.DeletedAt is null && !p.Shared;
+
+    /// <summary>
+    /// 提升项目为共享 —— 单向。★ 只共享【元数据】;文件夹内容仍在 HostMachine 那台机器上,
+    /// 别的机器要读写它得等中枢的文件通道(P4+),界面须如实标注"文件夹在 XX · 当前不可访问"。
+    /// </summary>
+    public bool ShareProject(string projectId)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i < 0 || !CanShare(_items[i])) return false;
+        _items[i] = _items[i] with { Shared = true };
+        Changed?.Invoke();
+        return true;
     }
 
     // ---------------------------------------------------------------- 文件夹唯一性(一个路径只能有一个项目)

@@ -35,7 +35,8 @@ public sealed record ChatSession(
     string WorkspaceKey = "chat",    // 会话属于哪个工作空间(不跨空间共享;可发送到别的空间)
     bool Ghost = false,              // 幽灵会话:不保留记录、不纳入记忆,不进任何列表
     DateTime? DeletedAt = null,      // 软删除:进"已删除",保留 30 天,过期自动清除
-    string? OwnerMemberId = null);   // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
+    string? OwnerMemberId = null,    // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
+    bool Shared = false);            // ★ 是否已【提升为共享】(送主机、全设备可见)。默认只在本机;单向,不可收回
 
 public sealed class ChatCenter
 {
@@ -72,6 +73,28 @@ public sealed class ChatCenter
         => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost && s.DeletedAt is null)
                     .Where(Visible)
                     .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
+
+    // ---------------------------------------------------------------- 提升为共享(单向,不可收回)
+    // 用户裁定(2026-07-30):每台设备【各自独立】的会话列表;要让全家看到,必须显式"提升为共享"。
+    //   ★ 提升时【整段对话一起上去】(否则对方看半截读不懂);
+    //   ★ 提升【不可收回】—— 界面必须在确认框里说清楚,别让人以为能撤回。
+    //   ★ 幽灵会话【永远不能共享】:它的定义就是不保留记录。
+
+    /// <summary>能否提升为共享:不是幽灵、没删除、且还没共享过。</summary>
+    public static bool CanShare(ChatSession s) => !s.Ghost && s.DeletedAt is null && !s.Shared;
+
+    /// <summary>
+    /// 提升为共享 —— 单向。成功返回 true。
+    /// ★ 这里只改【标记】;真正上传到主机要等中枢接入(P4+),界面须如实说明"接入后上传"。
+    /// </summary>
+    public bool ShareSession(string sessionId)
+    {
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i < 0 || !CanShare(_sessions[i])) return false;
+        _sessions[i] = _sessions[i] with { Shared = true };
+        Changed?.Invoke();
+        return true;
+    }
 
     /// <summary>幽灵会话:不保留记录、不纳入记忆,不进任何列表。开一个新的前先清掉旧的幽灵。</summary>
     public ChatSession NewGhostSession(string workspaceKey)

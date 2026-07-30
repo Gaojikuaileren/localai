@@ -763,6 +763,48 @@ public static class Selftest
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
 
+            // ---- 提升为共享:默认本机、单向不可收回、幽灵永不共享、任何机器都能删 ----
+            {
+                var sc = new Services.ChatCenter();
+                var loc = sc.NewSession(null, "chat");
+                Assert(!loc.Shared, "★ 会话默认【只在本机】(每台设备独立列表)");
+                Assert(Services.ChatCenter.CanShare(loc), "普通会话可提升为共享");
+                Assert(sc.ShareSession(loc.SessionId), "提升成功");
+                Assert(sc.Find(loc.SessionId)!.Shared, "提升后标记为共享");
+                Assert(!Services.ChatCenter.CanShare(sc.Find(loc.SessionId)!), "★ 已共享的不再给【提升】(单向)");
+                // ★ 不可收回:整个 ChatCenter 不应存在任何"取消共享"的入口
+                var ccSrc = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                if (ccSrc is not null)
+                    Assert(!ccSrc.Contains("Unshare") && !ccSrc.Contains("取消共享"), "★ 没有取消共享的接口(用户裁定:不可收回)");
+
+                var gh = sc.NewGhostSession("chat");
+                Assert(!Services.ChatCenter.CanShare(gh) && !sc.ShareSession(gh.SessionId), "★ 幽灵会话永远不能共享(它的定义就是不留记录)");
+
+                // 任何机器都能删共享会话 -> 删除照常走软删除
+                sc.Delete(loc.SessionId);
+                Assert(sc.Deleted("chat").Any(x => x.SessionId == loc.SessionId), "共享会话可被删除(任何机器都能删),进已删除");
+
+                var pc5 = new Services.ProjectCenter();
+                var pl = pc5.Create("本机项目", Path.Combine(Path.GetTempPath(), "sh-" + Guid.NewGuid().ToString("N")[..6]), null, Services.ProjectScope.Personal);
+                Assert(!pl.Shared, "★ 项目默认【只在本机】");
+                Assert(pc5.ShareProject(pl.ProjectId) && pc5.Find(pl.ProjectId)!.Shared, "项目可提升为共享");
+                Assert(!Services.ProjectCenter.CanShare(pc5.Find(pl.ProjectId)!), "项目共享同样单向");
+            }
+            var cvShare = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvShare is not null)
+            {
+                Assert(cvShare.Contains("提升为共享") && cvShare.Contains("无法收回"), "★ 提升确认框写明【不可收回】");
+                Assert(cvShare.Contains("条消息)会一起共享"), "★ 确认框写明整段历史一起共享(用户裁定 A)");
+                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("所有设备】生效"),
+                       "★ 删共享会话前提示会影响所有设备(任何机器都能删)");
+                Assert(cvShare.Contains("· 共享"), "会话行标出共享状态");
+                Assert(cvShare.Contains("中枢尚未接入"), "★ 如实说明现在只是标记、接入后才上传");
+            }
+            var puShare = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puShare is not null)
+                Assert(puShare.Contains("提升为共享") && puShare.Contains("文件夹】仍在"),
+                       "★ 项目提升说明:共享元数据,文件夹仍在原机");
+
             // ---- 记忆库 + 存储清理(2026-07-30 用户裁定)----
             {
                 var mc = new Services.MemoryCenter();

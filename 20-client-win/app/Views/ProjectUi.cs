@@ -137,6 +137,15 @@ public static class ProjectUi
         }
         m.Items.Add(ai);
 
+        // ★ 提升为共享(用户裁定):项目默认【只在本机】;提升后共享【元数据】,
+        //   文件夹内容仍在它所在的机器上。单向,不可收回。已共享的不再给这一项。
+        if (ProjectCenter.CanShare(p))
+        {
+            var share = new MenuItem { Header = "提升为共享…" };
+            share.Click += (_, _) => ConfirmShare(p);
+            m.Items.Add(share);
+        }
+
         // 发送到别的工作空间(项目不跨空间共享;会话跟着走)
         var toWs = new MenuItem { Header = "发送到工作空间" };
         foreach (var w in Workspaces.All)
@@ -187,6 +196,25 @@ public static class ProjectUi
         purge.Click += (_, _) => ConfirmPurge(p, anchor, onNavigate);
         m.Items.Add(purge);
         return m;
+    }
+
+    /// <summary>
+    /// 提升项目为共享的二次确认。★ 说清三件事:共享的是【元数据】、文件夹仍在原机、【不可收回】。
+    /// </summary>
+    static void ConfirmShare(Project p)
+    {
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var where = string.IsNullOrWhiteSpace(p.HostMachine) ? "本机" : p.HostMachine;
+            var ok = ConfirmDialog.Show("提升为共享",
+                $"把项目「{p.Title}」提升为共享?\n\n" +
+                "· 共享的是项目【信息与会话】,家里其他设备都能看到\n" +
+                $"· 项目【文件夹】仍在「{where}」上 —— 别的设备要读写它,需要那台机器在线\n" +
+                "· ★ 提升之后【无法收回】\n\n" +
+                "(中枢尚未接入,现在只做标记;接入后会上传到主机。)",
+                confirmText: "提升为共享", danger: true);
+            if (ok) Projects.ShareProject(p.ProjectId);
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>彻底删除的二次确认(不可恢复)。★ 仍然不动磁盘文件夹。</summary>

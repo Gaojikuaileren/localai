@@ -280,8 +280,10 @@ public sealed class ChatView : UserControl
         // ★ 选中态字色跟着底色走(墨白的 BgSelected 近黑,用 FgOnSelected 才不会黑底黑字)
         title.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : "FgPrimary");
         titleRow.Children.Add(title);
-        var time = new TextBlock { Text = s.LastActive.ToString("M月d日 HH:mm"), Margin = new Thickness(0, 1, 0, 0) };
-        time.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : "FgMuted");
+        // ★ 共享标记:默认会话只在本机,已提升为共享的要一眼看出来(删它会影响所有设备)
+        var meta = s.Shared ? s.LastActive.ToString("M月d日 HH:mm") + " · 共享" : s.LastActive.ToString("M月d日 HH:mm");
+        var time = new TextBlock { Text = meta, Margin = new Thickness(0, 1, 0, 0) };
+        time.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : s.Shared ? "Accent" : "FgMuted");
         time.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         textCol.Children.Add(titleRow);
         textCol.Children.Add(time);
@@ -363,12 +365,63 @@ public sealed class ChatView : UserControl
         pin.Click += (_, _) => TheApp.Chat.TogglePin(s.SessionId);
         m.Items.Add(pin);
 
+        // ★ 提升为共享(用户裁定):会话默认【只在本机】;提升后全家设备可见,且【不可收回】。
+        //   已共享的不再给这一项(没有"取消共享"—— 单向)。幽灵会话永远不给。
+        if (ChatCenter.CanShare(s))
+        {
+            var share = new MenuItem { Header = "提升为共享…" };
+            share.Click += (_, _) => ConfirmShare(s);
+            m.Items.Add(share);
+        }
+
         m.Items.Add(new Separator());
         // 删除 = 软删除进"已删除"(30 天可恢复),不弹确认(用户裁定)
-        var del = new MenuItem { Header = "删除会话" };
-        del.Click += (_, _) => { if (_sessionId == s.SessionId) _sessionId = null; TheApp.Chat.Delete(s.SessionId); };
+        // 删除:普通会话不弹确认(用户裁定)。★ 但【共享会话】任何机器都能删,而删除会影响所有设备 ——
+        //   这是对外可见的动作,必须先问一句(不是"确认删除",而是"你要替所有人删")。
+        var del = new MenuItem { Header = s.Shared ? "删除共享会话…" : "删除会话" };
+        del.Click += (_, _) =>
+        {
+            if (s.Shared)
+            {
+                Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    var ok = ConfirmDialog.Show("删除共享会话",
+                        $"删除共享会话「{s.Title}」?\n\n这是共享会话 —— 删除会对【家里所有设备】生效,不只是这台。\n\n" +
+                        $"会先进「已删除」,{ChatCenter.TrashRetentionDays} 天内可恢复。",
+                        confirmText: "删除", danger: true);
+                    if (!ok) return;
+                    if (_sessionId == s.SessionId) _sessionId = null;
+                    TheApp.Chat.Delete(s.SessionId);
+                }), System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            }
+            if (_sessionId == s.SessionId) _sessionId = null;
+            TheApp.Chat.Delete(s.SessionId);
+        };
         m.Items.Add(del);
         return m;
+    }
+
+    /// <summary>
+    /// 提升会话为共享的二次确认。★ 三件事必须说清楚(用户裁定 A/B):
+    ///   ① 整段对话(含全部历史消息)一起上去 —— 否则对方看半截读不懂;
+    ///   ② 家里其他设备都能看到;
+    ///   ③ 【不可收回】—— 提升之后没有撤销。
+    /// ★ 诚实:中枢未接入(P4)前只是【标记】,真正上传要等接入,这句也得写明。
+    /// </summary>
+    void ConfirmShare(ChatSession s)
+    {
+        var n = TheApp.Chat.MessagesOf(s.SessionId).Count();
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var ok = ConfirmDialog.Show("提升为共享",
+                $"把会话「{s.Title}」提升为共享?\n\n" +
+                $"· 整段对话({n} 条消息)会一起共享,家里其他设备都能看到\n" +
+                "· ★ 提升之后【无法收回】\n\n" +
+                "(中枢尚未接入,现在只做标记;接入后会上传到主机。)",
+                confirmText: "提升为共享", danger: true);
+            if (ok) TheApp.Chat.ShareSession(s.SessionId);
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     void MoveToNewProject(ChatSession s)
