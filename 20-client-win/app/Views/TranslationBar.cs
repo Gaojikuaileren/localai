@@ -15,6 +15,8 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
+using System.Windows.Shapes;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
 
@@ -27,6 +29,8 @@ public sealed class TranslationBar : UserControl
     public const double BarHeight = 176;
     /// <summary>目标池宽度 = 三个气泡刚好放满(气泡约 54 + 间距,再加卡片内边距)。</summary>
     const double PoolWidth = 208;
+    /// <summary>翻译程度那一列的宽度:一条竖滑条 + 四个档位名。</summary>
+    const double LevelWidth = 132;
 
     // 负的下边距吃掉【最后一行气泡】的 6px 外边距 —— 否则内容比可视区高 6px,
     // ScrollViewer 就会挂出一条多余的滚动条(渲染诊断里看得一清二楚)。
@@ -36,27 +40,27 @@ public sealed class TranslationBar : UserControl
     readonly Canvas _overlay = new() { IsHitTestVisible = false };   // 跟手气泡 + 节点气泡都画在这层
     Border _targetBox = null!, _poolBox = null!;
     Slider _levelSlider = null!;
+    readonly List<(TranslationLevel Level, TextBlock Label)> _levelLabels = new();
     Border? _tipBubble;
 
     public TranslationBar()
     {
         Height = BarHeight;
 
+        // ★ 四列并排(用户第三轮裁定):程度【竖排】| 目标池 | 语言池 | 学习笔记。
+        //   目标池与语言池是【并列关系】—— 左右排布、同宽同高,而不是一上一下。
+        //   语言在两者之间拖来拖去,并排才看得出"从这边搬到那边"。
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 16) });        // 程度 + 目标池
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 16) });        // 语言池
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 学习笔记(占剩下的,更宽)
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth) });            // 翻译程度(竖)
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 8) });         // 目标池
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 8) });         // 语言池
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 学习笔记(占剩下的)
 
-        var left = new DockPanel { LastChildFill = true };
-        var lvl = LevelCard();
-        DockPanel.SetDock(lvl, Dock.Top);
-        left.Children.Add(lvl);
-        left.Children.Add(TargetCard());
-        Grid.SetColumn(left, 0);
-
-        var pool = PoolCard(); Grid.SetColumn(pool, 1);
-        var notes = NotesCard(); Grid.SetColumn(notes, 2);
-        grid.Children.Add(left); grid.Children.Add(pool); grid.Children.Add(notes);
+        var lvl = LevelCard(); Grid.SetColumn(lvl, 0);
+        var target = TargetCard(); Grid.SetColumn(target, 1);
+        var pool = PoolCard(); Grid.SetColumn(pool, 2);
+        var notes = NotesCard(); Grid.SetColumn(notes, 3);
+        grid.Children.Add(lvl); grid.Children.Add(target); grid.Children.Add(pool); grid.Children.Add(notes);
 
         var root = new Grid();
         root.Children.Add(grid);
@@ -77,64 +81,70 @@ public sealed class TranslationBar : UserControl
 
     void Refresh() { RefreshPools(); RefreshLevel(); RefreshNotes(); }
 
-    // ---------------------------------------------------------------- 程度:滑条 + 每档解释气泡
+    // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡
     FrameworkElement LevelCard()
     {
+        // ★ 竖排(用户第三轮裁定)。IsDirectionReversed=true 让【最小值在上】——
+        //   第一阶「直译」在顶、最详的「语法」在底,和从上往下读的顺序一致。
         _levelSlider = new Slider
         {
+            Orientation = Orientation.Vertical,
+            IsDirectionReversed = true,
             Minimum = 0, Maximum = TranslationLevels.All.Length - 1,
             TickFrequency = 1, IsSnapToTickEnabled = true,
             Value = (int)TheApp.Translation.Level,
+            Margin = new Thickness(0, 2, 8, 2),
         };
         _levelSlider.ValueChanged += (_, _) => TheApp.Translation.SetLevel((TranslationLevel)(int)_levelSlider.Value);
 
-        // 四个节点标签:hover 时在上方弹出自绘小气泡解释这一档(全局 ToolTip 已关,这里自己画)。
-        // ★ 用 Canvas 手工摆位而不是等分格子:等分格子的【格心】和滑块的【落点】不是一回事
-        //   (滑块首尾贴着轨道两端,格心却缩在 1/8、3/8…),差十几像素,看着就是"标签没对准节点"。
-        var ticks = new Canvas { Height = 18, Margin = new Thickness(0, 2, 0, 0) };
-        var cells = new List<Border>();
-        foreach (var (level, name, desc) in TranslationLevels.All)
+        // 四个档位标签竖着排在滑条右边,hover 弹自绘小气泡解释这一档(全局 ToolTip 已关)。
+        // 第二阶的名字随目标池变(读音 / 词根),所以标签文字要能刷新 —— 存起来备用。
+        var rows = new Grid();
+        for (int i = 0; i < TranslationLevels.All.Length; i++)
+            rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+        _levelLabels.Clear();
+        for (int i = 0; i < TranslationLevels.All.Length; i++)
         {
-            var t = new TextBlock { Text = name, TextAlignment = TextAlignment.Center, Cursor = Cursors.Hand };
+            var (level, name, desc) = TranslationLevels.All[i];
+            var t = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand };
             t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             var cell = new Border { Child = t, Background = Brushes.Transparent, Padding = new Thickness(2, 0, 2, 0) };
             var capturedLevel = level;
-            var capturedDesc = $"{name} —— {desc}";
-            cell.MouseEnter += (_, _) => ShowTip(cell, capturedDesc);
+            cell.MouseEnter += (_, _) => ShowTip(cell, $"{LabelFor(capturedLevel)} —— {DescFor(capturedLevel)}");
             cell.MouseLeave += (_, _) => HideTip();
             cell.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Translation.SetLevel(capturedLevel); };
-            cells.Add(cell);
-            ticks.Children.Add(cell);
+            Grid.SetRow(cell, i);
+            rows.Children.Add(cell);
+            _levelLabels.Add((level, t));
         }
-        ticks.SizeChanged += (_, _) => PlaceTicks(ticks, cells);
 
-        var body = new StackPanel();
+        var body = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(_levelSlider, Dock.Left);
         body.Children.Add(_levelSlider);
-        body.Children.Add(ticks);
-        return Card(body, "翻译程度", scroll: false);
+        body.Children.Add(rows);
+
+        var card = Card(body, "翻译程度", scroll: false);
+        card.Width = LevelWidth;
+        card.HorizontalAlignment = HorizontalAlignment.Left;
+        return card;
     }
 
-    /// <summary>把四个档位标签摆到滑块【真正会停的位置】下面(轨道两端各让出半个滑块的宽度)。</summary>
-    static void PlaceTicks(Canvas host, List<Border> cells)
-    {
-        const double thumbHalf = 8;   // 滑块是 16px 的圆点(Controls.xaml)
-        var w = host.ActualWidth;
-        if (w <= 0 || cells.Count < 2) return;
-        var span = Math.Max(0, w - thumbHalf * 2);
-        for (int i = 0; i < cells.Count; i++)
-        {
-            var c = cells[i];
-            c.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            var x = thumbHalf + span * i / (cells.Count - 1) - c.DesiredSize.Width / 2;
-            Canvas.SetLeft(c, Math.Clamp(x, 0, Math.Max(0, w - c.DesiredSize.Width)));
-        }
-    }
+    /// <summary>档位显示名。★ 第二阶随目标池变:非拉丁语言给【读音】,拉丁语言(英/德)给【词根】。</summary>
+    string LabelFor(TranslationLevel l)
+        => l == TranslationLevel.Reading
+            ? TranslationLevels.SecondStageLabel(TheApp.Translation.Targets)
+            : TranslationLevels.NameOf(l);
+
+    string DescFor(TranslationLevel l) => TranslationLevels.DescOf(l);
 
     void RefreshLevel()
     {
         var lv = TheApp.Translation.Level;
         if ((int)_levelSlider.Value != (int)lv) _levelSlider.Value = (int)lv;
+        // 第二阶的名字跟着目标池走(全是英/德 -> 词根;全是中日韩 -> 读音;混着 -> 两个都写)
+        foreach (var (level, label) in _levelLabels) label.Text = LabelFor(level);
     }
 
     /// <summary>自绘的小气泡提示(全局 ToolTip 已关,但这里用户明确要提示)。</summary>
@@ -171,7 +181,6 @@ public sealed class TranslationBar : UserControl
         _targetBox = Card(_targetWrap, $"目标池(最多 {Languages.MaxTargets})", action: clear);
         _targetBox.Width = PoolWidth;
         _targetBox.HorizontalAlignment = HorizontalAlignment.Left;
-        _targetBox.Margin = new Thickness(0, 8, 0, 0);
         return _targetBox;
     }
 
@@ -181,7 +190,6 @@ public sealed class TranslationBar : UserControl
             gear: () => (Application.Current.MainWindow as MainWindow)?.OpenLanguagePoolSettings());
         _poolBox.Width = PoolWidth;
         _poolBox.HorizontalAlignment = HorizontalAlignment.Left;
-        _poolBox.Margin = new Thickness(8, 0, 0, 0);
         return _poolBox;
     }
 
@@ -199,7 +207,7 @@ public sealed class TranslationBar : UserControl
         {
             var l = Languages.Find(code);
             if (l is null || st.Contains(code)) continue;     // 已在目标池的不在这边重复出现
-            _poolWrap.Children.Add(Bubble(l, selected: false));
+            _poolWrap.Children.Add(Bubble(l, selected: false, stackIndex: _poolWrap.Children.Count));
         }
         if (_poolWrap.Children.Count == 0)
             _poolWrap.Children.Add(Ui.Caption(poolDisabled ? "目标池已满(3)" : "都在目标池里了"));
@@ -211,26 +219,107 @@ public sealed class TranslationBar : UserControl
             foreach (var code in st.Targets)
             {
                 var l = Languages.Find(code);
-                if (l is not null) _targetWrap.Children.Add(Bubble(l, selected: true));
+                if (l is not null) _targetWrap.Children.Add(Bubble(l, selected: true, stackIndex: _targetWrap.Children.Count));
             }
     }
 
-    // 语言气泡。★ 拖动是【自己捕获鼠标】做的 —— OLE 拖放不移动元素,做不出跟手效果。
-    Border Bubble(Lang l, bool selected)
+    /// <summary>
+    /// 语言卡片。★ 观感【按皮肤分档】(用户裁定):
+    ///   · 暖萌 = 抽屉里的一叠卡片 —— 互相压着、各带一点歪斜,拿起来像从堆里抽一张;
+    ///   · 微风(苹果风)/ 墨白 = 克制的胶囊,不歪不叠,只有干净的圆角。
+    /// 拖动一律是【自己捕获鼠标】做的 —— OLE 拖放不移动元素,做不出跟手效果。
+    /// </summary>
+    Border Bubble(Lang l, bool selected, int stackIndex = 0)
     {
+        var playful = ThemeManager.Current == Skin.Warm;
+
         var t = new TextBlock { Text = l.Name, VerticalAlignment = VerticalAlignment.Center };
         t.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnAccent" : "FgPrimary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var b = new Border
         {
-            Child = t, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 6, 6),
-            CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(1),
+            Child = t,
+            Padding = playful ? new Thickness(12, 7, 12, 7) : new Thickness(12, 5, 12, 5),
+            // 暖萌:左边距为负 -> 后一张压在前一张上,叠成一摞
+            Margin = playful ? new Thickness(stackIndex == 0 ? 0 : -10, 0, 6, 7) : new Thickness(0, 0, 6, 6),
+            CornerRadius = new CornerRadius(playful ? 8 : 14),   // 卡片是方一点的圆角,胶囊才是大圆角
+            BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
         };
         b.SetResourceReference(Border.BackgroundProperty, selected ? "Accent" : "BgSurface");
         b.SetResourceReference(Border.BorderBrushProperty, selected ? "Accent" : "Border");
+
+        if (playful)
+        {
+            // 每张歪一点点(角度按序号定,不随机 —— 重建时不能跳来跳去),并让后面的压在上层
+            b.RenderTransformOrigin = new Point(0.5, 1);
+            b.RenderTransform = new RotateTransform(TiltFor(stackIndex));
+            Panel.SetZIndex(b, stackIndex);
+            b.Effect = new DropShadowEffect
+            {
+                BlurRadius = 6, ShadowDepth = 1.5, Direction = 270, Opacity = 0.22,
+                Color = Colors.Black, RenderingBias = RenderingBias.Performance,
+            };
+            // 悬停时"抽出来一点",提示它可以被拿走
+            b.MouseEnter += (_, _) => Lift(b, -3);
+            b.MouseLeave += (_, _) => Lift(b, 0);
+        }
+
         b.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(b, l, selected, e);
         return b;
+    }
+
+    /// <summary>一摞卡片的歪斜角:按序号在 ±2.5° 之间来回,不用随机 —— 界面重建时不能跳。</summary>
+    static double TiltFor(int i) => (i % 3) switch { 0 => -2.2, 1 => 1.6, _ => 2.6 };
+
+    static void Lift(Border card, double dy)
+    {
+        var tt = card.RenderTransform as TransformGroup;
+        if (tt is null)
+        {
+            var g = new TransformGroup();
+            g.Children.Add(card.RenderTransform ?? new RotateTransform(0));
+            g.Children.Add(new TranslateTransform());
+            card.RenderTransform = g;
+            tt = g;
+        }
+        if (tt.Children[^1] is TranslateTransform tr)
+            tr.BeginAnimation(TranslateTransform.YProperty,
+                new DoubleAnimation(dy, TimeSpan.FromMilliseconds(120))
+                { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+    }
+
+    /// <summary>
+    /// 落地:在落点扬起一小撮灰 + 一声闷响。★ 只在暖萌皮肤下发生(用户裁定)——
+    /// 微风与墨白要克制,不出声也不扬尘。
+    /// </summary>
+    void PlayLanding(Point at)
+    {
+        if (ThemeManager.Current != Skin.Warm) return;
+
+        Services.Sfx.PlayDrop();
+
+        // 六粒尘:向外上方散开,同时变大变淡。用 Canvas 层画,不影响布局。
+        for (int i = 0; i < 6; i++)
+        {
+            var d = new Ellipse { Width = 5, Height = 5, Opacity = 0.5, IsHitTestVisible = false };
+            d.SetResourceReference(Shape.FillProperty, "FgMuted");
+            Canvas.SetLeft(d, at.X - 2.5);
+            Canvas.SetTop(d, at.Y - 2.5);
+            _overlay.Children.Add(d);
+
+            var dir = (i - 2.5) * 9;                       // 左右铺开
+            var move = new TranslateTransform();
+            d.RenderTransform = move;
+            var dur = TimeSpan.FromMilliseconds(420 + i * 25);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            move.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(0, dir, dur) { EasingFunction = ease });
+            move.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, -10 - (i % 3) * 4, dur) { EasingFunction = ease });
+            var fade = new DoubleAnimation(0.5, 0, dur) { EasingFunction = ease };
+            var dust = d;
+            fade.Completed += (_, _) => _overlay.Children.Remove(dust);
+            d.BeginAnimation(OpacityProperty, fade);
+        }
     }
 
     // ---------------------------------------------------------------- 跟手拖拽(手动实现)
@@ -308,8 +397,10 @@ public sealed class TranslationBar : UserControl
         if (lang is null || !wasDragging || e is null) return;
 
         // 落点决定去留:语言池 -> 目标池 = 加;目标池 -> 语言池 = 移出(用户裁定:取消也是拖回去)
-        if (!fromTarget && Hit(_targetBox, e)) TheApp.Translation.AddTarget(lang.Code);
-        else if (fromTarget && Hit(_poolBox, e)) TheApp.Translation.RemoveTarget(lang.Code);
+        var landed = false;
+        if (!fromTarget && Hit(_targetBox, e)) landed = TheApp.Translation.AddTarget(lang.Code);
+        else if (fromTarget && Hit(_poolBox, e)) { TheApp.Translation.RemoveTarget(lang.Code); landed = true; }
+        if (landed) PlayLanding(e.GetPosition(this));   // 落地才有反馈,落空了没有
     }
 
     // ---------------------------------------------------------------- 学习笔记(预览)

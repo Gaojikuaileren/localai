@@ -27,7 +27,7 @@ public sealed class TranslationState
     /// <summary>目标语言池(有序,最多 3)。</summary>
     public IReadOnlyList<string> Targets => _targets;
 
-    public TranslationLevel Level { get; private set; } = TranslationLevel.Pronunciation;
+    public TranslationLevel Level { get; private set; } = TranslationLevel.Reading;
 
     public event Action? Changed;
 

@@ -184,6 +184,60 @@
         </ControlTemplate>
       </Setter.Value>
     </Setter>
+    <Style.Triggers>
+      <!-- ★ 竖向要【另写一套】:上面那套把轨道写死成 Height=4 + VerticalAlignment=Center,
+           竖过来就散架(翻译程度改竖排时渲染诊断当场看出来的)。这里换成 Width=4 + 横向居中。
+           注意 Slider 的竖向【默认最小值在下】,翻译程度要"直译在顶",
+           所以由调用方设 IsDirectionReversed=true,模板不替它决定方向。 -->
+      <Trigger Property="Orientation" Value="Vertical">
+        <Setter Property="MinHeight" Value="0"/>
+        <Setter Property="MinWidth" Value="24"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Slider">
+              <Grid Width="24" HorizontalAlignment="Center">
+                <Border Width="4" CornerRadius="2" HorizontalAlignment="Center"
+                        Background="{DynamicResource BgSunken}"
+                        BorderBrush="{DynamicResource Border}" BorderThickness="1"/>
+                <Track x:Name="PART_Track">
+                  <Track.DecreaseRepeatButton>
+                    <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                      <RepeatButton.Template>
+                        <ControlTemplate TargetType="RepeatButton">
+                          <Border Width="4" CornerRadius="2" HorizontalAlignment="Center"
+                                  Background="{DynamicResource Accent}"/>
+                        </ControlTemplate>
+                      </RepeatButton.Template>
+                    </RepeatButton>
+                  </Track.DecreaseRepeatButton>
+                  <Track.Thumb>
+                    <Thumb Focusable="False">
+                      <Thumb.Template>
+                        <ControlTemplate TargetType="Thumb">
+                          <Grid Width="16" Height="16" Background="Transparent">
+                            <Ellipse Fill="{DynamicResource Accent}"/>
+                            <Ellipse Margin="4" Fill="{DynamicResource FgOnAccent}"/>
+                          </Grid>
+                        </ControlTemplate>
+                      </Thumb.Template>
+                    </Thumb>
+                  </Track.Thumb>
+                  <Track.IncreaseRepeatButton>
+                    <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                      <RepeatButton.Template>
+                        <ControlTemplate TargetType="RepeatButton">
+                          <Border Background="Transparent"/>
+                        </ControlTemplate>
+                      </RepeatButton.Template>
+                    </RepeatButton>
+                  </Track.IncreaseRepeatButton>
+                </Track>
+              </Grid>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Trigger>
+    </Style.Triggers>
   </Style>
 
   <!-- ================= 悬停提示:全局关闭 =================

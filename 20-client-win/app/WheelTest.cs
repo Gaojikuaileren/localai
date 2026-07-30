@@ -165,13 +165,21 @@ public static class WheelTest
 
         // 翻译工作空间下半条:程度滑条 + 目标池 + 语言池 + 学习笔记。
         // 无头断言验不了"目标池刚好放得下三个气泡""放大镜有没有被裁""笔记够不够宽",只能画出来看。
-        ThemeManager.Initialize(Skin.Breeze);
+        // ★ 三种皮肤各出一张:堆叠卡片只给暖萌,微风/墨白必须看得出【克制】(用户裁定)。
+        //   这正是无头断言验不了的东西 —— "克制"只能画出来看。
         var app = (App)Application.Current!;
+        foreach (var (skin, file) in new[] { (Skin.Breeze, "translation-bar-breeze.png"),
+                                             (Skin.Ink, "translation-bar-ink.png"),
+                                             (Skin.Warm, "translation-bar-warm.png") })
+        {
+            ThemeManager.Initialize(skin);
+            ClearTargets(app);
+            foreach (var c in new[] { "ja", "en", "de" }) app.Translation.AddTarget(c);
+            Save(Themed(SizedBar()), Path.Combine(outDir, file), 1000, (int)TranslationBar.BarHeight + 48);
+        }
+        ThemeManager.Initialize(Skin.Breeze);
         ClearTargets(app);
         Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-empty.png"), 1000, (int)TranslationBar.BarHeight + 48);
-        foreach (var c in new[] { "ja", "en", "de" }) app.Translation.AddTarget(c);
-        Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-full.png"), 1000, (int)TranslationBar.BarHeight + 48);
-        ClearTargets(app);
 
         // ★ 消息气泡的【正文对比度】:三种皮肤各画一张。
         //   这类毛病(底色被模板写死 -> 白字糊在灰底上)无头断言看不见,只有画出来才发现 —— 已经栽过一次。

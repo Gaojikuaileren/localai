@@ -44,6 +44,16 @@ public static class Languages
 
     public static string NameOf(string code) => Find(code)?.Name ?? code;
 
+    /// <summary>
+    /// 该语言是否用拉丁字母书写。★ 决定"第二阶给读音还是给词根"(用户裁定):
+    /// 英语德语这种拉丁文字标读音没意义,该给的是词源与构词。
+    /// </summary>
+    public static bool IsLatinScript(string code) => code switch
+    {
+        "zh" or "ja" or "ko" or "ru" => false,
+        _ => true,
+    };
+
     /// <summary>目标语言池上限(用户裁定:最多 3 个)。</summary>
     public const int MaxTargets = 3;
 
@@ -86,37 +96,73 @@ public static class Languages
 /// 翻译详细程度(用户裁定的四档,由简到全)。★ 每一档对应一个【固定格式】——
 /// 学习笔记就是按这个格式存的,所以格式必须是数据结构,而不是一段自由文本。
 /// </summary>
+/// <summary>
+/// 翻译详细程度,逐级累加(用户裁定 2026-07-30 第三轮):
+///   直译 → 读音/词根 → 例句 → 语法。
+/// ★ 第二阶【随目标语言变】:中日韩这类非拉丁文字要的是【读音】(假名/拼音/罗马音);
+///   英语德语这类拉丁文字不需要读音 —— 要的是【词根】(词源与构词),那才是学习价值所在。
+/// </summary>
 public enum TranslationLevel
 {
     /// <summary>只给译文 —— 最快。</summary>
     Plain = 0,
-    /// <summary>译文 + 读音标注(假名/罗马音/拼音/音标)。</summary>
-    Pronunciation = 1,
-    /// <summary>译文 + 读音 + 一个例句(例句也带读音)。</summary>
+    /// <summary>译文 + 读音(非拉丁语言)/ 词根(拉丁语言)。</summary>
+    Reading = 1,
+    /// <summary>再加一个例句。</summary>
     Example = 2,
-    /// <summary>译文 + 读音 + 例句 + 逐词详解(词性/释义/用法)。</summary>
-    Detailed = 3,
+    /// <summary>再加语法:时态、人称变位、格与词序等。</summary>
+    Grammar = 3,
 }
 
 public static class TranslationLevels
 {
+    /// <summary>第二阶在【拉丁文字】语言下的叫法 —— 读音换成词根。</summary>
+    public const string ReadingLabel = "读音";
+    public const string RootLabel = "词根";
+
     public static readonly (TranslationLevel Level, string Name, string Desc)[] All =
     {
-        (TranslationLevel.Plain,         "精简", "只给译文,最快"),
-        (TranslationLevel.Pronunciation, "带读音", "译文 + 读音标注"),
-        (TranslationLevel.Example,       "带例句", "译文 + 读音 + 一个例句"),
-        (TranslationLevel.Detailed,      "详解",   "译文 + 读音 + 例句 + 逐词详解"),
+        (TranslationLevel.Plain,   "直译", "只给译文,最快"),
+        (TranslationLevel.Reading, "读音", "译文 + 读音标注;拉丁文字语言(英/德…)不标读音,改给词根"),
+        (TranslationLevel.Example, "例句", "再加一个例句"),
+        (TranslationLevel.Grammar, "语法", "再加语法:时态、人称变位、格与词序等"),
     };
 
     public static string NameOf(TranslationLevel l) => All.First(x => x.Level == l).Name;
     public static string DescOf(TranslationLevel l) => All.First(x => x.Level == l).Desc;
 
-    /// <summary>该档位要求 AI 产出哪些字段 —— 接入后作为 prompt 契约,现在作为笔记的格式约束。</summary>
-    public static string[] FieldsOf(TranslationLevel l) => l switch
+    /// <summary>
+    /// 第二阶对某个目标语言该叫什么:拉丁文字 → 词根,其余 → 读音。
+    /// </summary>
+    public static string SecondStageFor(string langCode) => Languages.IsLatinScript(langCode) ? RootLabel : ReadingLabel;
+
+    /// <summary>
+    /// 第二阶在【当前目标池】下的显示名。全是拉丁 → 词根;全非拉丁 → 读音;混着 → 两个都写。
+    /// ★ 档位是全局一个,但它对每种语言的含义不同 —— 界面上如实写出来,别只写一个骗人。
+    /// </summary>
+    public static string SecondStageLabel(IEnumerable<string> targetCodes)
     {
-        TranslationLevel.Plain => new[] { "译文" },
-        TranslationLevel.Pronunciation => new[] { "译文", "读音" },
-        TranslationLevel.Example => new[] { "译文", "读音", "例句" },
-        _ => new[] { "译文", "读音", "例句", "逐词详解" },
-    };
+        var codes = targetCodes.ToList();
+        if (codes.Count == 0) return $"{ReadingLabel} / {RootLabel}";
+        var latin = codes.Count(Languages.IsLatinScript);
+        if (latin == 0) return ReadingLabel;
+        if (latin == codes.Count) return RootLabel;
+        return $"{ReadingLabel} / {RootLabel}";
+    }
+
+    /// <summary>
+    /// 该档位要求 AI 对【某个目标语言】产出哪些字段 —— 接入后作为 prompt 契约,
+    /// 现在作为笔记的格式约束。第二阶按语言在读音/词根之间切换。
+    /// </summary>
+    public static string[] FieldsOf(TranslationLevel l, string? langCode = null)
+    {
+        var second = langCode is null ? ReadingLabel : SecondStageFor(langCode);
+        return l switch
+        {
+            TranslationLevel.Plain => new[] { "译文" },
+            TranslationLevel.Reading => new[] { "译文", second },
+            TranslationLevel.Example => new[] { "译文", second, "例句" },
+            _ => new[] { "译文", second, "例句", "语法" },
+        };
+    }
 }

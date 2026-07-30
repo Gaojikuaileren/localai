@@ -52,9 +52,9 @@ public static class NoteEditor
         void SyncLevel()
         {
             var lv = (TranslationLevel)Math.Max(0, levelBox.SelectedIndex);
-            readingBox.Visibility = lv >= TranslationLevel.Pronunciation ? Visibility.Visible : Visibility.Collapsed;
+            readingBox.Visibility = lv >= TranslationLevel.Reading ? Visibility.Visible : Visibility.Collapsed;
             exampleBox.Visibility = lv >= TranslationLevel.Example ? Visibility.Visible : Visibility.Collapsed;
-            wordsBox.Visibility = lv >= TranslationLevel.Detailed ? Visibility.Visible : Visibility.Collapsed;
+            wordsBox.Visibility = lv >= TranslationLevel.Grammar ? Visibility.Visible : Visibility.Collapsed;
         }
         levelBox.SelectionChanged += (_, _) => SyncLevel();
         SyncLevel();
@@ -83,7 +83,7 @@ public static class NoteEditor
                 ExampleSource: Empty(exSrc.Text),
                 ExampleTranslation: Empty(exTr.Text),
                 ExampleReading: Empty(exRd.Text),
-                Words: lv >= TranslationLevel.Detailed && glosses.Count > 0 ? glosses : null,
+                Words: lv >= TranslationLevel.Grammar && glosses.Count > 0 ? glosses : null,
                 CreatedAt: existing?.CreatedAt,
                 CreatedByAi: existing?.CreatedByAi ?? false);   // 手改不改变"是不是 AI 建的"这个出处
 

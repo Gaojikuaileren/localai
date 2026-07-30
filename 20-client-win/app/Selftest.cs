@@ -987,13 +987,13 @@ public static class Selftest
 
                 // 档位 -> 固定格式(学习笔记就按这个存)
                 Assert(Services.TranslationLevels.FieldsOf(Services.TranslationLevel.Plain).SequenceEqual(new[] { "译文" }), "精简档只给译文");
-                Assert(Services.TranslationLevels.FieldsOf(Services.TranslationLevel.Detailed).Length == 4, "详解档四个字段(译文/读音/例句/逐词)");
+                Assert(Services.TranslationLevels.FieldsOf(Services.TranslationLevel.Grammar).Length == 4, "详解档四个字段(译文/读音/例句/逐词)");
 
                 // 学习笔记:按语言分类 + 多语言【拆开存】
                 var nc = new Services.NoteCenter();
                 nc.AddSplit(new[]
                 {
-                    new Services.StudyNote("", "ja", "你好", "zh", "こんにちは", Services.TranslationLevel.Pronunciation, Reading: "konnichiwa"),
+                    new Services.StudyNote("", "ja", "你好", "zh", "こんにちは", Services.TranslationLevel.Reading, Reading: "konnichiwa"),
                     new Services.StudyNote("", "en", "你好", "zh", "Hello", Services.TranslationLevel.Plain),
                 });
                 Assert(nc.Count("ja") == 1 && nc.Count("en") == 1, "★ 一次多语言翻译按目标语言【拆成多条】分别存");
@@ -1008,6 +1008,18 @@ public static class Selftest
                 Assert(nc.AddSplit(new[] { new Services.StudyNote("", "de", "x", "zh", "", Services.TranslationLevel.Plain) }) == 0,
                        "空译文不会被存成笔记");
             }
+            // 音效是【当场合成】的,不带音频素材文件 —— 验它确实是一段合法的 16bit 单声道 WAV
+            {
+                var wav = Services.Sfx.BuildDrop();
+                Assert(wav.Length > 44, "音效合成出了数据");
+                Assert(System.Text.Encoding.ASCII.GetString(wav, 0, 4) == "RIFF"
+                       && System.Text.Encoding.ASCII.GetString(wav, 8, 4) == "WAVE",
+                       "★ 合成的是合法 WAV(不需要任何素材文件,发布仍是单文件)");
+                Assert(BitConverter.ToInt16(wav, 22) == 1 && BitConverter.ToInt16(wav, 34) == 16,
+                       "单声道 16bit");
+                Assert(BitConverter.ToInt32(wav, 40) == wav.Length - 44, "数据块长度与实际字节数一致");
+                Assert(Services.Sfx.BuildDrop().SequenceEqual(wav), "★ 每次合成完全一样(固定种子,不要随机音色)");
+            }
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
@@ -1020,20 +1032,42 @@ public static class Selftest
                 var unl = tbSrc[tbSrc.IndexOf("Unloaded += (_, _) =>", StringComparison.Ordinal)..];
                 unl = unl[..400];
                 Assert(unl.Contains("FinishDrag(null)"), "★ 拖到一半被重建时释放鼠标捕获(否则整窗点不动)");
-                Assert(tbSrc.Contains("Hit(_targetBox, e)) TheApp.Translation.AddTarget"), "语言池 -> 目标池 = 加入");
-                Assert(tbSrc.Contains("Hit(_poolBox, e)) TheApp.Translation.RemoveTarget"), "★ 目标池取消 = 拖回语言池(用户裁定)");
+                var drop = Slice(tbSrc, "// 落点决定去留", "if (landed)");
+                Assert(drop is not null && drop.Contains("Hit(_targetBox, e)) landed = TheApp.Translation.AddTarget"),
+                       "语言池 -> 目标池 = 加入");
+                Assert(drop is not null && drop.Contains("Hit(_poolBox, e)) { TheApp.Translation.RemoveTarget"),
+                       "★ 目标池取消 = 拖回语言池(用户裁定)");
                 Assert(tbSrc.Contains("Chip(\"清空\"") && tbSrc.Contains("Targets.ToList()) TheApp.Translation.RemoveTarget"),
                        "目标池有【清空】按钮,一键全送回语言池");
-                Assert(tbSrc.Contains("CornerRadius(14)"), "语言是【气泡】(大圆角),池子是方形板块");
+                Assert(tbSrc.Contains("CornerRadius(playful ? 8 : 14)"),
+                       "克制皮肤下是大圆角胶囊,暖萌下是方一点的卡片;池子都是方形板块");
                 Assert(tbSrc.Contains("new Slider") && tbSrc.Contains("IsSnapToTickEnabled = true"), "★ 翻译程度是滑条(四档吸附)");
                 Assert(tbSrc.Contains("ShowTip(cell") && tbSrc.Contains("_tipBubble"), "★ 每个档位节点 hover 有解释气泡");
                 Assert(tbSrc.Contains("var poolDisabled = st.IsFull") && tbSrc.Contains("_poolBox.IsHitTestVisible = !poolDisabled"),
                        "★ 目标池满 3 个 -> 语言池灰掉禁用");
                 Assert(tbSrc.Contains("const double PoolWidth") && tbSrc.Contains("_targetBox.Width = PoolWidth"),
                        "目标池宽度 = 三个气泡刚好放满");
-                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 2)", StringComparison.Ordinal) > 0,
+                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 3)", StringComparison.Ordinal) > 0,
                        "★ 学习笔记占剩余空间(比两个池子宽)");
                 Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(4)"), "右下角学习笔记预览最新几条");
+                // ★ 第三轮裁定的排版:程度【竖排】,目标池与语言池【并列同宽】
+                Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && tbSrc.Contains("IsDirectionReversed = true"),
+                       "★ 翻译程度竖排,第一阶「直译」在顶");
+                Assert(tbSrc.Contains("Grid.SetColumn(target, 1)") && tbSrc.Contains("Grid.SetColumn(pool, 2)"),
+                       "★ 目标池与语言池左右并列(不再一上一下)");
+                Assert(tbSrc.Contains("_targetBox.Width = PoolWidth") && tbSrc.Contains("_poolBox.Width = PoolWidth"),
+                       "两个池子同宽");
+                Assert(!Body(tbSrc).Contains("_targetBox.Margin = new Thickness(0, 8, 0, 0)"),
+                       "目标池不再靠上边距压在程度下面");
+                // ★ 堆叠卡片 + 落地扬尘 + 音效【只给暖萌】,微风/墨白克制(用户裁定)
+                Assert(tbSrc.Contains("var playful = ThemeManager.Current == Skin.Warm;"),
+                       "★ 堆叠卡片的观感按皮肤分档");
+                var landing = Slice(tbSrc, "void PlayLanding(Point at)", "// 六粒尘");
+                Assert(landing is not null && landing.Contains("if (ThemeManager.Current != Skin.Warm) return;"),
+                       "★ 落地扬尘与音效只在暖萌下发生(微风/墨白不出声不扬尘)");
+                Assert(tbSrc.Contains("if (landed) PlayLanding("), "★ 落地才有反馈,拖空了没有");
+                Assert(tbSrc.Contains("static double TiltFor(int i)") && !tbSrc.Contains("new Random()"),
+                       "卡片歪斜角按序号定,不用随机(界面重建时不能跳)");
             }
             var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvTrans is not null)
