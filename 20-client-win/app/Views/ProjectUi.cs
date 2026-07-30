@@ -71,6 +71,15 @@ public static class ProjectUi
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
     static ChatCenter Chat => ((LocalAI.Client.App)Application.Current).Chat;
 
+    // ★ 菜单开着时点方块,应该【只关菜单】,不该顺势点进项目(用户反馈)。
+    //   成因:关菜单发生在鼠标【按下】,而方块的动作挂在【松开】上 —— 松开那下就落到方块上了。
+    //   办法:记下菜单关闭的时刻;方块在极短时间内(300ms)收到的点击一律忽略。
+    static DateTime _menuClosedAt = DateTime.MinValue;
+    static void NoteMenuClosed() => _menuClosedAt = DateTime.Now;
+
+    /// <summary>菜单刚关掉(300ms 内)—— 这一次点击只用于关菜单,调用方应直接 return。</summary>
+    public static bool JustClosedMenu() => (DateTime.Now - _menuClosedAt).TotalMilliseconds < 300;
+
     /// <summary>
     /// 项目的下拉菜单(用户裁定:不用右键,改成【三个点】按钮拉出这个菜单)。
     ///   在文件夹打开 · 置顶 · 改状态 · 发送到工作空间 · AI 权限 · 编辑(重定向路径) · 删除项目。
@@ -249,14 +258,18 @@ public static class ProjectUi
             e.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "FgSecondary");
             dots.Children.Add(e);
         }
-        var b = new Border { Child = dots, Width = 26, Height = 22, Cursor = System.Windows.Input.Cursors.Hand, Background = Brushes.Transparent };
+        // 命中区放大到 34×30(用户反馈"按钮太小,一点就点进项目了")
+        var b = new Border { Child = dots, Width = 34, Height = 30, Cursor = System.Windows.Input.Cursors.Hand, Background = Brushes.Transparent };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
         b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        // 按下就拦住:方块的动作挂在松开上,这里吃掉按下才不会"顺带点进项目"
+        b.PreviewMouseLeftButtonDown += (_, e) => e.Handled = true;
         b.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
             var menu = homeMenu ? BuildHomeMenu(p) : BuildMenu(p, onEdit, b, onNavigate);
+            menu.Closed += (_, _) => NoteMenuClosed();   // 关菜单那一下不要落到方块上
             menu.PlacementTarget = b;
             menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
             menu.IsOpen = true;

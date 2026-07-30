@@ -830,6 +830,8 @@ public sealed class HomeView : UserControl
         tile.MouseLeave += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); pinBtn.Opacity = 0; dots.Opacity = 0; };
         tile.MouseLeftButtonUp += (_, _) =>
         {
+            // 菜单刚被这一下点关掉 -> 只关菜单,不要顺势进项目(用户反馈)
+            if (ProjectUi.JustClosedMenu()) return;
             TheApp.Projects.Touch(p.ProjectId);
             (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.WorkspaceKey, p.ProjectId);
         };
@@ -871,7 +873,7 @@ public sealed class HomeView : UserControl
 
         var btn = new Border
         {
-            Width = 24, Height = 24,
+            Width = 30, Height = 30,   // 命中区放大(用户反馈太小)
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
             Background = System.Windows.Media.Brushes.Transparent,
             Cursor = System.Windows.Input.Cursors.Hand,
@@ -882,6 +884,7 @@ public sealed class HomeView : UserControl
         btn.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         btn.MouseEnter += (_, _) => btn.SetResourceReference(Border.BackgroundProperty, "BgSunken");
         btn.MouseLeave += (_, _) => btn.Background = System.Windows.Media.Brushes.Transparent;
+        btn.PreviewMouseLeftButtonDown += (_, e) => e.Handled = true;   // 吃掉按下,避免松开落到方块上
         btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Projects.TogglePin(p.ProjectId); };
         return btn;
     }

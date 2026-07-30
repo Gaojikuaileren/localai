@@ -352,6 +352,7 @@ public sealed class ProjectPickerView : UserControl
         // 选中后不关抽屉:只切上下文 + 重画高亮,让用户确认选的是哪个
         tile.MouseLeftButtonUp += (_, _) =>
         {
+            if (ProjectUi.JustClosedMenu()) return;   // 菜单刚关 -> 这一下只用于关菜单
             _current = p.ProjectId;
             _onPick(p.ProjectId);
             switch (_page) { case Page.Completed: ShowCompletedBoard(); break; case Page.Deleted: ShowDeletedBoard(); break; default: ShowGrid(); break; }
@@ -375,13 +376,14 @@ public sealed class ProjectPickerView : UserControl
 
         var btn = new Border
         {
-            Width = 22, Height = 22, Child = pin,
+            Width = 30, Height = 30, Child = pin,   // 命中区放大(用户反馈太小)
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
             Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
             Opacity = p.Pinned ? 1 : 0,
             ToolTip = p.Pinned ? "取消置顶" : "置顶",
         };
         btn.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        btn.PreviewMouseLeftButtonDown += (_, e) => e.Handled = true;   // 吃掉按下,避免松开落到方块上
         btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Projects.TogglePin(p.ProjectId); };
         return btn;
     }

@@ -439,6 +439,25 @@ public static class Selftest
                 Assert(hvFilter.Contains("OpenAppleSyncSettings"), "日历/待办图标点齿轮 -> Apple 同步设置");
                 Assert(hvFilter.Contains("homeMenu: true"), "★ 主页项目方块用精简菜单(只置顶 + 打开文件夹)");
             }
+            // ---- 交互打磨:菜单关闭不穿透 / 命中区放大 / 全局关掉悬停提示 ----
+            var puHit = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puHit is not null)
+            {
+                Assert(puHit.Contains("JustClosedMenu") && puHit.Contains("menu.Closed"), "★ 菜单关闭那一下不会穿透到方块(不会顺势进项目)");
+                Assert(puHit.Contains("Width = 34, Height = 30"), "三点按钮命中区放大");
+                Assert(puHit.Contains("PreviewMouseLeftButtonDown += (_, e) => e.Handled = true"), "按钮吃掉【按下】,避免松开落到方块");
+            }
+            var hvHit = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (hvHit is not null)
+                Assert(hvHit.Contains("ProjectUi.JustClosedMenu()"), "主页方块点击前先判菜单是否刚关");
+            var pkHit = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
+            if (pkHit is not null)
+                Assert(pkHit.Contains("ProjectUi.JustClosedMenu()"), "抽屉方块点击前先判菜单是否刚关");
+            var ctlTip = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+            if (ctlTip is not null)
+                Assert(ctlTip.Contains("TargetType=\"ToolTip\"") && ctlTip.Contains("Visibility\" Value=\"Collapsed"),
+                       "★ 全局关闭鼠标悬停提示(一处关掉,不逐个删)");
+
             var uiPanel = TryReadSource(Path.Combine("Views", "Ui.cs"));
             if (uiPanel is not null)
                 Assert(uiPanel.Contains("iconAction") && uiPanel.Contains("IconName.Settings"), "面板标题图标可 hover 变齿轮并点击");

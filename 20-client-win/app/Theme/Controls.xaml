@@ -129,6 +129,20 @@
     </Setter>
   </Style>
 
+  <!-- ================= 悬停提示:全局关闭 =================
+       用户裁定(2026-07-30):取消所有"鼠标悬停弹小窗"的提示 —— 界面本身要能说明白,
+       靠 tip 补说明既打断视线又遮内容。
+       ★ 在【一处】关掉,而不是逐个删 ToolTip 赋值:代码里仍可留 ToolTip 作为说明性注解
+       (也方便无障碍),但一律不再弹出。模板置空 + 折叠,连闪一下都不会有。 -->
+  <Style TargetType="ToolTip">
+    <Setter Property="Visibility" Value="Collapsed"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToolTip"/>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- ================= 菜单(三个点拉出的下拉)=================
        原生 ContextMenu/MenuItem 是系统外观(方角、系统蓝高亮),与整体脱节(用户反馈"太系统原生")。
        这里整套换成走令牌:圆角卡片 + 投影 · 项圆角 hover BgHover · 勾选画自绘对勾 · 子菜单自绘小箭头。
