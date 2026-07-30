@@ -131,15 +131,22 @@ public partial class App : Application
     // 覆盖:有时间的家务、带旗标+高优先级的个人待办、无截止的待办、已完成沉底的家务。
     void SeedDemoTodos()
     {
+        // 手动建立的:各种状态 —— 今天到期的家务、逾期高优先级、无截止、已完成
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)买菜:西红柿、鸡蛋、牛奶", TodoKind.Chore,
             Due: DateTime.Today.AddHours(18), DueHasTime: true, Owner: "双方", Scope: "家庭"));
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)交电费", TodoKind.Personal,
-            Due: DateTime.Today.AddDays(1), Flagged: true, Priority: TodoPriority.High, Owner: "我", Scope: "个人"));
-        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)预约理发", TodoKind.Personal, Owner: "我", Scope: "个人"));
-        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)续借图书馆的书", TodoKind.Personal,
-            Due: DateTime.Today.AddDays(2), Owner: "我", Scope: "个人", CreatedByAi: true));   // AI 建立 -> 带星标
+            Due: DateTime.Today.AddDays(-1), Flagged: true, Priority: TodoPriority.High, Owner: "我", Scope: "个人"));  // 逾期
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)预约理发", TodoKind.Personal, Owner: "我", Scope: "个人"));  // 无截止
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)倒垃圾", TodoKind.Chore,
-            Done: true, Owner: "我", Scope: "家庭", CompletedAt: DateTime.Now.AddHours(-2)));
+            Done: true, Owner: "我", Scope: "家庭", CompletedAt: DateTime.Now.AddHours(-2)));  // 已完成(手动)
+
+        // ★ AI 建立的:带星标,同样覆盖未完成 / 高优先级 / 已完成三种状态,便于对照
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)续借图书馆的书", TodoKind.Personal,
+            Due: DateTime.Today.AddDays(2), Owner: "我", Scope: "个人", CreatedByAi: true));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)提醒对方周五体检空腹", TodoKind.Chore,
+            Due: DateTime.Today.AddDays(3), DueHasTime: false, Priority: TodoPriority.Medium, Owner: "对方", Scope: "家庭", CreatedByAi: true));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)整理上周会议纪要", TodoKind.Personal,
+            Done: true, Owner: "我", Scope: "个人", CompletedAt: DateTime.Now.AddHours(-5), CreatedByAi: true));  // 已完成(AI)
     }
 
     // 日历同理:没有日程就只能看到空的格子,没法评审"有日程标点 / 点日期看当天"这些交互。
@@ -148,18 +155,18 @@ public partial class App : Application
     void SeedDemoEvents()
     {
         var today = DateTime.Today;
-        void Ev(int dayOffset, int h, int m, int durMin, string title, string owner, string scope)
+        void Ev(int dayOffset, int h, int m, int durMin, string title, string owner, string scope, bool ai = false)
             => Views.CalendarData.Events.Add(new Views.CalendarEvent(
                 today.AddDays(dayOffset).AddHours(h).AddMinutes(m),
                 today.AddDays(dayOffset).AddHours(h).AddMinutes(m + durMin),
-                title, owner, scope));
+                title, owner, scope, CreatedByAi: ai));
 
         // 今天:三条,验证"多条日程"的点与列表
         Ev(0,  9, 30,  60, "(示例)晨会", "我", "家庭");
         Ev(0, 12, 30,  60, "(示例)午饭 · 和家人", "双方", "家庭");
-        Ev(0, 19,  0,  90, "(示例)日语课", "我", "个人");
+        Ev(0, 19,  0,  90, "(示例)日语课", "我", "个人", ai: true);          // AI 建立
         // 本周其它天
-        Ev(1, 10,  0,  45, "(示例)牙医预约", "对方", "个人");
+        Ev(1, 10,  0,  45, "(示例)牙医预约", "对方", "个人", ai: true);        // AI 建立
         Ev(3, 15,  0, 120, "(示例)超市采购", "双方", "家庭");
         // 故意堆满一天(5 条定时)—— 验证"超过 4 条改用实心三角形"
         Ev(6,  8,  0,  30, "(示例)晨跑", "我", "个人");
@@ -173,16 +180,16 @@ public partial class App : Application
         Ev(8,  9,  0,  60, "(示例)体检", "我", "仅本人");
         Ev(10, 20, 0,  90, "(示例)家庭电影夜", "双方", "家庭");
         // 下月初(验证月排布翻月)
-        Ev(32, 14, 0,  60, "(示例)季度复盘", "我", "个人");
+        Ev(32, 14, 0,  60, "(示例)季度复盘", "我", "个人", ai: true);          // AI 建立
 
         // 全天 / 跨天(验证贯穿多格的长条):单日全天、本周内跨 3 天、跨周 5 天
-        void AllDay(int fromOffset, int toOffset, string title, string owner, string scope, string group)
+        void AllDay(int fromOffset, int toOffset, string title, string owner, string scope, string group, bool ai = false)
             => Views.CalendarData.Events.Add(new Views.CalendarEvent(
                 today.AddDays(fromOffset), today.AddDays(toOffset), title, owner, scope,
-                AllDay: true, CalendarGroup: group, Location: "", Url: "", Notes: ""));
+                AllDay: true, CalendarGroup: group, Location: "", Url: "", Notes: "", CreatedByAi: ai));
 
         AllDay(2, 2, "(示例)公休日", "双方", "家庭", "家庭");
-        AllDay(4, 6, "(示例)出差 · 柏林", "我", "个人", "工作");
+        AllDay(4, 6, "(示例)出差 · 柏林", "我", "个人", "工作", ai: true);   // AI 建立
         AllDay(9, 13, "(示例)家庭旅行", "双方", "家庭", "家庭");
     }
 

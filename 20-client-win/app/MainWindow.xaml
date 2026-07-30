@@ -127,32 +127,49 @@
                     ToolTip="收起导航" Click="OnToggleNav"/>
           </Grid>
 
-          <!-- 底部状态块(在显存条上方):本机是否为主机 + 本周 token 用量。点开看日/周/月/总量表。
-               ★ 用 Button(Click)而非 Border(MouseLeftButtonUp):浮层开着时,全局 PreviewMouseDown
-                 会吞掉这次按下并关闭浮层;Button 因此收不到按下、不会触发 Click,也就不会"关了又开"。
-                 Border 的 MouseLeftButtonUp 在松手时照样触发,才会出现关一下又弹开的老毛病。 -->
-          <Button x:Name="StatusBlock" DockPanel.Dock="Bottom" Margin="10,8,10,12"
-                  Cursor="Hand" Click="OnOpenUsage" ToolTip="查看 token 用量"
-                  HorizontalContentAlignment="Stretch">
-            <Button.Template>
-              <ControlTemplate TargetType="Button">
-                <Border x:Name="Bd" Padding="10,8" Background="{DynamicResource BgSunken}"
-                        CornerRadius="{DynamicResource RadiusMd}">
-                  <ContentPresenter/>
+          <!-- 底部状态行(在显存条上方)。用户裁定:token 块【左边】再放一个「当前使用者」显示栏。
+               布局:[使用者头像+名字] | [本机主副机 + 本周 token](后者可点开日/周/月/总量表)。
+               ★ token 块用 Button(Click)而非 Border(MouseLeftButtonUp):浮层开着时全局 PreviewMouseDown
+                 会吞掉这次按下并关闭浮层;Button 收不到按下、不触发 Click,不会"关了又开"。 -->
+          <DockPanel x:Name="StatusRow" DockPanel.Dock="Bottom" Margin="10,8,10,12" LastChildFill="True">
+            <!-- 左:当前使用者(未连接中枢时如实显示"未连接中枢")。仅显示,不参与权限判定(D45 铁律)。 -->
+            <Border x:Name="MemberBlock" DockPanel.Dock="Left" Margin="0,0,8,0" Padding="0"
+                    VerticalAlignment="Center" Background="Transparent">
+              <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Border x:Name="MemberAvatar" Width="28" Height="28" CornerRadius="14"
+                        Background="{DynamicResource BgSelected}">
+                  <TextBlock x:Name="MemberInitial" HorizontalAlignment="Center" VerticalAlignment="Center"
+                             FontWeight="SemiBold" Foreground="{DynamicResource FgOnSelected}"/>
                 </Border>
-                <ControlTemplate.Triggers>
-                  <Trigger Property="IsMouseOver" Value="True">
-                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
-                  </Trigger>
-                </ControlTemplate.Triggers>
-              </ControlTemplate>
-            </Button.Template>
-            <StackPanel>
-              <TextBlock x:Name="HostText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="TokenText" Foreground="{DynamicResource FgMuted}"
-                         FontSize="{DynamicResource FontCaption}" TextTrimming="CharacterEllipsis"/>
-            </StackPanel>
-          </Button>
+                <TextBlock x:Name="MemberText" Margin="7,0,0,0" VerticalAlignment="Center"
+                           MaxWidth="70" TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource FgPrimary}" FontSize="{DynamicResource FontCaption}"/>
+              </StackPanel>
+            </Border>
+
+            <!-- 右:主副机 + token(点开用量表) -->
+            <Button x:Name="StatusBlock" Cursor="Hand" Click="OnOpenUsage" ToolTip="查看 token 用量"
+                    HorizontalContentAlignment="Stretch">
+              <Button.Template>
+                <ControlTemplate TargetType="Button">
+                  <Border x:Name="Bd" Padding="10,8" Background="{DynamicResource BgSunken}"
+                          CornerRadius="{DynamicResource RadiusMd}">
+                    <ContentPresenter/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Button.Template>
+              <StackPanel>
+                <TextBlock x:Name="HostText" Foreground="{DynamicResource FgPrimary}" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="TokenText" Foreground="{DynamicResource FgMuted}"
+                           FontSize="{DynamicResource FontCaption}" TextTrimming="CharacterEllipsis"/>
+              </StackPanel>
+            </Button>
+          </DockPanel>
           <ContentControl x:Name="VramHost" DockPanel.Dock="Bottom" Margin="12,0,12,0"/>
 
           <!-- 系统组【贴底】:扩展 / 设置。位于显存条上方、工作空间下方(用户裁定) -->

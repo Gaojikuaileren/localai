@@ -570,11 +570,17 @@ public sealed class CalendarView : UserControl
         else foreach (var ev in evts) _dayList.Children.Add(EventRow(ev, compact: true));
     }
 
-    /// <summary>一条日程。点它 = 编辑这一条(用户裁定)。</summary>
-    Border EventRow(CalendarEvent ev, bool compact)
+    /// <summary>渲染诊断用:一条日程的纯视觉(无点击),便于离屏截图核对 AI 星标。</summary>
+    public static Border EventRowPreview(CalendarEvent ev)
     {
-        // ★ 命中区【贴合内容】—— 之前用 DockPanel 填满整行,右侧一大片空白也成了按钮,
-        //   鼠标划过老远就高亮,很不舒服(用户反馈)。改成横向堆叠 + 左对齐。
+        var hit = new Border { Child = EventVisual(ev, compact: true), Padding = new Thickness(5, 3, 8, 3), HorizontalAlignment = HorizontalAlignment.Left };
+        hit.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        return hit;
+    }
+
+    /// <summary>一条日程行的视觉(时间 + 标题 + AI 星标)。EventRow 与渲染诊断共用,避免走样。</summary>
+    static StackPanel EventVisual(CalendarEvent ev, bool compact)
+    {
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         // 全天日程显示「全天」,而不是 00:00 —— 全天没有起始时刻,显示 00:00 是把
         // 内部表示当成了用户可见语义(用户裁定)。跨天的再补上天数范围。
@@ -601,9 +607,26 @@ public sealed class CalendarView : UserControl
         t.SetResourceReference(TextBlock.FontSizeProperty, compact ? "FontCaption" : "FontBody");
         row.Children.Add(t);
 
+        // ★ AI 建立的日程带小星标(与待办同一套标记),一眼区分手动/AI 建立(用户裁定)
+        if (ev.CreatedByAi)
+        {
+            var ai = Theme.Icons.Make(Theme.IconName.Ai, 12, "Accent");
+            ai.Margin = new Thickness(6, 0, 0, 0);
+            ai.VerticalAlignment = VerticalAlignment.Center;
+            ai.ToolTip = "由 AI 建立";
+            row.Children.Add(ai);
+        }
+        return row;
+    }
+
+    /// <summary>一条日程。点它 = 编辑这一条(用户裁定)。</summary>
+    Border EventRow(CalendarEvent ev, bool compact)
+    {
+        // ★ 命中区【贴合内容】—— 之前用 DockPanel 填满整行,右侧一大片空白也成了按钮,
+        //   鼠标划过老远就高亮,很不舒服(用户反馈)。改成横向堆叠 + 左对齐。
         var hit = new Border
         {
-            Child = row, Padding = new Thickness(5, 3, 8, 3),
+            Child = EventVisual(ev, compact), Padding = new Thickness(5, 3, 8, 3),
             Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
             HorizontalAlignment = HorizontalAlignment.Left,   // 宽度贴合内容
         };

@@ -32,7 +32,7 @@ public static class WheelTest
         dual.Children.Add(Labeled("结束日期", WheelPicker.Date(new DateTime(2026, 8, 2), _ => { })));
         Save(ClipTo(dual, 360), Path.Combine(outDir, "wheel-date-dual.png"), 380, 170);
 
-        // 待办/家务面板(仿提醒事项):四种样子 —— 有时间的家务、旗标+高优先级、无截止、已完成
+        // 待办/家务面板(仿提醒事项):手动 vs AI 建立 × 各种状态 —— 让 AI 星标一眼可辨
         var list = new StackPanel();
         TodoItem[] demo =
         {
@@ -40,13 +40,25 @@ public static class WheelTest
             new(TodoCenter.NewId(), "交电费", TodoKind.Personal, Due: DateTime.Today.AddDays(-1), Flagged: true, Priority: TodoPriority.High),
             new(TodoCenter.NewId(), "预约理发", TodoKind.Personal),
             new(TodoCenter.NewId(), "续借图书馆的书", TodoKind.Personal, Due: DateTime.Today.AddDays(2), CreatedByAi: true),
+            new(TodoCenter.NewId(), "提醒对方周五体检空腹", TodoKind.Chore, Due: DateTime.Today.AddDays(3), Priority: TodoPriority.Medium, CreatedByAi: true),
             new(TodoCenter.NewId(), "倒垃圾", TodoKind.Chore, Done: true),
         };
         foreach (var t in demo) list.Children.Add(TodoList.Row(t, () => { }, () => { }));
         var panel = Ui.Panel("待办事项", list, IconName.Member, new Thickness(0),
             headerAction: Ui.PlusButton(() => { }, "新增"));
-        panel.Width = 300;
-        Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 360);
+        panel.Width = 320;
+        Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 340, 380);
+
+        // 日程行:手动 vs AI 建立(AI 带星标)—— 与待办同一套标记
+        var evlist = new StackPanel { Width = 300 };
+        CalendarEvent[] evs =
+        {
+            new(DateTime.Today.AddHours(9).AddMinutes(30), DateTime.Today.AddHours(10).AddMinutes(30), "晨会", "我", "家庭"),
+            new(DateTime.Today.AddHours(19), DateTime.Today.AddHours(20).AddMinutes(30), "日语课", "我", "个人", CreatedByAi: true),
+            new(DateTime.Today, DateTime.Today.AddDays(2), "出差 · 柏林", "我", "个人", AllDay: true, CreatedByAi: true),
+        };
+        foreach (var ev in evs) evlist.Children.Add(CalendarView.EventRowPreview(ev));
+        Save(Themed(evlist), Path.Combine(outDir, "calendar-events.png"), 320, 150);
 
         // 问候块:大字号主句 + 小助手副句,约 1/3 宽
         var gbox = new StackPanel { Width = 300 };

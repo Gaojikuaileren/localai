@@ -255,7 +255,10 @@ public static class Selftest
             {
                 Assert(mwStatus.Contains("ThisMachineIsHub"), "状态块显示本机是否为主机");
                 Assert(mwStatus.Contains("OnOpenUsage") && mwStatus.Contains("usage.title"), "点状态块弹出 token 用量表");
-                Assert(!mwStatus.Contains("MemberText.Text"), "移除原左下角登录成员块");
+                // 用户裁定(2026-07-30):token 块左边加【当前使用者】显示栏,未连接中枢时显示"未连接中枢"
+                Assert(mwStatus.Contains("MemberText.Text") && mwStatus.Contains("未连接中枢"), "token 块左边有当前使用者显示栏");
+                Assert(mwStatus.Contains("HubState.Online") && mwStatus.Contains("CachedMemberDisplayName"),
+                       "使用者名取自主机下发缓存(仅渲染);连接判据 = Hub 在线");
             }
 
             // token 用量按钮:用 Button(Click)而非 Border(MouseLeftButtonUp),否则会"关一下又弹开"

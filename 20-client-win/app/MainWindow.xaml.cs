@@ -501,7 +501,7 @@ public partial class MainWindow : Window
         StatusDot.Fill = (Brush)FindResource(brushKey);
     }
 
-    // 左下角状态块:本机是否为主机 + 本周 token 用量(用户裁定:去掉原来的"当前登录成员"小块)。
+    // 左下角状态行:左=当前使用者,右=本机主副机 + 本周 token 用量(用户裁定)。
     public void RefreshMember()
     {
         var paired = TheApp.Hub.IsPaired;
@@ -511,11 +511,39 @@ public partial class MainWindow : Window
         else
             HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client");
 
+        // ---- 当前使用者显示栏 ----
+        // ★ D45 铁律:这只是【显示】,不做任何权限判定。名字取自主机下发并缓存的成员显示名(仅渲染);
+        //   没有则退回配对时填的设备名。★ "连接中枢" = Hub 在线(State==Online);否则一律显示"未连接中枢"。
+        var connected = TheApp.Hub.State == HubState.Online;
+        var who = connected
+            ? (!string.IsNullOrWhiteSpace(TheApp.Settings.CachedMemberDisplayName)
+                ? TheApp.Settings.CachedMemberDisplayName!    // 主机下发的成员显示名(仅渲染)
+                : Environment.MachineName)                     // 还没下发就先用机器名兜底
+            : "未连接中枢";
+        MemberText.Text = who;
+        MemberText.SetResourceReference(TextBlock.ForegroundProperty, connected ? "FgPrimary" : "FgMuted");
+        MemberText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;   // 收起时只留头像
+        // 头像里放名字首字;未连接则放一个占位符,并用低饱和底色以示"离线"
+        MemberInitial.Text = connected ? FirstGlyph(who) : "·";
+        MemberAvatar.SetResourceReference(Border.BackgroundProperty, connected ? "BgSelected" : "BgSunken");
+        MemberBlock.ToolTip = connected ? $"当前使用者:{who}" : "未连接中枢(名字待主机下发)";
+
         // ★ token 用量尚未接入 -> 如实标注"待接入",绝不编数字(见 TokenUsage)。
         TokenText.Text = TokenUsage.Connected
             ? $"{Strings.Get("usage.this_week")} {TokenUsage.Week:N0}"
             : $"{Strings.Get("usage.this_week")} · {Strings.Get("usage.pending")}";
         TokenText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // 头像里的首字:中文取末字(姓名习惯看名),拉丁取首字母大写;空则占位。
+    static string FirstGlyph(string name)
+    {
+        var s = name.Trim();
+        if (s.Length == 0) return "·";
+        var first = s[0];
+        // 中日韩:直接用首个字(名字通常两三个字,首字已够辨识)
+        if (first >= 0x3400) return first.ToString();
+        return char.ToUpperInvariant(first).ToString();
     }
 
     // 点状态块 -> 浮窗:今日 / 本周 / 本月 / 累计 的 token 用量表(未接入时全为"—" + 说明)。
