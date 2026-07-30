@@ -175,17 +175,32 @@ public sealed class SettingsView : UserControl
         _langBody.Children.Add(Ui.Caption("池内(点可移除)"));
         _langBody.Children.Add(inPool);
 
-        var rest = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
-        foreach (var l in Languages.Catalog.Where(x => !s.TranslationPool.Contains(x.Code)))
-            rest.Children.Add(LangPill(l, inPool: false, () =>
+        // ★ 可添加改成【下拉菜单列全部语言】(用户裁定):平铺成一排小药丸时,
+        //   语言一多就换行成一大片,而且看不出"总共有哪些可选"。下拉是一个完整的清单。
+        var rest = Languages.Catalog.Where(x => !s.TranslationPool.Contains(x.Code)).ToList();
+        var addRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        if (rest.Count == 0)
+        {
+            addRow.Children.Add(Ui.Caption("目录里的语言都已经在池中了。"));
+        }
+        else
+        {
+            var pick = new ComboBox { Width = 200, VerticalAlignment = VerticalAlignment.Center };
+            foreach (var l in rest) pick.Items.Add(new ComboBoxItem { Content = $"{l.Name}({l.Native})", Tag = l.Code });
+            pick.SelectedIndex = 0;
+            var add = Ui.Secondary("添加", (_, _) =>
             {
-                s.TranslationPool.Add(l.Code);
+                if (pick.SelectedItem is not ComboBoxItem { Tag: string code }) return;
+                s.TranslationPool.Add(code);
                 s.Save();
                 RefreshLangPool();
-            }));
-        if (rest.Children.Count == 0) rest.Children.Add(Ui.Caption("目录里的语言都已经在池中了。"));
-        _langBody.Children.Add(Ui.Caption("可添加"));
-        _langBody.Children.Add(rest);
+            });
+            add.Margin = new Thickness(8, 0, 0, 0);
+            addRow.Children.Add(pick);
+            addRow.Children.Add(add);
+        }
+        _langBody.Children.Add(Ui.Caption("可添加(下拉里是全部语言)"));
+        _langBody.Children.Add(addRow);
     }
 
     static FrameworkElement LangPill(Lang l, bool inPool, Action onClick)
@@ -205,18 +220,8 @@ public sealed class SettingsView : UserControl
         return b;
     }
 
-    /// <summary>从翻译空间的齿轮跳进来:滚到语言池并闪一下。</summary>
-    public void RevealLanguagePool()
-    {
-        if (_langCard is null) return;
-        Dispatcher.BeginInvoke(new Action(() =>
-        {
-            _langCard.BringIntoView();
-            var flash = new System.Windows.Media.Animation.DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
-            { AutoReverse = true, RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(2) };
-            _langCard.BeginAnimation(OpacityProperty, flash);
-        }), System.Windows.Threading.DispatcherPriority.Loaded);
-    }
+    /// <summary>从翻译空间跳进来:滚到语言池并用橙色虚线框出来(5 秒或切界面后消退)。</summary>
+    public void RevealLanguagePool() => Reveal(_langCard);
 
     /// <summary>
     /// 与 Apple 同步(日历 / 提醒事项)。★ 目前是【预留板块】:接入方式与所需字段还没定,
@@ -243,17 +248,32 @@ public sealed class SettingsView : UserControl
 
     Border? _appleSyncCard;
 
-    /// <summary>从主页齿轮跳进来时:把"与 Apple 同步"这块滚到可视区并高亮一下,让人知道跳到哪了。</summary>
-    public void RevealAppleSync()
+    /// <summary>从主页齿轮跳进来:把"与 Apple 同步"这块滚到可视区并框出来。</summary>
+    public void RevealAppleSync() => Reveal(_appleSyncCard);
+
+    /// <summary>
+    /// 跳到某个设置板块:滚过去 + 橙色虚线框(5 秒或切界面后自然消退)。
+    /// ★★ 此前是"闪一下透明度":DoubleAnimation(0.35 -> 1) 配 AutoReverse + RepeatBehavior(2)
+    ///   【收在起点 0.35 上】,又没设 FillBehavior.Stop —— 动画结束后把 0.35 一直按着,
+    ///   板块从此永久停在 35% 不透明度,看着就是"变灰了"(用户实测的 bug)。
+    ///   而且闪透明度改的是内容本身,我们只想【指出位置】—— 所以改用装饰层画框,
+    ///   不进布局、不改被指的元素一个像素。
+    /// </summary>
+    void Reveal(FrameworkElement? card)
     {
-        if (_appleSyncCard is null) return;
-        Dispatcher.BeginInvoke(new Action(() =>
+        if (card is null) return;
+
+        void Go()
         {
-            _appleSyncCard.BringIntoView();
-            // 轻微闪一下描边:不改布局(避免跳动),只是提示"就是这一块"
-            var flash = new System.Windows.Media.Animation.DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
-            { AutoReverse = true, RepeatBehavior = new System.Windows.Media.Animation.RepeatBehavior(2) };
-            _appleSyncCard.BeginAnimation(OpacityProperty, flash);
-        }), System.Windows.Threading.DispatcherPriority.Loaded);
+            card.BringIntoView();          // 滚到【这一块】,不是滚回设置页顶部
+            RevealHighlight.Show(card);
+        }
+
+        // ★★ 时机很讲究:在 Loaded 优先级上做,元素还没排完版 —— BringIntoView 拿到的
+        //   位置是空的,于是滚不动、停在页面顶部(用户实测)。ContextIdle 排在布局与渲染【之后】,
+        //   那时才有真实坐标。页面若还没加载完,先等它的 Loaded 再排队。
+        //   装饰层同理:AdornerLayer 要元素进了可视树才拿得到。
+        if (card.IsLoaded) Dispatcher.BeginInvoke(new Action(Go), System.Windows.Threading.DispatcherPriority.ContextIdle);
+        else card.Loaded += (_, _) => Dispatcher.BeginInvoke(new Action(Go), System.Windows.Threading.DispatcherPriority.ContextIdle);
     }
 }

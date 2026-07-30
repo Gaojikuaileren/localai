@@ -932,9 +932,9 @@ public sealed class ChatView : UserControl
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     target.BringIntoView();
-                    var flash = new DoubleAnimation(0.35, 1, TimeSpan.FromMilliseconds(420))
-                    { AutoReverse = true, RepeatBehavior = new RepeatBehavior(2) };
-                    target.BeginAnimation(OpacityProperty, flash);
+                    // ★ 用装饰层画框,不动内容的透明度 —— 那种"闪一下"的写法会收在起点上
+                    //   把元素永久按在 35% 不透明度(设置页那边实测过,看着就是变灰了)。
+                    RevealHighlight.Show(target);
                 }), System.Windows.Threading.DispatcherPriority.Loaded);
                 break;
             }

@@ -1363,6 +1363,35 @@ public static class Selftest
                 Assert(enter is not null && enter.Contains("_canSend is not null && !_canSend()"),
                        "★ Enter 与按钮问同一条判据(只灰按钮是做样子,回车照发)");
             }
+            // ---- 跳到某个设置:橙色虚线框 + 真的滚到那一块(用户实测两个 bug)----
+            var setReveal = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (setReveal is not null)
+            {
+                // ★ 旧写法 DoubleAnimation(0.35 -> 1) + AutoReverse + RepeatBehavior(2) 收在【起点】上,
+                //   又没 FillBehavior.Stop -> 板块被永久按在 35% 不透明度,看着就是变灰了。
+                Assert(!Body(setReveal).Contains("DoubleAnimation(0.35"),
+                       "★ 不再用会把板块永久按灰的「闪一下」");
+                Assert(setReveal.Contains("RevealHighlight.Show(card)"), "改成装饰层画橙色虚线框");
+                Assert(setReveal.Contains("DispatcherPriority.ContextIdle"),
+                       "★ 滚动排在布局与渲染之后,否则拿不到真实坐标、只会停在页面顶部");
+                Assert(setReveal.Contains("else card.Loaded += "), "页面还没加载完就先等它加载");
+                Assert(setReveal.Contains("下拉里是全部语言") && setReveal.Contains("new ComboBox { Width = 200"),
+                       "★ 语言池「可添加」是下拉,列出全部语言");
+            }
+            var rhSrc = TryReadSource(Path.Combine("Views", "RevealHighlight.cs"));
+            if (rhSrc is not null)
+            {
+                Assert(rhSrc.Contains("IsHitTestVisible = false"), "高亮框只是标记,不挡住底下的操作");
+                Assert(rhSrc.Contains("TimeSpan.FromSeconds(5)"), "5 秒后自然消退");
+                Assert(rhSrc.Contains("fe.Unloaded += OnTargetUnloaded"), "★ 切界面立刻收掉,不把框留在半空");
+                Assert(rhSrc.Contains("RiskWarning"), "用橙色(风险语义色里的警告橙,三皮肤恒定)");
+                Assert(rhSrc.Contains("DashStyle"), "虚线");
+            }
+            var cvFlash = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvFlash is not null)
+                Assert(!Body(cvFlash).Contains("DoubleAnimation(0.35"),
+                       "会话里跳转到某条消息也不再用那种会按灰的闪烁");
+
             var setLang = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (setLang is not null)
                 Assert(setLang.Contains("翻译语言池") && setLang.Contains("RevealLanguagePool"), "设置里可增删语言池的语言");
