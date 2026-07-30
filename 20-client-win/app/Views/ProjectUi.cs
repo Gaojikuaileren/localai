@@ -75,8 +75,12 @@ public static class ProjectUi
     /// 项目的下拉菜单(用户裁定:不用右键,改成【三个点】按钮拉出这个菜单)。
     ///   在文件夹打开 · 置顶 · 改状态 · 发送到工作空间 · AI 权限 · 编辑(重定向路径) · 删除项目。
     /// </summary>
-    public static ContextMenu BuildMenu(Project p, Action onEdit, FrameworkElement? anchor = null)
+    public static ContextMenu BuildMenu(Project p, Action onEdit, FrameworkElement? anchor = null, Action? onNavigate = null)
     {
+        // ★ 已删除项目的菜单【与正常项目不同】(用户裁定):它不该有"删除/改状态/发送空间"这些,
+        //   只该有【还原】与【彻底删除】(以及看一眼文件夹)。
+        if (p.DeletedAt is not null) return BuildDeletedMenu(p, anchor, onNavigate);
+
         var m = new ContextMenu();
 
         var open = new MenuItem { Header = "在文件夹中打开" };
@@ -100,14 +104,15 @@ public static class ProjectUi
             var (label, _) = Status(st);
             var mi = new MenuItem { Header = "标记为 " + label, IsChecked = p.Status == st };
             var captured = st;
-            mi.Click += (_, _) => Projects.SetStatus(p.ProjectId, captured);
+            mi.Click += (_, _) => { Projects.SetStatus(p.ProjectId, captured); onNavigate?.Invoke(); };
             m.Items.Add(mi);
         }
 
         m.Items.Add(new Separator());
         // 可见范围:家庭 = 同网其它 PC 共享可见可操作;个人 = 只在本机显示(用户裁定)。
+        // ★ 只给这两项 —— "个人"与"仅本人"对项目来说是重复的(用户反馈),仅本人保留在枚举里供会话/D45 用。
         var vis = new MenuItem { Header = "可见范围" };
-        foreach (var sc in new[] { ProjectScope.Family, ProjectScope.Personal, ProjectScope.OnlyMe })
+        foreach (var sc in new[] { ProjectScope.Family, ProjectScope.Personal })
         {
             var mi = new MenuItem { Header = ScopeLabel(sc), IsChecked = p.Scope == sc, ToolTip = ScopeHint(sc) };
             var captured = sc;
@@ -149,6 +154,50 @@ public static class ProjectUi
         return m;
     }
 
+    /// <summary>
+    /// 【已删除项目】的菜单 —— 与正常项目完全不同(用户裁定):
+    /// 只有 还原项目 / 彻底删除项目(以及看一眼文件夹)。没有"删除项目"、不给改状态/发送空间。
+    /// </summary>
+    static ContextMenu BuildDeletedMenu(Project p, FrameworkElement? anchor, Action? onNavigate)
+    {
+        var m = new ContextMenu();
+
+        var open = new MenuItem { Header = "在文件夹中打开" };
+        open.Click += (_, _) =>
+        {
+            if (!ProjectCenter.OpenInExplorer(p.FolderPath))
+                ConfirmDialog.Show("打不开文件夹",
+                    string.IsNullOrWhiteSpace(p.FolderPath) ? "该项目还没有设置文件夹。" : $"打不开文件夹:\n{p.FolderPath}",
+                    confirmText: "好", cancelText: "关闭");
+        };
+        m.Items.Add(open);
+        m.Items.Add(new Separator());
+
+        var restore = new MenuItem { Header = "还原项目" };
+        restore.Click += (_, _) => { Projects.RestoreProject(p.ProjectId); Chat.RestoreProjectSessions(p.ProjectId); onNavigate?.Invoke(); };
+        m.Items.Add(restore);
+
+        var purge = new MenuItem { Header = "彻底删除项目…" };
+        purge.Click += (_, _) => ConfirmPurge(p, anchor, onNavigate);
+        m.Items.Add(purge);
+        return m;
+    }
+
+    /// <summary>彻底删除的二次确认(不可恢复)。★ 仍然不动磁盘文件夹。</summary>
+    public static void ConfirmPurge(Project p, FrameworkElement? anchor, Action? onNavigate = null)
+    {
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var ok = ConfirmDialog.Show("彻底删除项目",
+                $"彻底删除「{p.Title}」及其所有会话?\n\n不可恢复。(仍不会删除磁盘上的项目文件夹)",
+                confirmText: "彻底删除", danger: true);
+            if (!ok) return;
+            Chat.PurgeProjectSessions(p.ProjectId);
+            Projects.PurgeProject(p.ProjectId);
+            onNavigate?.Invoke();
+        }), System.Windows.Threading.DispatcherPriority.Background);
+    }
+
     // 删除项目的【二次确认】。★ 只删客户端里的项目与其会话,【不动磁盘文件夹】;会话进"已删除"(30 天可恢复)。
     // ★ 用独立模态窗(ConfirmDialog)而不是浮窗:浮窗要登记 Overlay,会把抽屉一起关掉、锚点随之消失,
     //   结果"点了删除没反应"(用户两次反馈的真正成因)。延到菜单关闭后再弹,避免菜单关闭抢焦点。
@@ -167,7 +216,7 @@ public static class ProjectUi
     }
 
     /// <summary>三个点按钮:左键点开上面的菜单(替代右键)。</summary>
-    public static FrameworkElement DotsButton(Project p, Action onEdit)
+    public static FrameworkElement DotsButton(Project p, Action onEdit, Action? onNavigate = null)
     {
         var dots = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         for (int k = 0; k < 3; k++)
@@ -183,7 +232,7 @@ public static class ProjectUi
         b.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            var menu = BuildMenu(p, onEdit, b);
+            var menu = BuildMenu(p, onEdit, b, onNavigate);
             menu.PlacementTarget = b;
             menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
             menu.IsOpen = true;

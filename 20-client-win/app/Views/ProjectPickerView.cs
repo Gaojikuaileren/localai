@@ -1,15 +1,25 @@
-// P3c -- 项目选择器(装进右侧抽屉,由聊天里的左箭头拉开)。用户裁定:
-//   · 顶部:新增项目(按下用【项目编辑器】取代当前网格,建完回网格)+ 返回普通会话;
-//   · 项目以【田字形文件夹图标】排布;当前选中的项目着重色;
-//   · 每个项目一个【三个点】按钮拉出菜单(在文件夹打开 / 改状态 / AI 权限 / 编辑重定向路径);
-//   · 点某项目 = 进入其项目会话(onPick);点抽屉外 = 关闭(由抽屉遮罩统一处理),保留当前会话列表。
+// P3c -- 项目抽屉(由会话列表右侧的竖直把手拉开)。
 //
-// ★ 放在抽屉(非 Popup):选文件夹会弹系统对话框,若用 StaysOpen=false 的浮窗会被焦点转移关掉。
+// ★ 层级模型(2026-07-30 用户裁定,统一梳理):抽屉里同一时刻只处在【一个页面】,
+//   页面切换时【顶部说明区】与【内容区】一起换,返回一律回到"进行中"网格:
+//
+//     进行中(默认)  ── 顶部:项目会话(未选 -> "选择一个项目";已选 -> "已选择「X」")
+//        ├─ 已完成项目  ── 顶部:解释"已完成项目是什么 + 能做什么" + 返回
+//        ├─ 已删除项目  ── 顶部:解释保留期 + 【多选彻底删除 / 全部彻底删除】+ 返回
+//        └─ 编辑/新建   ── 顶部:隐藏说明,专心填表;完成后回"进行中"
+//
+// 三种项目的【菜单不同】(见 ProjectUi):正常项目(全功能)/ 已删除项目(只有还原、彻底删除)。
+// 已完成项目在这里改状态后会【自动回到进行中网格】,不用手动返回(用户反馈)。
+//
+// 方块布局与主页一致:pin 在【右上角】、三个点在【右下角】。
+// 在"进行中"里把项目标记为已完成 -> 停留 3 秒再【向右划走】(与待办事项同一手感)。
 
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
 
@@ -19,15 +29,24 @@ public sealed class ProjectPickerView : UserControl
 {
     static App TheApp => (App)Application.Current;
 
+    enum Page { Grid, Completed, Deleted, Editor }
+
     readonly string _wsKey;
     string? _current;   // 当前选中项目;选后不关抽屉、只高亮,让用户确认(用户裁定)
     readonly Action<string> _onPick;
     readonly Action _onNormal;
     readonly StackPanel _root = new();
-    readonly ContentControl _hint = new();   // 常驻提示(未选/已选),不随内容重排而挤动
+    readonly ContentControl _header = new();   // 顶部说明区:随页面切换
     readonly ContentControl _body = new();
-    bool _editing;
-    bool _boarding;   // 正在看"已删除/已完成"覆盖板块(此时数据变更不自动回退到网格)
+    Page _page = Page.Grid;
+
+    readonly HashSet<string> _picked = new();  // 已删除板块里的多选集合
+    bool _multi;                                // 已删除板块:多选模式
+
+    // 完成动画:标记完成后停留 3 秒再划走
+    readonly DispatcherTimer _graceTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    readonly Dictionary<string, FrameworkElement> _tiles = new();
+    readonly HashSet<string> _sliding = new();
 
     public ProjectPickerView(string workspaceKey, string? current, Action<string> onPick, Action onNormal)
     {
@@ -36,7 +55,7 @@ public sealed class ProjectPickerView : UserControl
         _onPick = onPick;
         _onNormal = onNormal;
 
-        // 顶部:返回普通会话 + 新增项目
+        // 顶部固定条:返回普通会话 + 新建项目(任何页面都在)
         var add = Ui.PlusButton(() => ShowEditor(null), "新建项目");
         var normal = Chip("‹ 普通会话", () => { _current = null; ShowGrid(); _onNormal(); });
         var top = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 8) };
@@ -46,7 +65,7 @@ public sealed class ProjectPickerView : UserControl
         top.Children.Add(normal);
 
         _root.Children.Add(top);
-        _root.Children.Add(_hint);   // 常驻:未选项目也在,不挤动排版
+        _root.Children.Add(_header);
         _root.Children.Add(_body);
         Content = new ScrollViewer
         {
@@ -56,71 +75,310 @@ public sealed class ProjectPickerView : UserControl
         }.PassThrough();
 
         ShowGrid();
+        _graceTimer.Tick += (_, _) => SweepCompleted();
         Loaded += (_, _) => TheApp.Projects.Changed += OnChanged;
-        Unloaded += (_, _) => TheApp.Projects.Changed -= OnChanged;
+        Unloaded += (_, _) => { TheApp.Projects.Changed -= OnChanged; _graceTimer.Stop(); };
     }
 
-    void OnChanged() { if (!_editing && !_boarding) ShowGrid(); }
-
-    // 常驻提示:未选项目时告诉用户"选一个项目 = 基于它开会话";已选时提示已选哪个。★ 固定占位,不重排。
-    void UpdateHint()
+    // 数据变了就刷新【当前页面】(不要粗暴跳回网格 —— 那会把用户从板块里踢出去)
+    void OnChanged()
     {
-        FrameworkElement content;
-        if (_current is { } cur)
+        switch (_page)
         {
-            var proj = TheApp.Projects.Find(cur);
-            content = Ui.Stack(
-                Ui.Body($"已选择「{proj?.Title ?? "项目"}」", muted: false),
-                Ui.Caption("右侧新建/发送即【基于该项目开始会话】。选好后点空白处或关闭按钮收起。"));
+            case Page.Grid: ShowGrid(); break;
+            case Page.Completed: ShowCompletedBoard(); break;
+            case Page.Deleted: ShowDeletedBoard(); break;
+            // 编辑页不自动重建,否则用户填一半的表会被冲掉
         }
-        else
-        {
-            content = Ui.Stack(
-                Ui.Body("选择一个项目", muted: false),
-                Ui.Caption("选中某个项目 = 基于它开始项目会话;想聊普通会话点左上「‹ 普通会话」。"));
-        }
-        _hint.Content = Ui.Panel("项目会话", content, IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
     }
 
+    // ---------------------------------------------------------------- 页面:进行中(默认)
     void ShowGrid()
     {
-        _editing = false;
-        _boarding = false;
-        UpdateHint();
-        var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 只看本工作空间的项目
+        _page = Page.Grid;
+        _multi = false;
+        _picked.Clear();
+        _tiles.Clear();
 
+        // 顶部:项目会话说明(常驻,未选也在 —— 不随选中与否挤动排版)
+        FrameworkElement hint = _current is { } cur && TheApp.Projects.Find(cur) is { } proj
+            ? Ui.Stack(Ui.Body($"已选择「{proj.Title}」"),
+                       Ui.Caption("右侧新建/发送即【基于该项目开始会话】。点空白处或关闭按钮收起抽屉。"))
+            : Ui.Stack(Ui.Body("选择一个项目"),
+                       Ui.Caption("选中某个项目 = 基于它开始项目会话;想聊普通会话点左上「‹ 普通会话」。"));
+        _header.Content = Ui.Panel("项目会话", hint, IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+
+        var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 含"刚完成还在 3 秒宽限"的
         var panel = new StackPanel();
         if (items.Count == 0)
         {
             panel.Children.Add(Ui.Body("还没有进行中的项目。", muted: true));
-            panel.Children.Add(Ui.Caption("点右上角 + 新建;下面可看已完成/已删除的项目。"));
+            panel.Children.Add(Ui.Caption("点右上角 + 新建;下面可看已完成 / 已删除的项目。"));
         }
         else
         {
             var grid = new UniformGrid { Columns = 2 };
-            foreach (var p in items) grid.Children.Add(FolderTile(p));
+            foreach (var p in items) grid.Children.Add(Tile(p, Page.Grid));
             panel.Children.Add(grid);
         }
 
-        // 底部:已完成 / 已删除项目 的入口(点开覆盖式板块)
         panel.Children.Add(new Border { Height = 8 });
-        var completedN = TheApp.Projects.Completed(_wsKey).Count();
-        var deletedN = TheApp.Projects.DeletedProjectsCount();
-        panel.Children.Add(EntryRow($"已完成项目 ({completedN})", IconName.Folder, ShowCompletedBoard));
-        panel.Children.Add(EntryRow($"已删除项目 ({deletedN})", IconName.Folder, ShowDeletedBoard));
+        panel.Children.Add(EntryRow($"已完成项目 ({TheApp.Projects.Completed(_wsKey).Count()})", ShowCompletedBoard));
+        panel.Children.Add(EntryRow($"已删除项目 ({TheApp.Projects.DeletedProjectsCount()})", ShowDeletedBoard));
+        _body.Content = panel;
+
+        // 有"刚完成"的就开表,到点播划走动画
+        if (TheApp.Projects.HasCompletionGrace(_wsKey)) _graceTimer.Start(); else _graceTimer.Stop();
+    }
+
+    // 宽限到点:把刚完成的方块【向右划走 + 淡出】,划完再重建(此时它已不在进行中列表里)
+    void SweepCompleted()
+    {
+        if (_page != Page.Grid) { _graceTimer.Stop(); return; }
+        var expired = TheApp.Projects.Items
+            .Where(p => p.Status == ProjectStatus.Done && p.DeletedAt is null && p.CompletedAt is not null
+                        && !ProjectCenter.IsCompletingNow(p) && _tiles.ContainsKey(p.ProjectId) && !_sliding.Contains(p.ProjectId))
+            .ToList();
+        foreach (var p in expired) SlideOut(p.ProjectId);
+        if (!TheApp.Projects.HasCompletionGrace(_wsKey) && _sliding.Count == 0) { _graceTimer.Stop(); ShowGrid(); }
+    }
+
+    void SlideOut(string projectId)
+    {
+        if (!_tiles.TryGetValue(projectId, out var tile)) return;
+        _sliding.Add(projectId);
+        var t = new TranslateTransform();
+        tile.RenderTransform = t;
+        tile.IsHitTestVisible = false;   // 动画期间不可再交互(与待办一致)
+        var slide = new DoubleAnimation(0, 260, TimeSpan.FromMilliseconds(280)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
+        var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(280));
+        fade.Completed += (_, _) => { _sliding.Remove(projectId); if (_page == Page.Grid) ShowGrid(); };
+        t.BeginAnimation(TranslateTransform.XProperty, slide);
+        tile.BeginAnimation(OpacityProperty, fade);
+    }
+
+    // ---------------------------------------------------------------- 页面:已完成项目(按工作空间)
+    void ShowCompletedBoard()
+    {
+        _page = Page.Completed;
+        _multi = false;
+        _picked.Clear();
+        _tiles.Clear();
+        _graceTimer.Stop();
+
+        var items = TheApp.Projects.Completed(_wsKey).ToList();
+        _header.Content = Ui.Panel("已完成项目",
+            Ui.Stack(
+                Ui.Caption("这里是本工作空间已收尾的项目。选中可【只读浏览】它的会话记录;"),
+                Ui.Caption("在会话区可【继续此项目】(移回进行中)或【开启此项目分支】(复制成新的准备中项目)。"),
+                BackRow()),
+            IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+
+        var panel = new StackPanel();
+        if (items.Count == 0) panel.Children.Add(Ui.Body("这个工作空间还没有已完成的项目。", muted: true));
+        else
+        {
+            var grid = new UniformGrid { Columns = 2 };
+            foreach (var p in items) grid.Children.Add(Tile(p, Page.Completed));
+            panel.Children.Add(grid);
+        }
         _body.Content = panel;
     }
 
+    // ---------------------------------------------------------------- 页面:已删除项目(所有工作空间共享)
+    void ShowDeletedBoard()
+    {
+        _page = Page.Deleted;
+        _tiles.Clear();
+        _graceTimer.Stop();
+
+        var items = TheApp.Projects.DeletedProjects().ToList();
+        _picked.RemoveWhere(id => !items.Any(x => x.ProjectId == id));   // 清掉已消失的选中项
+
+        _header.Content = Ui.Panel("已删除项目",
+            Ui.Stack(
+                Ui.Caption($"所有工作空间共享一个回收站,保留 {ProjectCenter.TrashRetentionDays} 天后自动清除(不可恢复)。"),
+                Ui.Caption("选中可【只读浏览】;在会话区可【恢复此项目】或【彻底删除】。"),
+                DeletedActionRow(items)),
+            IconName.Folder, new Thickness(0, 0, 0, 8), compact: true);
+
+        var panel = new StackPanel();
+        if (items.Count == 0) panel.Children.Add(Ui.Body("没有已删除的项目。", muted: true));
+        else
+        {
+            var grid = new UniformGrid { Columns = 2 };
+            foreach (var p in items) grid.Children.Add(Tile(p, Page.Deleted));
+            panel.Children.Add(grid);
+        }
+        _body.Content = panel;
+    }
+
+    // 已删除板块的动作条:多选 / 彻底删除所选 / 全部彻底删除 / 返回
+    FrameworkElement DeletedActionRow(List<Project> items)
+    {
+        var row = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+        row.Children.Add(Chip("‹ 返回项目", ShowGrid));
+        if (items.Count == 0) return row;
+
+        if (!_multi)
+        {
+            row.Children.Add(Chip("多选", () => { _multi = true; _picked.Clear(); ShowDeletedBoard(); }));
+            row.Children.Add(Chip($"全部彻底删除 ({items.Count})", () =>
+            {
+                if (!ConfirmDialog.Show("全部彻底删除",
+                        $"彻底删除全部 {items.Count} 个已删除项目及其所有会话?\n\n不可恢复。(仍不会删除磁盘上的文件夹)",
+                        confirmText: "全部彻底删除", danger: true)) return;
+                foreach (var p in items) { TheApp.Chat.PurgeProjectSessions(p.ProjectId); TheApp.Projects.PurgeProject(p.ProjectId); }
+                if (_current is { } c && !TheApp.Projects.Items.Any(x => x.ProjectId == c)) { _current = null; _onNormal(); }
+                ShowDeletedBoard();
+            }, "RiskDanger"));
+            return row;
+        }
+
+        var all = _picked.Count == items.Count && items.Count > 0;
+        row.Children.Add(Chip(all ? "取消全选" : "全选", () =>
+        {
+            _picked.Clear();
+            if (!all) foreach (var p in items) _picked.Add(p.ProjectId);
+            ShowDeletedBoard();
+        }));
+        row.Children.Add(Chip($"彻底删除所选 ({_picked.Count})", () =>
+        {
+            if (_picked.Count == 0) return;
+            if (!ConfirmDialog.Show("彻底删除所选",
+                    $"彻底删除选中的 {_picked.Count} 个项目及其所有会话?\n\n不可恢复。(仍不会删除磁盘上的文件夹)",
+                    confirmText: "彻底删除", danger: true)) return;
+            foreach (var id in _picked.ToList()) { TheApp.Chat.PurgeProjectSessions(id); TheApp.Projects.PurgeProject(id); }
+            if (_current is { } c && !TheApp.Projects.Items.Any(x => x.ProjectId == c)) { _current = null; _onNormal(); }
+            _picked.Clear();
+            _multi = false;
+            ShowDeletedBoard();
+        }, _picked.Count > 0 ? "RiskDanger" : "FgMuted"));
+        row.Children.Add(Chip("退出多选", () => { _multi = false; _picked.Clear(); ShowDeletedBoard(); }));
+        return row;
+    }
+
+    FrameworkElement BackRow()
+    {
+        var row = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+        row.Children.Add(Chip("‹ 返回项目", ShowGrid));
+        return row;
+    }
+
+    // ---------------------------------------------------------------- 页面:编辑 / 新建
     void ShowEditor(Project? existing)
     {
-        _editing = true;
+        _page = Page.Editor;
+        _graceTimer.Stop();
+        _header.Content = null;   // 填表时不要说明框抢空间
         _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid, workspaceKey: _wsKey);
     }
 
-    // 底部入口条(点开覆盖式板块)。
-    FrameworkElement EntryRow(string text, IconName icon, Action onClick)
+    // ---------------------------------------------------------------- 方块
+    // 布局与主页一致:pin 在【右上角】,三个点在【右下角】(用户裁定)。
+    FrameworkElement Tile(Project p, Page page)
     {
-        var ic = Icons.Make(icon, 16, "FgMuted");
+        var sel = _current == p.ProjectId;
+        // ★ 墨白皮肤统一高亮规则:选中底色是 BgSelected(近黑),前景一律走 FgOnSelected(白)。
+        var folder = Icons.Make(IconName.Folder, 30, sel ? "FgOnSelected" : "FgSecondary");
+        folder.HorizontalAlignment = HorizontalAlignment.Left;
+
+        var name = new TextBlock
+        {
+            Text = p.Title, TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.Wrap,
+            MaxHeight = 34, Margin = new Thickness(0, 6, 26, 0),   // 右边给三点让位
+        };
+        name.SetResourceReference(TextBlock.ForegroundProperty, sel ? "FgOnSelected" : "FgPrimary");
+        name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var status = ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null);
+        status.Margin = new Thickness(0, 0, 30, 0);   // 给右下角的三点让位
+        var body = new StackPanel();
+        body.Children.Add(folder);
+        body.Children.Add(name);
+        body.Children.Add(status);
+
+        var overlay = new Grid();
+        overlay.Children.Add(body);
+
+        var pinned = p.Pinned;
+        FrameworkElement? pinBtn = null;
+        if (page == Page.Grid)
+        {
+            // 右上角:置顶(平时隐藏,hover 显示;已置顶常亮)—— 与主页一致
+            pinBtn = PinButton(p, sel);
+            overlay.Children.Add(pinBtn);
+        }
+        else if (page == Page.Deleted && _multi)
+        {
+            // 已删除 + 多选:左上角勾选框
+            var cb = new CheckBox { IsChecked = _picked.Contains(p.ProjectId), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+            cb.Checked += (_, _) => { _picked.Add(p.ProjectId); ShowDeletedBoard(); };
+            cb.Unchecked += (_, _) => { _picked.Remove(p.ProjectId); ShowDeletedBoard(); };
+            overlay.Children.Add(cb);
+        }
+
+        // 右下角:三个点(用户裁定)。菜单按项目状态分流(正常 / 已删除),改状态后回到进行中网格。
+        var dots = ProjectUi.DotsButton(p, () => ShowEditor(p), onNavigate: ShowGrid);
+        dots.HorizontalAlignment = HorizontalAlignment.Right;
+        dots.VerticalAlignment = VerticalAlignment.Bottom;
+        overlay.Children.Add(dots);
+
+        var tile = new Border
+        {
+            Child = overlay,
+            Height = 108,
+            Padding = new Thickness(12),
+            Margin = new Thickness(4),
+            BorderThickness = new Thickness(sel || pinned ? 2 : 1),   // 置顶态描边更粗(与主页一致)
+            Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        tile.SetResourceReference(Border.BackgroundProperty, sel ? "BgSelected" : "BgSurface");
+        tile.SetResourceReference(Border.BorderBrushProperty, sel || pinned ? "Accent" : "Border");
+        tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        tile.MouseEnter += (_, _) => { if (!sel) tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); if (pinBtn is not null && !pinned) pinBtn.Opacity = 1; };
+        tile.MouseLeave += (_, _) => { if (!sel) tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); if (pinBtn is not null && !pinned) pinBtn.Opacity = 0; };
+        // 选中后不关抽屉:只切上下文 + 重画高亮,让用户确认选的是哪个
+        tile.MouseLeftButtonUp += (_, _) =>
+        {
+            _current = p.ProjectId;
+            _onPick(p.ProjectId);
+            switch (_page) { case Page.Completed: ShowCompletedBoard(); break; case Page.Deleted: ShowDeletedBoard(); break; default: ShowGrid(); break; }
+        };
+        _tiles[p.ProjectId] = tile;
+        return tile;
+    }
+
+    // 置顶按钮(水滴 pin,与主页同款):右上角;平时隐藏,hover 显示;已置顶常亮 + 强调色。
+    FrameworkElement PinButton(Project p, bool sel)
+    {
+        var pin = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M8,1.6 C5.4,1.6 3.3,3.7 3.3,6.3 C3.3,9.8 8,14.4 8,14.4 C8,14.4 12.7,9.8 12.7,6.3 C12.7,3.7 10.6,1.6 8,1.6 Z"),
+            Width = 14, Height = 14, Stretch = Stretch.Uniform, StrokeThickness = 1.4,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
+        };
+        var key = sel ? "FgOnSelected" : p.Pinned ? "Accent" : "FgSecondary";
+        pin.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, key);
+        if (p.Pinned) pin.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, sel ? "FgOnSelected" : "Accent");
+
+        var btn = new Border
+        {
+            Width = 22, Height = 22, Child = pin,
+            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+            Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
+            Opacity = p.Pinned ? 1 : 0,
+            ToolTip = p.Pinned ? "取消置顶" : "置顶",
+        };
+        btn.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Projects.TogglePin(p.ProjectId); };
+        return btn;
+    }
+
+    // 底部入口条(进入覆盖式板块)
+    FrameworkElement EntryRow(string text, Action onClick)
+    {
+        var ic = Icons.Make(IconName.Folder, 16, "FgMuted");
         ic.VerticalAlignment = VerticalAlignment.Center;
         var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -135,120 +393,17 @@ public sealed class ProjectPickerView : UserControl
         return b;
     }
 
-    // ★ 覆盖式板块:已完成项目(按工作空间)。返回回到网格。选中 = 进只读浏览(会话区给"继续/分支"按钮)。
-    void ShowCompletedBoard() => ShowBoard("已完成项目", TheApp.Projects.Completed(_wsKey).ToList(),
-        "这个工作空间还没有已完成的项目。");
-
-    // ★ 覆盖式板块:已删除项目(★ 跨工作空间共享一个垃圾篓)。选中 = 进只读浏览(会话区给"恢复/彻底删除")。
-    void ShowDeletedBoard() => ShowBoard("已删除项目(所有工作空间共享)", TheApp.Projects.DeletedProjects().ToList(),
-        $"没有已删除的项目。删除的项目在这里保留 {ProjectCenter.TrashRetentionDays} 天。");
-
-    void ShowBoard(string title, List<Project> items, string emptyText)
-    {
-        _boarding = true;
-        var panel = new StackPanel();
-        var back = Chip("‹ 返回项目", ShowGrid);
-        panel.Children.Add(back);
-        panel.Children.Add(Ui.Panel(title,
-            items.Count == 0
-                ? Ui.Body(emptyText, muted: true)
-                : BoardGrid(items),
-            IconName.Folder, new Thickness(0, 8, 0, 0), compact: true));
-        _body.Content = panel;
-    }
-
-    UIElement BoardGrid(List<Project> items)
-    {
-        var grid = new UniformGrid { Columns = 2 };
-        foreach (var p in items) grid.Children.Add(FolderTile(p));   // 复用方块:选中即 onPick → 会话区只读浏览
-        return grid;
-    }
-
-    FrameworkElement FolderTile(Project p)
-    {
-        // ★ 墨白皮肤统一高亮规则:选中态底色是 BgSelected(近黑),前景一律走 FgOnSelected(白),
-        //   否则就是"黑底黑字看不清"(用户反馈)。图标/标题/置顶点/状态字都照此。
-        var sel = _current == p.ProjectId;
-        var folder = Icons.Make(IconName.Folder, 34, sel ? "FgOnSelected" : "FgSecondary");
-        folder.HorizontalAlignment = HorizontalAlignment.Left;
-
-        var name = new TextBlock { Text = p.Title, TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.Wrap, MaxHeight = 34, Margin = new Thickness(0, 6, 0, 0) };
-        name.SetResourceReference(TextBlock.ForegroundProperty, sel ? "FgOnSelected" : "FgPrimary");
-        name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        var body = new StackPanel();
-        body.Children.Add(folder);
-        body.Children.Add(name);
-        body.Children.Add(ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null));
-
-        // 三个点(右上角);编辑项目 -> 在本抽屉内用编辑器取代网格。
-        var dots = ProjectUi.DotsButton(p, () => ShowEditor(p));
-        dots.HorizontalAlignment = HorizontalAlignment.Right;
-        dots.VerticalAlignment = VerticalAlignment.Top;
-        // 置顶按钮(左上,像主页):平时隐藏,hover 才显示;已置顶则常亮。
-        var pinBtn = PinButton(p, sel);
-
-        var overlay = new Grid();
-        overlay.Children.Add(body);
-        overlay.Children.Add(pinBtn);
-        overlay.Children.Add(dots);
-
-        var pinned = p.Pinned;
-        var tile = new Border
-        {
-            Child = overlay,
-            Height = 108,
-            Padding = new Thickness(12),
-            Margin = new Thickness(4),
-            BorderThickness = new Thickness(sel || pinned ? 2 : 1),   // 置顶态描边更粗(与主页一致)
-            Cursor = System.Windows.Input.Cursors.Hand,
-        };
-        tile.SetResourceReference(Border.BackgroundProperty, sel ? "BgSelected" : "BgSurface");
-        tile.SetResourceReference(Border.BorderBrushProperty, sel || pinned ? "Accent" : "Border");
-        tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-        tile.MouseEnter += (_, _) => { if (!sel) tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); if (!pinned) pinBtn.Opacity = 1; };
-        tile.MouseLeave += (_, _) => { if (!sel) tile.SetResourceReference(Border.BackgroundProperty, "BgSurface"); if (!pinned) pinBtn.Opacity = 0; };
-        // 选中后不关抽屉:只切上下文 + 重画高亮,让用户确认选的是哪个;关闭由用户点关闭/点外部
-        tile.MouseLeftButtonUp += (_, _) => { _current = p.ProjectId; ShowGrid(); _onPick(p.ProjectId); };
-        return tile;
-    }
-
-    // 置顶按钮(水滴 pin,像主页):平时隐藏,tile hover 时显示;已置顶则常亮 + 强调色。
-    FrameworkElement PinButton(Project p, bool sel)
-    {
-        var pin = new System.Windows.Shapes.Path
-        {
-            Data = Geometry.Parse("M8,1.6 C5.4,1.6 3.3,3.7 3.3,6.3 C3.3,9.8 8,14.4 8,14.4 C8,14.4 12.7,9.8 12.7,6.3 C12.7,3.7 10.6,1.6 8,1.6 Z"),
-            Width = 14, Height = 14, Stretch = Stretch.Uniform, StrokeThickness = 1.4,
-            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
-        };
-        var strokeKey = p.Pinned ? (sel ? "FgOnSelected" : "Accent") : (sel ? "FgOnSelected" : "FgSecondary");
-        pin.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, strokeKey);
-        if (p.Pinned) pin.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, sel ? "FgOnSelected" : "Accent");
-
-        var btn = new Border
-        {
-            Width = 22, Height = 22, Child = pin,
-            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
-            Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
-            Opacity = p.Pinned ? 1 : 0,   // 已置顶常亮;未置顶靠 hover
-            ToolTip = p.Pinned ? "取消置顶" : "置顶",
-        };
-        btn.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Projects.TogglePin(p.ProjectId); };
-        return btn;
-    }
-
-    static FrameworkElement Chip(string text, Action onClick)
+    static FrameworkElement Chip(string text, Action onClick, string colorKey = "FgSecondary")
     {
         var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
-        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        t.SetResourceReference(TextBlock.ForegroundProperty, colorKey);
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        var b = new Border { Child = t, Padding = new Thickness(8, 4, 8, 4), Cursor = System.Windows.Input.Cursors.Hand, Background = Brushes.Transparent };
+        var b = new Border { Child = t, Padding = new Thickness(9, 4, 9, 4), Margin = new Thickness(0, 0, 6, 4), Cursor = System.Windows.Input.Cursors.Hand, Background = Brushes.Transparent, BorderThickness = new Thickness(1) };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
         b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
-        b.MouseLeftButtonUp += (_, _) => onClick();
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
         return b;
     }
 }

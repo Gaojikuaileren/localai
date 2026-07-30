@@ -38,7 +38,8 @@ public sealed record Project(
     IReadOnlyList<string>? Attachments = null, // 可选附件文件夹(可多个)
     AiPermission Ai = AiPermission.Ask,    // 给 AI 的权限(默认"需批准")
     string? OwnerMemberId = null,          // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
-    DateTime? DeletedAt = null);           // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
+    DateTime? DeletedAt = null,            // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
+    DateTime? CompletedAt = null);         // 标记完成的时刻(用于"完成后停留 3 秒再划走"的宽限)
 
 public sealed class ProjectCenter
 {
@@ -86,11 +87,34 @@ public sealed class ProjectCenter
         if (i >= 0) { _items[i] = _items[i] with { Pinned = !_items[i].Pinned }; Changed?.Invoke(); }
     }
 
+    /// <summary>改状态。标记为【已完成】时打上时间戳 —— 用于"在项目抽屉里停留 3 秒再划走"的宽限。</summary>
     public void SetStatus(string projectId, ProjectStatus status)
     {
         var i = _items.FindIndex(x => x.ProjectId == projectId);
-        if (i >= 0 && _items[i].Status != status) { _items[i] = _items[i] with { Status = status }; Changed?.Invoke(); }
+        if (i < 0 || _items[i].Status == status) return;
+        _items[i] = _items[i] with
+        {
+            Status = status,
+            CompletedAt = status == ProjectStatus.Done ? DateTime.Now : null,
+        };
+        Changed?.Invoke();
     }
+
+    /// <summary>标记完成后先在"进行中"停留几秒再划走(与待办一致:3 秒)。</summary>
+    public const double CompletionGraceSeconds = 3;
+
+    static bool InCompletionGrace(Project p, DateTime now)
+        => p.Status == ProjectStatus.Done && p.CompletedAt is { } c && (now - c).TotalSeconds < CompletionGraceSeconds;
+
+    /// <summary>是否还有处于"完成后 3 秒宽限"的项目(界面据此决定要不要继续轮询刷新)。</summary>
+    public bool HasCompletionGrace(string? workspaceKey = null, DateTime? asOf = null)
+    {
+        var now = asOf ?? DateTime.Now;
+        return _items.Any(p => p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey) && InCompletionGrace(p, now));
+    }
+
+    /// <summary>某项目是否正处在"刚完成、还没划走"的宽限期(界面据此播放划出动画)。</summary>
+    public static bool IsCompletingNow(Project p, DateTime? asOf = null) => InCompletionGrace(p, asOf ?? DateTime.Now);
 
     public void SetAiPermission(string projectId, AiPermission ai)
     {
@@ -179,10 +203,16 @@ public sealed class ProjectCenter
 
     /// <summary>非已完成(准备中 + 进行中)且未删除,置顶在前、再按最近。workspaceKey 给定则只取该空间的。
     ///   主页项目板块用【全部】(跨空间总览);各工作空间的项目选择器用【本空间】。</summary>
-    public IEnumerable<Project> Ongoing(string? workspaceKey = null)
-        => _items.Where(p => p.Status != ProjectStatus.Done && p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
-                 .Where(Visible)                                     // D45:别人的个人/仅本人项目绝不出现
-                 .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+    public IEnumerable<Project> Ongoing(string? workspaceKey = null, DateTime? asOf = null)
+    {
+        var now = asOf ?? DateTime.Now;
+        // ★ 刚标记完成的仍留在列表里(3 秒宽限),让界面能播"划走"的动画再消失(与待办一致)。
+        return _items.Where(p => p.DeletedAt is null
+                                 && (p.Status != ProjectStatus.Done || InCompletionGrace(p, now))
+                                 && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+                     .Where(Visible)                                 // D45:别人的个人/仅本人项目绝不出现
+                     .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
+    }
 
     /// <summary>D45 可见性:家庭范围全家可见;个人/仅本人只有所有者可见;所有者未知一律不可见。</summary>
     public static bool Visible(Project p) => MemberContext.CanSee(p.Scope, p.OwnerMemberId);

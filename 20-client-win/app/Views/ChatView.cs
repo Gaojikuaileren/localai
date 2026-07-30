@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
 
@@ -29,7 +30,8 @@ public sealed class ChatView : UserControl
     readonly ContentControl _ghostHost = new();   // 幽灵按钮:仅普通会话显示,且随幽灵状态换实线/虚线
     readonly ContentControl _newBtnHost = new();  // 新建会话按钮:只读项目(已删/已完成)下隐藏
     readonly DockPanel _actionsRow = new() { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
-    bool _trashOpen;   // 已删除会话【覆盖板块】开着(覆盖普通会话列表,可返回)
+    bool _trashOpen;      // 已删除会话【覆盖板块】开着(覆盖普通会话列表,可返回)
+    bool _wasEmptyState;  // 上一次会话区是"空态居中输入框"—— 用于居中→底部的滑动动画
     readonly StackPanel _sessions = new();
     readonly ContentControl _conv = new();   // 会话区(空态居中 / 有消息则底部输入)
     TextBox _input = new();
@@ -480,8 +482,25 @@ public sealed class ChatView : UserControl
             dock.Children.Add(inputWrap);
             dock.Children.Add(scroll);
             inner = dock;
-            Dispatcher.BeginInvoke(new Action(() => scroll.ScrollToEnd()), System.Windows.Threading.DispatcherPriority.Loaded);
+
+            // ★ 从"空会话居中输入框"变成"底部输入框"时给一段动画,而不是硬切(用户裁定):
+            //   输入框从原来的居中位置【滑到底部】,消息区同时淡入。
+            var slideFromCenter = _wasEmptyState;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                scroll.ScrollToEnd();
+                if (!slideFromCenter) return;
+                var h = _conv.ActualHeight;
+                var startY = -Math.Max(0, (h - inputWrap.ActualHeight) / 2 - 10);   // 居中处相对底部的偏移
+                if (startY >= -1) return;                                            // 高度还没算出来就别硬演
+                var t = new TranslateTransform { Y = startY };
+                inputWrap.RenderTransform = t;
+                t.BeginAnimation(TranslateTransform.YProperty,
+                    new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(320)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+                scroll.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(320)));
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
+        _wasEmptyState = !hasMsgs;
         _conv.Content = ConvShell(inner, isGhost, overlayBanner: !hasMsgs);
     }
 

@@ -698,7 +698,8 @@ public sealed class HomeView : UserControl
         // 状态(进行中/准备中)小标签 + 可见范围 —— 让"分进行中/准备中"在方块上一眼可辨
         var statusChip = ProjectUi.StatusChip(p.Status);
         statusChip.Margin = new Thickness(0, 0, 10, 0);
-        var scopeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        // 右边留出三点按钮的位置(它在右下角),状态/范围文字不会钻到它下面
+        var scopeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 30, 0) };
         scopeRow.Children.Add(statusChip);
         scopeRow.Children.Add(dot); scopeRow.Children.Add(scopeLabel);
 
@@ -724,16 +725,19 @@ public sealed class HomeView : UserControl
         tile.SetResourceReference(Border.BorderBrushProperty, p.Pinned ? "Accent" : "Border");
         tile.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
 
-        // 右上角:三个点菜单 + 置顶按钮。平时隐藏,鼠标移到方块上才显示(用户裁定)
+        // ★ 统一布局(用户裁定):置顶 pin 在【右上角】,三个点在【右下角】—— 项目抽屉里也是这样。
+        //   平时隐藏,鼠标移到方块上才显示(已置顶的 pin 常亮)。
         var pinBtn = PinButton(p);
+        pinBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        pinBtn.VerticalAlignment = VerticalAlignment.Top;
         var dots = ProjectUi.DotsButton(p, () => (Application.Current.MainWindow as MainWindow)?.OpenProjectEditor(p));
         dots.Opacity = 0;
-        var topRight = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
-        topRight.Children.Add(dots);
-        topRight.Children.Add(pinBtn);
+        dots.HorizontalAlignment = HorizontalAlignment.Right;
+        dots.VerticalAlignment = VerticalAlignment.Bottom;
         var overlay = new Grid();
         overlay.Children.Add(body);
-        overlay.Children.Add(topRight);
+        overlay.Children.Add(pinBtn);
+        overlay.Children.Add(dots);
         tile.Child = overlay;
 
         tile.MouseEnter += (_, _) => { tile.SetResourceReference(Border.BackgroundProperty, "BgHover"); pinBtn.Opacity = 1; dots.Opacity = 1; };

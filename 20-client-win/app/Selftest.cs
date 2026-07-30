@@ -292,7 +292,11 @@ public static class Selftest
             pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Active);
             Assert(pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "进行中的项目出现在 Ongoing()");
             pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Done);
-            Assert(!pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "已完成的不在 Ongoing()(主页不显示)");
+            // ★ 标记完成后有 3 秒宽限(界面据此播"划走"动画),宽限内仍在列表、宽限后才消失
+            Assert(pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "刚标记完成的项目【仍在】列表里(3 秒宽限,给划走动画用)");
+            Assert(pcx.HasCompletionGrace(), "存在处于完成宽限期的项目(界面据此开表)");
+            var afterGrace = DateTime.Now.AddSeconds(Services.ProjectCenter.CompletionGraceSeconds + 1);
+            Assert(!pcx.Ongoing(null, afterGrace).Any(x => x.ProjectId == np.ProjectId), "宽限过后已完成的不在 Ongoing()(主页不显示)");
             Assert(pcx.Completed().Any(x => x.ProjectId == np.ProjectId), "已完成的进 Completed()(项目库)");
             pcx.SetAiPermission(np.ProjectId, Services.AiPermission.Edit);
             Assert(pcx.Find(np.ProjectId)!.Ai == Services.AiPermission.Edit, "可设项目 AI 权限");
@@ -691,7 +695,7 @@ public static class Selftest
             if (pkBoard is not null)
             {
                 Assert(pkBoard.Contains("ShowDeletedBoard") && pkBoard.Contains("ShowCompletedBoard"), "项目抽屉有【已删除/已完成项目】覆盖板块");
-                Assert(pkBoard.Contains("UpdateHint") && pkBoard.Contains("选择一个项目"), "常驻提示(未选时提示选项目;不挤排版)");
+                Assert(pkBoard.Contains("_header") && pkBoard.Contains("选择一个项目"), "常驻提示(未选时提示选项目;不挤排版)");
                 Assert(pkBoard.Contains("PinButton"), "项目方块用 hover 置顶按钮(像主页)");
             }
             var cvRO = TryReadSource(Path.Combine("Views", "ChatView.cs"));
