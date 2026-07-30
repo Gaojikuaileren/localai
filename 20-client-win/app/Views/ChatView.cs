@@ -562,7 +562,7 @@ public sealed class ChatView : UserControl
     const int SoftAttachLimit = 5;
     static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" };
 
-    // "+"按钮:点开【选择文件(可多选) / 选择文件夹】。★ 图片/文件已合并为一个"选择文件";
+    // "+"按钮:点开【选择文件(支持多选) / 选择文件夹】。★ 图片/文件已合并为一个"选择文件";
     //   剪贴板截图改成在输入框里 Ctrl+V(见 OnInputPaste)。只带路径,不真发内容。
     FrameworkElement AttachButton()
     {
@@ -577,7 +577,7 @@ public sealed class ChatView : UserControl
         b.ToolTip = "添加文件 / 文件夹(截图可直接在输入框粘贴)";
 
         var menu = new ContextMenu();
-        var mFile = new MenuItem { Header = "选择文件…(可多选)" };
+        var mFile = new MenuItem { Header = "选择文件…" };
         mFile.Click += (_, _) => PickFiles();
         var mFolder = new MenuItem { Header = "选择文件夹…" };
         mFolder.Click += (_, _) => PickChatFolder();
@@ -596,7 +596,7 @@ public sealed class ChatView : UserControl
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
             {
-                Title = "选择文件(可多选)", Multiselect = true, Filter = "所有文件|*.*",
+                Title = "选择文件", Multiselect = true, Filter = "所有文件|*.*",
             };
             if (dlg.ShowDialog(Window.GetWindow(this)) != true) return;
             AddPaths(dlg.FileNames);
@@ -669,29 +669,14 @@ public sealed class ChatView : UserControl
     {
         var box = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
 
-        // 顶行:计数 + 【一键清空】。超过软上限时提示"上下文吃紧"。
-        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 4) };
-        var count = new TextBlock { Text = $"附件 {_pending.Count}", VerticalAlignment = VerticalAlignment.Center };
+        // 顶行:「附件 X 个」+ 紧跟其右的【清空】(用户裁定:清空放计数右边;去掉橙黄"上下文吃紧"提醒)。
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4), VerticalAlignment = VerticalAlignment.Center };
+        var count = new TextBlock { Text = $"附件 {_pending.Count} 个", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
         count.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         count.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        DockPanel.SetDock(count, Dock.Left);
         head.Children.Add(count);
-        var clearAll = Chip("清空", "RiskDanger", () => { _pending.Clear(); BuildConversation(); });
-        DockPanel.SetDock(clearAll, Dock.Right);
-        head.Children.Add(clearAll);
+        head.Children.Add(Chip("清空", "RiskDanger", () => { _pending.Clear(); BuildConversation(); }));
         box.Children.Add(head);
-
-        if (_pending.Count > SoftAttachLimit)
-        {
-            var warn = new TextBlock
-            {
-                Text = $"已挂载 {_pending.Count} 个,超过 {SoftAttachLimit} 个后上下文会吃紧;下面仅展开前 {SoftAttachLimit} 个。",
-                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4),
-            };
-            warn.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
-            warn.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            box.Children.Add(warn);
-        }
 
         // 只展开前 5 个;其余折叠成一个"+N"卡(避免占满输入区)。
         var wrap = new WrapPanel();

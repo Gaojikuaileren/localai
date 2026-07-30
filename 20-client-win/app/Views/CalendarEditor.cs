@@ -4,8 +4,8 @@
 //   iCloud 日历组(留待接入) · 地点(仅字符) · 链接 · 备注。
 // 归属成员与可见范围沿用 D45 口径。AI 与手动编辑写同一个数据模型。
 //
-// ★ 数据源未接入 Apple 家庭共享日历 -> 保存/删除【如实拒绝】并说明原因,
-//   不伪造日程、不伪造同步成功(设计 §4.5 / 状态矩阵 §8)。
+// ★ 本地优先(2026-07-30 用户裁定):没接入 Apple 也能新增/编辑/删除,当场写进本机并落盘。
+//   接入 Apple 后走增量合并(不覆盖),见 CalendarData.MergeIn / LocalOnly。接入前不谎称"已同步"。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -98,17 +98,53 @@ public static class CalendarEditor
 
         var status = Ui.Caption("");
         status.Margin = new Thickness(0, 8, 0, 0);
-        void Reject(string what)
+        void Warn(string msg)
         {
-            status.Text = $"日历尚未连接,暂时无法{what}。接入 Apple 家庭共享日历后,这里的修改会自动同步。";
+            status.Text = msg;
             status.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
         }
 
+        // 从各控件收出一条日程(保留 existing 的 Id / 来源 / Apple UID / AI 标记,编辑不抹掉出处)。
+        CalendarEvent Collect()
+        {
+            var isAllDay = allDay.IsChecked == true;
+            DateTime s, e2;
+            if (isAllDay)
+            {
+                s = startDay.Date;
+                e2 = endDay.Date < startDay.Date ? startDay.Date : endDay.Date;   // 结束早于开始 -> 收回到当天
+            }
+            else
+            {
+                var d0 = existing?.Start.Date ?? day.Date;   // 定时日程落在所选那天
+                s = d0 + startAt;
+                e2 = d0 + endAt;
+                if (e2 <= s) e2 = s + DefaultDuration;        // 结束不晚于开始 -> 补 1 小时
+            }
+            return new CalendarEvent(
+                s, e2, title.Text.Trim(),
+                owners[Math.Max(0, owner.SelectedIndex)],
+                scopes[Math.Max(0, scope.SelectedIndex)],
+                AllDay: isAllDay,
+                CalendarGroup: CalendarData.Groups[Math.Max(0, group.SelectedIndex)],
+                Location: string.IsNullOrWhiteSpace(location.Text) ? null : location.Text,
+                Url: string.IsNullOrWhiteSpace(url.Text) ? null : url.Text,
+                Notes: string.IsNullOrWhiteSpace(notes.Text) ? null : notes.Text,
+                CreatedByAi: existing?.CreatedByAi ?? false,
+                Id: existing?.Id, Source: existing?.Source ?? "local", ExternalId: existing?.ExternalId);
+        }
+
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
-        buttons.Children.Add(Ui.Primary(existing is null ? "添加" : "保存", (_, _) => Reject(existing is null ? "添加" : "保存")));
+        buttons.Children.Add(Ui.Primary(existing is null ? "添加" : "保存", (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(title.Text)) { Warn("请先填写标题。"); title.Focus(); return; }
+            var ev = Collect();
+            if (existing is null) CalendarData.Add(ev); else CalendarData.Update(ev);
+            onSaved();   // 存好收起抽屉;列表由 CalendarData.Changed 自动刷新
+        }));
         if (existing is not null)
         {
-            var del = Ui.Danger("删除", (_, _) => Reject("删除"));
+            var del = Ui.Danger("删除", (_, _) => { CalendarData.Remove(existing); onSaved(); });
             del.Margin = new Thickness(10, 0, 0, 0);
             buttons.Children.Add(del);
         }
@@ -133,7 +169,7 @@ public static class CalendarEditor
 
             buttons,
             status,
-            Ui.Caption("接入后:与对方相关的日程只能发邀请/修改建议;AI 走同一入口,遵守同样的可见范围规则。")
+            Ui.Caption("现在改动【只在本机生效并保存】。接入 Apple 家庭共享日历后按增量合并双向同步(不覆盖已有);与对方相关的日程届时只发邀请/修改建议。")
         );
 
         // 装在右侧全高抽屉里,不再需要浮窗时代的高度上限;仍留滚动以应对小窗口。

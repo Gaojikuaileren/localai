@@ -2,8 +2,11 @@
 //   标题 · 开始 · 结束(默认 +1 小时) · iCloud 日历组(留待接入) · 地点(纯字符) · 链接 · 备注
 //   · 全天开关;全天日程可【跨天】,跨天在界面上用一条贯穿多格的长条表示。
 //
-// ★ 数据源尚未接入 Apple 家庭共享日历(设计 §4.5 / 状态矩阵 §8):
-//   模型先立住(AI 与手动编辑写同一个),但保存一律如实拒绝,绝不伪造日程或同步成功。
+// ★ 本地优先(2026-07-30 用户裁定):没接入 Apple 也能【新增/编辑/显示/持久化】日程 ——
+//   日历现在是本机自有数据(与待办同),明文落盘(D50 / calendar.json)。
+//   接入 Apple 家庭共享日历后走【双向增量合并】,不是全局覆盖(见 CalendarData.MergeIn / LocalOnly):
+//     · 已有的不重复加;没有的才加;绝不用空日程覆盖已有;本地独有的反向推给 Apple。
+//   AI 与手动编辑写同一个模型;接入前不伪造"同步成功",只在本机生效。
 //
 // 可见范围(Scope)与归属(Owner)沿用 D45 的两成员家庭口径。
 // Location / Url / Notes 都是【自由文本】:仅作显示,永不进 prompt(与设备自报名同一纪律)。
@@ -21,7 +24,10 @@ public sealed record CalendarEvent(
     string? Location = null,        // 仅字符,不做地理解析
     string? Url = null,
     string? Notes = null,
-    bool CreatedByAi = false)   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
+    bool CreatedByAi = false,   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
+    string? Id = null,          // 本地稳定 id(CalendarData.Add 自动补;供编辑/删除定位)
+    string Source = "local",    // 来源:local(本机建) / apple(从家庭共享日历同步来)
+    string? ExternalId = null)  // Apple 那边的 UID(同步后回填,用于合并去重的首选判据)
 {
     /// <summary>跨天判定:全天日程按【日期区间】算,定时日程只属于起始那天。</summary>
     public DateTime FirstDay => Start.Date;
@@ -45,8 +51,94 @@ public static class CalendarData
 
     public static void NotifyChanged() => Changed?.Invoke();
 
-    public static void Add(CalendarEvent e) { Events.Add(e); NotifyChanged(); }
-    public static void Remove(CalendarEvent e) { if (Events.Remove(e)) NotifyChanged(); }
+    public static string NewId() => "ev-" + Guid.NewGuid().ToString("N")[..8];
+
+    /// <summary>新增。没带 Id 就补一个稳定 Id(供后续编辑/删除定位)。</summary>
+    public static void Add(CalendarEvent e)
+    {
+        if (string.IsNullOrEmpty(e.Id)) e = e with { Id = NewId() };
+        Events.Add(e);
+        NotifyChanged();
+    }
+
+    /// <summary>按 Id 更新一条(编辑保存走这里)。</summary>
+    public static void Update(CalendarEvent e)
+    {
+        var i = string.IsNullOrEmpty(e.Id) ? -1 : Events.FindIndex(x => x.Id == e.Id);
+        if (i >= 0) { Events[i] = e; NotifyChanged(); }
+        else Add(e);   // 没找到(理论上不该)就当新增,别默默丢
+    }
+
+    /// <summary>删除:优先按 Id,其次按值(兼容没 Id 的旧数据)。</summary>
+    public static void Remove(CalendarEvent e)
+    {
+        var removed = !string.IsNullOrEmpty(e.Id)
+            ? Events.RemoveAll(x => x.Id == e.Id) > 0
+            : Events.Remove(e);
+        if (removed) NotifyChanged();
+    }
+
+    // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
+    public static List<CalendarEvent> Export() => Events.ToList();
+
+    public static void Import(List<CalendarEvent>? items)
+    {
+        if (items is null) return;
+        Events.Clear();
+        foreach (var e in items) Events.Add(string.IsNullOrEmpty(e.Id) ? e with { Id = NewId() } : e);
+        NotifyChanged();
+    }
+
+    // ---------------------------------------------------------------- 与 Apple 家庭共享日历的【增量合并】
+    // 用户裁定(2026-07-30):接入 Apple 后【不是全局覆盖】,而是双向增量:
+    //   · 已有的不重复加;没有的才加;★ 绝不用空日程覆盖已有;
+    //   · 本地独有的(Apple 没有)反向推给 Apple(见 LocalOnly)。
+    // Apple 未接入前:这些是【纯函数 + 数据操作】,已被 selftest 钉死;真正的拉取/推送等接入时接上。
+
+    /// <summary>空日程:没标题的不参与合并、也永不用来覆盖(用户明确要求)。</summary>
+    public static bool IsBlank(CalendarEvent e) => string.IsNullOrWhiteSpace(e.Title);
+
+    /// <summary>内容签名:没有 Apple UID 时,按"起止+全天+标题"判断是否同一条。</summary>
+    public static string ContentKey(CalendarEvent e)
+        => $"{e.Start:o}|{e.End:o}|{e.AllDay}|{(e.Title ?? "").Trim()}";
+
+    /// <summary>去重判据:有 Apple UID 用 UID,否则用内容签名。</summary>
+    public static string Identity(CalendarEvent e)
+        => !string.IsNullOrEmpty(e.ExternalId) ? "x:" + e.ExternalId : "c:" + ContentKey(e);
+
+    /// <summary>
+    /// 把 incoming 增量并入 existing:只加【没有的】,不重复加、不覆盖已有、不并入空日程。
+    /// 返回实际新增的条数。纯函数(直接改 existing 列表),便于测试与复用。
+    /// </summary>
+    public static int MergeInto(List<CalendarEvent> existing, IEnumerable<CalendarEvent> incoming)
+    {
+        var seen = new HashSet<string>();
+        foreach (var e in existing) seen.Add(Identity(e));
+        var added = 0;
+        foreach (var inc in incoming)
+        {
+            if (IsBlank(inc)) continue;              // ★ 空日程不并入(不覆盖已有)
+            if (!seen.Add(Identity(inc))) continue;  // ★ 已存在 -> 跳过(不重复、不覆盖)
+            existing.Add(string.IsNullOrEmpty(inc.Id) ? inc with { Id = NewId() } : inc);
+            added++;
+        }
+        return added;
+    }
+
+    /// <summary>本地独有(remote 里没有)的日程 —— 接入后要反向推给 Apple 的那些。</summary>
+    public static List<CalendarEvent> LocalOnly(IEnumerable<CalendarEvent> local, IEnumerable<CalendarEvent> remote)
+    {
+        var rkeys = remote.Select(Identity).ToHashSet();
+        return local.Where(e => !IsBlank(e) && !rkeys.Contains(Identity(e))).ToList();
+    }
+
+    /// <summary>接入后:把 Apple 拉来的日程合并进本机(不覆盖、不重复)。返回新增条数。</summary>
+    public static int MergeIn(IEnumerable<CalendarEvent> incoming)
+    {
+        var n = MergeInto(Events, incoming);
+        if (n > 0) NotifyChanged();
+        return n;
+    }
 
     /// <summary>iCloud 日历组。接入前给一组占位;接入后由服务端下发真实分组。</summary>
     public static readonly string[] Groups = { "家庭", "个人", "工作", "(未分组)" };

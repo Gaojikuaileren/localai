@@ -588,16 +588,18 @@ public static class Selftest
                 Assert(scBody.IndexOf("_pending.Clear()", StringComparison.Ordinal) < scBody.IndexOf("TheApp.Chat.Send", StringComparison.Ordinal),
                        "★ 发送前先清空待发附件(修:发出后附件还挂在输入框)");
                 // 合并选择器:文件(可多选)+ 文件夹;去掉"选择图片"与"剪贴板"菜单项
-                Assert(cvAtt.Contains("选择文件…(可多选)") && cvAtt.Contains("选择文件夹…"), "选择器合并为【选择文件(多选)+ 选择文件夹】");
+                Assert(cvAtt.Contains("选择文件…") && cvAtt.Contains("选择文件夹…"), "选择器合并为【选择文件(多选)+ 选择文件夹】");
+                Assert(!cvAtt.Contains("选择文件…(可多选)") , "选择文件按钮不带(可多选)括注(用户裁定)");
                 Assert(!cvAtt.Contains("选择图片…") && !cvAtt.Contains("粘贴剪贴板截图"), "去掉独立的选择图片 / 剪贴板菜单项");
                 Assert(cvAtt.Contains("Multiselect = true"), "文件对话框支持多选");
                 Assert(cvAtt.Contains("MaxAttachments = 99") && cvAtt.Contains("SoftAttachLimit = 5"), "上限 99、软阈值 5");
                 // 输入框内粘贴截图
                 Assert(cvAtt.Contains("DataObject.AddPastingHandler") && cvAtt.Contains("OnInputPaste"), "★ 输入框内 Ctrl+V 粘贴截图进附件栏");
                 Assert(cvAtt.Contains("CancelCommand()"), "剪贴板是图片时取消文本粘贴(不贴成乱码)");
-                // 超阈值提示 + 折叠 + 一键清空
-                Assert(cvAtt.Contains("上下文会吃紧"), "超过 5 个提示上下文吃紧");
-                Assert(cvAtt.Contains("MoreChip"), "超出部分折叠成 +N,不铺满输入区");
+                // 折叠 + 计数 + 一键清空(去掉橙黄"上下文吃紧"提醒;清空紧跟计数右边)
+                Assert(!cvAtt.Contains("上下文会吃紧"), "去掉橙黄的上下文吃紧提醒(用户裁定)");
+                Assert(cvAtt.Contains("附件 {_pending.Count} 个"), "附件栏只显示【附件 X 个】计数");
+                Assert(cvAtt.Contains("MoreChip"), "超出 5 个折叠成 +N,不铺满输入区");
                 Assert(cvAtt.Contains("_pending.Clear(); BuildConversation();") && cvAtt.Contains("\"清空\""), "有一键清空附件");
                 // 按类型预览
                 Assert(cvAtt.Contains("IconName.Pdf") && cvAtt.Contains("IconName.File") && cvAtt.Contains("AttachKind.Folder"),
@@ -962,6 +964,62 @@ public static class Selftest
             Views.CalendarData.Events.Clear();
             Views.CalendarData.Events.Clear();
 
+            // ---- 日历:本地优先 + 与 Apple 的增量合并(2026-07-30 用户裁定)----
+            {
+                DateTime D(int d, int h = 9) => new DateTime(2026, 8, d, h, 0, 0);
+                var existing = new List<Views.CalendarEvent>
+                {
+                    new(D(1), D(1, 10), "已有会议", "我", "家庭"),
+                    new(D(2), D(2, 10), "牙医", "我", "个人", ExternalId: "apple-uid-1"),
+                };
+                var incoming = new List<Views.CalendarEvent>
+                {
+                    new(D(1), D(1, 10), "已有会议", "我", "家庭"),                 // 完全重复 -> 不该再加
+                    new(D(2, 0), D(2, 10), "牙医(标题被改过)", "我", "个人", ExternalId: "apple-uid-1"), // 同 UID -> 不该覆盖/重复
+                    new(D(3), D(3, 10), "新的:体检", "我", "家庭"),               // 没有的 -> 应加入
+                    new(D(4), D(4, 10), "", "我", "家庭"),                        // 空标题 -> 不并入
+                };
+                var before = existing.Count;
+                var added = Views.CalendarData.MergeInto(existing, incoming);
+                Assert(added == 1, "增量合并只加【没有的】那 1 条");
+                Assert(existing.Count == before + 1, "总数只 +1(重复/同 UID/空 都没进)");
+                Assert(existing.Count(x => x.Title == "已有会议") == 1, "★ 内容重复的不重复加入");
+                Assert(existing.Count(x => x.ExternalId == "apple-uid-1") == 1 && existing.Any(x => x.Title == "牙医"),
+                       "★ 同一 Apple UID 不覆盖已有(标题保持原样)");
+                Assert(existing.Any(x => x.Title == "新的:体检"), "没有的日程被加入");
+                Assert(!existing.Any(x => string.IsNullOrWhiteSpace(x.Title)), "★ 空日程不并入(不覆盖已有)");
+
+                // 双向:本地独有的(remote 没有)-> 待推给 Apple
+                var local = new List<Views.CalendarEvent> { new(D(1), D(1, 10), "本地独有", "我", "家庭"), new(D(2), D(2, 10), "两边都有", "我", "家庭") };
+                var remote = new List<Views.CalendarEvent> { new(D(2), D(2, 10), "两边都有", "我", "家庭") };
+                var toPush = Views.CalendarData.LocalOnly(local, remote);
+                Assert(toPush.Count == 1 && toPush[0].Title == "本地独有", "★ 本地独有的挑出来待推给 Apple(双向增量)");
+
+                // 持久化往返(日历现在明文落盘)
+                Views.CalendarData.Events.Clear();
+                Views.CalendarData.Add(new Views.CalendarEvent(D(5), D(5, 10), "落盘日程", "我", "个人", CreatedByAi: true));
+                Assert(Views.CalendarData.Events[0].Id is { Length: > 0 }, "Add 自动补稳定 Id");
+                var cjson = System.Text.Json.JsonSerializer.Serialize(Views.CalendarData.Export(), StoreJson);
+                Views.CalendarData.Events.Clear();
+                Views.CalendarData.Import(System.Text.Json.JsonSerializer.Deserialize<List<Views.CalendarEvent>>(cjson, StoreJson));
+                Assert(Views.CalendarData.Events.Count == 1 && Views.CalendarData.Events[0].Title == "落盘日程" && Views.CalendarData.Events[0].CreatedByAi,
+                       "日历 JSON 往返(含 AI 标记)");
+                Views.CalendarData.Events.Clear();
+            }
+            var calEd = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
+            if (calEd is not null)
+            {
+                Assert(calEd.Contains("CalendarData.Add") && calEd.Contains("CalendarData.Update") && calEd.Contains("CalendarData.Remove"),
+                       "★ 日程编辑器【真的写入】本机(不再一律拒绝保存)");
+                Assert(!calEd.Contains("如实拒绝") && !calEd.Contains("暂时无法"), "去掉'尚未连接一律拒绝'的旧文案");
+            }
+            var appCal = TryReadSource("App.xaml.cs");
+            if (appCal is not null)
+            {
+                Assert(appCal.Contains("CalendarData.Import") && appCal.Contains("CalendarData.Export"), "日历纳入本地存档读写");
+                Assert(appCal.Contains("hadCalendar"), "日历示例独立播种(老用户也补一次,且删了不复活)");
+            }
+
             // ---- 接线自检:防"补丁静默失配导致整段成死代码" ----
             // 已经踩过三次:替换字符串没匹配上,函数还在但调用点被删,编译通过、断言全绿、功能没了。
             // 这里直接对源码做结构断言 —— 我改动的正是这些接线点。
@@ -1066,7 +1124,8 @@ public static class Selftest
                 var ev = new Views.CalendarEvent(DateTime.Today.AddHours(9), DateTime.Today.AddHours(10), "x", "我", "家庭");
                 Views.CalendarData.Add(ev);
                 Assert(calNotified == 1, "写入日程会触发变更通知(界面据此自动刷新,不依赖播种早于建窗口)");
-                Views.CalendarData.Remove(ev);
+                // Add 会补 Id 并存入【副本】;删除按存入的那条(与编辑器传 existing 的真实用法一致)
+                Views.CalendarData.Remove(Views.CalendarData.Events[0]);
                 Assert(calNotified == 2, "删除日程同样触发变更通知");
             }
             finally { Views.CalendarData.Changed -= OnCal; Views.CalendarData.Events.Clear(); }

@@ -26,6 +26,7 @@ public static class ClientStore
     public static string ChatPath => Path.Combine(AppPaths.StateDir, "chat.json");
     public static string ProjectsPath => Path.Combine(AppPaths.StateDir, "projects.json");
     public static string TodosPath => Path.Combine(AppPaths.StateDir, "todos.json");
+    public static string CalendarPath => Path.Combine(AppPaths.StateDir, "calendar.json");
 
     /// <summary>本机是否已有存档(有则不再播种示例数据 —— 否则每次启动都冒出一堆"(示例)")。</summary>
     public static bool HasAnyStore()

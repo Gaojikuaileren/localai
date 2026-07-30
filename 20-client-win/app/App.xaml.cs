@@ -85,12 +85,14 @@ public partial class App : Application
         // ★ 先读本地存档,再决定要不要播种示例;两者都必须在建窗口【之前】完成 ——
         //   否则界面构建时读到的是空表,表现为"开启时读不出来,点一下才有"。
         var hadStore = ClientStore.HasAnyStore();
+        var hadCalendar = File.Exists(ClientStore.CalendarPath);   // 日历单独落盘,独立判断是否首见
         LoadStores();
-        if (!hadStore) SeedDemoTasks();   // 有存档就不再冒出"(示例)"数据
+        if (!hadStore) SeedDemoTasks();       // 聊天/项目/待办示例
+        if (!hadCalendar) SeedDemoEvents();   // 日历示例(独立:老用户有其它存档但还没日历档,也补一次)
         AttachAutoSave();
         // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
         //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。
-        if (!hadStore) SaveStores();
+        if (!hadStore || !hadCalendar) SaveStores();
         // 按"自动删除超过 X 天的已完成"设置清一次(0 = 关闭)。放在建窗口前,界面直接看到清理后的结果。
         Todos.PurgeCompletedOlderThan(Settings.TodoAutoPurgeDays);
 
@@ -123,8 +125,7 @@ public partial class App : Application
         Chat.NewSession(null, "chat", ProjectScope.Personal, "(示例)随便问问");
         Chat.NewSession("p1", "chat", ProjectScope.Family, "(示例)行程讨论");
 
-        SeedDemoEvents();
-        SeedDemoTodos();
+        SeedDemoTodos();   // 日历示例由 SeedDemoEvents 独立播种(日历单独落盘)
     }
 
     // 待办/家务同理:没有条目就只剩空态,没法评审列表与勾选交互。全部标注「(示例)」。
@@ -155,8 +156,9 @@ public partial class App : Application
     void SeedDemoEvents()
     {
         var today = DateTime.Today;
+        // ★ 走 CalendarData.Add(而非 Events.Add):让每条都拿到稳定 Id,否则编辑器按 Id 定位会错行。
         void Ev(int dayOffset, int h, int m, int durMin, string title, string owner, string scope, bool ai = false)
-            => Views.CalendarData.Events.Add(new Views.CalendarEvent(
+            => Views.CalendarData.Add(new Views.CalendarEvent(
                 today.AddDays(dayOffset).AddHours(h).AddMinutes(m),
                 today.AddDays(dayOffset).AddHours(h).AddMinutes(m + durMin),
                 title, owner, scope, CreatedByAi: ai));
@@ -184,7 +186,7 @@ public partial class App : Application
 
         // 全天 / 跨天(验证贯穿多格的长条):单日全天、本周内跨 3 天、跨周 5 天
         void AllDay(int fromOffset, int toOffset, string title, string owner, string scope, string group, bool ai = false)
-            => Views.CalendarData.Events.Add(new Views.CalendarEvent(
+            => Views.CalendarData.Add(new Views.CalendarEvent(
                 today.AddDays(fromOffset), today.AddDays(toOffset), title, owner, scope,
                 AllDay: true, CalendarGroup: group, Location: "", Url: "", Notes: "", CreatedByAi: ai));
 
@@ -213,6 +215,7 @@ public partial class App : Application
         Projects.Import(ClientStore.Load<List<Project>>(ClientStore.ProjectsPath));
         Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
         Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
+        Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
     }
 
     // 变更 -> 防抖 400ms 后落盘。防抖是必要的:一次操作常触发多次 Changed(改状态 + 迁会话),
@@ -227,6 +230,7 @@ public partial class App : Application
         Projects.Changed += Touch;
         Todos.Changed += Touch;
         Chat.Changed += Touch;
+        Views.CalendarData.Changed += Touch;
     }
 
     void SaveStores()
@@ -234,6 +238,7 @@ public partial class App : Application
         ClientStore.Save(ClientStore.ProjectsPath, Projects.Export());
         ClientStore.Save(ClientStore.TodosPath, Todos.Export());
         ClientStore.Save(ClientStore.ChatPath, Chat.Export());
+        ClientStore.Save(ClientStore.CalendarPath, Views.CalendarData.Export());
     }
 
     void RegisterCleanupSteps()
