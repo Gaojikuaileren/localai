@@ -502,7 +502,7 @@ public sealed class ChatView : UserControl
         return b;
     }
 
-    FrameworkElement BuildInputArea(bool attachmentsBelow = false, bool searchIcon = false)
+    FrameworkElement BuildInputArea(bool attachmentsBelow, ConvSpec spec)
     {
         // ★ 输入框(用户反馈的三条一起修):
         //   ① 能换行 —— Shift+Enter 换行,单独 Enter 才发送(聊天的通用约定);
@@ -545,18 +545,18 @@ public sealed class ChatView : UserControl
         // ★ 在输入框里直接【粘贴截图】(Ctrl+V):剪贴板是图片就收进附件栏,而不是当文本贴进去。
         //   用户裁定:去掉"+"菜单里的剪贴板项,改成这里粘贴。文本粘贴不受影响(仅在剪贴板是图片时拦截)。
         DataObject.AddPastingHandler(_input, OnInputPaste);
-        // 翻译空间的发送 = 放大镜(是"查翻译"不是"发消息",用户裁定)
-        Button send;
-
-        if (searchIcon) send = SearchSendButton(SendCurrent);
-        else send = Ui.Primary("发送", (_, _) => SendCurrent());
+        // 翻译空间的发送 = 放大镜(是"查翻译"不是"发消息",用户裁定)。
+        // ★ 【长什么样】与【能不能按】是两件事,由 ConvSpec 分别给:
+        //   此前它们被绑在同一个 bool 上,于是"按钮灰了但回车照发"——那个禁用纯属做样子。
+        //   也因此这个共享的输入区不再直接摸 TheApp.Translation(分层泄漏)。
+        var send = spec.SearchIcon ? SearchSendButton(SendCurrent) : Ui.Primary("发送", (_, _) => SendCurrent());
         send.Height = 40;
-        // ★★ 发送能不能按,是一个【会变的条件】,不是建界面那一刻算一次就完事。
-        //   之前写成建构时算一次:进翻译空间时目标池是空的 -> 按钮灰掉,之后你把语言拖进目标池,
-        //   按钮还是灰的(用户实测)—— 因为没人再去重算它。
-        //   现在:条件存成谓词,状态由 RefreshSendEnabled() 统一刷,目标池一变就跟着变。
+        // ★★ 发送能不能按是个【会变的条件】,不是建界面那一刻算一次就完事:
+        //   进翻译空间时目标池是空的 -> 按钮灰掉,之后把语言拖进去按钮还是灰的(用户实测)。
+        //   所以存【谓词】而不是当时的布尔答案,由 RefreshSendEnabled() 统一刷。
         _sendBtn = send;
-        _canSend = searchIcon ? () => TheApp.Translation.Targets.Count > 0 : null;
+        _canSend = spec.CanSend;
+        _blockReason = spec.BlockReason;
         RefreshSendEnabled();
         var attach = AttachButton();
 
@@ -572,6 +572,16 @@ public sealed class ChatView : UserControl
         inputRow.Children.Add(_input);
 
         var area = new StackPanel();
+
+        // 发不出去的原因(翻译空间:目标池里只剩输入语言自己)
+        if (_sendBlockedHint is { Length: > 0 } blocked)
+        {
+            var w = Ui.Caption(blocked);
+            w.SetResourceReference(TextBlock.ForegroundProperty, "RiskDanger");
+            w.Margin = new Thickness(0, 0, 0, 6);
+            w.TextWrapping = TextWrapping.Wrap;
+            area.Children.Add(w);
+        }
 
         // ★ 会话太长的提醒:超过设置里的【整理阈值】就建议另开新会话。
         //   用户裁定:整理由 AI 做(未接入),但"这条会话该拆了"这件事【现在就能判断】,
@@ -617,10 +627,20 @@ public sealed class ChatView : UserControl
     // 发送键与它的前置条件。★ 存谓词而不是存布尔:布尔是"当时的答案",谓词才是"问题本身"。
     Button? _sendBtn;
     Func<bool>? _canSend;
+    Func<string, string?>? _blockReason;
+    /// <summary>发不出去时的原因(显示在输入框上方)。目标池一变或下次成功发送就清掉。</summary>
+    string? _sendBlockedHint;
 
     /// <summary>按当前条件刷新发送键的可用状态。目标池一变就会被叫到。</summary>
     void RefreshSendEnabled()
     {
+        // 目标池变了 -> 之前那条"没有可翻目标"的解释可能已经不成立,别赖着不走
+        if (_sendBlockedHint is not null && _blockReason?.Invoke(_draft) is null)
+        {
+            _sendBlockedHint = null;
+            BuildConversation();
+            return;
+        }
         if (_sendBtn is null) return;
         var ok = _canSend is null || _canSend();
         _sendBtn.IsEnabled = ok;
@@ -654,111 +674,171 @@ public sealed class ChatView : UserControl
         //   界面当时是自相矛盾的:右上角「新建会话」被隐藏了,却让你往删掉的会话里打字。
         if (ReadOnly) { _conv.Content = BuildReadonlyProject(); return; }
 
-        // ★ 翻译工作空间(用户裁定的排版):上方【主会话框】(输入框直接在底部,不居中;发送 = 放大镜),
-        //   下方一排【程度竖条 / 目标池 / 语言池 / 学习笔记】。会话列表与项目抽屉外壳照旧。
-        if (_wsKey == "translation") { _conv.Content = BuildTranslationLayout(); return; }
-        // 其余工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假界面。
-        if (_wsKey != "chat") { _conv.Content = PlaceholderCenter(); return; }
+        // 未接入 AI 的工作空间:同样的会话/项目外壳,但中间是占位,不做假界面。
+        // ★ 它说的是"这个空间还没有 AI 能力"(正确形态 = 没有输入框),不是"你还没开始聊",
+        //   所以不能并进空态提示 —— 那会让界面在接入后继续对用户撒谎。
+        if (_wsKey is not ("chat" or "translation")) { _conv.Content = PlaceholderCenter(); return; }
 
+        _conv.Content = BuildConvPanel(SpecFor(_wsKey));
+    }
+
+    /// <summary>
+    /// 会话面板的【全部】工作空间差异都在这里。默认值 = 聊天空间的现状 ——
+    /// new ConvSpec() 生成的界面必须与聊天空间逐像素相同。
+    /// </summary>
+    sealed record ConvSpec
+    {
+        /// <summary>空态形态:居中大标题(聊天,像 GPT)/ 输入框始终贴板块底部(翻译,用户裁定)。</summary>
+        public bool HeroEmptyState { get; init; } = true;
+        /// <summary>居中态内容盒宽度。★ 此前 MaxWidth 与 Width 各写了一遍 640。</summary>
+        public double HeroWidth { get; init; } = 640;
+        /// <summary>空态大标题。返回 null/空 = 不画标题层(翻译就没有)。</summary>
+        public Func<string?> EmptyTitle { get; init; } = () => Greetings.ChatOpener(DateTime.Now);
+        /// <summary>空态里【项目归属提示之后】追加的空间专属说明。</summary>
+        public IReadOnlyList<string> EmptyNotes { get; init; } = Array.Empty<string>();
+        /// <summary>发送键【长什么样】。只管外观,不管能不能发。</summary>
+        public bool SearchIcon { get; init; }
+        /// <summary>
+        /// 发送的【前置条件】。null = 永远可发。
+        /// ★ 与外观完全独立:此前两件事被绑在一个 bool 上,于是"按钮灰了但回车照发"。
+        /// </summary>
+        public Func<bool>? CanSend { get; init; }
+        /// <summary>挂在会话卡【下面】的固定高度附属条。★ 用 Func:每次重建都要新建一个。</summary>
+        public Func<FrameworkElement>? BottomAccessory { get; init; }
+        /// <summary>
+        /// 给定当前草稿,返回"这次为什么发不出去";没问题返回 null。
+        /// ★ 与 CanSend 的区别:CanSend 只看得见静态条件(目标池空不空),
+        ///   这条要看【输入内容】—— 比如目标池里只剩输入语言自己。
+        ///   放在这里是为了让共享视图完全不知道"翻译"这回事。
+        /// </summary>
+        public Func<string, string?>? BlockReason { get; init; }
+    }
+
+    /// <summary>_wsKey -> ConvSpec 的【唯一】映射点。别处不再拿 _wsKey 和字面量比。</summary>
+    static ConvSpec SpecFor(string wsKey) => wsKey switch
+    {
+        "translation" => new ConvSpec
+        {
+            HeroEmptyState = false,          // 用户裁定:翻译的输入框始终贴板块底部,不居中
+            EmptyTitle = () => null,
+            EmptyNotes = new[]
+            {
+                "输入要翻译的内容,按下放大镜。",
+                "翻成哪些语言由下面的【目标池】决定;详细程度由左边的竖条决定。",
+            },
+            SearchIcon = true,
+            CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0,
+            BottomAccessory = () => new TranslationBar(),
+            BlockReason = TranslationBlockReason,
+        },
+        _ => new ConvSpec(),                 // 聊天:全默认
+    };
+
+    /// <summary>唯一的会话面板。聊天与翻译都由它生成,差异全部走 ConvSpec。</summary>
+    FrameworkElement BuildConvPanel(ConvSpec spec)
+    {
         var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
+        // ★ 居中态 = 【这个空间要居中】且【确实没有消息】。附件放哪、横幅浮不浮、
+        //   滑动动画演不演,全都由它推出来 —— 此前是三处各写一遍,四种组合里两种是坏的。
+        var heroNow = spec.HeroEmptyState && !hasMsgs;
+
+        var inputArea = BuildInputArea(attachmentsBelow: heroNow, spec);
         FrameworkElement inner;
+
         if (!hasMsgs)
         {
-            // 空态:输入框竖直居中(像 GPT)。附件放【下方】,幽灵提示【浮在顶部】——都不顶动居中框(用户裁定)。
-            var inputArea = BuildInputArea(attachmentsBelow: true);
-            var title = new TextBlock { Text = Greetings.ChatOpener(DateTime.Now), FontWeight = FontWeights.SemiBold, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Center };
-            title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            var box = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = spec.HeroWidth };
+            if (heroNow) box.VerticalAlignment = VerticalAlignment.Center;   // 居中态才竖直居中
+            else box.Margin = new Thickness(0, 24, 0, 0);
+
+            if (spec.EmptyTitle() is { Length: > 0 } title)
+            {
+                var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Center };
+                t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                box.Children.Add(t);
+                box.Children.Add(new Border { Height = 6 });
+            }
+
+            // ★ 项目归属提示对【所有空间】都画:它讲的是外壳自己的状态(_projectId),与空间无关。
+            //   此前只有聊天有 —— 于是在翻译空间可能在不知情的项目上下文里发请求,事后找不到。
             var hint = Ui.Caption(_projectId is null
                 ? "没选项目直接聊 = 普通会话。右侧箭头可选项目。"
                 : "当前在项目「" + (TheApp.Projects.Find(_projectId!)?.Title ?? "") + "」下,新消息会归到该项目。");
             hint.HorizontalAlignment = HorizontalAlignment.Center;
             hint.TextAlignment = TextAlignment.Center;
-            var box = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 640 };
-            box.Children.Add(title);
-            box.Children.Add(new Border { Height = 6 });
             box.Children.Add(hint);
-            box.Children.Add(new Border { Height = 16 });
-            inputArea.Width = 640;
-            box.Children.Add(inputArea);
-            inner = box;
+
+            for (int i = 0; i < spec.EmptyNotes.Count; i++)
+            {
+                var note = i == 0 ? Ui.Body(spec.EmptyNotes[i], muted: true) : Ui.Caption(spec.EmptyNotes[i]);
+                note.HorizontalAlignment = HorizontalAlignment.Center;
+                note.TextAlignment = TextAlignment.Center;
+                note.Margin = new Thickness(0, i == 0 ? 8 : 4, 0, 0);
+                box.Children.Add(note);
+            }
+
+            if (heroNow)
+            {
+                box.Children.Add(new Border { Height = 16 });
+                inputArea.Width = spec.HeroWidth;
+                box.Children.Add(inputArea);
+                inner = box;
+            }
+            else
+            {
+                // 贴底态:提示留在上方消息区的位置,输入框照常 Dock 到底
+                inner = DockWithInput(MessageScroller(box), inputArea, slideFromCenter: false);
+            }
         }
         else
         {
-            var inputArea = BuildInputArea(attachmentsBelow: false);
             var msgs = new StackPanel();
             FillMessages(msgs, _sessionId!, animate: true);
-            var scroll = MessageScroller(msgs);
-            var dock = new DockPanel { LastChildFill = true };
-            var inputWrap = new Border { Child = inputArea, Margin = new Thickness(0, 10, 0, 0) };
-            DockPanel.SetDock(inputWrap, Dock.Bottom);
-            dock.Children.Add(inputWrap);
-            dock.Children.Add(scroll);
-            inner = dock;
-
-            // ★ 从"空会话居中输入框"变成"底部输入框"时给一段动画,而不是硬切(用户裁定):
-            //   输入框从原来的居中位置【滑到底部】,消息区同时淡入。
-            var slideFromCenter = _wasEmptyState;
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                scroll.ScrollToEnd();
-                if (!slideFromCenter) return;
-                var h = _conv.ActualHeight;
-                var startY = -Math.Max(0, (h - inputWrap.ActualHeight) / 2 - 10);   // 居中处相对底部的偏移
-                if (startY >= -1) return;                                            // 高度还没算出来就别硬演
-                // 慢一点、更丝滑:缓入缓出(EaseInOut),消息区稍晚淡入,避免"抢在输入框前面出现"
-                var t = new TranslateTransform { Y = startY };
-                inputWrap.RenderTransform = t;
-                t.BeginAnimation(TranslateTransform.YProperty,
-                    new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(520))
-                    { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
-                scroll.BeginAnimation(OpacityProperty,
-                    new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(420))
-                    { BeginTime = TimeSpan.FromMilliseconds(120), EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
-            }), System.Windows.Threading.DispatcherPriority.Loaded);
+            inner = DockWithInput(MessageScroller(msgs), inputArea, slideFromCenter: _wasEmptyState);
         }
-        _wasEmptyState = !hasMsgs;
-        _conv.Content = ConvShell(inner, isGhost, overlayBanner: !hasMsgs);
-    }
 
-    /// <summary>翻译空间:上方主会话框(板块)+ 下方语言池/程度/笔记一排。</summary>
-    FrameworkElement BuildTranslationLayout()
-    {
-        var msgs = new StackPanel();
-        var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
-        if (hasMsgs)
-        {
-            FillMessages(msgs, _sessionId!, animate: true);
-        }
-        else
-        {
-            // 空态也【不居中】—— 用户裁定:输入框始终在板块底部
-            var hint = Ui.Body("输入要翻译的内容,按下放大镜。", muted: true);
-            hint.HorizontalAlignment = HorizontalAlignment.Center;
-            var tip = Ui.Caption("翻成哪些语言由下面的【目标池】决定;详细程度由左边的竖条决定。");
-            tip.HorizontalAlignment = HorizontalAlignment.Center;
-            msgs.Children.Add(new Border { Height = 24 });
-            msgs.Children.Add(hint);
-            msgs.Children.Add(tip);
-        }
-        var scroll = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }.PassThrough();
-        Dispatcher.BeginInvoke(new Action(() => scroll.ScrollToEnd()), System.Windows.Threading.DispatcherPriority.Loaded);
-
-        var inputArea = BuildInputArea(attachmentsBelow: false, searchIcon: true);
-        var convDock = new DockPanel { LastChildFill = true };
-        var inputWrap = new Border { Child = inputArea, Margin = new Thickness(0, 10, 0, 0) };
-        DockPanel.SetDock(inputWrap, Dock.Bottom);
-        convDock.Children.Add(inputWrap);
-        convDock.Children.Add(scroll);
-
-        var conv = ConvCard(convDock);
+        _wasEmptyState = heroNow;   // ★ 不是 !hasMsgs:贴底态永远没有"从居中滑下来"这一说
+        var card = ConvShell(inner, isGhost, overlayBanner: heroNow);
+        if (spec.BottomAccessory is null) return card;
 
         var root = new DockPanel { LastChildFill = true };
-        var bar = new TranslationBar { Margin = new Thickness(0, 10, 0, 0) };
+        var bar = spec.BottomAccessory();
+        bar.Margin = new Thickness(0, 10, 0, 0);
         DockPanel.SetDock(bar, Dock.Bottom);
         root.Children.Add(bar);
-        root.Children.Add(conv);
+        root.Children.Add(card);
         return root;
+    }
+
+    /// <summary>消息区在上、输入框 Dock 到底;需要时演一段"从居中滑到底部"。</summary>
+    FrameworkElement DockWithInput(ScrollViewer scroll, FrameworkElement inputArea, bool slideFromCenter)
+    {
+        var dock = new DockPanel { LastChildFill = true };
+        var inputWrap = new Border { Child = inputArea, Margin = new Thickness(0, 10, 0, 0) };
+        DockPanel.SetDock(inputWrap, Dock.Bottom);
+        dock.Children.Add(inputWrap);
+        dock.Children.Add(scroll);
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            scroll.ScrollToEnd();                 // ★ 必须排在下面那句 return 之前
+            if (!slideFromCenter) return;
+            // ★ 从"空会话居中输入框"变成"底部输入框"时给一段动画,而不是硬切(用户裁定):
+            //   输入框从原来的居中位置【滑到底部】,消息区同时淡入。
+            var h = _conv.ActualHeight;
+            var startY = -Math.Max(0, (h - inputWrap.ActualHeight) / 2 - 10);
+            if (startY >= -1) return;             // 高度还没算出来就别硬演
+            var t = new TranslateTransform { Y = startY };
+            inputWrap.RenderTransform = t;
+            t.BeginAnimation(TranslateTransform.YProperty,
+                new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(520))
+                { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
+            scroll.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(420))
+                { BeginTime = TimeSpan.FromMilliseconds(120), EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } });
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
+        return dock;
     }
 
     // 只读浏览:已删除 / 已完成项目。灰化会话内容,底部换成对应的动作按钮。
@@ -1101,10 +1181,36 @@ public sealed class ChatView : UserControl
         FocusInputIfPresent();
     }
 
+    /// <summary>
+    /// 翻译空间的出手前检查:目标池里只剩输入语言自己时,这次翻译【没有任何目标】。
+    /// 返回一句该说的话;没问题返回 null。
+    /// ★ 语种判不出来(拉丁字母)时不拦 —— 那时我们并不知道它是不是池内那一个,
+    ///   宁可交给 AI 判,也不要凭猜测拦下用户一次正当的翻译(与 Languages.Detect 同一条纪律)。
+    /// </summary>
+    static string? TranslationBlockReason(string draft)
+    {
+        var st = ((App)Application.Current).Translation;
+        if (st.Targets.Count == 0) return "目标池是空的 —— 先从右边把语言拖进来。";
+        var plan = st.Plan(draft);
+        if (!plan.NothingToDo) return null;
+        var lang = plan.InputLang is { } c ? Languages.NameOf(c) : "这段文字";
+        return $"目标池里只有{lang},而你输入的也是{lang} —— 没有可翻的目标语言。再拖一个语言进目标池。";
+    }
+
     void SendCurrent()
     {
         var text = _input.Text;
         if (string.IsNullOrWhiteSpace(text) && _pending.Count == 0) return;   // 空且无附件不发
+
+        // ★ 翻译空间:目标池里只剩输入语言自己时,这次翻译没有任何目标 —— 不发,并说清为什么。
+        //   不弹模态框(那太重),就在输入框上方留一行,下次成功发送或目标池一变就消失。
+        if (_blockReason?.Invoke(_draft) is { } why)
+        {
+            _sendBlockedHint = why;
+            BuildConversation();
+            return;
+        }
+        _sendBlockedHint = null;
         if (_sessionId is null) NewSession();
         if (_sessionId is null) return;
         var atts = _pending.Count > 0 ? _pending.ToList() : null;

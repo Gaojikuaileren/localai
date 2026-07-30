@@ -1042,6 +1042,54 @@ public static class Selftest
             if (setSfx is not null)
                 Assert(setSfx.Contains("Content = \"界面音效\"") && setSfx.Contains("s.SoundEffects = false"),
                        "设置里能关界面音效");
+            // ---- 边界:目标池里只剩输入语言自己 -> 这次翻译【没有任何目标】----
+            // 用户提的:"目标池里只有中文,但我们输入中文会怎么样?"
+            {
+                var ts = new Services.TranslationState();
+                ts.AddTarget("zh");
+                var pz = ts.Plan("你好世界");
+                Assert(pz.InputLang == "zh", "中文被认出来");
+                Assert(pz.Targets.Count == 0, "池里只有中文、输入也是中文 -> 目标集为空");
+                Assert(pz.NothingToDo, "★ 这种情况必须能被判出来,而不是发出去翻成空集");
+
+                // 只有日语和英语,输入日语 -> 还剩英语,正常
+                var ts2 = new Services.TranslationState();
+                ts2.AddTarget("ja");
+                ts2.AddTarget("en");
+                var planJa = ts2.Plan("こんにちは");
+                Assert(planJa.InputLang == "ja" && planJa.Targets.SequenceEqual(new[] { "en" }),
+                       "池里有日英、输入日语 -> 只翻成英语");
+                Assert(!planJa.NothingToDo, "还有目标就不该被拦");
+
+                // 只有日语,输入日语 -> 空集
+                var ts3 = new Services.TranslationState();
+                ts3.AddTarget("ja");
+                Assert(ts3.Plan("こんにちは").NothingToDo, "池里只有日语、输入也是日语 -> 没有目标");
+
+                // ★ 语种判不出来(拉丁字母)时【不许】拦:那时我们并不知道它是不是池内那一个,
+                //   宁可交给 AI 判,也不要凭猜测拦下一次正当的翻译(与 Detect 同一条纪律)。
+                var ts4 = new Services.TranslationState();
+                ts4.AddTarget("en");
+                var pe = ts4.Plan("hello world");
+                Assert(pe.NeedsAiDetect && pe.InputLang is null, "拉丁字母不硬猜语种");
+                Assert(!pe.NothingToDo, "★ 判不出语种时不拦(不能凭猜测拦下正当的翻译)");
+
+                // 池子空着也算发不出去,但那是另一条(由 CanSend 管)
+                Assert(new Services.TranslationState().Plan("你好").Targets.Count == 0, "空池自然没有目标");
+            }
+            var cvBlock = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvBlock is not null)
+            {
+                var send = Slice(cvBlock, "void SendCurrent()", "TheApp.Chat.Send(");
+                Assert(send is not null && send.Contains("_blockReason?.Invoke(_draft) is { } why"),
+                       "★ 没有可翻目标时不发送,并如实说明原因");
+                Assert(send is not null
+                       && send.IndexOf("_pending.Clear()", StringComparison.Ordinal) >= 0,
+                       "发送前先清待发附件(顺序不能反,见下一条)");
+                Assert(cvBlock.Contains("_sendBlockedHint = null;") && cvBlock.Contains("RiskDanger"),
+                       "解释在下次成功发送/目标池变化后消失");
+            }
+
             var tbSrc = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (tbSrc is not null)
             {
@@ -1100,21 +1148,35 @@ public static class Selftest
             {
                 // ★★ 只读是【数据状态】,必须排在【工作空间分流】之前。排反了 = 在已删除/已完成
                 //   的项目里还能打字、还能发送、甚至在回收站里的项目下新建会话(2026-07-30 审查发现)。
-                var bc = Slice(cvTrans, "void BuildConversation()", "var isGhost");
+                var bc = Slice(cvTrans, "void BuildConversationCore()", "sealed record ConvSpec");
                 if (bc is not null)
                 {
                     var ro = bc.IndexOf("if (ReadOnly)", StringComparison.Ordinal);
-                    var ws = bc.IndexOf("_wsKey ==", StringComparison.Ordinal);
+                    var ws = bc.IndexOf("_wsKey is not", StringComparison.Ordinal);
                     Assert(ro >= 0 && ws >= 0 && ro < ws,
                            "★ 只读判断排在工作空间分流之前(否则删掉的项目里还能发消息)");
                 }
-                Assert(cvTrans.Contains("_wsKey == \"translation\"") && cvTrans.Contains("BuildTranslationLayout"),
-                       "翻译空间:上方主会话框 + 下方语言池一排");
-                Assert(cvTrans.Contains("searchIcon: true") && cvTrans.Contains("IconName.Search"),
+                // ★★ 会话面板已经统一成一份:翻译与聊天走同一个 BuildConvPanel,差异全在 ConvSpec 里。
+                //   此前这几条断言是切 BuildTranslationLayout 的 —— 方法一删,IndexOf 返回 -1、
+                //   src[-1..] 直接【抛异常而不是报 FAIL】,自检进程当场挂掉(审查预言的坑,实际发生了)。
+                //   所以现在一律先 Slice(找不到就返回 null),绝不裸用 IndexOf。
+                Assert(!Body(cvTrans).Contains("BuildTranslationLayout"), "★ 翻译不再有自己那一套会话构建器");
+                var spec = Slice(cvTrans, "\"translation\" => new ConvSpec", "_ => new ConvSpec()");
+                Assert(spec is not null, "★ SpecFor 里有翻译空间这一支");
+                Assert(spec is not null && spec.Contains("HeroEmptyState = false"),
+                       "★ 翻译空间输入框始终在底部,不居中(用户裁定)");
+                Assert(spec is not null && spec.Contains("SearchIcon = true"),
                        "★ 翻译的发送按钮是放大镜(查翻译)");
-                var bt = cvTrans[cvTrans.IndexOf("FrameworkElement BuildTranslationLayout()", StringComparison.Ordinal)..];
-                bt = bt[..bt.IndexOf("// 只读浏览", StringComparison.Ordinal)];
-                Assert(!bt.Contains("VerticalAlignment.Center"), "★ 翻译空间输入框始终在底部,不居中(用户裁定)");
+                Assert(spec is not null && spec.Contains("BottomAccessory = () => new TranslationBar()"),
+                       "翻译空间下方挂语言池那一条");
+                Assert(cvTrans.Contains("IconName.Search"), "放大镜图标还在");
+                // 发送键【长什么样】与【能不能按】必须是两件事
+                Assert(!Body(cvTrans).Contains("bool searchIcon"), "★ 外观与前置条件不再挤在一个 bool 上");
+                var ia = Slice(cvTrans, "FrameworkElement BuildInputArea(", "FrameworkElement PendingStrip()");
+                Assert(ia is not null && !Body(ia).Contains("TheApp.Translation"),
+                       "★ 共享输入区不再直接摸翻译状态(分层泄漏归零)");
+                Assert(cvTrans.Contains("_wasEmptyState = heroNow;"),
+                       "★ 空态记账按【居中态】算,不是按有没有消息 —— 贴底态没有\"从居中滑下来\"这一说");
                 // 发送按钮:放大镜要【居中不被裁】(固定尺寸的 Grid 容器 + 去掉按钮内边距)
                 var sendBlk = cvTrans[cvTrans.IndexOf("internal static Button SearchSendButton", StringComparison.Ordinal)..];
                 sendBlk = sendBlk[..900];
@@ -1125,7 +1187,8 @@ public static class Selftest
                 //   之前进翻译空间时目标池是空的 -> 按钮灰掉,之后把语言拖进去按钮还是灰的(用户实测)。
                 Assert(!Body(cvTrans).Contains("searchIcon && TheApp.Translation.Targets.Count == 0"),
                        "★ 发送状态不再是建构时算死的布尔");
-                Assert(cvTrans.Contains("_canSend = searchIcon ? () => TheApp.Translation.Targets.Count > 0 : null;"),
+                Assert(cvTrans.Contains("_canSend = spec.CanSend;")
+                       && cvTrans.Contains("CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0"),
                        "★ 发送前置条件存成【谓词】(问题本身),不是当时的答案");
                 Assert(cvTrans.Contains("TheApp.Translation.Changed += RefreshSendEnabled;"),
                        "★ 目标池一变,发送键当场跟着变");
@@ -1491,7 +1554,7 @@ public static class Selftest
                 Assert(cvRO.Contains("继续此项目") && cvRO.Contains("开启此项目分支"), "已完成项目输入区 = 继续/开分支");
                 Assert(cvRO.Contains("BuildTrashBoard") && cvRO.Contains("‹ 返回会话") && !cvRO.Contains("Flyout.Show(anchor, \"已删除会话\""),
                        "已删除会话改成覆盖式板块(不再浮窗)");
-                Assert(cvRO.Contains("attachmentsBelow: true") && cvRO.Contains("overlayBanner: !hasMsgs"),
+                Assert(cvRO.Contains("attachmentsBelow: heroNow") && cvRO.Contains("overlayBanner: heroNow"),
                        "空态:附件放输入框下方、幽灵提示浮顶,不顶动居中框");
             }
 

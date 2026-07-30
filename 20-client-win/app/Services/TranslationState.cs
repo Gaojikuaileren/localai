@@ -18,7 +18,16 @@ public sealed record TranslationPlan(
     IReadOnlyList<string> Targets,// 这次要翻成的语言
     bool AddInputToPool,          // 是否应把输入语种加进目标池
     bool PoolFull,                // 池已满,没能把新语种加进去
-    bool NeedsAiDetect);          // 语种靠字符集判不出来,需要 AI 判定
+    bool NeedsAiDetect)           // 语种靠字符集判不出来,需要 AI 判定
+{
+    /// <summary>
+    /// 这次【没有任何可翻的目标】。★ 典型情形:目标池里只有中文,而你输入的也是中文 ——
+    /// "翻成池内除输入语言以外的全部"算出来是空集。
+    /// 判据里必须带上 !NeedsAiDetect:语种没判出来时(拉丁字母)我们【不知道】它是不是池内那一个,
+    /// 这时不能拦 —— 宁可交给 AI 判,也不要凭猜测拦下用户一次正当的翻译。
+    /// </summary>
+    public bool NothingToDo => !NeedsAiDetect && Targets.Count == 0;
+}
 
 public sealed class TranslationState
 {
