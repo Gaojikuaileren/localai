@@ -64,7 +64,7 @@ public partial class MainWindow : Window
         {
             if (ke.Key != Key.Tab) return;
             ke.Handled = true;
-            FocusPolicy.HandleTab(this);
+            FocusPolicy.HandleTab(this, FocusPark);
         };
 
         // ★ Esc 是【总闸】:浮层和菜单都归它管。以前只管浮层 —— 万一菜单状态卡住,

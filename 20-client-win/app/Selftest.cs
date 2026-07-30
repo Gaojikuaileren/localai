@@ -2401,9 +2401,12 @@ public static class Selftest
                 var fpSrc = TryReadSource(Path.Combine("Views", "FocusPolicy.cs"));
                 if (fpSrc is not null)
                 {
-                    var cf = Slice(fpSrc, "public static void ClearFocus(", "    }");
-                    Assert(cf is not null && cf.Contains("FocusManager.SetFocusedElement(scope, null)") && cf.Contains("Keyboard.ClearFocus()"),
-                           "★ 取消聚焦时逻辑焦点与键盘焦点一起清");
+                    // ★★ "什么都不聚焦"必须停到【一个确定的元素】上:只清焦点不可靠,
+                    //   WPF 会把焦点还给焦点范围里记着的那个输入框 —— 于是既能打字,
+                    //   Tab 又永远回不去(开关每次都判定"已经在输入框上")。
+                    var cf = Slice(fpSrc, "public static void Park(", "    }");
+                    Assert(cf is not null && cf.Contains("FocusManager.SetFocusedElement(scope, park)") && cf.Contains("Keyboard.Focus(park)"),
+                           "★ 取消聚焦 = 把焦点停到专门的空元素上(逻辑焦点与键盘焦点一起改)");
                     Assert(!Body(fpSrc).Contains("{ Keyboard.ClearFocus(); return; }"),
                            "不再有「只清键盘焦点」的写法");
                 }
@@ -2421,7 +2424,7 @@ public static class Selftest
             var mwTab = TryReadSource("MainWindow.xaml.cs");
             if (mwTab is not null)
             {
-                Assert(mwTab.Contains("ke.Key != Key.Tab") && mwTab.Contains("FocusPolicy.HandleTab(this)"),
+                Assert(mwTab.Contains("ke.Key != Key.Tab") && mwTab.Contains("FocusPolicy.HandleTab(this, FocusPark)"),
                        "★ Tab 由窗口统一接管(不靠逐个控件设 IsTabStop)");
             }
             var cvMark = TryReadSource(Path.Combine("Views", "ChatView.cs"));

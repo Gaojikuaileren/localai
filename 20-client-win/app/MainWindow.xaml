@@ -73,6 +73,13 @@
       <RowDefinition Height="*"/>
     </Grid.RowDefinitions>
 
+    <!-- ★ 焦点停车位:Tab 的"不聚焦任何东西"其实要停在【一个确定的元素】上。
+         只调 Keyboard.ClearFocus() 不可靠 —— WPF 会在下一次输入把焦点还给原来那个输入框,
+         表现就是"输入框看着没选中却照样能打字"、而且再按 Tab 也回不去(用户实测)。
+         停在这个零尺寸元素上,状态就是确定的:焦点在这 = 谁也没被聚焦。 -->
+    <Border x:Name="FocusPark" Width="0" Height="0" Focusable="True"
+            HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
     <!-- ================= 标题栏 ================= -->
     <Border Grid.Row="0" Background="{DynamicResource BgNav}"
             BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1">

@@ -572,9 +572,9 @@ public sealed class TranslationBar : UserControl
         var star = Chip("★", () =>
         {
             _favoritesOnly = !_favoritesOnly;
-            RefreshNotes();
-        });
-        star.ToolTip = "只看收藏";
+            RebuildNotesCard();
+        }, on: _favoritesOnly);
+        star.ToolTip = _favoritesOnly ? "显示全部历史" : "只看收藏";
         var all = Chip("全部历史", () => (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
             "全部历史", new HistoryBoardView(), IconName.Translation));
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
@@ -584,8 +584,25 @@ public sealed class TranslationBar : UserControl
 
         var card = Card(_notesPreview, "翻译历史", action: actions, scroll: false);
         // 间距统一由列宽给(见构造函数的 Gap),这里不再自带边距,否则会叠加成两倍
-        return card;
+        _notesHost.Content = card;
+        return _notesHost;
     }
+
+    /// <summary>
+    /// 重建历史卡片的外壳。★ 只为了让「只看收藏」那个星按钮换成着重色实心 ——
+    /// 按钮的开/关是【建的时候定的】,不重建就换不了样子。
+    /// 重建时先把预览面板从旧卡片里摘出来,否则会撞上一个元素不能有两个父节点。
+    /// </summary>
+    void RebuildNotesCard()
+    {
+        if (_notesPreview.Parent is Panel oldParent) oldParent.Children.Remove(_notesPreview);
+        else if (_notesPreview.Parent is Decorator dec) dec.Child = null;
+        else if (_notesPreview.Parent is ContentControl cc) cc.Content = null;
+        NotesCard();      // 内部会把新卡片塞进 _notesHost
+        RefreshNotes();
+    }
+
+    readonly ContentControl _notesHost = new();
 
     void RefreshNotes()
     {
@@ -639,16 +656,29 @@ public sealed class TranslationBar : UserControl
         return card;
     }
 
-    static FrameworkElement Chip(string text, Action onClick)
+    /// <summary>
+    /// 小按钮。★ on=true 表示【这个开关正开着】—— 用着重色实心填充,
+    /// 一眼能和没开分清(用户反馈:只看收藏开没开看不出来)。
+    /// </summary>
+    static FrameworkElement Chip(string text, Action onClick, bool on = false)
     {
         var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
-        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        var b = new Border { Child = t, Padding = new Thickness(5, 1, 5, 1), Cursor = Cursors.Hand, Background = Brushes.Transparent, BorderThickness = new Thickness(1) };
+        var b = new Border { Child = t, Padding = new Thickness(5, 1, 5, 1), Cursor = Cursors.Hand, BorderThickness = new Thickness(1) };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        b.SetResourceReference(Border.BorderBrushProperty, "Border");
-        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
-        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        if (on)
+        {
+            b.SetResourceReference(Border.BackgroundProperty, "Accent");
+            b.SetResourceReference(Border.BorderBrushProperty, "Accent");
+        }
+        else
+        {
+            b.Background = Brushes.Transparent;
+            b.SetResourceReference(Border.BorderBrushProperty, "Border");
+            b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+            b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        }
         b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
         return b;
     }

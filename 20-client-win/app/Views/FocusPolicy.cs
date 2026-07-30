@@ -63,24 +63,31 @@ public static class FocusPolicy
     public static FrameworkElement? Toggle(FrameworkElement? chatInput, object? focused)
         => chatInput is null || ReferenceEquals(chatInput, focused) ? null : chatInput;
 
-    /// <summary>处理一次 Tab:在【聚焦 AI 输入框】与【什么都不聚焦】之间切换。</summary>
-    public static void HandleTab(DependencyObject? scope)
+    /// <summary>
+    /// 处理一次 Tab:在【聚焦 AI 输入框】与【什么都不聚焦】之间切换,可以一直来回按。
+    /// </summary>
+    /// <param name="park">"什么都不聚焦"时把焦点停到哪(零尺寸的停车位元素)</param>
+    public static void HandleTab(DependencyObject? scope, IInputElement? park)
     {
-        var target = Toggle(FindChatInput(scope), Keyboard.FocusedElement);
-        if (target is null) { ClearFocus(scope); return; }
-        target.Focus();
+        var input = FindChatInput(scope);
+        var target = Toggle(input, Keyboard.FocusedElement);
+        if (target is not null) { target.Focus(); return; }
+        Park(scope, park);
     }
 
     /// <summary>
-    /// 真正地什么都不聚焦。
-    /// ★★ 只调 Keyboard.ClearFocus() 是【不够的】—— 它清掉的是键盘焦点,
-    ///   而【逻辑焦点】还留在焦点范围里指着那个输入框;WPF 会在下一次输入/激活时把键盘焦点
-    ///   还给它。表现就是:输入框看着没被选中(灰的),打字却照样进去、还能回车发出去
-    ///   (用户实测的 bug)。所以必须把焦点范围里的逻辑焦点也一并清掉。
+    /// 真正地"什么都不聚焦"= 把焦点停到一个【确定的空元素】上。
+    /// ★★ 不能只调 Keyboard.ClearFocus():WPF 会在下一次输入把键盘焦点还给焦点范围里
+    ///   记着的那个元素(也就是输入框)。用户实测的两个症状都是它:
+    ///   ① 输入框看着没选中却照样能打字、还能回车发出去;
+    ///   ② 再按多少次 Tab 也回不到输入框 —— 因为焦点其实一直在输入框上,
+    ///      开关每次都判定"已经在上面了",于是又去清一遍,来回都在同一边。
+    ///   停到一个零尺寸、不参与 Tab 的元素上,状态才是确定且可判定的。
     /// </summary>
-    public static void ClearFocus(DependencyObject? scope)
+    public static void Park(DependencyObject? scope, IInputElement? park)
     {
-        if (scope is not null) FocusManager.SetFocusedElement(scope, null);
-        Keyboard.ClearFocus();
+        if (scope is not null) FocusManager.SetFocusedElement(scope, park);
+        if (park is not null) Keyboard.Focus(park);
+        else Keyboard.ClearFocus();
     }
 }

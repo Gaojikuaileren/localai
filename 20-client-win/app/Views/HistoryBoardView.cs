@@ -71,6 +71,10 @@ public sealed class HistoryBoardView : UserControl
     /// </summary>
     public static FrameworkElement HistoryRow(HistoryEntry e, bool showTime)
     {
+        // 预览板块(showTime=false)高度是【定量】的:下半条总高固定,
+        // 一行占太高就只塞得下三条,而用户要的是五条 —— 所以预览行压扁。
+        var pad = showTime ? new Thickness(8, 6, 6, 6) : new Thickness(6, 1, 4, 1);
+        var gap = showTime ? 2.0 : 0.0;
         var text = new TextBlock
         {
             Text = e.Text.Replace(Environment.NewLine, " ").Replace("\n", " "),
@@ -80,9 +84,9 @@ public sealed class HistoryBoardView : UserControl
         text.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         text.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        var star = StarButton(e);
+        var star = StarButton(e, showTime ? 5 : 2);
 
-        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 2) };
+        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, gap) };
         DockPanel.SetDock(star, Dock.Right);
         row.Children.Add(star);
 
@@ -98,8 +102,8 @@ public sealed class HistoryBoardView : UserControl
 
         var b = new Border
         {
-            Child = row, Padding = new Thickness(8, 6, 6, 6), Cursor = Cursors.Hand,
-            Background = Brushes.Transparent, Margin = new Thickness(0, 0, 0, 2),
+            Child = row, Padding = pad, Cursor = Cursors.Hand,
+            Background = Brushes.Transparent, Margin = new Thickness(0, 0, 0, gap),
         };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
@@ -108,12 +112,12 @@ public sealed class HistoryBoardView : UserControl
         return b;
     }
 
-    static FrameworkElement StarButton(HistoryEntry e)
+    static FrameworkElement StarButton(HistoryEntry e, double pad = 5)
     {
-        var icon = Icons.Make(IconName.Star, 14, e.Favorite ? "Accent" : "FgMuted");
+        var icon = Icons.Make(IconName.Star, 13, e.Favorite ? "Accent" : "FgMuted");
         var b = new Border
         {
-            Child = icon, Padding = new Thickness(5), Cursor = Cursors.Hand,
+            Child = icon, Padding = new Thickness(pad), Cursor = Cursors.Hand,
             Background = Brushes.Transparent, VerticalAlignment = VerticalAlignment.Center,
             ToolTip = e.Favorite ? "取消收藏" : "收藏",
         };
