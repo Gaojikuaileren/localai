@@ -28,14 +28,21 @@ public sealed class TranslationBar : UserControl
 
     public const double BarHeight = 176;
     /// <summary>目标池宽度 = 三个气泡刚好放满(气泡约 54 + 间距,再加卡片内边距)。</summary>
-    const double PoolWidth = 208;
+    /// <summary>
+    /// 目标池 = 1 列 × 3 行语言标签;语言池 = 2 列 × 3 行,宽度正好是目标池的两倍(用户裁定)。
+    /// ★ 标签在格子里【拉伸填满】,所以"1×3 / 2×3"是真的格子,不是靠估宽度凑出来的。
+    /// </summary>
+    const double TargetPoolWidth = 92;
+    const double LangPoolWidth = TargetPoolWidth * 2;
     /// <summary>翻译程度那一列的宽度:一条竖滑条 + 四个档位名。</summary>
     const double LevelWidth = 132;
 
     // 负的下边距吃掉【最后一行气泡】的 6px 外边距 —— 否则内容比可视区高 6px,
     // ScrollViewer 就会挂出一条多余的滚动条(渲染诊断里看得一清二楚)。
-    readonly WrapPanel _targetWrap = new() { Margin = new Thickness(0, 0, 0, -6) };
-    readonly WrapPanel _poolWrap = new() { Margin = new Thickness(0, 0, 0, -6) };
+    // 负的下边距吃掉【最后一行标签】的外边距 —— 否则内容比可视区高一点,
+    // ScrollViewer 就会挂出一条多余的滚动条(渲染诊断里看得一清二楚)。
+    readonly UniformGrid _targetWrap = new() { Columns = 1, Margin = new Thickness(0, 0, 0, -6) };
+    readonly UniformGrid _poolWrap = new() { Columns = 2, Margin = new Thickness(0, 0, 0, -6) };
     readonly StackPanel _notesPreview = new();
     readonly Canvas _overlay = new() { IsHitTestVisible = false };   // 跟手气泡 + 节点气泡都画在这层
     Border _targetBox = null!, _poolBox = null!;
@@ -52,8 +59,8 @@ public sealed class TranslationBar : UserControl
         //   语言在两者之间拖来拖去,并排才看得出"从这边搬到那边"。
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth) });            // 翻译程度(竖)
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 8) });         // 目标池
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(PoolWidth + 8) });         // 语言池
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + 8) });   // 目标池 1×3
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + 8) });     // 语言池 2×3(两倍宽)
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 学习笔记(占剩下的)
 
         var lvl = LevelCard(); Grid.SetColumn(lvl, 0);
@@ -84,12 +91,12 @@ public sealed class TranslationBar : UserControl
     // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡
     FrameworkElement LevelCard()
     {
-        // ★ 竖排(用户第三轮裁定)。IsDirectionReversed=true 让【最小值在上】——
-        //   第一阶「直译」在顶、最详的「语法」在底,和从上往下读的顺序一致。
+        // ★ 竖排,且【从下往上】递进(用户裁定):第一阶「直译」在底,越往上越详,顶上是「语法」。
+        //   WPF 竖向 Slider 默认就是最小值在下,所以【不要】设 IsDirectionReversed ——
+        //   设了就变成从上往下拉,正是要改掉的那个方向。标签排列也要跟着倒过来(见下)。
         _levelSlider = new Slider
         {
             Orientation = Orientation.Vertical,
-            IsDirectionReversed = true,
             Minimum = 0, Maximum = TranslationLevels.All.Length - 1,
             TickFrequency = 1, IsSnapToTickEnabled = true,
             Value = (int)TheApp.Translation.Level,
@@ -104,9 +111,11 @@ public sealed class TranslationBar : UserControl
             rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         _levelLabels.Clear();
-        for (int i = 0; i < TranslationLevels.All.Length; i++)
+        // 倒着放:行 0 = 最详的档位(顶),最后一行 = 直译(底),与滑条方向一致
+        var ordered = TranslationLevels.All.Reverse().ToArray();
+        for (int i = 0; i < ordered.Length; i++)
         {
-            var (level, name, desc) = TranslationLevels.All[i];
+            var (level, name, desc) = ordered[i];
             var t = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand };
             t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -178,8 +187,10 @@ public sealed class TranslationBar : UserControl
         {
             foreach (var c in TheApp.Translation.Targets.ToList()) TheApp.Translation.RemoveTarget(c);
         });
-        _targetBox = Card(_targetWrap, $"目标池(最多 {Languages.MaxTargets})", action: clear);
-        _targetBox.Width = PoolWidth;
+        // ★ 标题只留三个字:目标池只有一列宽(92px),再加"(最多 3)"就会把标题和「清空」一起挤出去。
+        //   上限改写在空态提示里 —— 那里本来就有位置,也更是用户真正需要看到它的时机。
+        _targetBox = Card(_targetWrap, "目标池", action: clear);
+        _targetBox.Width = TargetPoolWidth;
         _targetBox.HorizontalAlignment = HorizontalAlignment.Left;
         return _targetBox;
     }
@@ -188,7 +199,7 @@ public sealed class TranslationBar : UserControl
     {
         _poolBox = Card(_poolWrap, "语言池",
             gear: () => (Application.Current.MainWindow as MainWindow)?.OpenLanguagePoolSettings());
-        _poolBox.Width = PoolWidth;
+        _poolBox.Width = LangPoolWidth;
         _poolBox.HorizontalAlignment = HorizontalAlignment.Left;
         return _poolBox;
     }
@@ -214,7 +225,7 @@ public sealed class TranslationBar : UserControl
 
         _targetWrap.Children.Clear();
         if (st.Targets.Count == 0)
-            _targetWrap.Children.Add(Ui.Caption("把语言拖进来"));
+            _targetWrap.Children.Add(Ui.Caption($"拖进来{Environment.NewLine}(最多 {Languages.MaxTargets})"));
         else
             foreach (var code in st.Targets)
             {
@@ -233,15 +244,26 @@ public sealed class TranslationBar : UserControl
     {
         var playful = ThemeManager.Current == Skin.Warm;
 
-        var t = new TextBlock { Text = l.Name, VerticalAlignment = VerticalAlignment.Center };
+        var t = new TextBlock
+        {
+            Text = l.Name, VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,   // 「西班牙语」这种长名字也不撑破格子
+        };
         t.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnAccent" : "FgPrimary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var b = new Border
         {
             Child = t,
-            Padding = playful ? new Thickness(12, 7, 12, 7) : new Thickness(12, 5, 12, 5),
-            // 暖萌:左边距为负 -> 后一张压在前一张上,叠成一摞
-            Margin = playful ? new Thickness(stackIndex == 0 ? 0 : -10, 0, 6, 7) : new Thickness(0, 0, 6, 6),
+            Padding = playful ? new Thickness(8, 7, 8, 7) : new Thickness(8, 5, 8, 5),
+            // 标签在格子里【拉伸填满】(1×3 / 2×3 是真的格子)。
+            // 暖萌:上边距为负 -> 后一张压住前一张,叠成一摞;克制皮肤下规规矩矩留空。
+            Margin = playful ? new Thickness(0, stackIndex < 2 ? 0 : -5, 6, 6) : new Thickness(0, 0, 6, 6),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            // ★ 固定高度 + 顶对齐:UniformGrid 会把每个格子撑满可用高度,
+            //   不钉住的话标签会被拉成一根高条(渲染诊断里当场看到)。
+            VerticalAlignment = VerticalAlignment.Top,
+            Height = 30,
             CornerRadius = new CornerRadius(playful ? 8 : 14),   // 卡片是方一点的圆角,胶囊才是大圆角
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
@@ -472,7 +494,7 @@ public sealed class TranslationBar : UserControl
         var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        var b = new Border { Child = t, Padding = new Thickness(8, 2, 8, 2), Cursor = Cursors.Hand, Background = Brushes.Transparent, BorderThickness = new Thickness(1) };
+        var b = new Border { Child = t, Padding = new Thickness(5, 1, 5, 1), Cursor = Cursors.Hand, Background = Brushes.Transparent, BorderThickness = new Thickness(1) };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         b.SetResourceReference(Border.BorderBrushProperty, "Border");
         b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");

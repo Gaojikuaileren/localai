@@ -1067,18 +1067,22 @@ public static class Selftest
                 Assert(tbSrc.Contains("ShowTip(cell") && tbSrc.Contains("_tipBubble"), "★ 每个档位节点 hover 有解释气泡");
                 Assert(tbSrc.Contains("var poolDisabled = st.IsFull") && tbSrc.Contains("_poolBox.IsHitTestVisible = !poolDisabled"),
                        "★ 目标池满 3 个 -> 语言池灰掉禁用");
-                Assert(tbSrc.Contains("const double PoolWidth") && tbSrc.Contains("_targetBox.Width = PoolWidth"),
-                       "目标池宽度 = 三个气泡刚好放满");
+                Assert(tbSrc.Contains("_targetBox.Width = TargetPoolWidth") && tbSrc.Contains("_poolBox.Width = LangPoolWidth"),
+                       "两个池子各自用自己的宽度");
                 Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 3)", StringComparison.Ordinal) > 0,
                        "★ 学习笔记占剩余空间(比两个池子宽)");
                 Assert(tbSrc.Contains("学习笔记") && tbSrc.Contains("Take(4)"), "右下角学习笔记预览最新几条");
                 // ★ 第三轮裁定的排版:程度【竖排】,目标池与语言池【并列同宽】
-                Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && tbSrc.Contains("IsDirectionReversed = true"),
-                       "★ 翻译程度竖排,第一阶「直译」在顶");
+                Assert(tbSrc.Contains("Orientation = Orientation.Vertical") && !Body(tbSrc).Contains("IsDirectionReversed"),
+                       "★ 翻译程度竖排且【从下往上】递进:直译在底,越往上越详(设了 IsDirectionReversed 就反了)");
+                Assert(tbSrc.Contains("TranslationLevels.All.Reverse()"), "档位标签跟着倒排,行 0 是最详的那档");
                 Assert(tbSrc.Contains("Grid.SetColumn(target, 1)") && tbSrc.Contains("Grid.SetColumn(pool, 2)"),
                        "★ 目标池与语言池左右并列(不再一上一下)");
-                Assert(tbSrc.Contains("_targetBox.Width = PoolWidth") && tbSrc.Contains("_poolBox.Width = PoolWidth"),
-                       "两个池子同宽");
+                Assert(tbSrc.Contains("const double LangPoolWidth = TargetPoolWidth * 2;"),
+                       "★ 语言池宽度正好是目标池的两倍(用户裁定)");
+                Assert(tbSrc.Contains("UniformGrid _targetWrap = new() { Columns = 1")
+                       && tbSrc.Contains("UniformGrid _poolWrap = new() { Columns = 2"),
+                       "★ 目标池 1 列、语言池 2 列 —— 是真的格子,不是估宽度凑的");
                 Assert(!Body(tbSrc).Contains("_targetBox.Margin = new Thickness(0, 8, 0, 0)"),
                        "目标池不再靠上边距压在程度下面");
                 // ★ 堆叠卡片 + 落地扬尘 + 音效【只给暖萌】,微风/墨白克制(用户裁定)
