@@ -304,7 +304,20 @@ public sealed class ProjectPickerView : UserControl
         _graceTimer.Stop();
         UpdateBack();
         _header.Content = null;   // 填表时不要说明框抢空间
-        _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid, workspaceKey: _wsKey);
+        _body.Content = ProjectEditor.Build(existing, onDone: ShowGrid, workspaceKey: _wsKey, onJump: JumpTo);
+    }
+
+    /// <summary>
+    /// 转跳到既有项目(新建时发现同路径已有项目):按它现在在哪个板块,切到那一页并选中它。
+    /// 已删除 / 已完成的也照样能跳过去(只读浏览),用户不会"建不了又找不到"。
+    /// </summary>
+    void JumpTo(Project p)
+    {
+        _current = p.ProjectId;
+        _onPick(p.ProjectId);
+        if (p.DeletedAt is not null) ShowDeletedBoard();
+        else if (p.Status == ProjectStatus.Done) ShowCompletedBoard();
+        else ShowGrid();
     }
 
     // ---------------------------------------------------------------- 方块

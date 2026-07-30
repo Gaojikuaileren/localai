@@ -156,6 +156,16 @@ public sealed class ChatCenter
         Changed?.Invoke();
     }
 
+    /// <summary>把 fromProjectId 名下的会话整体改挂到 toProjectId(合并同路径重复项目时用)。</summary>
+    public void ReassignSessions(string fromProjectId, string toProjectId)
+    {
+        var any = false;
+        for (int i = 0; i < _sessions.Count; i++)
+            if (_sessions[i].ProjectId == fromProjectId)
+            { _sessions[i] = _sessions[i] with { ProjectId = toProjectId }; any = true; }
+        if (any) Changed?.Invoke();
+    }
+
     /// <summary>某项目的【全部】会话(含已随项目删除的)—— 供"选中已删除/已完成项目"只读浏览。</summary>
     public IEnumerable<ChatSession> AllSessionsOf(string projectId)
         => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost)

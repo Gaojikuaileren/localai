@@ -39,7 +39,8 @@ public sealed record Project(
     AiPermission Ai = AiPermission.Ask,    // 给 AI 的权限(默认"需批准")
     string? OwnerMemberId = null,          // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
     DateTime? DeletedAt = null,            // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
-    DateTime? CompletedAt = null);         // 标记完成的时刻(用于"完成后停留 3 秒再划走"的宽限)
+    DateTime? CompletedAt = null,          // 标记完成的时刻(用于"完成后停留 3 秒再划走"的宽限)
+    string? HostMachine = null);           // 项目文件夹在哪台机器上(null/空 = 本机);跨 PC 项目用
 
 public sealed class ProjectCenter
 {
@@ -63,11 +64,15 @@ public sealed class ProjectCenter
     public static string NewId() => "prj-" + Guid.NewGuid().ToString("N")[..8];
 
     /// <summary>新建项目。默认【准备中】。folder 为实际文件夹,attachments 可为多个或空。</summary>
-    public Project Create(string title, string? folder, IEnumerable<string>? attachments, ProjectScope scope, string workspaceKey = "chat")
+    public Project Create(string title, string? folder, IEnumerable<string>? attachments, ProjectScope scope,
+                          string workspaceKey = "chat", string? hostMachine = null)
     {
+        // ★ 同一台机器的【同一个文件夹】只能有一个项目:已经有就直接返回它,不再重复建(用户裁定)。
+        if (FindByFolder(folder, hostMachine) is { } existing) return existing;
         var p = new Project(NewId(), title, "", workspaceKey, scope, DateTime.Now,
             Status: ProjectStatus.Preparing, FolderPath: folder, Attachments: attachments?.ToList(),
-            OwnerMemberId: MemberContext.Current);   // D45:建的时候就定所有者
+            OwnerMemberId: MemberContext.Current,   // D45:建的时候就定所有者
+            HostMachine: hostMachine);
         _items.Add(p);
         Changed?.Invoke();
         return p;
@@ -133,6 +138,65 @@ public sealed class ProjectCenter
     {
         var i = _items.FindIndex(x => x.ProjectId == p.ProjectId);
         if (i >= 0) { _items[i] = p; Changed?.Invoke(); }
+    }
+
+    // ---------------------------------------------------------------- 文件夹唯一性(一个路径只能有一个项目)
+    /// <summary>本机的机器标识(HostMachine 为空即表示这台机器)。</summary>
+    public const string LocalMachine = "";
+
+    /// <summary>
+    /// 路径归一化:去掉首尾空白与结尾的斜杠,取完整路径,Windows 下不区分大小写。
+    /// ★ 只做【完全相同】的判定 —— 子路径不算重复(用户裁定:子目录可以另立项目)。
+    /// </summary>
+    public static string NormalizeFolder(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "";
+        var s = path.Trim();
+        try { s = Path.GetFullPath(s); } catch { /* 不合法路径就按原样比 */ }
+        s = s.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return s.ToLowerInvariant();
+    }
+
+    static bool SameFolder(Project p, string normFolder, string? machine)
+        => NormalizeFolder(p.FolderPath) == normFolder
+           && string.Equals(p.HostMachine ?? "", machine ?? "", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 找出【同一台机器上、同一个文件夹】的既有项目 —— ★ 含已完成与已删除的
+    /// (否则用户会在回收站里躺着一个同路径项目的情况下又建一个)。excludeId 用于编辑自身时跳过。
+    /// </summary>
+    public Project? FindByFolder(string? folder, string? machine = null, string? excludeId = null)
+    {
+        var norm = NormalizeFolder(folder);
+        if (norm.Length == 0) return null;
+        return _items.FirstOrDefault(p => p.ProjectId != excludeId && SameFolder(p, norm, machine));
+    }
+
+    /// <summary>
+    /// 合并【完全同路径 + 同机器】的重复项目:保留最早建立的那个(会话最全的历史),
+    /// 把其余的会话并过去再移除。返回被合并掉的条数。★ 子路径不合并。
+    /// 用于导入旧存档(那时还没有唯一性约束)后的一次性收敛。
+    /// </summary>
+    public int MergeDuplicateFolders(Action<string, string>? moveSessions = null)
+    {
+        var merged = 0;
+        // 有路径的才参与;按 (机器, 归一化路径) 分组
+        var groups = _items.Where(p => !string.IsNullOrWhiteSpace(p.FolderPath))
+                           .GroupBy(p => ((p.HostMachine ?? "").ToLowerInvariant(), NormalizeFolder(p.FolderPath)))
+                           .Where(g => g.Count() > 1);
+        foreach (var g in groups.ToList())
+        {
+            // 保留:优先未删除的、再按最近打开(最活跃的那个当主)
+            var keep = g.OrderBy(p => p.DeletedAt is null ? 0 : 1).ThenByDescending(p => p.LastOpened).First();
+            foreach (var dup in g.Where(p => p.ProjectId != keep.ProjectId))
+            {
+                moveSessions?.Invoke(dup.ProjectId, keep.ProjectId);   // 会话并到保留的那个项目下
+                _items.RemoveAll(x => x.ProjectId == dup.ProjectId);
+                merged++;
+            }
+        }
+        if (merged > 0) Changed?.Invoke();
+        return merged;
     }
 
     /// <summary>已删除项目保留天数(与会话垃圾篓一致:30 天后自动清除,不可恢复)。</summary>

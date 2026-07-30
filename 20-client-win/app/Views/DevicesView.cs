@@ -239,6 +239,7 @@ public sealed class DevicesView : UserControl
         try { devices = HubClient.ParseDevices(json); }
         catch (Exception ex) { list.Children.Add(Ui.Body("设备列表解析失败:" + ex.Message, muted: true)); return; }
 
+        TheApp.Hub.CacheDevices(devices);   // 真拿到了才缓存 —— 项目"文件夹所在机器"复用这份
         var others = devices.Where(d => d.Status != "revoked").ToList();
         if (others.Count == 0) { list.Children.Add(Ui.Body(Strings.Get("devices.empty"), muted: true)); return; }
 

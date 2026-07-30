@@ -185,6 +185,17 @@ public sealed class HubClient
         return await Transport.Send(Profile, Dial(), HttpMethod.Get, "/admin/devices", null, ct);
     }
 
+    /// <summary>
+    /// 最近一次【真的从主机拿到】的其它设备(已解除的不算)。★ 诚实:只有主机真给了才有内容;
+    /// 没配对 / 连不上 / 没权限 时永远是空 —— 界面据此"只显示本机",不摆假的远程列表。
+    /// 由设备页在成功拉取后调用 CacheDevices 填充。
+    /// </summary>
+    public IReadOnlyList<HubDevice> KnownDevices { get; private set; } = Array.Empty<HubDevice>();
+
+    /// <summary>设备页拉到真实设备表后回填这里,供别处(如项目文件夹选机器)复用。</summary>
+    public void CacheDevices(IEnumerable<HubDevice> devices)
+        => KnownDevices = devices.Where(d => d.Status != "revoked").ToList();
+
     public async Task<(int status, string body)> RevokeDeviceAsync(string deviceId, CancellationToken ct = default)
     {
         if (Profile is null) throw new InvalidOperationException("尚未配对");

@@ -86,13 +86,14 @@ public partial class App : Application
         //   否则界面构建时读到的是空表,表现为"开启时读不出来,点一下才有"。
         var hadStore = ClientStore.HasAnyStore();
         var hadCalendar = File.Exists(ClientStore.CalendarPath);   // 日历单独落盘,独立判断是否首见
-        LoadStores();
+        var mergedOnLoad = LoadStores();      // 合并了重复项目就得补存(见下)
         if (!hadStore) SeedDemoTasks();       // 聊天/项目/待办示例
         if (!hadCalendar) SeedDemoEvents();   // 日历示例(独立:老用户有其它存档但还没日历档,也补一次)
         AttachAutoSave();
         // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
         //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。
-        if (!hadStore || !hadCalendar) SaveStores();
+        //   合并重复项目同理:它发生在订阅【之前】,不补这一次就不会落盘,下次启动又是一堆重复。
+        if (!hadStore || !hadCalendar || mergedOnLoad) SaveStores();
         // 按"自动删除超过 X 天的已完成"设置清一次(0 = 关闭)。放在建窗口前,界面直接看到清理后的结果。
         Todos.PurgeCompletedOlderThan(Settings.TodoAutoPurgeDays);
 
@@ -210,12 +211,16 @@ public partial class App : Application
     // ---------------------------------------------------------------- 本地存档(明文,D21/D22 口径)
     // 用户裁定(2026-07-30):项目/会话/待办落盘为明文,与记忆库、备份同一处理,不引入客户端密钥管理。
     // ★ 幽灵会话不落盘(ChatCenter.Export 排除),已删除会话连 DeletedAt 一起存、启动时扫过期。
-    void LoadStores()
+    /// <summary>读存档。返回 true 表示【加载过程中改动过数据】(如合并了重复项目),调用方需要补存一次。</summary>
+    bool LoadStores()
     {
         Projects.Import(ClientStore.Load<List<Project>>(ClientStore.ProjectsPath));
         Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
         Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
         Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
+        // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
+        //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
+        return Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
     }
 
     // 变更 -> 防抖 400ms 后落盘。防抖是必要的:一次操作常触发多次 Changed(改状态 + 迁会话),

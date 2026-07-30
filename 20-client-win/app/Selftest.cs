@@ -763,6 +763,66 @@ public static class Selftest
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
 
+            // ---- 项目文件夹唯一性:同路径只能一个项目;子路径不算;跨机器不算 ----
+            {
+                var root = Path.Combine(Path.GetTempPath(), "localai-uniq-" + Guid.NewGuid().ToString("N")[..6]);
+                var sub = Path.Combine(root, "sub");
+                var pu = new Services.ProjectCenter();
+                var a = pu.Create("A", root, null, Services.ProjectScope.Personal);
+                // 完全相同的路径 -> 不再新建,直接返回既有的
+                var again = pu.Create("B", root, null, Services.ProjectScope.Personal);
+                Assert(again.ProjectId == a.ProjectId && pu.Items.Count == 1, "★ 同一路径不会建出第二个项目(直接返回既有)");
+                // 末尾斜杠 / 大小写 视作同一路径
+                var withSlash = pu.Create("C", root + Path.DirectorySeparatorChar, null, Services.ProjectScope.Personal);
+                Assert(withSlash.ProjectId == a.ProjectId, "结尾斜杠视作同一路径");
+                Assert(pu.Create("D", root.ToUpperInvariant(), null, Services.ProjectScope.Personal).ProjectId == a.ProjectId, "大小写不同视作同一路径");
+                // ★ 子路径【不算】重复
+                var subP = pu.Create("Sub", sub, null, Services.ProjectScope.Personal);
+                Assert(subP.ProjectId != a.ProjectId && pu.Items.Count == 2, "★ 子路径不算重复,可以另立项目");
+                // 不同机器上的同一路径也不算重复
+                var remote = pu.Create("远端同名", root, null, Services.ProjectScope.Personal, "chat", "dev-999");
+                Assert(remote.ProjectId != a.ProjectId, "不同机器的同一路径不算重复");
+                Assert(remote.HostMachine == "dev-999", "项目记住文件夹所在机器");
+
+                // 查找要能看到【已完成 / 已删除】的同路径项目(否则回收站里躺着一个还会重复建)
+                pu.SetStatus(a.ProjectId, Services.ProjectStatus.Done);
+                Assert(pu.FindByFolder(root)?.ProjectId == a.ProjectId, "同路径查找能找到【已完成】的项目");
+                pu.Delete(a.ProjectId);
+                Assert(pu.FindByFolder(root)?.ProjectId == a.ProjectId, "同路径查找能找到【已删除】的项目");
+                Assert(pu.FindByFolder(root, excludeId: a.ProjectId) is null, "编辑自身时不会把自己判成重复");
+
+                // 合并旧存档里的同路径重复:会话并到保留的那个
+                var pm = new Services.ProjectCenter();
+                var cm = new Services.ChatCenter();
+                pm.Import(new List<Services.Project>
+                {
+                    new("dup-old", "旧的", "", "chat", Services.ProjectScope.Personal, DateTime.Now.AddDays(-2), FolderPath: root, OwnerMemberId: Services.MemberContext.Current),
+                    new("dup-new", "新的", "", "chat", Services.ProjectScope.Personal, DateTime.Now, FolderPath: root + Path.DirectorySeparatorChar, OwnerMemberId: Services.MemberContext.Current),
+                    new("keep-sub", "子目录的", "", "chat", Services.ProjectScope.Personal, DateTime.Now, FolderPath: sub, OwnerMemberId: Services.MemberContext.Current),
+                });
+                cm.NewSession("dup-old", "chat");
+                cm.NewSession("dup-new", "chat");
+                var mergedN = pm.MergeDuplicateFolders((from, to) => cm.ReassignSessions(from, to));
+                Assert(mergedN == 1 && pm.Items.Count == 2, "★ 自动合并同路径重复项目(子路径的保留)");
+                var kept = pm.Items.First(x => x.ProjectId is "dup-old" or "dup-new").ProjectId;
+                Assert(cm.SessionsOf(kept).Count() == 2, "★ 被合并项目的会话并到保留的那个项目下(不丢会话)");
+                Assert(pm.Items.Any(x => x.ProjectId == "keep-sub"), "子路径项目不参与合并");
+            }
+            var peDup = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
+            if (peDup is not null)
+            {
+                Assert(peDup.Contains("转跳至该项目") && peDup.Contains("FindByFolder"), "★ 路径已有项目时,创建按钮变【转跳至该项目】");
+                Assert(peDup.Contains("已删除项目") && peDup.Contains("已完成项目"), "提示里说明该项目当前在哪(进行中/已完成/已删除)");
+                Assert(peDup.Contains("MachineOptions") && peDup.Contains("本机"), "可选择文件夹所在机器(本机 / 已配对电脑)");
+            }
+            var hubDev = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+            if (hubDev is not null)
+                Assert(hubDev.Contains("KnownDevices") && hubDev.Contains("CacheDevices"),
+                       "★ 远程机器清单只来自【真的拿到过】的设备表(拿不到就只有本机,不摆假列表)");
+            var appMerge = TryReadSource("App.xaml.cs");
+            if (appMerge is not null)
+                Assert(appMerge.Contains("MergeDuplicateFolders"), "启动加载存档后合并同路径重复项目");
+
             // ---- 项目:共享删除垃圾篓 / 已完成按空间 / 分支 / 可见范围(2026-07-30 用户裁定)----
             {
                 var pc4 = new Services.ProjectCenter();
