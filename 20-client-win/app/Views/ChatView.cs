@@ -205,11 +205,16 @@ public sealed class ChatView : UserControl
         BuildConversation();
     }
 
+    /// <summary>
+    /// 回到普通会话。★ 用户裁定:从项目/幽灵/垃圾篓等任何地方回来,都落在【空会话】
+    /// (输入框居中的新会话态),而不是自动跳进排第一的那条旧对话 —— 那样很突兀,
+    /// 像是替用户决定"你接着聊这个"。想继续旧会话,右侧列表点一下即可。
+    /// </summary>
     void ToNormal()
     {
         _trashOpen = false;
         _projectId = null;
-        _sessionId = TheApp.Chat.NormalSessions(_wsKey).FirstOrDefault()?.SessionId;
+        _sessionId = null;      // 不选中任何会话 = 空态
         TheApp.Chat.PurgeGhosts();
         BuildSessions();
         BuildConversation();
@@ -517,7 +522,9 @@ public sealed class ChatView : UserControl
 
     void BuildConversation()
     {
-        // 非聊天工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假聊天界面。
+        // ★ 翻译工作空间:中间换成翻译外壳(语言池 / 档位 / 学习笔记),会话列表与项目抽屉照旧。
+        if (_wsKey == "translation") { _conv.Content = Ui.Card(new TranslationView(), new Thickness(0)); return; }
+        // 其余工作空间:同样的会话/项目外壳,但中间是占位(功能待接入),不做假界面。
         if (_wsKey != "chat") { _conv.Content = PlaceholderCenter(); return; }
 
         // ★ 只读:选中的是【已删除项目】或【已完成项目】—— 只能浏览记录,输入区换成对应动作按钮。
@@ -1128,7 +1135,8 @@ public sealed class ChatView : UserControl
     /// <summary>进入 / 退出幽灵会话。退出即抹除该会话并回到普通会话(可退出 —— 用户反馈"按下之后无法退出")。</summary>
     void ToggleGhost()
     {
-        if (InGhost) { ToNormal(); return; }   // ToNormal 会 PurgeGhosts + 选回普通会话
+        // 退出幽灵 -> 回普通会话的空态(ToNormal 已经保证落在空会话上)
+        if (InGhost) { ToNormal(); _input.Focus(); return; }
         var g = TheApp.Chat.NewGhostSession(_wsKey);
         _sessionId = g.SessionId;
         BuildSessions();

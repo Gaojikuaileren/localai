@@ -28,6 +28,8 @@ public static class ClientStore
     public static string TodosPath => Path.Combine(AppPaths.StateDir, "todos.json");
     public static string CalendarPath => Path.Combine(AppPaths.StateDir, "calendar.json");
     public static string MemoryPath => Path.Combine(AppPaths.StateDir, "memory.json");
+    public static string NotesPath => Path.Combine(AppPaths.StateDir, "notes.json");
+    public static string TranslationPath => Path.Combine(AppPaths.StateDir, "translation.json");
 
     /// <summary>本机是否已有存档(有则不再播种示例数据 —— 否则每次启动都冒出一堆"(示例)")。</summary>
     public static bool HasAnyStore()

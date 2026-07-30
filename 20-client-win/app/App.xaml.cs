@@ -35,6 +35,10 @@ public partial class App : Application
     public ChatCenter Chat { get; } = new();
     /// <summary>记忆库:AI 生成的摘要/事实。★ AI 未接入(P4)前不会有任何内容,界面如实说明。</summary>
     public MemoryCenter Memory { get; } = new();
+    /// <summary>翻译工作空间:目标语言池 + 详细程度(每台设备各自的偏好)。</summary>
+    public TranslationState Translation { get; } = new();
+    /// <summary>学习笔记:翻译结果的收藏,按目标语言分类。</summary>
+    public NoteCenter Notes { get; } = new();
     // 命名成 Lifecycle 而不是 Shutdown:后者会遮蔽 Application.Shutdown(),是个陷阱
     // (将来有人在 App 内写 Shutdown() 想退应用,拿到的却是这个协调器)。
     public ShutdownCoordinator Lifecycle { get; } = new();
@@ -221,6 +225,8 @@ public partial class App : Application
         Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
         Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
         Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath));
+        Notes.Import(ClientStore.Load<List<StudyNote>>(ClientStore.NotesPath));
+        Translation.Import(ClientStore.Load<TranslationState.Snapshot>(ClientStore.TranslationPath));
         // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
         //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
         var merged = Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
@@ -244,6 +250,8 @@ public partial class App : Application
         Chat.Changed += Touch;
         Views.CalendarData.Changed += Touch;
         Memory.Changed += Touch;
+        Notes.Changed += Touch;
+        Translation.Changed += Touch;
     }
 
     void SaveStores()
@@ -253,6 +261,8 @@ public partial class App : Application
         ClientStore.Save(ClientStore.ChatPath, Chat.Export());
         ClientStore.Save(ClientStore.CalendarPath, Views.CalendarData.Export());
         ClientStore.Save(ClientStore.MemoryPath, Memory.Export());
+        ClientStore.Save(ClientStore.NotesPath, Notes.Export());
+        ClientStore.Save(ClientStore.TranslationPath, Translation.Export());
     }
 
     void RegisterCleanupSteps()

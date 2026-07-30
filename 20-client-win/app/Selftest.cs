@@ -377,7 +377,7 @@ public static class Selftest
                 Assert(chatSrc.Contains("VerticalAlignment.Stretch") && chatSrc.Contains("CornerRadius(8, 0, 0, 8)"), "项目把手是整条竖直窄条(非高度居中小按钮)");
                 Assert(chatSrc.Contains("ToNormal(); Overlay.CloseActive()"), "选普通会话直接收起抽屉(选项目则不收)");
                 // 幽灵会话可退出:按钮是开关,状态决定实线/虚线,且只在普通会话上下文出现
-                Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal(); return; }"), "幽灵按钮可【退出】(再按回普通会话)");
+                Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal();"), "幽灵按钮可【退出】(再按回普通会话的空态)");
                 Assert(chatSrc.Contains("GhostButton(bool active)") && chatSrc.Contains("if (!active) ring.StrokeDashArray"), "幽灵中=实线,未进入=虚线");
                 Assert(chatSrc.Contains("(_wsKey == \"chat\" && !inProject) ? GhostButton(InGhost) : null"), "项目会话下不显示幽灵按钮");
                 Assert(chatSrc.Contains("_ctxTitle.MaxHeight = 42") && chatSrc.Contains("_ctxTitle.TextWrapping = TextWrapping.Wrap"), "长项目名可显示两排,交互按钮另起一行");
@@ -861,6 +861,85 @@ public static class Selftest
             if (puShare is not null)
                 Assert(puShare.Contains("提升为共享") && puShare.Contains("文件夹】仍在"),
                        "★ 项目提升说明:共享元数据,文件夹仍在原机");
+
+            // ---- 翻译工作空间:语言池规则 / 语种检测 / 档位格式 / 学习笔记 ----
+            {
+                // 语种检测:能确定的才给答案,拉丁字母一律交给 AI(不瞎猜)
+                Assert(Services.Languages.Detect("今天天气不错") == "zh", "汉字(无假名)-> 中文");
+                Assert(Services.Languages.Detect("これは日本語です") == "ja", "★ 有假名 -> 日语(汉字中日共用,假名才是证据)");
+                Assert(Services.Languages.Detect("漢字とかな") == "ja", "中日混排里有假名 -> 判日语");
+                Assert(Services.Languages.Detect("안녕하세요") == "ko", "谚文 -> 韩语");
+                Assert(Services.Languages.Detect("Привет") == "ru", "西里尔 -> 俄语");
+                Assert(Services.Languages.Detect("Guten Morgen") is null, "★ 拉丁字母分不清语种 -> 返回 null 交给 AI(不瞎猜)");
+                Assert(Services.Languages.Detect("   ") is null, "空白输入不给语种");
+
+                var ts = new Services.TranslationState();
+                ts.AddTarget("zh"); ts.AddTarget("ja");
+                // 例一:池 = 中/日,输入中文 -> 只翻日语
+                var p1 = ts.Plan("你好");
+                Assert(p1.InputLang == "zh" && p1.Targets.SequenceEqual(new[] { "ja" }), "池=中/日,输入中文 -> 译成日语");
+                var p2 = ts.Plan("こんにちは");
+                Assert(p2.Targets.SequenceEqual(new[] { "zh" }), "池=中/日,输入日语 -> 译成中文");
+
+                // 例二:输入池外语种 -> 建议入池,并翻成池内其它语言
+                var p3 = ts.Plan("안녕");
+                Assert(p3.InputLang == "ko" && p3.AddInputToPool && !p3.PoolFull, "★ 池外语种 -> 建议加进目标池");
+                Assert(p3.Targets.OrderBy(x => x).SequenceEqual(new[] { "ja", "zh" }), "同时翻成池内其余语言(中+日)");
+                Assert(ts.Targets.Count == 2, "★ Plan 只建议、不偷偷改池(用户看得见时才 Apply)");
+                ts.Apply(p3);
+                Assert(ts.Targets.Count == 3 && ts.Contains("ko"), "Apply 之后才真的入池");
+
+                // 上限 3:满了不再加,也不擅自替换用户的选择
+                Assert(ts.IsFull && !ts.AddTarget("de"), "★ 目标池上限 3,满了加不进去");
+                var p4 = ts.Plan("Hallo");   // 拉丁 -> 检测不出
+                Assert(p4.NeedsAiDetect && !p4.AddInputToPool, "检测不出语种时不乱入池,标记需 AI 判定");
+                ts.RemoveTarget("ko");
+                Assert(!ts.Contains("ko") && ts.Targets.Count == 2, "可以把语言移出目标池");
+
+                // 档位 -> 固定格式(学习笔记就按这个存)
+                Assert(Services.TranslationLevels.FieldsOf(Services.TranslationLevel.Plain).SequenceEqual(new[] { "译文" }), "精简档只给译文");
+                Assert(Services.TranslationLevels.FieldsOf(Services.TranslationLevel.Detailed).Length == 4, "详解档四个字段(译文/读音/例句/逐词)");
+
+                // 学习笔记:按语言分类 + 多语言【拆开存】
+                var nc = new Services.NoteCenter();
+                nc.AddSplit(new[]
+                {
+                    new Services.StudyNote("", "ja", "你好", "zh", "こんにちは", Services.TranslationLevel.Pronunciation, Reading: "konnichiwa"),
+                    new Services.StudyNote("", "en", "你好", "zh", "Hello", Services.TranslationLevel.Plain),
+                });
+                Assert(nc.Count("ja") == 1 && nc.Count("en") == 1, "★ 一次多语言翻译按目标语言【拆成多条】分别存");
+                Assert(nc.LanguagesUsed().Count() == 2, "笔记按语言分类");
+                Assert(nc.Of("ja").First().Reading == "konnichiwa", "带读音的档位把读音存下来");
+                var enNote = nc.Of("en").First();
+                nc.Update(enNote with { Translation = "Hi" });
+                Assert(nc.Of("en").First().Translation == "Hi", "笔记可在格式内编辑");
+                nc.Remove(enNote.Id);
+                Assert(nc.Count("en") == 0, "笔记可删除");
+                // 空译文不进笔记(拆分时跳过)
+                Assert(nc.AddSplit(new[] { new Services.StudyNote("", "de", "x", "zh", "", Services.TranslationLevel.Plain) }) == 0,
+                       "空译文不会被存成笔记");
+            }
+            var tvSrc = TryReadSource(Path.Combine("Views", "TranslationView.cs"));
+            if (tvSrc is not null)
+            {
+                Assert(tvSrc.Contains("DragDrop.DoDragDrop") && tvSrc.Contains("AllowDrop = true"), "常用语言可拖进目标池");
+                Assert(tvSrc.Contains("TranslationLevels.NameOf") && tvSrc.Contains("new Slider"), "翻译程度用滑条(四档)");
+                Assert(tvSrc.Contains("学习笔记") && tvSrc.Contains("NotesBoard"), "有学习笔记板块");
+                Assert(tvSrc.Contains("AI 尚未接入"), "★ 如实说明现在还不能真的翻译(不假装翻了)");
+            }
+            var cvTrans = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvTrans is not null)
+                Assert(cvTrans.Contains("_wsKey == \"translation\"") && cvTrans.Contains("new TranslationView()"),
+                       "翻译工作空间的中间区换成翻译外壳(会话列表与项目抽屉照旧)");
+
+            // ★ 回普通会话一律落在【空会话】,不跳进排第一的旧对话(用户裁定)
+            var cvNormal = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvNormal is not null)
+            {
+                var tn = cvNormal[cvNormal.IndexOf("void ToNormal()", StringComparison.Ordinal)..];
+                tn = tn[..tn.IndexOf("BuildConversation();", StringComparison.Ordinal)];
+                Assert(tn.Contains("_sessionId = null"), "★ 回普通会话落在空会话(不自动跳进第一条旧对话)");
+            }
 
             // ---- 当前使用者推测(仅显示;连不上就沿用缓存)----
             {
