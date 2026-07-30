@@ -114,7 +114,7 @@ public sealed class ProjectPickerView : UserControl
                        Ui.Caption("选中项目 = 基于它开会话;普通会话点左上「‹ 普通会话」。"));
         _header.Content = PageHeader("项目会话", HeaderState.Ongoing, hint);
 
-        var items = TheApp.Projects.Ongoing(_wsKey).ToList();   // 含"刚完成还在 3 秒宽限"的
+        var items = TheApp.Projects.Ongoing(_wsKey, includeJustCompleted: true).ToList();   // 只有这里要含"刚完成还在 3 秒宽限"的(有巡检表播动画)
         var panel = new StackPanel();
         if (items.Count == 0)
         {

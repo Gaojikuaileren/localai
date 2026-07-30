@@ -285,12 +285,16 @@ public sealed class ProjectCenter
 
     /// <summary>非已完成(准备中 + 进行中)且未删除,置顶在前、再按最近。workspaceKey 给定则只取该空间的。
     ///   主页项目板块用【全部】(跨空间总览);各工作空间的项目选择器用【本空间】。</summary>
-    public IEnumerable<Project> Ongoing(string? workspaceKey = null, DateTime? asOf = null)
+    /// <param name="includeJustCompleted">
+    /// ★ 默认 false。只有【项目抽屉】要 true —— 它有巡检表,能在宽限到点时播"划走"动画再移除。
+    /// 其它地方(主页方块、菜单)【不能】开:它们只在 Changed 时重建,宽限过后没有事件,
+    /// 已完成的项目会一直赖在列表上不走(审查时实测到的真 bug)。
+    /// </param>
+    public IEnumerable<Project> Ongoing(string? workspaceKey = null, DateTime? asOf = null, bool includeJustCompleted = false)
     {
         var now = asOf ?? DateTime.Now;
-        // ★ 刚标记完成的仍留在列表里(3 秒宽限),让界面能播"划走"的动画再消失(与待办一致)。
         return _items.Where(p => p.DeletedAt is null
-                                 && (p.Status != ProjectStatus.Done || InCompletionGrace(p, now))
+                                 && (p.Status != ProjectStatus.Done || (includeJustCompleted && InCompletionGrace(p, now)))
                                  && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
                      .Where(Visible)                                 // D45:别人的个人/仅本人项目绝不出现
                      .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);

@@ -30,12 +30,9 @@ public sealed class StorageView : UserControl
 
     public StorageView()
     {
-        Content = new ScrollViewer
-        {
-            Content = _root,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        }.PassThrough();
+        // ★ 不要自带 ScrollViewer:本视图是【并入设置页】的一段,而 Ui.Page 外层已经是 ScrollViewer。
+        //   套两层的后果是内层吃掉滚轮、外层滚不动(本项目在转盘上already 踩过同款)。
+        Content = _root;
         Build();
         Loaded += (_, _) => TheApp.Memory.Changed += OnMemChanged;
         Unloaded += (_, _) => TheApp.Memory.Changed -= OnMemChanged;

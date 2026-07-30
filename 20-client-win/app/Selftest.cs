@@ -292,11 +292,13 @@ public static class Selftest
             pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Active);
             Assert(pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "进行中的项目出现在 Ongoing()");
             pcx.SetStatus(np.ProjectId, Services.ProjectStatus.Done);
-            // ★ 标记完成后有 3 秒宽限(界面据此播"划走"动画),宽限内仍在列表、宽限后才消失
-            Assert(pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "刚标记完成的项目【仍在】列表里(3 秒宽限,给划走动画用)");
-            Assert(pcx.HasCompletionGrace(), "存在处于完成宽限期的项目(界面据此开表)");
+            // ★ 完成宽限【只给项目抽屉】(它有巡检表能播划走动画);默认不含 —— 否则主页只在 Changed 时重建,
+            //   宽限过后没有事件,已完成的项目会一直赖在主页上不走(审查实测到的真 bug)。
+            Assert(!pcx.Ongoing().Any(x => x.ProjectId == np.ProjectId), "★ 默认不含刚完成的(主页/菜单不会滞留已完成项目)");
+            Assert(pcx.Ongoing(includeJustCompleted: true).Any(x => x.ProjectId == np.ProjectId), "抽屉显式要宽限时才含(给划走动画用)");
+            Assert(pcx.HasCompletionGrace(), "存在处于完成宽限期的项目(抽屉据此开表)");
             var afterGrace = DateTime.Now.AddSeconds(Services.ProjectCenter.CompletionGraceSeconds + 1);
-            Assert(!pcx.Ongoing(null, afterGrace).Any(x => x.ProjectId == np.ProjectId), "宽限过后已完成的不在 Ongoing()(主页不显示)");
+            Assert(!pcx.Ongoing(null, afterGrace, includeJustCompleted: true).Any(x => x.ProjectId == np.ProjectId), "宽限过后连抽屉也不再显示");
             Assert(pcx.Completed().Any(x => x.ProjectId == np.ProjectId), "已完成的进 Completed()(项目库)");
             pcx.SetAiPermission(np.ProjectId, Services.AiPermission.Edit);
             Assert(pcx.Find(np.ProjectId)!.Ai == Services.AiPermission.Edit, "可设项目 AI 权限");
@@ -762,6 +764,34 @@ public static class Selftest
                 Assert(appSrc2.Contains("save-client-stores"), "退出前把未落盘的改动存下来");
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
+
+            // ★ 只有项目抽屉能开完成宽限;主页/会话菜单不能(它们没有巡检表,会滞留)
+            var pkGrace = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
+            if (pkGrace is not null)
+                Assert(pkGrace.Contains("includeJustCompleted: true"), "项目抽屉显式开启完成宽限(它有巡检表)");
+            foreach (var f in new[] { Path.Combine("Views", "HomeView.cs"), Path.Combine("Views", "ChatView.cs") })
+            {
+                var src = TryReadSource(f);
+                if (src is null) continue;
+                Assert(!src.Contains("includeJustCompleted"), $"{Path.GetFileName(f)} 不开完成宽限(没有巡检表,会滞留已完成项目)");
+            }
+            // ★ 并入设置页的视图不能自带 ScrollViewer(外层 Ui.Page 已是 ScrollViewer,套两层会吃掉滚轮)
+            var svScroll = TryReadSource(Path.Combine("Views", "StorageView.cs"));
+            if (svScroll is not null)
+                Assert(!svScroll.Contains("new ScrollViewer"), "★ StorageView 不自带滚动(并入设置页,避免嵌套滚动吃滚轮)");
+
+            // ★ 整理阈值必须【真的被用到】—— 否则设置里就是个不做事的摆设
+            {
+                var szc = new Services.ChatCenter();
+                var ss = szc.NewSession(null, "chat");
+                szc.Send(ss.SessionId, new string('x', 500));
+                Assert(szc.SizeOf(ss.SessionId) >= 500, "会话体量可计算(字符数估算,接入后换 token)");
+                Assert(szc.SizeOf("no-such") == 0, "不存在的会话体量为 0(不抛)");
+            }
+            var cvThr = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvThr is not null)
+                Assert(cvThr.Contains("SummaryThresholdChars") && cvThr.Contains("这条会话已经很长"),
+                       "★ 整理阈值真的用上了(超长会话会建议另开一条),不是个空设置");
 
             // ---- 主机离线 / 一网多主机 ----
             var puFolder2 = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));

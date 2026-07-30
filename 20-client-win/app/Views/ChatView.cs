@@ -479,6 +479,19 @@ public sealed class ChatView : UserControl
         inputRow.Children.Add(_input);
 
         var area = new StackPanel();
+
+        // ★ 会话太长的提醒:超过设置里的【整理阈值】就建议另开新会话。
+        //   用户裁定:整理由 AI 做(未接入),但"这条会话该拆了"这件事【现在就能判断】,
+        //   否则设置里那个阈值就是个不做事的摆设。开新会话是用户自己点,我们不替他动数据。
+        var limit = TheApp.Settings.SummaryThresholdChars;
+        if (limit > 0 && _sessionId is { } sid2 && TheApp.Chat.SizeOf(sid2) > limit)
+        {
+            var big = Ui.Caption($"这条会话已经很长(约 {TheApp.Chat.SizeOf(sid2):N0} 字)—— 建议点右上角 + 另开一条,聊起来更准也更快。");
+            big.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+            big.Margin = new Thickness(2, 0, 2, 6);
+            area.Children.Add(big);
+        }
+
         // ★ 主机没开时如实说明(用户提问):本机会话照常可读可写,只是【AI 算不了】——
         //   AI 在主机上跑。发出去的消息会先记在本机,主机上线后才可能有回答。
         //   只在【已配对但连不上】时提示;没配对的情况左下角状态块已经常驻显示,不重复唠叨。

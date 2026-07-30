@@ -189,6 +189,13 @@ public sealed class ChatCenter
         if (any) Changed?.Invoke();
     }
 
+    /// <summary>
+    /// 一条会话的累计体量(字符数估算)。★ 真正的约束是模型上下文窗口,但模型未接入(P4),
+    /// 先用字符数顶着;接入后换成真 tokenizer 计数,这个方法是唯一的换算点。
+    /// </summary>
+    public int SizeOf(string sessionId)
+        => _messages.Where(m => m.SessionId == sessionId).Sum(m => m.Text?.Length ?? 0);
+
     /// <summary>某项目的【全部】会话(含已随项目删除的)—— 供"选中已删除/已完成项目"只读浏览。</summary>
     public IEnumerable<ChatSession> AllSessionsOf(string projectId)
         => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost)
