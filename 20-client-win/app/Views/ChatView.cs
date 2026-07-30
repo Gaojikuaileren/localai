@@ -687,31 +687,8 @@ public sealed class ChatView : UserControl
         {
             var inputArea = BuildInputArea(attachmentsBelow: false);
             var msgs = new StackPanel();
-            // ★ 新发出的消息要有出现动画(用户裁定):只给【这次新增的那几条】播,
-            //   旧消息重建时不再重复动(否则每次刷新整屏乱跳)。
-            // ★ 分层存储:更早的消息在温层(另存文件),平时不加载 —— 顶部给个"加载更早"入口。
-            //   原文一直都在,只是不占内存/上下文(见 SessionArchive)。
-            var older = TheApp.Chat.UnloadedArchivedCount(_sessionId!);
-            if (older > 0)
-            {
-                var more = Chip($"↑ 加载更早的 {older} 条", "FgSecondary", () => TheApp.Chat.LoadArchived(_sessionId!));
-                more.HorizontalAlignment = HorizontalAlignment.Center;
-                more.Margin = new Thickness(0, 0, 0, 8);
-                msgs.Children.Add(more);
-            }
-
-            var all = TheApp.Chat.MessagesOf(_sessionId!).ToList();
-            var seenKey = _sessionId!;
-            var seen = _seenMsgCount.TryGetValue(seenKey, out var n) ? n : all.Count;   // 首次进会话不animate
-            for (int i = 0; i < all.Count; i++)
-            {
-                var bubble = Bubble(all[i], i);
-                if (i >= seen) AnimateIn(bubble, delayMs: (i - seen) * 70);   // 用户消息 + 随后的系统说明依次浮现
-                msgs.Children.Add(bubble);
-            }
-            _seenMsgCount[seenKey] = all.Count;
-            var scroll = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-            scroll.PassThrough();
+            FillMessages(msgs, _sessionId!, animate: true);
+            var scroll = MessageScroller(msgs);
             var dock = new DockPanel { LastChildFill = true };
             var inputWrap = new Border { Child = inputArea, Margin = new Thickness(0, 10, 0, 0) };
             DockPanel.SetDock(inputWrap, Dock.Bottom);
@@ -751,8 +728,7 @@ public sealed class ChatView : UserControl
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
         if (hasMsgs)
         {
-            var list = TheApp.Chat.MessagesOf(_sessionId!).ToList();
-            for (int i = 0; i < list.Count; i++) msgs.Children.Add(Bubble(list[i], i));
+            FillMessages(msgs, _sessionId!, animate: true);
         }
         else
         {
@@ -775,8 +751,7 @@ public sealed class ChatView : UserControl
         convDock.Children.Add(inputWrap);
         convDock.Children.Add(scroll);
 
-        var conv = Ui.Card(convDock, new Thickness(0));
-        conv.Padding = new Thickness(12);
+        var conv = ConvCard(convDock);
 
         var root = new DockPanel { LastChildFill = true };
         var bar = new TranslationBar { Margin = new Thickness(0, 10, 0, 0) };
@@ -787,6 +762,61 @@ public sealed class ChatView : UserControl
     }
 
     // 只读浏览:已删除 / 已完成项目。灰化会话内容,底部换成对应的动作按钮。
+    /// <summary>
+    /// 唯一的「铺消息列表」。★ 此前有【三份】各写各的(聊天 / 翻译 / 只读浏览),
+    /// 于是归档入口、出现动画这些只长在聊天那一份上,另外两处悄悄退化 ——
+    /// 用户看到的是"翻译空间的旧消息没了,而且没有任何按钮能取回"。
+    ///
+    /// animate=false 时不播动画、也【不写】_seenMsgCount:只读浏览不该改"看过几条"的账。
+    /// </summary>
+    void FillMessages(StackPanel msgs, string sessionId, bool animate)
+    {
+        // ★ 分层存储:更早的消息在温层(另存文件),平时不加载 —— 顶部给个"加载更早"入口。
+        //   原文一直都在,只是不占内存/上下文(见 SessionArchive)。归档【不分工作空间】,
+        //   所以这个入口也必须对所有空间都在。
+        var older = TheApp.Chat.UnloadedArchivedCount(sessionId);
+        if (older > 0)
+        {
+            var more = Chip($"↑ 加载更早的 {older} 条", "FgSecondary", () => TheApp.Chat.LoadArchived(sessionId));
+            more.HorizontalAlignment = HorizontalAlignment.Center;
+            more.Margin = new Thickness(0, 0, 0, 8);
+            msgs.Children.Add(more);
+        }
+
+        var all = TheApp.Chat.MessagesOf(sessionId).ToList();
+        // ★ 新发出的消息才播出现动画:只给【这次新增的那几条】,
+        //   旧消息重建时不再重复动(否则每次刷新整屏乱跳)。
+        var seen = animate && _seenMsgCount.TryGetValue(sessionId, out var n) ? n : all.Count;
+        for (int i = 0; i < all.Count; i++)
+        {
+            var bubble = Bubble(all[i], i);
+            if (animate && i >= seen) AnimateIn(bubble, delayMs: (i - seen) * 70);
+            msgs.Children.Add(bubble);
+        }
+        if (animate) _seenMsgCount[sessionId] = all.Count;
+    }
+
+    /// <summary>消息区的滚动壳。★ 必须 PassThrough:嵌套 ScrollViewer 会把滚轮吃掉。</summary>
+    static ScrollViewer MessageScroller(UIElement msgs)
+        => new ScrollViewer
+        {
+            Content = msgs,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        }.PassThrough();
+
+    /// <summary>
+    /// 唯一的会话卡工厂。★ 内边距 12 此前在四个地方各写了一遍,还有一处漏写吃到 Ui.Card 的默认 16
+    /// (切到占位工作空间时卡片内边距会跳一下)。sunken=true 给只读态:整块偏灰。
+    /// </summary>
+    static Border ConvCard(UIElement inner, bool sunken = false)
+    {
+        var c = Ui.Card(inner, new Thickness(0));
+        c.Padding = new Thickness(12);
+        if (sunken) c.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        return c;
+    }
+
     FrameworkElement BuildReadonlyProject()
     {
         var p = CurrentProject!;
@@ -797,9 +827,11 @@ public sealed class ChatView : UserControl
         if (_sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any())
         {
             var msgs = new StackPanel();
-            var ro = TheApp.Chat.MessagesOf(_sessionId!).ToList();
-            for (int i = 0; i < ro.Count; i++) msgs.Children.Add(Bubble(ro[i], i));
-            body = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }.PassThrough();
+            FillMessages(msgs, _sessionId!, animate: false);   // 只读浏览:不播动画,也不改"看过几条"的账
+            var roScroll = MessageScroller(msgs);
+            // ★ 打开就停在最后一条 —— 此前只读态整段没有 ScrollToEnd,一进来停在最顶上
+            Dispatcher.BeginInvoke(new Action(() => roScroll.ScrollToEnd()), System.Windows.Threading.DispatcherPriority.Loaded);
+            body = roScroll;
         }
         else
         {
@@ -827,11 +859,7 @@ public sealed class ChatView : UserControl
         dock.Children.Add(aWrap);
         dock.Children.Add(body);
 
-        var card = new Border { Child = dock, Padding = new Thickness(12), BorderThickness = new Thickness(1) };
-        card.SetResourceReference(Border.BackgroundProperty, "BgSunken");   // 整块偏灰,提示只读
-        card.SetResourceReference(Border.BorderBrushProperty, "Border");
-        card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-        return card;
+        return ConvCard(dock, sunken: true);   // 整块偏灰,提示只读
     }
 
     // 已删除项目:输入框换成【恢复此项目 / 彻底删除此项目】。
@@ -878,7 +906,9 @@ public sealed class ChatView : UserControl
     }
 
     // 折叠状态按【会话 + 序号】记 —— 消息本身没有 id,而重建时同一条的序号是稳定的
-    string BubbleKey(ChatMessage m, int index) => $"{m.SessionId}#{index}";
+    // ★ 折叠状态的键走消息自己的稳定标识,【不能用下标】——
+    //   "加载更早"会把所有下标整体后移,展开的那条就跳到别人身上了(见 ChatMessage.StableKey)。
+    static string BubbleKey(ChatMessage m) => m.StableKey;
 
     /// <summary>新消息浮现:从下方微微上移 + 淡入(缓出)。delayMs 让连着的几条依次出现。</summary>
     static void AnimateIn(FrameworkElement el, int delayMs)
@@ -898,7 +928,7 @@ public sealed class ChatView : UserControl
     // overlayBanner=true(空态):提示【浮】在顶部,不占布局、不顶动居中的输入框(用户裁定)。
     FrameworkElement ConvShell(FrameworkElement inner, bool ghost, bool overlayBanner)
     {
-        if (!ghost) { var c = Ui.Card(inner, new Thickness(0)); c.Padding = new Thickness(12); return c; }
+        if (!ghost) return ConvCard(inner);
 
         var banner = Ui.Caption("幽灵会话 · 不保留记录、不纳入记忆");
         banner.HorizontalAlignment = HorizontalAlignment.Center;
@@ -955,7 +985,7 @@ public sealed class ChatView : UserControl
         box.Children.Add(t);
         box.Children.Add(new Border { Height = 8 });
         box.Children.Add(c);
-        return Ui.Card(box, new Thickness(0));
+        return ConvCard(box);   // ★ 此前这里漏写 Padding,吃 Ui.Card 的默认 16 —— 切到占位空间卡片会跳一下
     }
 
     /// <summary>
@@ -1002,7 +1032,7 @@ public sealed class ChatView : UserControl
             var lines = m.Text.Split('\n');
             if (lines.Length > CollapseLines)
             {
-                var key = BubbleKey(m, index);
+                var key = BubbleKey(m);
                 var expanded = _expandedBubbles.Contains(key);
                 tb.Text = expanded ? m.Text : string.Join("\n", lines.Take(CollapseLines));
                 stack.Children.Add(tb);

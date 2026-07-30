@@ -2233,6 +2233,85 @@ public static class Selftest
                 Assert(mvSrc.Contains("path.LostFocus += (_, _) => Commit();") && mvSrc.Contains("Unloaded += (_, _) => Commit();"),
                        "★ 模型路径不只靠失焦提交(焦点收窄后这页只剩它一个可聚焦控件)");
 
+            // ---- 折叠状态的键必须【稳定】:加载更早的消息不能让展开态跑到别人身上 ----
+            // ★ 这条只能用行为断言:结构断言看不出"下标 vs 稳定标识"会不会在归档后错位。
+            {
+                var kdir = Path.Combine(tmp, "bubblekey");
+                Directory.CreateDirectory(kdir);
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, kdir);
+                var kc = new Services.ChatCenter();
+                var sid = kc.NewSession(null, "chat").SessionId;
+                for (int i = 0; i < 12; i++) kc.Send(sid, "第 " + i + " 条");
+                var before = kc.MessagesOf(sid).ToList();
+                Assert(before.Count == 24, "12 次发送 = 24 条(每次连带一条系统说明)");
+
+                // 同一次 Send 的两条:时间戳可能一模一样,键仍必须不同
+                Assert(before[0].StableKey != before[1].StableKey,
+                       "★ 同一次发送的两条消息键不相等(只用时间戳会撞)");
+
+                var target = before[^3];
+                var keyBefore = target.StableKey;
+                kc.ArchiveOldMessages(keepRecent: 6);
+                Assert(kc.UnloadedArchivedCount(sid) > 0, "确实归档了一部分");
+                kc.LoadArchived(sid);
+                var after = kc.MessagesOf(sid).ToList();
+                var same = after.First(m => ReferenceEquals(m, target) || m.StableKey == keyBefore);
+                Assert(same.Text == target.Text, "★ 加载更早之后,同一条消息的键没变(展开态不会跑到别人身上)");
+                Assert(after.Select(m => m.StableKey).Distinct().Count() == after.Count,
+                       "★ 全会话的键两两不同");
+
+                // 归档【不分工作空间】—— 翻译空间的会话同样会被归档,所以入口也必须对所有空间都在
+                var tsid = kc.NewSession(null, "translation").SessionId;
+                for (int i = 0; i < 12; i++) kc.Send(tsid, "翻译 " + i);
+                kc.ArchiveOldMessages(keepRecent: 6);
+                Assert(kc.UnloadedArchivedCount(tsid) > 0,
+                       "★ 翻译空间的会话一样会被归档(所以「加载更早」不能只长在聊天分支上)");
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, tmp);
+            }
+            var cvFill = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvFill is not null)
+            {
+                // 三份铺消息合成一份:Bubble( 只应出现在 FillMessages 与它自己的定义里
+                var bubbleCalls = System.Text.RegularExpressions.Regex.Matches(
+                    Body(cvFill), @"(?<![A-Za-z])Bubble\(").Count;
+                Assert(bubbleCalls == 2, $"★ 只剩一处铺消息(FillMessages)+ 一处定义,实得 {bubbleCalls}");
+                var loadMore = System.Text.RegularExpressions.Regex.Matches(Body(cvFill), "加载更早的").Count;
+                Assert(loadMore == 1, $"★ 「加载更早」入口只有一处、在共享层(实得 {loadMore})");
+                var cards = System.Text.RegularExpressions.Regex.Matches(Body(cvFill), @"Ui\.Card\(").Count;
+                Assert(cards == 2, $"★ 卡片配方唯一(会话列表 1 处 + ConvCard 内 1 处,实得 {cards})");
+                var ro = Slice(cvFill, "FrameworkElement BuildReadonlyProject()", "var banner");
+                Assert(ro is not null && ro.Contains("animate: false") && ro.Contains("ScrollToEnd"),
+                       "★ 只读浏览:有归档入口、会滚到底、不播动画");
+                Assert(cvFill.Contains("static string BubbleKey(ChatMessage m) => m.StableKey;"),
+                       "★ 折叠键走稳定标识,不再用下标");
+            }
+
+            // ---- 皮肤纪律(用户裁定 2026-07-30):微风(苹果风)是【标准默认皮肤】----
+            // ★ 所有主要设计都对着微风做;其它皮肤原则上只靠【换色 + 微调】实现。
+            //   理由是用户的原话:"每个皮肤改一点会导致混乱"——
+            //   一旦结构按皮肤分叉,任何改动都要在三套里各验一遍,而且必然有一套被忘掉。
+            Assert(new Services.AppSettings().Skin == Services.Skin.Breeze, "★ 默认皮肤 = 微风(苹果风)");
+            {
+                // 结构性的按皮肤分叉必须【屈指可数且登记在案】。新增一处就会让这条挂掉,
+                // 逼着人回来确认"这真的必须按皮肤分结构吗,还是换个颜色令牌就够了"。
+                var forks = new List<string>();
+                var viewsDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Views");
+                if (Directory.Exists(viewsDir))
+                {
+                    foreach (var f in Directory.GetFiles(viewsDir, "*.cs"))
+                        foreach (var line in File.ReadAllLines(f))
+                        {
+                            var t = line.TrimStart();
+                            if (t.StartsWith("//")) continue;                       // 注释不算(踩过三次)
+                            if (t.Contains("ThemeManager.Current =")) forks.Add(Path.GetFileName(f));
+                        }
+                    var distinct = forks.Distinct().OrderBy(x => x).ToList();
+                    Assert(distinct.Count <= 1 && (distinct.Count == 0 || distinct[0] == "TranslationBar.cs"),
+                           "★ 按皮肤分【结构】的地方只有登记在案的那一处(其余皮肤差异一律走颜色令牌)"
+                           + (distinct.Count > 0 ? " 现有:" + string.Join(",", distinct) : ""));
+                }
+            }
+
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
                                "FgSecondary", "FgMuted", "FgOnAccent", "Accent", "AccentHover", "Border",

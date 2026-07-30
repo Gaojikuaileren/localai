@@ -23,7 +23,23 @@ public sealed record ChatAttachment(AttachKind Kind, string Path, string Display
 }
 
 public sealed record ChatMessage(string SessionId, ChatRole Role, string Text, DateTime At,
-    IReadOnlyList<ChatAttachment>? Attachments = null);
+    IReadOnlyList<ChatAttachment>? Attachments = null,
+    /// <summary>
+    /// 稳定标识。★ 界面用它记"这条消息被展开了" —— 此前用的是【下标】,
+    /// 而"加载更早"会把所有下标整体后移,于是用户展开的那条收了回去、另一条莫名展开着。
+    /// 位置记录末尾追加可选参数:老档案里没有这个字段 -> 反序列化成 null,照常读得动。
+    /// </summary>
+    string? MessageId = null)
+{
+    /// <summary>
+    /// 给界面用的稳定键。新消息有 MessageId 直接用;老消息(含已归档到温层的)退回内容指纹。
+    /// ★ 指纹【不能只用时间戳】:Send 一次会连加"用户消息 + 系统说明"两条,各自 DateTime.Now,
+    ///   而 Windows 上它的分辨率是毫秒级 —— 这两条完全可能拿到相同的 Ticks。
+    /// </summary>
+    public string StableKey => MessageId is { Length: > 0 } id
+        ? $"{SessionId}#{id}"
+        : $"{SessionId}#{At.Ticks}#{(int)Role}#{Text.Length}";
+}
 
 public sealed record ChatSession(
     string SessionId,
@@ -48,6 +64,8 @@ public sealed class ChatCenter
     public event Action? Changed;
 
     public static string NewId() => "s-" + Guid.NewGuid().ToString("N")[..8];
+    /// <summary>消息的稳定标识。前缀区别于会话 id,方便肉眼分辨。</summary>
+    public static string NewMsgId() => "m-" + Guid.NewGuid().ToString("N")[..10];
 
     public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null)
     {
@@ -385,12 +403,12 @@ public sealed class ChatCenter
         if (i < 0) return false;
 
         var first = !_messages.Any(m => m.SessionId == sessionId && m.Role == ChatRole.User);
-        _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments));
+        _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments, NewMsgId()));
         // ★ 诚实:AI 未接入。附件只是【路径/剪贴板指令】,不真发内容(见 ChatAttachment)。
         var note = hasAtt
             ? "AI 模型尚未接入(P4)。消息与附件引用(路径/剪贴板)已记录;接入后由 AI 自行在本机读取,不会真的把文件发出去。"
             : "AI 模型尚未接入(P4 GPU Broker)。你的消息已记录;接入后这里会给出真实回复。";
-        _messages.Add(new ChatMessage(sessionId, ChatRole.System, note, DateTime.Now));
+        _messages.Add(new ChatMessage(sessionId, ChatRole.System, note, DateTime.Now, null, NewMsgId()));
 
         // ★ 标题:接入模型后由 AI 依会话内容起;未接入前用首条消息(截断)作占位。
         var titleSeed = text.Length > 0 ? text : (hasAtt ? attachments![0].Display : "");
