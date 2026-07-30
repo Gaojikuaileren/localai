@@ -14,6 +14,12 @@ namespace LocalAI.Client;
 
 public static class Selftest
 {
+    // 与 ClientStore 相同的序列化口径(枚举存名字),用于存档往返测试
+    static readonly System.Text.Json.JsonSerializerOptions StoreJson = new()
+    {
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
     public static int Run()
     {
         int pass = 0, fail = 0;
@@ -392,6 +398,76 @@ public static class Selftest
             cc3.Delete(sa.SessionId);
             cc3.SweepExpiredDeleted(DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
             Assert(cc3.Find(sa.SessionId) is null, "超过保留期自动清除(不可恢复)");
+
+            // ---- 本地存档(明文,D21/D22 口径)----
+            {
+                var store = new Services.ChatCenter();
+                var keepS = store.NewSession(null, "chat");
+                store.Send(keepS.SessionId, "留下来");
+                var ghostS = store.NewGhostSession("chat");
+                store.Send(ghostS.SessionId, "别落盘");
+                var delS = store.NewSession(null, "chat");
+                store.Send(delS.SessionId, "回收站里的");
+                store.Delete(delS.SessionId);
+
+                var snap = store.Export();
+                // ★ 幽灵会话是"不保留记录"的承诺 —— 落盘就是毁约
+                Assert(!snap.Sessions.Any(x => x.Ghost), "★ 幽灵会话不进存档");
+                Assert(!snap.Messages.Any(m => m.SessionId == ghostS.SessionId), "★ 幽灵会话的消息也不进存档");
+                Assert(snap.Sessions.Any(x => x.SessionId == keepS.SessionId), "普通会话进存档");
+                Assert(snap.Sessions.Any(x => x.SessionId == delS.SessionId && x.DeletedAt is not null), "已删除会话连 DeletedAt 一起存(重启后继续走 30 天)");
+
+                // JSON 往返:枚举存名字、可空时间戳、附件都要能还原
+                var json = System.Text.Json.JsonSerializer.Serialize(snap, StoreJson);
+                var snapBack = System.Text.Json.JsonSerializer.Deserialize<Services.ChatCenter.Snapshot>(json, StoreJson);
+                var restored = new Services.ChatCenter();
+                restored.Import(snapBack);
+                Assert(restored.NormalSessions("chat").Any(x => x.SessionId == keepS.SessionId), "JSON 往返后普通会话还在");
+                Assert(restored.MessagesOf(keepS.SessionId).Any(m => m.Text == "留下来"), "JSON 往返后消息还在");
+                Assert(restored.Find(ghostS.SessionId) is null, "JSON 往返后幽灵会话不存在");
+                Assert(restored.Deleted("chat").Any(x => x.SessionId == delS.SessionId), "JSON 往返后回收站还在");
+
+                // 导入时扫过期:超过保留期的已删除会话不该被恢复
+                var expired = new Services.ChatCenter();
+                expired.Import(snapBack, DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
+                Assert(expired.Find(delS.SessionId) is null, "导入时清掉已过 30 天的回收站项");
+
+                // 项目 / 待办往返
+                var pStore = new Services.ProjectCenter();
+                pStore.Create("存档项目", Path.Combine(Path.GetTempPath(), "p"), new[] { "a", "b" }, Services.ProjectScope.Family);
+                var pJson = System.Text.Json.JsonSerializer.Serialize(pStore.Export(), StoreJson);
+                var pBack = new Services.ProjectCenter();
+                pBack.Import(System.Text.Json.JsonSerializer.Deserialize<List<Services.Project>>(pJson, StoreJson));
+                Assert(pBack.Items.Count == 1 && pBack.Items[0].Attachments is { Count: 2 }, "项目往返(含多附件夹)");
+
+                var tStore = new Services.TodoCenter();
+                tStore.Add(new Services.TodoItem("", "存档待办", Services.TodoKind.Chore, Due: DateTime.Today));
+                var tJson = System.Text.Json.JsonSerializer.Serialize(tStore.Export(), StoreJson);
+                var tBack = new Services.TodoCenter();
+                tBack.Import(System.Text.Json.JsonSerializer.Deserialize<List<Services.TodoItem>>(tJson, StoreJson));
+                Assert(tBack.Items.Count == 1 && tBack.Items[0].Title == "存档待办", "待办往返");
+
+                // 损坏存档不能拖垮启动
+                var badPath = Path.Combine(Path.GetTempPath(), "localai-bad-" + Guid.NewGuid().ToString("N")[..6] + ".json");
+                File.WriteAllText(badPath, "{ 这不是合法 JSON ");
+                Assert(Services.ClientStore.Load<List<Services.Project>>(badPath) is null, "存档损坏时返回空,不抛异常");
+                Assert(File.Exists(badPath + ".corrupt"), "坏档被改名留证");
+                try { File.Delete(badPath + ".corrupt"); } catch { }
+
+                // 原子写 + 读回
+                var okPath = Path.Combine(Path.GetTempPath(), "localai-ok-" + Guid.NewGuid().ToString("N")[..6] + ".json");
+                Services.ClientStore.Save(okPath, tStore.Export());
+                Assert(File.Exists(okPath) && !File.Exists(okPath + ".tmp"), "原子写完成后不留 .tmp");
+                Assert(Services.ClientStore.Load<List<Services.TodoItem>>(okPath)?.Count == 1, "存档可读回");
+                try { File.Delete(okPath); } catch { }
+            }
+            var appSrc2 = TryReadSource("App.xaml.cs");
+            if (appSrc2 is not null)
+            {
+                Assert(appSrc2.Contains("if (!hadStore) SeedDemoTasks()"), "有存档就不再播种示例数据");
+                Assert(appSrc2.Contains("save-client-stores"), "退出前把未落盘的改动存下来");
+                Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
+            }
 
             var pcd = new Services.ProjectCenter();
             var pdel = pcd.Create("待删", Path.Combine(Path.GetTempPath(), "x"), null, Services.ProjectScope.Personal);

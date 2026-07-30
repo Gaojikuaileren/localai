@@ -173,6 +173,35 @@ public sealed class ChatCenter
         Changed?.Invoke();
     }
 
+    // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
+    /// <summary>存档结构。★ 幽灵会话【不进存档】—— 见 Export。</summary>
+    public sealed record Snapshot(List<ChatSession> Sessions, List<ChatMessage> Messages);
+
+    /// <summary>
+    /// 导出可落盘的内容。★ 幽灵会话及其消息【一律排除】:它的定义就是"不保留记录",
+    /// 落盘等于毁约(selftest 钉死)。已删除会话【保留】,连同 DeletedAt,重启后继续走 30 天窗口。
+    /// </summary>
+    public Snapshot Export()
+    {
+        var keep = _sessions.Where(s => !s.Ghost).ToList();
+        var ids = keep.Select(s => s.SessionId).ToHashSet();
+        return new Snapshot(keep, _messages.Where(m => ids.Contains(m.SessionId)).ToList());
+    }
+
+    /// <summary>从存档恢复(启动时)。顺带扫掉已过保留期的已删除会话。</summary>
+    public void Import(Snapshot? snap, DateTime? asOf = null)
+    {
+        if (snap is null) return;
+        _sessions.Clear();
+        _messages.Clear();
+        // 双保险:即便存档里混进了幽灵(不该发生),恢复时也丢掉
+        _sessions.AddRange(snap.Sessions.Where(s => !s.Ghost));
+        var ids = _sessions.Select(s => s.SessionId).ToHashSet();
+        _messages.AddRange(snap.Messages.Where(m => ids.Contains(m.SessionId)));
+        SweepExpiredDeleted(asOf ?? DateTime.Now);
+        Changed?.Invoke();
+    }
+
     /// <summary>清掉超过保留期的已删除会话(30 天)。asOf 供测试注入。</summary>
     public void SweepExpiredDeleted(DateTime asOf)
     {

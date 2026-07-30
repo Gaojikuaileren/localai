@@ -85,6 +85,17 @@ public sealed class TodoCenter
 
     public static string NewId() => Guid.NewGuid().ToString("N")[..8];
 
+    // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
+    public List<TodoItem> Export() => _items.ToList();
+
+    public void Import(List<TodoItem>? items)
+    {
+        if (items is null) return;
+        _items.Clear();
+        _items.AddRange(items);
+        Changed?.Invoke();
+    }
+
     /// <summary>勾完成后先停留几秒再归档到"已完成"抽屉(用户裁定:3 秒)。</summary>
     public const double ArchiveGraceSeconds = 3;
 

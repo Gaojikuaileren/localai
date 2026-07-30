@@ -68,9 +68,15 @@ public partial class App : Application
         SetupTray();
         Strings.LanguageChanged += () => Dispatcher.Invoke(RebuildTrayMenu);
 
-        // ★ 示例数据必须在建窗口【之前】播种 —— 否则界面构建时读到的是空表,
-        //   表现为"开启时日程读不出来,点一下才有"。
-        SeedDemoTasks();
+        // ★ 先读本地存档,再决定要不要播种示例;两者都必须在建窗口【之前】完成 ——
+        //   否则界面构建时读到的是空表,表现为"开启时读不出来,点一下才有"。
+        var hadStore = ClientStore.HasAnyStore();
+        LoadStores();
+        if (!hadStore) SeedDemoTasks();   // 有存档就不再冒出"(示例)"数据
+        AttachAutoSave();
+        // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
+        //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。
+        if (!hadStore) SaveStores();
 
         _main = new MainWindow();
         _main.Closing += OnMainWindowClosing;
@@ -162,9 +168,43 @@ public partial class App : Application
         AllDay(9, 13, "(示例)家庭旅行", "双方", "家庭", "家庭");
     }
 
+    // ---------------------------------------------------------------- 本地存档(明文,D21/D22 口径)
+    // 用户裁定(2026-07-30):项目/会话/待办落盘为明文,与记忆库、备份同一处理,不引入客户端密钥管理。
+    // ★ 幽灵会话不落盘(ChatCenter.Export 排除),已删除会话连 DeletedAt 一起存、启动时扫过期。
+    void LoadStores()
+    {
+        Projects.Import(ClientStore.Load<List<Project>>(ClientStore.ProjectsPath));
+        Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
+        Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
+    }
+
+    // 变更 -> 防抖 400ms 后落盘。防抖是必要的:一次操作常触发多次 Changed(改状态 + 迁会话),
+    // 不防抖就会连写好几次。退出时再无条件存一次(见 RegisterCleanupSteps)。
+    readonly System.Windows.Threading.DispatcherTimer _saveDebounce =
+        new() { Interval = TimeSpan.FromMilliseconds(400) };
+
+    void AttachAutoSave()
+    {
+        _saveDebounce.Tick += (_, _) => { _saveDebounce.Stop(); SaveStores(); };
+        void Touch() => Dispatcher.Invoke(() => { _saveDebounce.Stop(); _saveDebounce.Start(); });
+        Projects.Changed += Touch;
+        Todos.Changed += Touch;
+        Chat.Changed += Touch;
+    }
+
+    void SaveStores()
+    {
+        ClientStore.Save(ClientStore.ProjectsPath, Projects.Export());
+        ClientStore.Save(ClientStore.TodosPath, Todos.Export());
+        ClientStore.Save(ClientStore.ChatPath, Chat.Export());
+    }
+
     void RegisterCleanupSteps()
     {
-        // ① 结束与中枢的会话 + 请主机释放本客户端占用的显存。
+        // ① 退出前把未落盘的改动存下来(防抖可能还没到点)。放在最前:先保住数据,再谈释放资源。
+        Lifecycle.Register("save-client-stores", () => SaveStores());
+
+        // ② 结束与中枢的会话 + 请主机释放本客户端占用的显存。
         //    ★ 语义要点:请求的是"释放**本会话**占用",不是"卸载所有模型" ——
         //      副机退出绝不能把另一个人正在用的模型干掉(引用计数归零才真卸载,主机侧负责)。
         Lifecycle.Register("end-session+release-vram", async ct =>
@@ -173,10 +213,10 @@ public partial class App : Application
             await Hub.EndSessionAsync(ct);
         });
 
-        // ② 落盘界面偏好(皮肤/语言/自启开关),避免设置改了没保存。
+        // ③ 落盘界面偏好(皮肤/语言/自启开关),避免设置改了没保存。
         Lifecycle.Register("save-settings", () => Settings.Save());
 
-        // ③ 收掉托盘图标,否则进程没了图标还赖在任务栏上直到鼠标划过。
+        // ④ 停显存监视;⑤ 收掉托盘图标(否则进程没了图标还赖在任务栏上直到鼠标划过)。
         Lifecycle.Register("stop-vram-monitor", () => Vram.Dispose());
 
         Lifecycle.Register("dispose-tray", () => { _tray?.Dispose(); _tray = null; });

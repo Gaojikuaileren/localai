@@ -122,6 +122,17 @@ public sealed class ProjectCenter
     /// <summary>兼容旧调用:主页要的是"回到刚才那件事" —— 现等价于 Ongoing()。</summary>
     public IEnumerable<Project> Recent() => Ongoing();
 
+    // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
+    public List<Project> Export() => _items.ToList();
+
+    public void Import(List<Project>? items)
+    {
+        if (items is null) return;
+        _items.Clear();
+        _items.AddRange(items);
+        Changed?.Invoke();
+    }
+
     /// <summary>在系统文件管理器里打开项目文件夹。没设路径或路径不存在则返回 false(界面据此提示)。</summary>
     public static bool OpenInExplorer(string? folder)
     {
