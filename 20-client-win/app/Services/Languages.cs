@@ -156,14 +156,18 @@ public enum TranslationLevel
 
 public static class TranslationLevels
 {
-    /// <summary>第二阶在【拉丁文字】语言下的叫法 —— 读音换成词根。</summary>
+    // ★ 四个档位名【一律两个字】(用户裁定:长度要统一)——
+    //   竖排在滑条旁边,长短不齐会显得歪。第二阶随目标语言在读音/词根之间切换,
+    //   两者都是两个字;目标池混着拉丁与非拉丁时用中性的「词解」兜住,同样两个字。
     public const string ReadingLabel = "读音";
     public const string RootLabel = "词根";
+    /// <summary>目标池里拉丁与非拉丁混着时的中性说法(具体给什么,tip 气泡里讲清楚)。</summary>
+    public const string MixedLabel = "词解";
 
     public static readonly (TranslationLevel Level, string Name, string Desc)[] All =
     {
         (TranslationLevel.Plain,   "直译", "只给译文,最快"),
-        (TranslationLevel.Reading, "读音", "译文 + 读音标注;拉丁文字语言(英/德…)不标读音,改给词根"),
+        (TranslationLevel.Reading, "词解", "译文 + 读音标注;拉丁文字语言(英/德…)不标读音,改给词根"),
         (TranslationLevel.Example, "例句", "再加一个例句"),
         (TranslationLevel.Grammar, "语法", "再加语法:时态、人称变位、格与词序等"),
     };
@@ -183,11 +187,11 @@ public static class TranslationLevels
     public static string SecondStageLabel(IEnumerable<string> targetCodes)
     {
         var codes = targetCodes.ToList();
-        if (codes.Count == 0) return $"{ReadingLabel} / {RootLabel}";
+        if (codes.Count == 0) return MixedLabel;
         var latin = codes.Count(Languages.IsLatinScript);
-        if (latin == 0) return ReadingLabel;
-        if (latin == codes.Count) return RootLabel;
-        return $"{ReadingLabel} / {RootLabel}";
+        if (latin == 0) return ReadingLabel;          // 全是中日韩 -> 读音
+        if (latin == codes.Count) return RootLabel;   // 全是英德 -> 词根
+        return MixedLabel;                            // 混着 -> 中性说法,长度仍是两个字
     }
 
     /// <summary>

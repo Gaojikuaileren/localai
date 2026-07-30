@@ -32,10 +32,16 @@ public sealed class TranslationBar : UserControl
     /// 目标池 = 1 列 × 3 行语言标签;语言池 = 2 列 × 3 行,宽度正好是目标池的两倍(用户裁定)。
     /// ★ 标签在格子里【拉伸填满】,所以"1×3 / 2×3"是真的格子,不是靠估宽度凑出来的。
     /// </summary>
-    const double TargetPoolWidth = 92;
+    const double TargetPoolWidth = 110;
     const double LangPoolWidth = TargetPoolWidth * 2;
     /// <summary>翻译程度那一列的宽度:一条竖滑条 + 四个档位名。</summary>
-    const double LevelWidth = 132;
+    const double LevelWidth = 104;
+    /// <summary>语言池的坑数(2 列 × 3 行)。</summary>
+    const int PoolSlots = 6;
+    /// <summary>每个坑的高度 —— 语言卡和空坑必须一样高,否则填进去的瞬间会跳。</summary>
+    const double SlotHeight = 30;
+    /// <summary>四个板块之间统一的间距。</summary>
+    const double Gap = 10;
 
     // 负的下边距吃掉【最后一行气泡】的 6px 外边距 —— 否则内容比可视区高 6px,
     // ScrollViewer 就会挂出一条多余的滚动条(渲染诊断里看得一清二楚)。
@@ -58,9 +64,11 @@ public sealed class TranslationBar : UserControl
         //   目标池与语言池是【并列关系】—— 左右排布、同宽同高,而不是一上一下。
         //   语言在两者之间拖来拖去,并排才看得出"从这边搬到那边"。
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth) });            // 翻译程度(竖)
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + 8) });   // 目标池 1×3
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + 8) });     // 语言池 2×3(两倍宽)
+        // ★ 三个板块之间的间距【一律相同】(用户裁定):每一列都比卡片宽出一个 Gap,
+        //   于是间隔全落在卡片右侧、大小一致;剩下的宽度全归学习笔记。
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth + Gap) });      // 翻译程度(竖)
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + Gap) }); // 目标池 1×3
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });   // 语言池 2×3(两倍宽)
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 学习笔记(占剩下的)
 
         var lvl = LevelCard(); Grid.SetColumn(lvl, 0);
@@ -197,12 +205,73 @@ public sealed class TranslationBar : UserControl
 
     FrameworkElement PoolCard()
     {
-        _poolBox = Card(_poolWrap, "语言池",
-            gear: () => (Application.Current.MainWindow as MainWindow)?.OpenLanguagePoolSettings());
+        // ★ 不再要齿轮:进设置的入口改成【空坑里的 +】(用户裁定)——
+        //   加语言这件事本来就发生在"还有空位"的时候,把入口放在空位上比放在标题角上更顺手。
+        //   只有一种情况坑全满、放不下 +:那时退回标题角上的小 + (下面 RefreshPools 里处理)。
+        _poolBox = Card(_poolWrap, "语言池", action: _poolHeaderAdd);
         _poolBox.Width = LangPoolWidth;
         _poolBox.HorizontalAlignment = HorizontalAlignment.Left;
         return _poolBox;
     }
+
+    /// <summary>坑全满时退到标题角上的「+」。平时藏起来。</summary>
+    // 坑全满时退到标题角上的「+」。平时 Collapsed。
+    readonly FrameworkElement _poolHeaderAdd = Chip("+", OpenPoolSettings);
+
+    /// <summary>
+    /// 一个【空坑】。虚线描边、浅色,一眼看出"这里可以放一个语言"。
+    /// hint 为空 = 不写字(语言池的空坑不需要提示,用户裁定)。
+    /// </summary>
+    Border EmptySlot(string? hint = null, Action? onClick = null)
+    {
+        var box = new Border
+        {
+            Height = SlotHeight,
+            Margin = new Thickness(0, 0, 6, 6),
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(1),
+            // 虚线:与"实心的语言卡"一眼可分 —— 这是坑,不是内容
+            BorderBrush = System.Windows.Media.Brushes.Transparent,
+            Background = System.Windows.Media.Brushes.Transparent,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        box.SetResourceReference(Border.BorderBrushProperty, "Border");
+        box.Opacity = 0.55;
+
+        if (hint is { Length: > 0 })
+        {
+            var t = new TextBlock
+            {
+                Text = hint,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            box.Child = t;
+        }
+
+        if (onClick is not null)
+        {
+            box.Cursor = Cursors.Hand;
+            box.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+            box.MouseEnter += (_, _) => box.Opacity = 1;
+            box.MouseLeave += (_, _) => box.Opacity = 0.55;
+        }
+        return box;
+    }
+
+    /// <summary>空坑里的「+」:点它去设置里增删语言池。</summary>
+    Border AddSlot()
+    {
+        var slot = EmptySlot("+", OpenPoolSettings);
+        if (slot.Child is TextBlock t) t.FontSize = 15;
+        slot.Opacity = 0.7;
+        return slot;
+    }
+
+    static void OpenPoolSettings()
+        => (Application.Current.MainWindow as MainWindow)?.OpenLanguagePoolSettings();
 
     void RefreshPools()
     {
@@ -213,25 +282,38 @@ public sealed class TranslationBar : UserControl
         _poolBox.Opacity = poolDisabled ? 0.45 : 1;
         _poolBox.IsHitTestVisible = !poolDisabled;
 
-        _poolWrap.Children.Clear();
-        foreach (var code in TheApp.Settings.TranslationPool)
-        {
-            var l = Languages.Find(code);
-            if (l is null || st.Contains(code)) continue;     // 已在目标池的不在这边重复出现
-            _poolWrap.Children.Add(Bubble(l, selected: false, stackIndex: _poolWrap.Children.Count));
-        }
-        if (_poolWrap.Children.Count == 0)
-            _poolWrap.Children.Add(Ui.Caption(poolDisabled ? "目标池已满(3)" : "都在目标池里了"));
+        // ★★ 两个池子都是【固定的坑】(用户裁定):目标池 3 个、语言池 6 个。
+        //   拖进拖出只是往坑里填人/腾空,【排版一动不动】—— 此前是有几个画几个,
+        //   于是每拖一次整块都在重排,看着就像界面在抖。
 
+        // 语言池:6 个坑。已在目标池的不在这边重复出现;剩下的坑空着(不写提示,用户裁定),
+        // 第一个空坑放「+」当作进设置的入口。
+        _poolWrap.Children.Clear();
+        var avail = TheApp.Settings.TranslationPool
+            .Where(c => !st.Contains(c) && Languages.Find(c) is not null)
+            .Take(PoolSlots)
+            .ToList();
+        for (int i = 0; i < PoolSlots; i++)
+        {
+            if (i < avail.Count)
+                _poolWrap.Children.Add(Bubble(Languages.Find(avail[i])!, selected: false, stackIndex: i));
+            else if (i == avail.Count)
+                _poolWrap.Children.Add(AddSlot());          // 第一个空坑 = 加语言的入口
+            else
+                _poolWrap.Children.Add(EmptySlot());        // 其余空坑:纯占位,不写字
+        }
+        // 坑全满时 + 没地方放 -> 退回标题角上那个
+        _poolHeaderAdd.Visibility = avail.Count >= PoolSlots ? Visibility.Visible : Visibility.Collapsed;
+
+        // 目标池:3 个坑,空坑写一个浅色的「拖入」
         _targetWrap.Children.Clear();
-        if (st.Targets.Count == 0)
-            _targetWrap.Children.Add(Ui.Caption($"拖进来{Environment.NewLine}(最多 {Languages.MaxTargets})"));
-        else
-            foreach (var code in st.Targets)
-            {
-                var l = Languages.Find(code);
-                if (l is not null) _targetWrap.Children.Add(Bubble(l, selected: true, stackIndex: _targetWrap.Children.Count));
-            }
+        for (int i = 0; i < Languages.MaxTargets; i++)
+        {
+            if (i < st.Targets.Count && Languages.Find(st.Targets[i]) is { } l)
+                _targetWrap.Children.Add(Bubble(l, selected: true, stackIndex: i));
+            else
+                _targetWrap.Children.Add(EmptySlot("拖入"));
+        }
     }
 
     /// <summary>
@@ -263,7 +345,7 @@ public sealed class TranslationBar : UserControl
             // ★ 固定高度 + 顶对齐:UniformGrid 会把每个格子撑满可用高度,
             //   不钉住的话标签会被拉成一根高条(渲染诊断里当场看到)。
             VerticalAlignment = VerticalAlignment.Top,
-            Height = 30,
+            Height = SlotHeight,
             CornerRadius = new CornerRadius(playful ? 8 : 14),   // 卡片是方一点的圆角,胶囊才是大圆角
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
@@ -431,7 +513,7 @@ public sealed class TranslationBar : UserControl
         var card = Card(_notesPreview, "学习笔记",
             action: Chip("全部", () => (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(
                 "学习笔记", new NotesBoardView(), IconName.Translation)));
-        card.Margin = new Thickness(8, 0, 0, 0);
+        // 间距统一由列宽给(见构造函数的 Gap),这里不再自带边距,否则会叠加成两倍
         return card;
     }
 

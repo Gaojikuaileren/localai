@@ -1226,6 +1226,28 @@ public static class Selftest
                        "★ 目标池与语言池左右并列(不再一上一下)");
                 Assert(tbSrc.Contains("const double LangPoolWidth = TargetPoolWidth * 2;"),
                        "★ 语言池宽度正好是目标池的两倍(用户裁定)");
+                // ★ 固定的坑:拖进拖出只是填人/腾空,排版一动不动(此前是有几个画几个,每拖一次整块重排)
+                Assert(tbSrc.Contains("for (int i = 0; i < Languages.MaxTargets; i++)")
+                       && tbSrc.Contains("EmptySlot(\"拖入\")"),
+                       "★ 目标池是 3 个固定的坑,空坑写浅色的「拖入」");
+                Assert(tbSrc.Contains("for (int i = 0; i < PoolSlots; i++)") && tbSrc.Contains("const int PoolSlots = 6"),
+                       "★ 语言池是 6 个固定的坑");
+                Assert(tbSrc.Contains("_poolWrap.Children.Add(EmptySlot());"),
+                       "语言池的空坑不写提示(用户裁定)");
+                Assert(tbSrc.Contains("AddSlot()") && !Body(tbSrc).Contains("gear:"),
+                       "★ 进设置的入口改成空坑里的「+」,齿轮撤掉");
+                Assert(tbSrc.Contains("Height = SlotHeight") && tbSrc.Contains("const double SlotHeight"),
+                       "语言卡与空坑等高(不然填进去的瞬间会跳)");
+                Assert(tbSrc.Contains("LevelWidth + Gap") && tbSrc.Contains("TargetPoolWidth + Gap") && tbSrc.Contains("LangPoolWidth + Gap"),
+                       "★ 三个板块之间间距一致,剩下的宽度全归学习笔记");
+                // 档位名一律两个字(竖排在滑条边上,长短不齐会显得歪)
+                foreach (var lv in Services.TranslationLevels.All)
+                    Assert(lv.Name.Length == 2, "★ 档位名统一两个字:" + lv.Name);
+                Assert(Services.TranslationLevels.SecondStageLabel(new[] { "ja", "en" }).Length == 2,
+                       "★ 混合目标池下第二阶也是两个字(中性说法)");
+                Assert(Services.TranslationLevels.SecondStageLabel(new[] { "ja" }) == "读音"
+                       && Services.TranslationLevels.SecondStageLabel(new[] { "en", "de" }) == "词根",
+                       "不混的时候仍给精确的说法");
                 Assert(tbSrc.Contains("UniformGrid _targetWrap = new() { Columns = 1")
                        && tbSrc.Contains("UniformGrid _poolWrap = new() { Columns = 2"),
                        "★ 目标池 1 列、语言池 2 列 —— 是真的格子,不是估宽度凑的");
