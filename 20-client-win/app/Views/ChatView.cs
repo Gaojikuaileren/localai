@@ -33,6 +33,7 @@ public sealed class ChatView : UserControl
     bool _trashOpen;      // 已删除会话【覆盖板块】开着(覆盖普通会话列表,可返回)
     bool _wasEmptyState;  // 上一次会话区是"空态居中输入框"—— 用于居中→底部的滑动动画
     readonly Dictionary<string, int> _seenMsgCount = new();   // 会话 -> 已经出现过的消息条数(只给新增的播动画)
+    readonly HashSet<string> _expandedBubbles = new();        // 被用户展开的超长消息(会话#序号)
     readonly StackPanel _sessions = new();
     readonly ContentControl _conv = new();   // 会话区(空态居中 / 有消息则底部输入)
     TextBox _input = new();
@@ -482,6 +483,15 @@ public sealed class ChatView : UserControl
         _input.TextChanged += (_, _) => _draft = _input.Text;
         _input.PreviewKeyDown += (_, e) =>
         {
+            // ★ Ctrl+V 必须在【按键层】处理,不能只靠 DataObject.Pasting:
+            //   剪贴板里【只有图片没有文本】时,TextBox 认为自己消费不了这个格式,
+            //   于是 Paste 命令根本不可执行 —— 粘贴处理器压根不会被调用,
+            //   表现就是"截图粘不进去"(用户实测反馈)。这里自己判、自己收。
+            if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+            {
+                if (TryPasteAttachment()) { e.Handled = true; return; }
+                return;   // 普通文本粘贴照常走 TextBox 自己的处理
+            }
             if (e.Key != Key.Enter) return;
             // Shift/Ctrl + Enter = 换行;单独 Enter = 发送
             if ((Keyboard.Modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) != 0) return;
@@ -610,7 +620,7 @@ public sealed class ChatView : UserControl
             var seen = _seenMsgCount.TryGetValue(seenKey, out var n) ? n : all.Count;   // 首次进会话不animate
             for (int i = 0; i < all.Count; i++)
             {
-                var bubble = Bubble(all[i]);
+                var bubble = Bubble(all[i], i);
                 if (i >= seen) AnimateIn(bubble, delayMs: (i - seen) * 70);   // 用户消息 + 随后的系统说明依次浮现
                 msgs.Children.Add(bubble);
             }
@@ -656,7 +666,8 @@ public sealed class ChatView : UserControl
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
         if (hasMsgs)
         {
-            foreach (var m in TheApp.Chat.MessagesOf(_sessionId!)) msgs.Children.Add(Bubble(m));
+            var list = TheApp.Chat.MessagesOf(_sessionId!).ToList();
+            for (int i = 0; i < list.Count; i++) msgs.Children.Add(Bubble(list[i], i));
         }
         else
         {
@@ -701,7 +712,8 @@ public sealed class ChatView : UserControl
         if (_sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any())
         {
             var msgs = new StackPanel();
-            foreach (var m in TheApp.Chat.MessagesOf(_sessionId!)) msgs.Children.Add(Bubble(m));
+            var ro = TheApp.Chat.MessagesOf(_sessionId!).ToList();
+            for (int i = 0; i < ro.Count; i++) msgs.Children.Add(Bubble(ro[i], i));
             body = new ScrollViewer { Content = msgs, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }.PassThrough();
         }
         else
@@ -779,6 +791,9 @@ public sealed class ChatView : UserControl
         row.Children.Add(branch);
         return row;
     }
+
+    // 折叠状态按【会话 + 序号】记 —— 消息本身没有 id,而重建时同一条的序号是稳定的
+    string BubbleKey(ChatMessage m, int index) => $"{m.SessionId}#{index}";
 
     /// <summary>新消息浮现:从下方微微上移 + 淡入(缓出)。delayMs 让连着的几条依次出现。</summary>
     static void AnimateIn(FrameworkElement el, int delayMs)
@@ -858,7 +873,7 @@ public sealed class ChatView : UserControl
         return Ui.Card(box, new Thickness(0));
     }
 
-    FrameworkElement Bubble(ChatMessage m)
+    FrameworkElement Bubble(ChatMessage m, int index = -1)
     {
         if (m.Role == ChatRole.System)
         {
@@ -879,9 +894,40 @@ public sealed class ChatView : UserControl
         }
         if (m.Text.Length > 0)
         {
-            var tb = new TextBlock { Text = m.Text, TextWrapping = TextWrapping.Wrap };
+            var tb = new TextBlock { TextWrapping = TextWrapping.Wrap };
             tb.SetResourceReference(TextBlock.ForegroundProperty, user ? "FgOnAccent" : "FgPrimary");
-            stack.Children.Add(tb);
+
+            // ★ 超长文本【默认折叠】(用户裁定):只显示前 N 行,点一下展开,再点收起。
+            //   ——【只是显示折叠】。给 AI 的永远是全文(m.Text 一个字都没少),折叠不影响数据。
+            var lines = m.Text.Split('\n');
+            if (lines.Length > CollapseLines)
+            {
+                var key = BubbleKey(m, index);
+                var expanded = _expandedBubbles.Contains(key);
+                tb.Text = expanded ? m.Text : string.Join("\n", lines.Take(CollapseLines));
+                stack.Children.Add(tb);
+
+                var toggle = new TextBlock
+                {
+                    Text = expanded ? "收起" : $"展开全部({lines.Length} 行)",
+                    Cursor = Cursors.Hand, Margin = new Thickness(0, 6, 0, 0),
+                    TextDecorations = TextDecorations.Underline,
+                };
+                toggle.SetResourceReference(TextBlock.ForegroundProperty, user ? "FgOnAccent" : "FgSecondary");
+                toggle.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+                toggle.MouseLeftButtonUp += (_, e) =>
+                {
+                    e.Handled = true;
+                    if (!_expandedBubbles.Remove(key)) _expandedBubbles.Add(key);
+                    BuildConversation();
+                };
+                stack.Children.Add(toggle);
+            }
+            else
+            {
+                tb.Text = m.Text;
+                stack.Children.Add(tb);
+            }
         }
         var bubble = new Border
         {
@@ -936,6 +982,9 @@ public sealed class ChatView : UserControl
     // 附件上限与"上下文吃紧"阈值(用户裁定):最多 99 个;超过 5 个提示、且只展开显示前 5 个。
     /// <summary>输入框最多长到几行,再多就在框内滚动(用户裁定:3 行)。</summary>
     const int InputMaxLines = 3;
+
+    /// <summary>消息超过这么多行就【默认折叠】显示(用户裁定:50 行)。★ 只折叠显示,给 AI 的仍是全文。</summary>
+    const int CollapseLines = 50;
 
     const int MaxAttachments = 99;
     const int SoftAttachLimit = 5;
@@ -1010,6 +1059,41 @@ public sealed class ChatView : UserControl
     }
 
     // 在输入框里粘贴:剪贴板是图片就收进附件栏(而不是把图片/乱码贴成文本);纯文本粘贴照常。
+    /// <summary>
+    /// Ctrl+V:如果剪贴板里是【文件】或【图片】,就收进附件栏并返回 true(这次按键由我们消化)。
+    /// 纯文本返回 false,交给 TextBox 自己粘贴。规则见 ClipboardIntent.Decide(可单测)。
+    /// </summary>
+    bool TryPasteAttachment()
+    {
+        try
+        {
+            var intent = ClipboardIntent.Decide(
+                hasFiles: Clipboard.ContainsFileDropList(),
+                hasImage: Clipboard.ContainsImage(),
+                hasText: Clipboard.ContainsText());
+
+            switch (intent)
+            {
+                case ClipboardIntent.Kind.Files:
+                    var files = Clipboard.GetFileDropList().Cast<string?>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToList();
+                    if (files.Count == 0) return false;
+                    AddPaths(files);
+                    return true;
+                case ClipboardIntent.Kind.Image:
+                    AddClipboardImage();
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            // 剪贴板被别的进程占用会抛 —— 如实说一声,别静默失败让人以为"粘不进去"
+            ConfirmDialog.Show("粘贴失败", ex.Message, confirmText: "好", cancelText: "关闭");
+            return true;
+        }
+    }
+
     void OnInputPaste(object sender, DataObjectPastingEventArgs e)
     {
         try

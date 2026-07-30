@@ -720,6 +720,35 @@ public static class Selftest
                        "★ 可以粘贴【文件】进附件栏(从资源管理器复制)");
                 Assert(cvInput.Contains("DispatcherPriority.Background") && cvInput.Contains("AddClipboardImage"),
                        "粘贴截图延后执行(粘贴处理器里直接重建界面会打断输入事件)");
+                // ★ 真 bug:剪贴板【只有图片】时 TextBox 的 Paste 命令不可执行 -> DataObject.Pasting 压根不触发,
+                //   所以 Ctrl+V 必须在【按键层】自己处理(用户实测"截图粘不进去")
+                Assert(cvInput.Contains("e.Key == Key.V") && cvInput.Contains("TryPasteAttachment()"),
+                       "★ Ctrl+V 在按键层处理(只挂 DataObject.Pasting 时截图粘不进去)");
+                Assert(cvInput.Contains("ClipboardIntent.Decide"), "粘贴意图走可单测的纯函数");
+            }
+            {
+                // 粘贴规则(纯函数,可单测)
+                Assert(Services.ClipboardIntent.Decide(hasFiles: true, hasImage: false, hasText: true) == Services.ClipboardIntent.Kind.Files,
+                       "★ 有文件就当附件(资源管理器复制会附带路径文本,那不是用户要的内容)");
+                Assert(Services.ClipboardIntent.Decide(false, true, false) == Services.ClipboardIntent.Kind.Image,
+                       "★ 只有图片 -> 当附件(截图的典型情形)");
+                Assert(Services.ClipboardIntent.Decide(false, true, true) == Services.ClipboardIntent.Kind.Text,
+                       "图片+文本 -> 走文本(网页富文本多半要的是字)");
+                Assert(Services.ClipboardIntent.Decide(false, false, true) == Services.ClipboardIntent.Kind.Text,
+                       "纯文本 -> 走文本");
+            }
+
+            // ---- 超长消息默认折叠(只折叠显示,给 AI 的仍是全文)----
+            var cvFold = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvFold is not null)
+            {
+                Assert(cvFold.Contains("CollapseLines = 50"), "超过 50 行的消息默认折叠");
+                Assert(cvFold.Contains("展开全部(") && cvFold.Contains("\"收起\""), "可展开、可再次收起");
+                Assert(cvFold.Contains("_expandedBubbles"), "展开状态按会话+序号记住(重建后不丢)");
+                // ★ 折叠只影响显示 —— 发送与存储用的都是 m.Text 全文;截行只发生在渲染那一句
+                Assert(cvFold.Contains("expanded ? m.Text : string.Join(\"\\n\", lines.Take(CollapseLines))"),
+                       "★ 折叠只截【显示】的行,原文一个字没少(给 AI 的是全文)");
+                Assert(cvFold.Contains("只是显示折叠"), "代码里写明折叠不影响发给 AI 的内容");
             }
 
             // ---- 附件栏重做(2026-07-30 用户裁定)----
