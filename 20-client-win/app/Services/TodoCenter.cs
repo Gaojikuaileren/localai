@@ -7,7 +7,7 @@
 //
 // ★ 与日历不同:日历是【镜像 Apple 家庭共享日历】,本地改不了、故保存如实拒绝;
 //   待办/家务是【中枢自有数据】,手动新增/编辑/删除【当场生效】,不是伪造。
-//   目前存在内存里(与项目、日历示例同一处理),【跨设备同步与落盘持久化】随中枢接入(P4+)启用 ——
+//   本机【已落盘】(明文,D50 / ClientStore);【跨设备同步】随中枢接入(P4+)启用 ——
 //   界面上如实说明,不谎称已跨设备同步。
 //
 // 标题 / 备注是自由文本:仅作显示,永不进 prompt(与设备自报名同一纪律)。
@@ -33,7 +33,8 @@ public sealed record TodoItem(
     string? Notes = null,
     string Owner = "我",
     string Scope = "家庭",
-    DateTime? CompletedAt = null)
+    DateTime? CompletedAt = null,
+    bool CreatedByAi = false)   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
 {
     /// <summary>已逾期:有截止、未完成、且截止在此刻之前。</summary>
     public bool IsOverdue => Due is { } d && !Done && d < DateTime.Now;
@@ -112,6 +113,34 @@ public sealed class TodoCenter
         return _items.Where(t => !t.Done || InGrace(t, now))
                      .OrderBy(t => t.Due ?? DateTime.MaxValue)
                      .ThenBy(t => t.Title, StringComparer.CurrentCulture);
+    }
+
+    /// <summary>批量删除:一次删掉给定的若干条(已完成抽屉的多选删除用它)。</summary>
+    public void RemoveMany(IEnumerable<string> ids)
+    {
+        var set = ids.ToHashSet();
+        if (set.Count == 0) return;
+        if (_items.RemoveAll(x => set.Contains(x.Id)) > 0) Changed?.Invoke();
+    }
+
+    /// <summary>清空全部已完成(批量删除的"全选"入口)。</summary>
+    public void ClearCompleted()
+    {
+        if (_items.RemoveAll(x => x.Done) > 0) Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 自动清理:删掉【完成时间】早于 days 天的已完成事项。days &lt;= 0 表示不自动清理。
+    /// asOf 供测试注入。返回删掉的条数。
+    /// </summary>
+    public int PurgeCompletedOlderThan(int days, DateTime? asOf = null)
+    {
+        if (days <= 0) return 0;                       // 0 = 关闭自动清理(默认)
+        var cutoff = (asOf ?? DateTime.Now).AddDays(-days);
+        // 只清【有完成时间且早于阈值】的;没有时间戳的不动(宁可留着也不误删)
+        var n = _items.RemoveAll(x => x.Done && x.CompletedAt is { } c && c < cutoff);
+        if (n > 0) Changed?.Invoke();
+        return n;
     }
 
     /// <summary>已完成抽屉:全部已完成,最近完成在前。</summary>

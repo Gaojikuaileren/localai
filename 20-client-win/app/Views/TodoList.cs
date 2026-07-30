@@ -68,6 +68,15 @@ public static class TodoList
             sub.Children.Add(tb);
         }
         Meta(t.Kind == TodoKind.Chore ? "家务" : "待办", "FgMuted");
+        // ★ AI 建立的用小星标区分(用户裁定:要能一眼看出是手动建的还是 AI 建的)
+        if (t.CreatedByAi)
+        {
+            var ai = LocalAI.Client.Theme.Icons.Make(LocalAI.Client.Theme.IconName.Ai, 12, "Accent");
+            ai.Margin = new Thickness(6, 0, 0, 0);
+            ai.VerticalAlignment = VerticalAlignment.Center;
+            ai.ToolTip = "由 AI 建立";
+            sub.Children.Add(ai);
+        }
         if (t.Due is { } due)
             Meta("  ·  " + FormatDue(due, t.DueHasTime), t.IsOverdue ? "RiskDanger" : "FgMuted");
         if (t.Flagged)

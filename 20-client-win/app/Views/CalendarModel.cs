@@ -20,7 +20,8 @@ public sealed record CalendarEvent(
     string? CalendarGroup = null,   // iCloud 日历组(接入后由服务端给出可选集合)
     string? Location = null,        // 仅字符,不做地理解析
     string? Url = null,
-    string? Notes = null)
+    string? Notes = null,
+    bool CreatedByAi = false)   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
 {
     /// <summary>跨天判定:全天日程按【日期区间】算,定时日程只属于起始那天。</summary>
     public DateTime FirstDay => Start.Date;

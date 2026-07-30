@@ -77,6 +77,8 @@ public partial class App : Application
         // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
         //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。
         if (!hadStore) SaveStores();
+        // 按"自动删除超过 X 天的已完成"设置清一次(0 = 关闭)。放在建窗口前,界面直接看到清理后的结果。
+        Todos.PurgeCompletedOlderThan(Settings.TodoAutoPurgeDays);
 
         _main = new MainWindow();
         _main.Closing += OnMainWindowClosing;
@@ -120,6 +122,8 @@ public partial class App : Application
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)交电费", TodoKind.Personal,
             Due: DateTime.Today.AddDays(1), Flagged: true, Priority: TodoPriority.High, Owner: "我", Scope: "个人"));
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)预约理发", TodoKind.Personal, Owner: "我", Scope: "个人"));
+        Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)续借图书馆的书", TodoKind.Personal,
+            Due: DateTime.Today.AddDays(2), Owner: "我", Scope: "个人", CreatedByAi: true));   // AI 建立 -> 带星标
         Todos.Add(new TodoItem(TodoCenter.NewId(), "(示例)倒垃圾", TodoKind.Chore,
             Done: true, Owner: "我", Scope: "家庭", CompletedAt: DateTime.Now.AddHours(-2)));
     }

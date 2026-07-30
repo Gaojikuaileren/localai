@@ -399,6 +399,57 @@ public static class Selftest
             cc3.SweepExpiredDeleted(DateTime.Now.AddDays(Services.ChatCenter.TrashRetentionDays + 1));
             Assert(cc3.Find(sa.SessionId) is null, "超过保留期自动清除(不可恢复)");
 
+            // ---- 待办:批量删除 / 自动清理 / AI 建立标记 ----
+            {
+                var tc = new Services.TodoCenter();
+                var a1 = tc.Add(new Services.TodoItem("", "手动建的", Services.TodoKind.Personal));
+                var a2 = tc.Add(new Services.TodoItem("", "AI 建的", Services.TodoKind.Personal, CreatedByAi: true));
+                Assert(!tc.Items.First(x => x.Id == a1).CreatedByAi, "手动建立不带 AI 标记");
+                Assert(tc.Items.First(x => x.Id == a2).CreatedByAi, "AI 建立带 AI 标记(界面据此显示星标)");
+
+                // 批量删除
+                var b1 = tc.Add(new Services.TodoItem("", "批删1", Services.TodoKind.Chore));
+                var b2 = tc.Add(new Services.TodoItem("", "批删2", Services.TodoKind.Chore));
+                tc.RemoveMany(new[] { b1, b2 });
+                Assert(!tc.Items.Any(x => x.Id == b1 || x.Id == b2), "批量删除一次删掉多条");
+
+                // 清空已完成:只清已完成,未完成的不动
+                tc.Toggle(a2);
+                tc.ClearCompleted();
+                Assert(tc.Items.Any(x => x.Id == a1), "清空已完成不动未完成的");
+                Assert(!tc.Items.Any(x => x.Id == a2), "清空已完成删掉已完成的");
+
+                // 自动清理:按完成时间算;0 = 关闭;没有完成时间戳的不误删
+                var pc2 = new Services.TodoCenter();
+                var old = pc2.Add(new Services.TodoItem("", "很久前完成", Services.TodoKind.Personal,
+                    Done: true, CompletedAt: DateTime.Now.AddDays(-40)));
+                var fresh = pc2.Add(new Services.TodoItem("", "刚完成", Services.TodoKind.Personal,
+                    Done: true, CompletedAt: DateTime.Now.AddDays(-1)));
+                var noStamp = pc2.Add(new Services.TodoItem("", "完成但没时间戳", Services.TodoKind.Personal, Done: true));
+                Assert(pc2.PurgeCompletedOlderThan(0) == 0, "0 天 = 关闭自动清理,一条都不删");
+                Assert(pc2.Items.Count == 3, "关闭时确实没删");
+                var n = pc2.PurgeCompletedOlderThan(30);
+                Assert(n == 1 && !pc2.Items.Any(x => x.Id == old), "清掉超过 30 天完成的");
+                Assert(pc2.Items.Any(x => x.Id == fresh), "没超期的保留");
+                Assert(pc2.Items.Any(x => x.Id == noStamp), "★ 没有完成时间戳的不误删(宁可留着)");
+            }
+            var arch = TryReadSource(Path.Combine("Views", "TodoArchiveView.cs"));
+            if (arch is not null)
+            {
+                Assert(arch.Contains("RemoveMany") && arch.Contains("全选"), "已完成抽屉有批量删除(含全选)");
+                Assert(arch.Contains("TodoAutoPurgeDays") && arch.Contains("PurgeCompletedOlderThan"), "已完成抽屉可设自动清理天数");
+                Assert(arch.Contains("ConfirmDialog.Show"), "批量删除走自绘二次确认");
+            }
+            var tlSrc = TryReadSource(Path.Combine("Views", "TodoList.cs"));
+            if (tlSrc is not null)
+                Assert(tlSrc.Contains("CreatedByAi") && tlSrc.Contains("IconName.Ai"), "待办行显示 AI 建立标记");
+            var calMod = TryReadSource(Path.Combine("Views", "CalendarModel.cs"));
+            if (calMod is not null)
+                Assert(calMod.Contains("CreatedByAi"), "日程模型也带 AI 建立标记");
+            var appPurge = TryReadSource("App.xaml.cs");
+            if (appPurge is not null)
+                Assert(appPurge.Contains("PurgeCompletedOlderThan(Settings.TodoAutoPurgeDays)"), "启动时按设置自动清理一次");
+
             // ---- D45 可见范围过滤(fail-closed)----
             {
                 const string me = "m-me", other = "m-other";

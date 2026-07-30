@@ -75,6 +75,12 @@ public sealed class AppSettings
 
     bool AddHiddenPanel(string key) { HiddenPanels.Add(key); return true; }
 
+    /// <summary>
+    /// 自动删除【超过 X 天】的已完成待办。0 = 不自动删除(默认,保守:不替用户丢东西)。
+    /// 在"待办 › 已完成"抽屉里设置。
+    /// </summary>
+    public int TodoAutoPurgeDays { get; set; }
+
     // ---- 模型(在"系统 › 模型"里设置)。★ 这些是【偏好】:接入 GPU Broker(P4)后才真正装载模型。----
     /// <summary>各模型权重的统一存放目录(接入后中枢按此路径加载)。</summary>
     public string? ModelStorePath { get; set; }

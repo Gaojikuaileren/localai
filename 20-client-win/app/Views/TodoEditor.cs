@@ -103,7 +103,8 @@ public static class TodoEditor
                 Notes: string.IsNullOrWhiteSpace(notes.Text) ? null : notes.Text,
                 Owner: owners[Math.Max(0, owner.SelectedIndex)],
                 Scope: scopes[Math.Max(0, scope.SelectedIndex)],
-                CompletedAt: existing?.CompletedAt);   // 保留完成时间戳,编辑不影响归档
+                CompletedAt: existing?.CompletedAt,   // 保留完成时间戳,编辑不影响归档
+                CreatedByAi: existing?.CreatedByAi ?? false);   // 保留"AI 建立"标记(编辑不抹掉出处)
         }
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
@@ -139,7 +140,7 @@ public static class TodoEditor
 
             buttons,
             status,
-            Ui.Caption("新增/修改当场生效;跨设备同步与持久化在接入中枢后启用。")
+            Ui.Caption("新增/修改当场生效并保存在本机;【跨设备同步】在接入中枢后启用。")
         );
 
         return new ScrollViewer

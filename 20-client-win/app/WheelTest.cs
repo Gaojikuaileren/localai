@@ -39,13 +39,14 @@ public static class WheelTest
             new(TodoCenter.NewId(), "买菜:西红柿、鸡蛋、牛奶", TodoKind.Chore, Due: DateTime.Today.AddHours(18), DueHasTime: true),
             new(TodoCenter.NewId(), "交电费", TodoKind.Personal, Due: DateTime.Today.AddDays(-1), Flagged: true, Priority: TodoPriority.High),
             new(TodoCenter.NewId(), "预约理发", TodoKind.Personal),
+            new(TodoCenter.NewId(), "续借图书馆的书", TodoKind.Personal, Due: DateTime.Today.AddDays(2), CreatedByAi: true),
             new(TodoCenter.NewId(), "倒垃圾", TodoKind.Chore, Done: true),
         };
         foreach (var t in demo) list.Children.Add(TodoList.Row(t, () => { }, () => { }));
         var panel = Ui.Panel("待办事项", list, IconName.Member, new Thickness(0),
             headerAction: Ui.PlusButton(() => { }, "新增"));
         panel.Width = 300;
-        Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 320);
+        Save(Themed(panel), Path.Combine(outDir, "todo-panel.png"), 320, 360);
 
         // 问候块:大字号主句 + 小助手副句,约 1/3 宽
         var gbox = new StackPanel { Width = 300 };
@@ -59,7 +60,7 @@ public static class WheelTest
 
         // 图标核对:财务管理(钱包)vs 投资(走势图)要能一眼区分
         var icons = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var ic in new[] { IconName.Folder, IconName.Model, IconName.Finance, IconName.Chat, IconName.Computer })
+        foreach (var ic in new[] { IconName.Ai, IconName.Folder, IconName.Model, IconName.Finance, IconName.Chat })
         {
             var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
             var el = Icons.Make(ic, 34, "FgPrimary");
