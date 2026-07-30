@@ -173,6 +173,22 @@ public static class WheelTest
         Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-full.png"), 1000, (int)TranslationBar.BarHeight + 48);
         ClearTargets(app);
 
+        // ★ 消息气泡的【正文对比度】:三种皮肤各画一张。
+        //   这类毛病(底色被模板写死 -> 白字糊在灰底上)无头断言看不见,只有画出来才发现 —— 已经栽过一次。
+        foreach (var (skin, file) in new[] { (Skin.Breeze, "bubbles-breeze.png"), (Skin.Ink, "bubbles-ink.png"), (Skin.Warm, "bubbles-warm.png") })
+        {
+            ThemeManager.Initialize(skin);
+            var conv = new StackPanel { Width = 460 };
+            var mine = ChatView.MessageText(user: true);
+            mine.Text = "这是我发出去的消息,应该是强调色底 + 反白字,能选中能复制。";
+            conv.Children.Add(ChatView.BubbleShell(mine, user: true));
+            var theirs = ChatView.MessageText(user: false);
+            theirs.Text = "这是 AI 的回复,应该是沉底色 + 正文色。";
+            conv.Children.Add(ChatView.BubbleShell(theirs, user: false));
+            Save(Themed(conv), Path.Combine(outDir, file), 500, 160);
+        }
+        ThemeManager.Initialize(Skin.Breeze);
+
         // 放大镜发送键:画的就是界面里那一个(SearchSendButton),不是复刻件
         var sendRow = new StackPanel { Orientation = Orientation.Horizontal };
         var sendOn = ChatView.SearchSendButton(() => { }); sendOn.Height = 40;

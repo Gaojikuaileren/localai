@@ -893,6 +893,22 @@ public sealed class ChatView : UserControl
         return Ui.Card(box, new Thickness(0));
     }
 
+    /// <summary>
+    /// 气泡里的正文。★ 用【只读 TextBox】而不是 TextBlock:WPF 的 TextBlock 不能选中,
+    /// 对话内容就没法复制(用户反馈)。外观必须走 PlainTextBox 这套模板 —— 常规 TextBox 模板
+    /// 把底色写死成 BgSunken(不是 TemplateBinding),在代码里设 Background 是【无效】的,
+    /// 于是气泡里糊出一块灰底、配上气泡的白字就成了"灰底白字"(用户反馈)。
+    /// 抽成静态是为了让渲染诊断画的就是这一个 —— 这种"只有画出来才看得见"的毛病,无头断言抓不到。
+    /// </summary>
+    internal static TextBox MessageText(bool user)
+    {
+        var tb = new TextBox { TextWrapping = TextWrapping.Wrap };
+        tb.SetResourceReference(FrameworkElement.StyleProperty, "PlainTextBox");
+        tb.SetResourceReference(TextBox.ForegroundProperty, user ? "FgOnAccent" : "FgPrimary");
+        tb.SetResourceReference(TextBox.SelectionBrushProperty, user ? "FgOnAccent" : "Accent");
+        return tb;
+    }
+
     FrameworkElement Bubble(ChatMessage m, int index = -1)
     {
         if (m.Role == ChatRole.System)
@@ -914,22 +930,7 @@ public sealed class ChatView : UserControl
         }
         if (m.Text.Length > 0)
         {
-            // ★ 用【只读 TextBox】而不是 TextBlock:WPF 的 TextBlock 不能选中,
-            //   于是对话内容没法复制(用户反馈)。只读 TextBox 去掉边框底色后外观一致,但可选可复制。
-            var tb = new TextBox
-            {
-                IsReadOnly = true,
-                TextWrapping = TextWrapping.Wrap,
-                BorderThickness = new Thickness(0),
-                Background = Brushes.Transparent,
-                Padding = new Thickness(0),
-                IsReadOnlyCaretVisible = false,
-                // 让它像文本一样,不抢滚轮、不显示自己的滚动条
-                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            };
-            tb.SetResourceReference(TextBox.ForegroundProperty, user ? "FgOnAccent" : "FgPrimary");
-            tb.SetResourceReference(TextBox.SelectionBrushProperty, user ? "FgOnAccent" : "Accent");
+            var tb = MessageText(user);
 
             // ★ 超长文本【默认折叠】(用户裁定):只显示前 N 行,点一下展开,再点收起。
             //   ——【只是显示折叠】。给 AI 的永远是全文(m.Text 一个字都没少),折叠不影响数据。
@@ -963,9 +964,15 @@ public sealed class ChatView : UserControl
                 stack.Children.Add(tb);
             }
         }
+        return BubbleShell(stack, user);
+    }
+
+    /// <summary>气泡外壳(自己发的靠右、强调色;AI 的靠左、沉底色)。与正文同理:渲染诊断画的就是它。</summary>
+    internal static Border BubbleShell(UIElement content, bool user)
+    {
         var bubble = new Border
         {
-            Child = stack, Padding = new Thickness(11, 8, 11, 8), MaxWidth = 560, Margin = new Thickness(0, 4, 0, 4),
+            Child = content, Padding = new Thickness(11, 8, 11, 8), MaxWidth = 560, Margin = new Thickness(0, 4, 0, 4),
             HorizontalAlignment = user ? HorizontalAlignment.Right : HorizontalAlignment.Left,
         };
         bubble.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");

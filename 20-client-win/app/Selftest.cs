@@ -1015,14 +1015,18 @@ public static class Selftest
             var cvSel = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvSel is not null)
             {
-                var bub = cvSel[cvSel.IndexOf("FrameworkElement Bubble(ChatMessage m", StringComparison.Ordinal)..];
-                bub = bub[..3000];
-                Assert(bub.Contains("new TextBox") && bub.Contains("IsReadOnly = true") && bub.Contains("SelectionBrushProperty"),
+                var bub = cvSel[cvSel.IndexOf("internal static TextBox MessageText(bool user)", StringComparison.Ordinal)..];
+                bub = bub[..600];
+                Assert(bub.Contains("new TextBox") && bub.Contains("SelectionBrushProperty"),
                        "★ 对话内容可选中复制(只读 TextBox,不是 TextBlock)");
-                Assert(bub.Contains("BorderThickness = new Thickness(0)") && bub.Contains("Background = Brushes.Transparent"),
-                       "可选中的同时看起来仍是纯文本(无边框/透明底)");
+                // ★ 常规 TextBox 模板把底色写死成 BgSunken,代码里设 Background 是【无效】的 ——
+                //   那正是"灰底白字"的成因。所以必须走 PlainTextBox 这套光板模板,不能靠设属性。
+                Assert(bub.Contains("\"PlainTextBox\"") && !bub.Contains("Background = Brushes.Transparent"),
+                       "★ 正文走 PlainTextBox 模板(靠设 Background 是没用的,会糊出灰底)");
+                // ★ 这条必须留在 if 里面:发布版没有源码,放外面就是"脱离源码树跑必挂"
+                //   —— 开发机上恰好有源码,所以一开始没露馅,换到临时目录发布才炸出来。
+                Assert(Body(cvSel).Contains("const int CollapseLines = 30;"), "★ 超长消息折叠阈值 = 30 行(用户裁定,原为 50)");
             }
-            Assert(Body(cvSel ?? "").Contains("const int CollapseLines = 30;"), "★ 超长消息折叠阈值 = 30 行(用户裁定,原为 50)");
 
             // ★ 剪贴板截图:DIB 没有真 alpha,整条是 0 -> 存出来的 png 完全透明,
             //   于是"附件挂上了、预览却是空白"(用户反馈)。补成不透明;真有透明度的图不许动。
@@ -1061,6 +1065,16 @@ public static class Selftest
                 decodedBgra.CopyPixels(outBuf, stride, 0);
                 Assert(outBuf[3] == 255, "★ 截图存成 png 后不是全透明的(预览真画得出来)");
                 Assert(outBuf[0] == 200 && outBuf[1] == 40 && outBuf[2] == 30, "修 alpha 没把颜色改掉");
+            }
+            var ctrlXaml = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+            if (ctrlXaml is not null)
+            {
+                var plain = ctrlXaml[ctrlXaml.IndexOf("x:Key=\"PlainTextBox\"", StringComparison.Ordinal)..];
+                plain = plain[..plain.IndexOf("</Style>", StringComparison.Ordinal)];
+                Assert(plain.Contains("Value=\"Transparent\"") && !plain.Contains("BgSunken") && !plain.Contains("BorderBrush"),
+                       "★ PlainTextBox 模板不画底色也不画边框(否则又是一块灰底)");
+                Assert(plain.Contains("PART_ContentHost"), "PlainTextBox 仍保留承载文字的 PART_ContentHost(否则一个字都不显示)");
+                Assert(!plain.Contains("Value=\"{x:Null}\""), "底色用 Transparent 而不是 null —— null 不参与命中测试就选不中了");
             }
             var cvClip = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvClip is not null)

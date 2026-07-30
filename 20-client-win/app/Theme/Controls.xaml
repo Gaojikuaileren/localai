@@ -346,6 +346,33 @@
     </Setter>
   </Style>
 
+  <!-- 「看起来是纯文本、其实能选中复制」的只读输入框:气泡里的消息正文用它。
+       ★ 为什么必须另起一套模板:上面那套 TextBox 模板把 Background 写死成 BgSunken
+       (不是 TemplateBinding),所以在代码里设 Background=Transparent 根本不起作用 ——
+       结果就是消息正文顶着一块灰底,配上气泡的白字变成"灰底白字"看不清(用户反馈)。
+       这里连边框带底色一起去掉,只留承载文字的 PART_ContentHost。
+       Background 用 Transparent 而不是 null:null 不参与命中测试,就选不中了。 -->
+  <Style x:Key="PlainTextBox" TargetType="TextBox">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="IsReadOnly" Value="True"/>
+    <Setter Property="IsReadOnlyCaretVisible" Value="False"/>
+    <Setter Property="TextWrapping" Value="Wrap"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                        VerticalScrollBarVisibility="Disabled"
+                        HorizontalScrollBarVisibility="Disabled"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- 复选框:自绘方框 + 勾,不用系统外观 -->
   <Style TargetType="CheckBox">
     <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
