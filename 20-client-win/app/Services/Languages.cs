@@ -45,6 +45,46 @@ public static class Languages
     public static string NameOf(string code) => Find(code)?.Name ?? code;
 
     /// <summary>
+    /// 从客户端界面语言推出使用者母语。★ 这是【目前唯一可靠的信号】——
+    /// 用户在设置里选的界面语言,就是他最习惯读的那一种。设置里可显式改写。
+    /// 接入 AI 之后可以换成真判断,但在那之前绝不靠"猜"(猜错会把翻译发到没人要的语言上)。
+    /// </summary>
+    public static string NativeFromUi(string? uiLanguage) => uiLanguage switch
+    {
+        "en-US" => "en",
+        "ja-JP" => "ja",
+        _ => "zh",
+    };
+
+    /// <summary>
+    /// 从用户的一句话里认出他说的是哪种语言(用于"直接回一句语言名"这条路)。
+    /// 认中文名(日语)、本地名(日本語)、语言码(ja),以及常见英文名。
+    /// ★ 只在【整句就是个语言名】或明确包含某个语言名时才认;认不出返回 null —— 不硬猜。
+    /// </summary>
+    public static string? ParseLanguage(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var t = text.Trim().Trim('。', '.', '!', '!', '?', '?', ',', ',').ToLowerInvariant();
+        if (t.Length == 0 || t.Length > 24) return null;      // 一整段话不是在回答语言
+
+        foreach (var l in Catalog)
+        {
+            if (t == l.Code) return l.Code;
+            if (t.Contains(l.Name, StringComparison.OrdinalIgnoreCase)) return l.Code;
+            if (t.Contains(l.Native, StringComparison.OrdinalIgnoreCase)) return l.Code;
+        }
+        // 常见英文说法(用户用英语作答的情形 —— 这条路正是英语母语者才会走到的)
+        foreach (var (word, code) in new[]
+                 {
+                     ("chinese", "zh"), ("mandarin", "zh"), ("japanese", "ja"), ("german", "de"),
+                     ("korean", "ko"), ("french", "fr"), ("spanish", "es"), ("russian", "ru"),
+                     ("italian", "it"), ("portuguese", "pt"), ("english", "en"),
+                 })
+            if (t.Contains(word, StringComparison.Ordinal)) return code;
+        return null;
+    }
+
+    /// <summary>
     /// 该语言是否用拉丁字母书写。★ 决定"第二阶给读音还是给词根"(用户裁定):
     /// 英语德语这种拉丁文字标读音没意义,该给的是词源与构词。
     /// </summary>

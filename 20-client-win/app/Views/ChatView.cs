@@ -557,6 +557,8 @@ public sealed class ChatView : UserControl
         _sendBtn = send;
         _canSend = spec.CanSend;
         _blockReason = spec.BlockReason;
+        _fallback = spec.Fallback is null ? null : draft => spec.Fallback(this, draft);
+        _answerPending = spec.Fallback is null ? null : AnswerPendingChoice;
         RefreshSendEnabled();
         var attach = AttachButton();
 
@@ -628,6 +630,10 @@ public sealed class ChatView : UserControl
     Button? _sendBtn;
     Func<bool>? _canSend;
     Func<string, string?>? _blockReason;
+    /// <summary>兜底级联:处理了就返回 true(这次输入不再当普通消息发出去)。</summary>
+    Func<string, bool>? _fallback;
+    /// <summary>把一句话当作"回答上一条语言提问";认出来并记上了就返回 true。</summary>
+    Func<string, bool>? _answerPending;
     /// <summary>发不出去时的原因(显示在输入框上方)。目标池一变或下次成功发送就清掉。</summary>
     string? _sendBlockedHint;
 
@@ -712,6 +718,12 @@ public sealed class ChatView : UserControl
         ///   放在这里是为了让共享视图完全不知道"翻译"这回事。
         /// </summary>
         public Func<string, string?>? BlockReason { get; init; }
+        /// <summary>
+        /// 目标池算不出目标时的兜底级联。处理掉了就返回 true(这次输入不再当普通消息发出去)。
+        /// 传 ChatView 进去是为了让它能写会话、刷界面 —— 规则本身在 TranslationFallbacks 里,
+        /// 这里只是把"谁来执行"接上。
+        /// </summary>
+        public Func<ChatView, string, bool>? Fallback { get; init; }
     }
 
     /// <summary>_wsKey -> ConvSpec 的【唯一】映射点。别处不再拿 _wsKey 和字面量比。</summary>
@@ -730,6 +742,7 @@ public sealed class ChatView : UserControl
             CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0,
             BottomAccessory = () => new TranslationBar(),
             BlockReason = TranslationBlockReason,
+            Fallback = (view, draft) => view.RunTranslationFallback(draft),
         },
         _ => new ConvSpec(),                 // 聊天:全默认
     };
@@ -1098,7 +1111,29 @@ public sealed class ChatView : UserControl
             sys.HorizontalAlignment = HorizontalAlignment.Center;
             sys.TextAlignment = TextAlignment.Center;
             sys.Margin = new Thickness(0, 6, 0, 6);
-            return sys;
+            if (m.ChoiceOptions is not { Count: > 0 }) return sys;
+
+            // ★ 带选项的提问(目前只有"翻成哪种语言"用到)。
+            //   答过之后按钮【置灰但保留】——用户裁定 disable 掉,而不是让它消失:
+            //   留着才看得出当时问了什么、选了哪个。
+            var answered = m.ChoiceAnswer is { Length: > 0 };
+            var row = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 2, 0, 6) };
+            foreach (var code in m.ChoiceOptions)
+            {
+                var picked = answered && m.ChoiceAnswer == code;
+                var btn = Chip(Languages.NameOf(code), picked ? "Accent" : "FgSecondary", () =>
+                {
+                    if (m.MessageId is { } mid) ApplyChoice(mid, code);
+                });
+                btn.Margin = new Thickness(0, 0, 6, 0);
+                if (answered) { btn.IsEnabled = false; btn.Opacity = picked ? 0.85 : 0.4; }
+                row.Children.Add(btn);
+            }
+            var box = new StackPanel { Margin = new Thickness(0, 6, 0, 6) };
+            sys.Margin = new Thickness(0, 0, 0, 4);
+            box.Children.Add(sys);
+            box.Children.Add(row);
+            return box;
         }
         var user = m.Role == ChatRole.User;
         var stack = new StackPanel();
@@ -1203,13 +1238,76 @@ public sealed class ChatView : UserControl
         return $"目标池里只有{lang},而你输入的也是{lang} —— 没有可翻的目标语言。再拖一个语言进目标池。";
     }
 
+    /// <summary>
+    /// 跑一遍翻译兜底级联(规则见 TranslationFallbacks)。处理掉了返回 true。
+    /// 三条出口:翻成母语 / 翻成英语 / 在对话里问 —— 前两条会把语言加进目标池并写一条说明,
+    /// 第三条写一条带按钮的提问,等用户点或回话。
+    /// </summary>
+    bool RunTranslationFallback(string draft)
+    {
+        var st = TheApp.Translation;
+        if (st.Targets.Count == 0) return false;          // 空池不是级联管的事
+        var plan = st.Plan(draft);
+        var f = TranslationFallbacks.Resolve(plan.Targets, plan.InputLang, TheApp.Settings.NativeLang,
+                                             TheApp.Settings.TranslationPool, st.Targets);
+        if (f.Kind == FallbackKind.None) return false;
+
+        if (_sessionId is null) NewSession();
+        if (_sessionId is null) return false;
+
+        if (f.Kind == FallbackKind.Ask)
+        {
+            if (f.Options.Count == 0) return false;       // 没得选就别问,交回上面那条"发不出去"的解释
+            TheApp.Chat.Send(_sessionId, draft);          // 原文照常入会话,不然用户白打一遍
+            TheApp.Chat.AskChoice(_sessionId, TranslationFallbacks.Explain(f, plan.InputLang!), f.Options);
+            return true;
+        }
+
+        // 母语 / 英语:把它加进目标池,说明一句,然后照常把这次输入发出去
+        if (f.AddToPool is { } add) st.AddTarget(add);
+        TheApp.Chat.Send(_sessionId, draft);
+        TheApp.Chat.AskChoice(_sessionId, TranslationFallbacks.Explain(f, plan.InputLang!), Array.Empty<string>());
+        return true;
+    }
+
+    /// <summary>把一句话当作"回答上一条语言提问"。认出来并记上了返回 true。</summary>
+    bool AnswerPendingChoice(string text)
+    {
+        if (_sessionId is null) return false;
+        var q = TheApp.Chat.PendingChoice(_sessionId);
+        if (q?.MessageId is not { } qid) return false;
+        var code = Languages.ParseLanguage(text);
+        if (code is null || !q.ChoiceOptions!.Contains(code)) return false;   // 认不出就当普通消息,不硬猜
+        ApplyChoice(qid, code);
+        return true;
+    }
+
+    /// <summary>记下选择:按钮置灰、语言进目标池,然后开始翻译。</summary>
+    void ApplyChoice(string messageId, string code)
+    {
+        if (!TheApp.Chat.AnswerChoice(messageId, code)) return;
+        TheApp.Translation.AddTarget(code);
+        if (_sessionId is not null)
+            TheApp.Chat.AskChoice(_sessionId, $"好 —— 已把{Languages.NameOf(code)}加进目标池,开始翻译。", Array.Empty<string>());
+    }
+
     void SendCurrent()
     {
         var text = _input.Text;
         if (string.IsNullOrWhiteSpace(text) && _pending.Count == 0) return;   // 空且无附件不发
 
-        // ★ 翻译空间:目标池里只剩输入语言自己时,这次翻译没有任何目标 —— 不发,并说清为什么。
-        //   不弹模态框(那太重),就在输入框上方留一行,下次成功发送或目标池一变就消失。
+        // ★ 会话里有一条【还没答的语言提问】时,这次输入先当作"作答"处理:
+        //   用户回一句语言名 -> 记上、按钮置灰、语言进目标池,然后这次输入不当消息发出去。
+        if (_answerPending is { } answer && !string.IsNullOrWhiteSpace(text))
+        {
+            if (answer(text)) { _input.Clear(); _draft = ""; return; }
+        }
+
+        // ★ 翻译空间:目标池算不出目标时走【兜底级联】(用户裁定):
+        //   母语 -> 英语 -> 在对话里问。它会自己把该加的语言加进目标池并写一条说明。
+        if (_fallback?.Invoke(_draft) == true) { _input.Clear(); _draft = ""; return; }
+
+        // 还剩一种发不出去:目标池整个是空的(那不是级联能兜的,得先拖个语言进来)
         if (_blockReason?.Invoke(_draft) is { } why)
         {
             _sendBlockedHint = why;

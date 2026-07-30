@@ -29,7 +29,14 @@ public sealed record ChatMessage(string SessionId, ChatRole Role, string Text, D
     /// 而"加载更早"会把所有下标整体后移,于是用户展开的那条收了回去、另一条莫名展开着。
     /// 位置记录末尾追加可选参数:老档案里没有这个字段 -> 反序列化成 null,照常读得动。
     /// </summary>
-    string? MessageId = null)
+    string? MessageId = null,
+    /// <summary>
+    /// 这条消息附带的【选项按钮】(语言码)。目前只有一处用:目标池算不出目标、
+    /// 且输入=目标=母语=英语时,在对话里问"要翻成什么"。
+    /// </summary>
+    IReadOnlyList<string>? ChoiceOptions = null,
+    /// <summary>用户选了哪个(null = 还没选)。选过之后按钮置灰,不能再改。</summary>
+    string? ChoiceAnswer = null)
 {
     /// <summary>
     /// 给界面用的稳定键。新消息有 MessageId 直接用;老消息(含已归档到温层的)退回内容指纹。
@@ -420,6 +427,42 @@ public sealed class ChatCenter
         Changed?.Invoke();
         return true;
     }
+
+    /// <summary>
+    /// 往会话里写一条【带选项按钮】的系统提问。返回这条消息的稳定标识,便于之后作答。
+    /// ★ 这不是"伪造 AI 回复":它是客户端自己要问的事(翻成哪种语言),
+    ///   与 AI 未接入无关,所以照常写进会话。
+    /// </summary>
+    public string? AskChoice(string sessionId, string question, IReadOnlyList<string> options)
+    {
+        if (!_sessions.Any(x => x.SessionId == sessionId)) return null;
+        var id = NewMsgId();
+        _messages.Add(new ChatMessage(sessionId, ChatRole.System, question, DateTime.Now,
+                                      null, id, options.ToList(), null));
+        Changed?.Invoke();
+        return id;
+    }
+
+    /// <summary>
+    /// 回答一条提问。★ 只认【还没答过】的那条 —— 答过就定死,按钮置灰不能再改
+    /// (用户裁定:点过之后 disable 掉)。返回是否真的记上了。
+    /// </summary>
+    public bool AnswerChoice(string messageId, string answer)
+    {
+        var i = _messages.FindIndex(m => m.MessageId == messageId);
+        if (i < 0) return false;
+        if (_messages[i].ChoiceOptions is not { Count: > 0 }) return false;
+        if (_messages[i].ChoiceAnswer is not null) return false;      // 已经答过,不覆盖
+        _messages[i] = _messages[i] with { ChoiceAnswer = answer };
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>该会话里【还没被回答】的最后一条提问(用户直接回一句语言名时要找的就是它)。</summary>
+    public ChatMessage? PendingChoice(string sessionId)
+        => _messages.LastOrDefault(m => m.SessionId == sessionId
+                                        && m.ChoiceOptions is { Count: > 0 }
+                                        && m.ChoiceAnswer is null);
 
     static string Trim(string t) => t.Length <= 18 ? t : t[..18] + "…";
 }

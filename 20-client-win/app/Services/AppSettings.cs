@@ -82,6 +82,17 @@ public sealed class AppSettings
     public List<string> TranslationPool { get; set; } = Languages.DefaultPool.ToList();
 
     /// <summary>
+    /// 使用者母语(语言码)。空 = 跟着界面语言走(见 NativeLang)。
+    /// ★ 翻译的兜底级联要用它:目标池算不出目标时,第一顺位就是翻成母语。
+    /// </summary>
+    public string? NativeLangOverride { get; set; }
+
+    /// <summary>实际生效的母语:显式设了就用设的,否则从界面语言推。</summary>
+    public string NativeLang => string.IsNullOrWhiteSpace(NativeLangOverride)
+        ? Languages.NativeFromUi(Language)
+        : NativeLangOverride!;
+
+    /// <summary>
     /// 界面音效(拖动卡片落地的闷响等)。默认开。★ 每台设备各自的偏好,不同步。
     /// 只管【声音】—— 落地扬尘属于暖萌皮肤的观感,不受它影响(关声音不该把动效也一起关掉)。
     /// </summary>

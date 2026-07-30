@@ -46,6 +46,21 @@ public sealed class SettingsView : UserControl
             }
         };
 
+        // ---- 母语(翻译兜底级联要用)----
+        var native = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+        native.Items.Add(new ComboBoxItem { Content = "跟随界面语言", Tag = "" });
+        foreach (var l in Languages.Catalog) native.Items.Add(new ComboBoxItem { Content = l.Name, Tag = l.Code });
+        native.SelectedIndex = string.IsNullOrWhiteSpace(s.NativeLangOverride)
+            ? 0 : Math.Max(0, Array.FindIndex(Languages.Catalog, x => x.Code == s.NativeLangOverride) + 1);
+        native.SelectionChanged += (_, _) =>
+        {
+            if (native.SelectedItem is ComboBoxItem { Tag: string code })
+            {
+                s.NativeLangOverride = string.IsNullOrEmpty(code) ? null : code;
+                s.Save();
+            }
+        };
+
         // ---- 界面音效 ----
         var sfx = new CheckBox
         {
@@ -90,6 +105,9 @@ public sealed class SettingsView : UserControl
                 Ui.Body(Strings.Get("settings.skin")), skin,
                 new Border { Height = 12 },
                 Ui.Body(Strings.Get("settings.language")), lang,
+                new Border { Height = 12 },
+                Ui.Body("母语"), native,
+                Ui.Caption("翻译时如果目标池算不出目标(比如池里只有中文、你输入的也是中文),会先翻成母语。"),
                 sfx,
                 Ui.Caption("拖动语言卡片落地时的轻响。★ 只有暖萌皮肤会出声 —— 微风与墨白本来就是克制的。"),
                 new Border { Height = 8 },

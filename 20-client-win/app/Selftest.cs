@@ -1077,6 +1077,104 @@ public static class Selftest
                 // 池子空着也算发不出去,但那是另一条(由 CanSend 管)
                 Assert(new Services.TranslationState().Plan("你好").Targets.Count == 0, "空池自然没有目标");
             }
+            // ---- 目标池算不出目标时的【兜底级联】(用户裁定 2026-07-30)----
+            // 母语 -> 英语 -> 在对话里问。四层分支,每层都有"翻给谁""加不加进池"两件事,
+            // 所以规则抽成纯函数,这里一条条钉死。
+            {
+                var pool = new[] { "zh", "ja", "en", "de", "ko" };
+                var R = (string[] targets, string? input, string native, string[] cur)
+                    => Services.TranslationFallbacks.Resolve(targets, input, native, pool, cur);
+
+                // ① 本来就有目标 -> 不兜底
+                Assert(R(new[] { "ja" }, "zh", "zh", new[] { "ja" }).Kind == Services.FallbackKind.None,
+                       "有目标就不启动兜底");
+
+                // ② 池里只有中文、输入中文、母语日语 -> 翻成母语(日语),并把日语加进池
+                var f1 = R(Array.Empty<string>(), "zh", "ja", new[] { "zh" });
+                Assert(f1.Kind == Services.FallbackKind.Native && f1.AddToPool == "ja",
+                       "★ 输入=目标 且 母语不同 -> 翻成母语,母语进目标池");
+
+                // ③ 输入=目标=母语(中文) -> 翻成英语,英语进池
+                var f2 = R(Array.Empty<string>(), "zh", "zh", new[] { "zh" });
+                Assert(f2.Kind == Services.FallbackKind.English && f2.AddToPool == "en",
+                       "★ 输入=目标=母语(非英语) -> 翻成英语,英语进目标池");
+
+                // ④ 输入=目标=母语=英语 -> 在对话里问,候选来自语言池、去掉英语与已在目标池的
+                var f3 = R(Array.Empty<string>(), "en", "en", new[] { "en" });
+                Assert(f3.Kind == Services.FallbackKind.Ask && f3.AddToPool is null,
+                       "★ 输入=目标=母语=英语 -> 在对话里问,先不擅自加语言");
+                Assert(!f3.Options.Contains("en"), "候选里不该出现英语本身");
+                Assert(f3.Options.SequenceEqual(new[] { "zh", "ja", "de", "ko" }),
+                       "候选 = 语言池减去英语与已在目标池的");
+
+                // ★ 目标池满 3 个、输入是【第四种】语言 -> 翻成池里那三种(用户裁定)。
+                //   池子不动:用户挑的那三个是他自己的选择,不该被这次输入挤掉
+                //   (TranslationState.Plan 已把 PoolFull 如实标出来,界面据此说明)。
+                var full3 = new Services.TranslationState();
+                foreach (var c in new[] { "zh", "ja", "de" }) full3.AddTarget(c);
+                var p4 = full3.Plan("안녕하세요");
+                Assert(p4.InputLang == "ko", "第四种语言被认出来");
+                Assert(p4.Targets.SequenceEqual(new[] { "zh", "ja", "de" }),
+                       "★ 池满时输入第四种语言 -> 翻成池里全部三种");
+                Assert(p4.PoolFull && !p4.AddInputToPool,
+                       "★ 池满则如实标记,不擅自替换用户挑的三个");
+                Assert(R(p4.Targets.ToArray(), "ko", "zh", new[] { "zh", "ja", "de" }).Kind == Services.FallbackKind.None,
+                       "有三个目标,不该启动兜底");
+
+                // ⑤ 语种没判出来(拉丁字母)-> 一律不兜底,交给 AI 判
+                Assert(R(Array.Empty<string>(), null, "zh", new[] { "en" }).Kind == Services.FallbackKind.None,
+                       "★ 语种判不出来时不启动兜底(不能凭猜测把翻译发到没人要的语言上)");
+
+                // ⑥ 母语来源:跟着界面语言走,可显式改写
+                Assert(Services.Languages.NativeFromUi("zh-CN") == "zh"
+                       && Services.Languages.NativeFromUi("en-US") == "en"
+                       && Services.Languages.NativeFromUi("ja-JP") == "ja", "母语默认跟界面语言走");
+                var st6 = new Services.AppSettings { Language = "en-US" };
+                Assert(st6.NativeLang == "en", "没显式设时用界面语言推出来的");
+                st6.NativeLangOverride = "de";
+                Assert(st6.NativeLang == "de", "★ 设置里显式指定的母语优先");
+
+                // ⑦ 「直接回一句语言名」的解析:认中文名/本地名/语言码/英文名,认不出返回 null
+                Assert(Services.Languages.ParseLanguage("日语") == "ja", "认中文名");
+                Assert(Services.Languages.ParseLanguage("日本語") == "ja", "认本地名");
+                Assert(Services.Languages.ParseLanguage("de") == "de", "认语言码");
+                Assert(Services.Languages.ParseLanguage("German") == "de", "认英文名");
+                Assert(Services.Languages.ParseLanguage("翻成德语吧") == "de", "认一句话里的语言名");
+                Assert(Services.Languages.ParseLanguage("帮我看看这段代码为什么会闪退,顺便解释一下") is null,
+                       "★ 一整段正常的话不会被当成在回答语言");
+                Assert(Services.Languages.ParseLanguage("") is null && Services.Languages.ParseLanguage(null) is null,
+                       "空输入不认");
+            }
+            // 提问与作答的数据层:答过就定死,不许改
+            {
+                var adir = Path.Combine(tmp, "choice");
+                Directory.CreateDirectory(adir);
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, adir);
+                var ac = new Services.ChatCenter();
+                var asid = ac.NewSession(null, "translation").SessionId;
+                var qid = ac.AskChoice(asid, "要翻成什么语言?", new[] { "zh", "ja" });
+                Assert(qid is not null, "提问写进了会话");
+                Assert(ac.PendingChoice(asid)?.MessageId == qid, "找得到还没答的那条");
+                Assert(ac.AnswerChoice(qid!, "ja"), "作答成功");
+                Assert(ac.PendingChoice(asid) is null, "★ 答过之后不再是待答状态(按钮该置灰了)");
+                Assert(!ac.AnswerChoice(qid!, "zh"), "★ 答过就定死,不许再改");
+                Assert(ac.MessagesOf(asid).First(m => m.MessageId == qid).ChoiceAnswer == "ja", "记的是第一次那个答案");
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, tmp);
+            }
+            var cvCascade = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvCascade is not null)
+            {
+                var send = Slice(cvCascade, "void SendCurrent()", "TheApp.Chat.Send(_sessionId, text, atts)");
+                Assert(send is not null && send.IndexOf("_answerPending", StringComparison.Ordinal) >= 0
+                       && send.IndexOf("_fallback", StringComparison.Ordinal) >= 0
+                       && send.IndexOf("_answerPending", StringComparison.Ordinal)
+                          < send.IndexOf("_fallback", StringComparison.Ordinal),
+                       "★ 先看是不是在回答提问,再走兜底级联(顺序反了会把回答当新输入)");
+                var bub = Slice(cvCascade, "if (m.Role == ChatRole.System)", "var user = m.Role == ChatRole.User");
+                Assert(bub is not null && bub.Contains("btn.IsEnabled = false"),
+                       "★ 答过之后按钮置灰(保留可见,看得出当时问了什么、选了哪个)");
+            }
+
             var cvBlock = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvBlock is not null)
             {
@@ -1172,7 +1270,9 @@ public static class Selftest
                 Assert(cvTrans.Contains("IconName.Search"), "放大镜图标还在");
                 // 发送键【长什么样】与【能不能按】必须是两件事
                 Assert(!Body(cvTrans).Contains("bool searchIcon"), "★ 外观与前置条件不再挤在一个 bool 上");
-                var ia = Slice(cvTrans, "FrameworkElement BuildInputArea(", "FrameworkElement PendingStrip()");
+                // ★ 精确切到 BuildInputArea 的方法体(到它的 return 为止)——
+                //   切到下一个方法会把 RunTranslationFallback 之类也圈进来,那不是这条要管的。
+                var ia = Slice(cvTrans, "FrameworkElement BuildInputArea(", "        return area;");
                 Assert(ia is not null && !Body(ia).Contains("TheApp.Translation"),
                        "★ 共享输入区不再直接摸翻译状态(分层泄漏归零)");
                 // ★ 空态盒子必须 Stretch + MaxWidth:写死 Width 会在窄窗口撑破卡片、裁掉发送键;
