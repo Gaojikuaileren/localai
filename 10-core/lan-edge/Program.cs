@@ -615,7 +615,10 @@ static class Edge
         builder.Logging.SetMinimumLevel(LogLevel.Warning);   // ← temporarily surface handshake errors
         builder.WebHost.ConfigureKestrel(k =>
         {
-            k.Limits.MaxRequestBodySize = 32 * 1024;
+            // ★★ 请求体上限【按面分流】(2026-07-31 审计),不再服务器级压到 32 KiB:
+            //   32 KiB 是决策包 §5.2 给【匿名 /pair 面】的抗-DoS 上限,但它被写成了服务器级默认,
+            //   于是把【业务面】的聊天转发也一起卡在 32 KiB —— 稍长一点的历史就被 Kestrel 空 413 挡掉。
+            //   这里不设服务器级 body 上限(交给下面的中间件按路径给);header/请求行两条保持不变。
             k.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             k.Limits.MaxRequestLineSize = 4 * 1024;
             k.Listen(cfg.Bind ?? IPAddress.Loopback, cfg.ListenPort, lo => lo.UseHttps(h =>
@@ -635,6 +638,18 @@ static class Edge
         });
 
         var app = builder.Build();
+
+        // ★ 按面给请求体上限(2026-07-31 审计):匿名 /pair/* 仍是 32 KiB(抗-DoS,一点没削弱),
+        //   业务面过了 mTLS + active 成员校验才够得到 8 MiB(聊天历史 / 将来多模态)。上限做成具名常量,不散魔数。
+        const long PairBodyCap = 32 * 1024;           // 决策包 §5.2:匿名入口
+        const long BusinessBodyCap = 8L * 1024 * 1024; // 业务面
+        app.Use(async (ctx, next) =>
+        {
+            var f = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+            if (f is { IsReadOnly: false })
+                f.MaxRequestBodySize = ctx.Request.Path.StartsWithSegments("/pair") ? PairBodyCap : BusinessBodyCap;
+            await next();
+        });
 
         // anonymous pairing routes (no client cert). Only these are reachable without a member cert.
         app.MapPost("/pair/enroll", async (HttpContext ctx) =>
@@ -772,10 +787,12 @@ static class Edge
             var r = (await JsonDocument.ParseAsync(c.Request.Body)).RootElement;
             try
             {
-                var s = Store.LoadOrEmpty(idDir);
-                s.RevokeDevice(r.GetProperty("deviceId").GetString()!);
-                s.Save(idDir);
-                return Results.Json(new { ok = true, generation = s.IdentityGeneration });
+                var gen = Store.Mutate(idDir, s =>   // ★ 命名 Mutex 串行:吊销不能被并发配对写掉
+                {
+                    s.RevokeDevice(r.GetProperty("deviceId").GetString()!);
+                    return s.IdentityGeneration;
+                });
+                return Results.Json(new { ok = true, generation = gen });
             }
             catch (Exception ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 409); }
         });

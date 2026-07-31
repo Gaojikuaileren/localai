@@ -1,5 +1,8 @@
 // P3b S2.2 -- JSON membership store (devices / device_certificates / identity_generation).
-// Single-writer registry, single-host: one store.json written atomically (temp + move). Read by the
+// Multi-writer, single-host: writers = pairing approve/complete (lan-edge threads) + admin revoke
+// (lan-edge loopback) + identity CLI (a SEPARATE process: revoke-device / add-member /
+// set-device-member). All go through Store.Mutate(), serialized by a NAMED mutex (cross-process).
+// One store.json written atomically (temp + move). Read by the
 // Python gateway in S3 for fingerprint->principal mapping. Packet §7.1: certificate proves "holds a
 // CA-signed key"; the membership store proves "this device is still allowed" -- both required.
 //
@@ -7,6 +10,7 @@
 // superseded|revoked|expired. caller_tier is always LAN_DEVICE (P3b does not widen P3a).
 
 using System.Text.Json;
+using System.Threading;
 
 namespace LocalAI.Identity;
 
@@ -67,11 +71,51 @@ public sealed class Store
     static string Now() => DateTimeOffset.UtcNow.ToString("O");
     static string PathOf(string dir) => Path.Combine(dir, "store.json");
 
+    // ★★ 跨进程串行的写入闸(2026-07-31 审计):store.json 此前是【无锁的全量 read-modify-write】,
+    //   而写它的有三条并发路径:配对审批(控制台线程)、/pair/complete(LAN 口请求线程)、
+    //   /admin/devices/revoke(回环 admin 请求线程),外加 identity CLI 是【另一个进程】
+    //   (revoke-device / add-member / set-device-member)。Save 是 last-write-wins 全量覆盖,
+    //   于是一次吊销可能被同时发生的一次配对整包写掉 —— 设备"复活"。
+    //   必须用【命名 Mutex】(不能只用 lock):要跨进程,identity CLI 与 lan-edge 是两个 exe。
+    static readonly Mutex Gate = new(false, @"Local\LocalAI.Identity.Store");
+
+    /// <summary>取闸 → 读 → 改 → 写 → 放闸,整段原子。所有会写 store 的地方都走它。</summary>
+    public static T Mutate<T>(string dir, Func<Store, T> change)
+    {
+        // 放弃的 Mutex(持有进程崩了)会抛 AbandonedMutexException,但锁已到手 —— 照常继续。
+        try { Gate.WaitOne(); } catch (AbandonedMutexException) { }
+        try
+        {
+            var s = LoadOrEmpty(dir);
+            var r = change(s);
+            s.Save(dir);
+            return r;
+        }
+        finally { Gate.ReleaseMutex(); }
+    }
+
+    /// <summary>无返回值的便捷重载。</summary>
+    public static void Mutate(string dir, Action<Store> change)
+        => Mutate<object?>(dir, s => { change(s); return null; });
+
     public static Store LoadOrEmpty(string dir)
     {
         var p = PathOf(dir);
         if (!File.Exists(p)) return new Store { SnapshotCreatedAt = Now() };
-        return JsonSerializer.Deserialize<Store>(File.ReadAllText(p)) ?? new Store();
+        // ★ FileShare.ReadWrite|Delete:另一个 mutate 正在原子替换(temp+move)时,读不该抛
+        //   IOException/500;这里容忍并发替换。
+        try
+        {
+            using var fs = new FileStream(p, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
+            using var sr = new StreamReader(fs);
+            return JsonSerializer.Deserialize<Store>(sr.ReadToEnd()) ?? new Store();
+        }
+        catch (IOException)
+        {
+            // 恰好撞上 move 的瞬间:重读一次(此刻新文件已就位)。
+            return JsonSerializer.Deserialize<Store>(File.ReadAllText(p)) ?? new Store();
+        }
     }
 
     public void Save(string dir)

@@ -211,10 +211,8 @@ static int RevokeDevice(string? deviceId)
     if (deviceId is null) { Console.WriteLine("usage: revoke-device <device-id>"); return 2; }
     var idDir = Paths.IdentityDir();
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: init)"); return 1; }
-    var s = Store.LoadOrEmpty(idDir);
-    s.RevokeDevice(deviceId);
-    s.Save(idDir);
-    Console.WriteLine($"revoked {deviceId}; generation now {s.IdentityGeneration}");
+    var gen = Store.Mutate(idDir, s => { s.RevokeDevice(deviceId); return s.IdentityGeneration; });   // ★ 命名 Mutex 串行
+    Console.WriteLine($"revoked {deviceId}; generation now {gen}");
     return 0;
 }
 
@@ -331,9 +329,7 @@ static int AddMember(string? name, string? role)
     if (name is null) { Console.WriteLine("usage: add-member <display-name> [admin|member]"); return 2; }
     var idDir = Paths.IdentityDir();
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: init)"); return 1; }
-    var s = Store.LoadOrEmpty(idDir);
-    var m = s.AddMember(name, role);
-    s.Save(idDir);
+    var m = Store.Mutate(idDir, s => s.AddMember(name, role));   // ★ 命名 Mutex 串行
     Console.WriteLine($"added member {m.MemberId}  {m.Role}  {m.DisplayName}");
     return 0;
 }
@@ -344,9 +340,7 @@ static int SetDeviceMember(string? deviceId, string? memberId)
     { Console.WriteLine("usage: set-device-member <device-id> <member-id|->   ('-' clears)"); return 2; }
     var idDir = Paths.IdentityDir();
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: init)"); return 1; }
-    var s = Store.LoadOrEmpty(idDir);
-    s.SetDeviceDefaultMember(deviceId, memberId == "-" ? null : memberId);
-    s.Save(idDir);
+    Store.Mutate(idDir, s => s.SetDeviceDefaultMember(deviceId, memberId == "-" ? null : memberId));   // ★ 命名 Mutex 串行
     Console.WriteLine($"device {deviceId} default member -> {(memberId == "-" ? "(none)" : memberId)}");
     return 0;
 }

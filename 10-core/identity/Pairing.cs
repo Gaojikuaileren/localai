@@ -195,11 +195,12 @@ public sealed class Pairing
         p.ClaimNonce = RandomNumberGenerator.GetBytes(32);
         p.Status = "approved";
 
-        var store = Store.LoadOrEmpty(_idDir);
-        store.AddProvisioning(deviceId, p.DisplayName, null);
-        store.AddCandidate(deviceId, cert.SerialNumber, p.CandidateSha256, Convert.ToHexString(p.CsrSpkiSha),
-                           cert.NotBefore.ToString("O"), cert.NotAfter.ToString("O"));
-        store.Save(_idDir);
+        Store.Mutate(_idDir, store =>   // ★ 命名 Mutex 串行(见 Store.Mutate):别被并发的 revoke 写掉
+        {
+            store.AddProvisioning(deviceId, p.DisplayName, null);
+            store.AddCandidate(deviceId, cert.SerialNumber, p.CandidateSha256, Convert.ToHexString(p.CsrSpkiSha),
+                               cert.NotBefore.ToString("O"), cert.NotAfter.ToString("O"));
+        });
       }
     }
 
@@ -243,7 +244,12 @@ public sealed class Pairing
                 throw new UnauthorizedAccessException("challenge signature invalid");
 
             p.Status = "certificate_issued";   // repeat calls return the same candidate
-            return p.Candidate!;
+            // ★ 返回一份【副本】,而不是 Pairing 自己持有的那个实例(2026-07-31 审计):
+            //   所有调用点都写成 `using var cand = pairing.Claim(...)`,会在用完后 Dispose 掉返回值。
+            //   若返回 p.Candidate 本身,第一次 claim 就把 Pending 记录持有的证书 Dispose 了,
+            //   幂等重试(同一 requestId 再 claim)读它的 RawData 直接抛 CryptographicException → 500。
+            //   给副本,调用方 Dispose 的是自己那份,Pairing 继续持有 p.Candidate。
+            return X509CertificateLoader.LoadCertificate(p.Candidate!.RawData);
         }
     }
 
@@ -259,9 +265,7 @@ public sealed class Pairing
             if (presentedCertSha256 is not null &&
                 !string.Equals(presentedCertSha256, p.CandidateSha256, StringComparison.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("presented cert is not the candidate for this request");
-            var store = Store.LoadOrEmpty(_idDir);
-            store.Activate(p.DeviceId, p.CandidateSha256);   // generation++
-            store.Save(_idDir);
+            Store.Mutate(_idDir, store => store.Activate(p.DeviceId, p.CandidateSha256));   // generation++,命名 Mutex 串行
             p.Status = "active";
         }
     }
