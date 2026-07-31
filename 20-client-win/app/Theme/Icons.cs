@@ -160,6 +160,23 @@ public static class Icons
     static bool _hooked;
     static int _sweepAt = 256;   // ★ 下次摊还清扫的水位(审计 2026-07-31)
 
+    /// <summary>
+    /// 转起来的时候该绕哪一点 —— ★★ 不一定是包围盒中心。
+    ///
+    /// 刷新图标是一个圆 + 一个箭头，而箭头把包围盒往上撑出了一截：
+    ///   圆心 (12,12) 半径 8 -> 圆的盒子是 y[4,20]，而箭头尖到 y=2.6，
+    ///   于是整个几何的盒子变成 y[2.6,20] —— 它的中心比【圆心】高了一点。
+    ///   绕盒子中心转，看到的就是整个圈在晟（用户反馈："旋转不在中心"）。
+    ///   三套皮肤的刷新几何略有不同，算出来的圆心分别在 0.540 / 0.536 / 0.540，
+    ///   取 0.538 三边的误差都在 0.03px 以内。
+    /// ★ 为什么不去改图标路径：Refresh 在别处也在用，把箭头收短会改变它静态的样子。
+    /// </summary>
+    public static Point SpinOrigin(IconName name) => name switch
+    {
+        IconName.Refresh => new Point(0.5, 0.538),
+        _ => new Point(0.5, 0.5),
+    };
+
     public static FrameworkElement Make(IconName name, double size = 18, string foregroundKey = "FgSecondary")
     {
         var host = new ContentControl { Width = size, Height = size, Focusable = false };

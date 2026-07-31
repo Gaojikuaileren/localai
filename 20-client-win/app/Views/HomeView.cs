@@ -174,6 +174,7 @@ public sealed class HomeView : UserControl
                 HideModeSwitch = true,
                 HideDayArea = true,
                 HideWeekdayHeader = true,   // 与下方时间轴共用中间那一行「周一 27…」
+                HideTodayButton = true,     // 下方时间轴那个「现在」已经干这件事了
                 LeftGutter = WeekTimeline.GutterWidth,   // 七列与下方时间轴对齐
             };
             var timeline = new WeekTimeline { MinHeight = 150 };
@@ -187,6 +188,7 @@ public sealed class HomeView : UserControl
             calView.SelectionChanged = d => timeline.FocusWeekOf(d);
             // ★ 反向也要跟:在时间轴上翻周、月历却还停在旧月 —— 那就是上下两块各说各的周。
             timeline.WeekChanged = ws => calView.FocusWeekStart(ws);
+            timeline.TodayRequested = () => calView.FocusToday();   // 按「现在」-> 选中日也回今天
             timeline.DayRolled = () => calView.Rebuild();   // 跨零点：月历的"今天"也要挪过去
 
             var calStack = new DockPanel { LastChildFill = true };
@@ -983,7 +985,7 @@ public sealed class HomeView : UserControl
             var spin = new System.Windows.Media.Animation.DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(900))
             { RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever };
             var rot = new System.Windows.Media.RotateTransform();
-            glyph.RenderTransformOrigin = new Point(0.5, 0.5);
+            glyph.RenderTransformOrigin = Icons.SpinOrigin(IconName.Refresh);   // ★ 绕【圆心】转,不是绕包围盒中心
             glyph.RenderTransform = rot;
             rot.BeginAnimation(System.Windows.Media.RotateTransform.AngleProperty, spin);
             try

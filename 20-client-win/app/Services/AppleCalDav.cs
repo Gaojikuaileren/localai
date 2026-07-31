@@ -225,7 +225,8 @@ public static class AppleCalDav
             var skipped = 0;
             foreach (var ics in ParseCalendarData(text))
             {
-                var (part, sk) = ICalParser.ParseEvents(ics, owner, scope);
+                // ★ 把【这个日历的名字】一并交下去 —— 它就是这批日程的分类
+                var (part, sk) = ICalParser.ParseEvents(ics, owner, scope, cal.DisplayName);
                 evs.AddRange(part);
                 skipped += sk;
             }

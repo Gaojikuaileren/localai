@@ -3379,6 +3379,22 @@ public static class Selftest
                        "★ 断开后回到本地占位分类");
             }
 
+            // ---- 从 Apple 拉下来的日程要带【分类】----
+            {
+                // ★★ 之前 ParseEvents 根本不填 CalendarGroup:拉下来的日程全是无分类,
+                //   于是在界面上全一个颜色、也对不上任何一个日历(用户反馈"分类不对")。
+                const string oneIcs =
+                    "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x-1\r\nSUMMARY:开会\r\n" +
+                    "DTSTART:20260731T090000\r\nDTEND:20260731T100000\r\nEND:VEVENT\r\nEND:VCALENDAR";
+                var (evs0, _) = Services.ICalParser.ParseEvents(oneIcs, "me", "private", "工作");
+                Assert(evs0.Count == 1 && evs0[0].CalendarGroup == "工作",
+                       "★★ 拉下来的日程带上【所在 iCloud 日历的名字】作为分类");
+                var (evs1, _) = Services.ICalParser.ParseEvents(oneIcs, "me", "private", "   ");
+                Assert(evs1.Count == 1 && evs1[0].CalendarGroup is null,
+                       "★ 日历名是空白 -> 分类留 null(不填一个空字串冒充)");
+                Assert(evs0[0].Source == "apple", "来源标成 apple");
+            }
+
             // ---- Apple 凭据保管(日历接入)----
             {
                 // ★ 安全:本函数开头已把 LOCALAI_CLIENT_STATE 指到临时目录,

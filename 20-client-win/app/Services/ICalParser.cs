@@ -28,7 +28,13 @@ public static class ICalParser
     /// ★ 解析不出来的单条【跳过而不是抛】—— 一条坏日程不该让整次同步失败;
     ///   但跳了几条要能被调用方看见(见返回的 skipped)。
     /// </summary>
-    public static (List<Views.CalendarEvent> events, int skipped) ParseEvents(string ics, string owner, string scope)
+    /// <param name="calendarName">
+    /// 这批日程来自哪个 iCloud 日历 —— 存进 CalendarGroup。
+    /// ★★ 之前这一项根本没填:从 Apple 拉下来的日程全部是【无分类】,
+    ///   于是它们在界面上全是同一个颜色、也对不上任何一个日历(用户反馈"分类不对")。
+    /// </param>
+    public static (List<Views.CalendarEvent> events, int skipped) ParseEvents(
+        string ics, string owner, string scope, string? calendarName = null)
     {
         var list = new List<Views.CalendarEvent>();
         var skipped = 0;
@@ -48,7 +54,7 @@ public static class ICalParser
             {
                 if (cur is not null)
                 {
-                    var ev = Build(cur, owner, scope);
+                    var ev = Build(cur, owner, scope, calendarName);
                     if (ev is not null) list.Add(ev); else skipped++;
                 }
                 cur = null;
@@ -268,7 +274,8 @@ public static class ICalParser
 
     // ---------------------------------------------------------------- 组装
     static Views.CalendarEvent? Build(
-        List<(string name, Dictionary<string, string> parms, string value)> props, string owner, string scope)
+        List<(string name, Dictionary<string, string> parms, string value)> props, string owner, string scope,
+        string? calendarName)
     {
         string? uid = null, summary = null, location = null, url = null, notes = null;
         (DateTime when, bool allDay)? start = null, end = null;
@@ -311,7 +318,12 @@ public static class ICalParser
 
         return new Views.CalendarEvent(
             Start: s, End: e, Title: summary!.Trim(), Owner: owner, Scope: scope,
-            AllDay: allDay, Location: NullIfBlank(location), Url: NullIfBlank(url), Notes: NullIfBlank(notes),
+            AllDay: allDay,
+            // ★ 分类 = 它所在的那个 iCloud 日历的名字。
+            //   这个名字与 CalendarGroups 里那张表用的是同一个值(都是 displayname),
+            //   颜色才对得上。
+            CalendarGroup: NullIfBlank(calendarName),
+            Location: NullIfBlank(location), Url: NullIfBlank(url), Notes: NullIfBlank(notes),
             Source: "apple", ExternalId: NullIfBlank(uid));
     }
 

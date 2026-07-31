@@ -104,6 +104,13 @@ public sealed class WeekTimeline : UserControl
     /// <summary>跨过了午夜 —— 宿主据此把月历也刷一遍(否则"今天"高亮还停在昨天)。</summary>
     public Action? DayRolled;
 
+    /// <summary>
+    /// 按了「现在」—— 宿主据此把月历的【选中日】也挪回今天。
+    /// ★ 不能只靠 WeekChanged:那条路径是"保持星期几不变地换周",
+    ///   按「现在」却回到了本周的周三 —— 人要的是今天。
+    /// </summary>
+    public Action? TodayRequested;
+
     /// <summary>当前显示的是哪一周(周一)。上方月历据此把那一排标出来。</summary>
     public DateTime CurrentWeekStart => _weekStart;
 
@@ -125,7 +132,9 @@ public sealed class WeekTimeline : UserControl
             // ★ 【保持当前缩放】(用户裁定)—— 不再把 _hours 复位成默认值。
             //   把此刻放在视野中间,比顶在最上面更容易一眼找到。
             _top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);
-            GoWeek(StartOfWeek(DateTime.Today));
+            _weekStart = StartOfWeek(DateTime.Today);
+            Rebuild();
+            TodayRequested?.Invoke();      // 月历的选中日也回到今天
         }));
 
         // ★★ 全天条带也要【让开左侧刻度列】—— 否则它的七列比下面的表格向左偏 44px，

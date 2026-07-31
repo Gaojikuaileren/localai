@@ -311,11 +311,34 @@ public sealed class CalendarView : UserControl
         SelectDay(new DateTime(anchor.Year, anchor.Month, Math.Min(_selected.Day, days)));
     }
 
+    /// <summary>
+    /// 把视野与【选中日】一起拉回今天 —— 下方时间轴那个「现在」按钮走这里。
+    /// notify: false —— 时间轴已经自己去了本周,不必再回传绕一圈。
+    /// </summary>
+    public void FocusToday()
+    {
+        _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
+        SelectDay(DateTime.Today, notify: false);
+        Rebuild();
+    }
+
+    /// <summary>
+    /// 藏掉「回到今日」—— 主页合并板块里下方时间轴已经有一个「现在」了,
+    /// 两个按钮干同一件事(用户裁定 2026-07-31)。
+    /// ★ 顶栏那个日历抽屉没有时间轴,那里必须留着 —— 所以是开关而不是直接删。
+    /// </summary>
+    public bool HideTodayButton
+    {
+        get => _hideTodayButton;
+        set { if (_hideTodayButton == value) return; _hideTodayButton = value; Rebuild(); }
+    }
+    bool _hideTodayButton;
+
     /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
     void RefreshTodayButton()
     {
         _leftActions.Children.Clear();
-        if (ShowsToday()) return;
+        if (_hideTodayButton || ShowsToday()) return;
         var today = Btn("回到今日", () =>
         {
             _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
