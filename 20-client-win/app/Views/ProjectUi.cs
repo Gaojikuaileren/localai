@@ -19,21 +19,21 @@ public static class ProjectUi
         _ => ("已完成", "FgMuted"),
     };
 
-    /// <summary>可见范围显示名。</summary>
-    public static string ScopeLabel(ProjectScope s) => s switch
+    /// <summary>可见范围显示名。★ 过界面用词表 —— 存的是 ProjectScope 枚举,这里只是显示。</summary>
+    public static string ScopeLabel(ProjectScope s) => Services.Vocab.Apply(s switch
     {
         ProjectScope.Family => "家庭",
         ProjectScope.OnlyMe => "仅本人",
         _ => "个人",
-    };
+    });
 
-    /// <summary>可见范围一行解释。</summary>
-    public static string ScopeHint(ProjectScope s) => s switch
+    /// <summary>可见范围一行解释。★ 同上,过界面用词表。</summary>
+    public static string ScopeHint(ProjectScope s) => Services.Vocab.Apply(s switch
     {
         ProjectScope.Family => "家庭:同一网络里其它 PC 的客户端可见、可操作。",
         ProjectScope.OnlyMe => "仅本人:只有你本人可见(即便同机另一位成员也看不到)。",
         _ => "个人:只在本机显示,不共享到其它 PC。",
-    };
+    });
 
     /// <summary>AI 权限的显示名。</summary>
     public static string AiLabel(AiPermission a) => a switch

@@ -104,7 +104,11 @@ public static class CalendarEditor
 
         // ---- iCloud 日历组(接入后由服务端下发真实分组)----
         var group = new ComboBox { Margin = new Thickness(0, 2, 0, 6) };
-        foreach (var g in CalendarData.Groups) group.Items.Add(g);
+        // ★★ 显示过【界面用词表】(家庭/团队),但【存的仍是 CalendarData.Groups 里的原词】——
+        //   见保存处 `CalendarGroup: CalendarData.Groups[index]`,以及下一行按【原值】反查选中项。
+        //   若把存储值也换掉:老档案里 CalendarGroup="家庭" 将匹配不上分组表 -> IndexOf 得 -1
+        //   -> 回落到第 0 项 -> 用户的日程被静默改到别的分组。存储与显示必须分开(见 Services/Vocab)。
+        foreach (var g in CalendarData.Groups) group.Items.Add(Services.Vocab.Apply(g));
         group.SelectedIndex = Math.Max(0, Array.IndexOf(CalendarData.Groups, existing?.CalendarGroup ?? CalendarData.Groups[0]));
 
         var location = Field(existing?.Location ?? "");

@@ -61,6 +61,21 @@ public sealed class SettingsView : UserControl
             }
         };
 
+        // ---- 界面用词:家庭 / 团队(用户裁定 2026-07-31)----
+        // ★ 只换界面文案里的称谓,不动任何存储值(见 Services/Vocab 头部的纪律)。
+        var vocab = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+        foreach (var v in new[] { OrgVocab.Family, OrgVocab.Team })
+            vocab.Items.Add(new ComboBoxItem { Content = Vocab.LabelOf(v, s.Language), Tag = v });
+        vocab.SelectedIndex = (int)s.OrgVocab;
+        vocab.SelectionChanged += (_, _) =>
+        {
+            if (vocab.SelectedItem is ComboBoxItem { Tag: OrgVocab picked })
+            {
+                s.OrgVocab = picked; s.Save();
+                Vocab.Current = picked;   // 触发 Changed -> 界面就地重建(与换语言同一条路)
+            }
+        };
+
         // ---- 界面音效 ----
         var sfx = new CheckBox
         {
@@ -108,6 +123,13 @@ public sealed class SettingsView : UserControl
                 new Border { Height = 12 },
                 Ui.Body("母语"), native,
                 Ui.Caption("翻译时如果目标池算不出目标(比如池里只有中文、你输入的也是中文),会先翻成母语。"),
+                new Border { Height = 12 },
+                Ui.Body("称呼这群人"), vocab,
+                // ★ 这两行说明【不能】自己写上"家庭""团队"这两个词 —— 它们会被界面用词表就地替换,
+                //   于是句子变成"…的『团队』会整体换成『团队』",自己把自己说糊涂了。
+                //   所以描述成"这个称谓",不点名具体词。
+                Ui.Caption("界面里把「共用这台中枢的这群人」叫什么。改了之后,成员、可见范围、动态等处的这个称谓会整体跟着变。"),
+                Ui.Caption("★ 只改界面用词 —— 不动任何已存的数据(日程分组、待办范围等存的仍是原值);Apple 家庭共享这类产品名也照旧。"),
                 sfx,
                 Ui.Caption("拖动语言卡片落地时的轻响。★ 只有暖萌皮肤会出声 —— 微风与墨白本来就是克制的。"),
                 new Border { Height = 8 },

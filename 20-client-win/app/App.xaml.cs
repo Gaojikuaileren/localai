@@ -76,6 +76,7 @@ public partial class App : Application
 
         Settings = AppSettings.Load();
         Strings.Language = Settings.Language;
+        Vocab.Current = Settings.OrgVocab;   // ★ 在建窗口之前 —— 否则首屏还是旧用词
         ThemeManager.Initialize(Settings.Skin);
 
         // 自启项若指向旧路径(exe 被移动/更新过)则重写,否则开机会启动到一个不存在的文件。

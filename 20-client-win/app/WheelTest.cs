@@ -233,6 +233,26 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 会话面板渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★ 界面用词表:同一张设置页,家庭档 vs 团队档 —— 看替换是否真的到位、且排版不碎。
+        try
+        {
+            ThemeManager.Initialize(Skin.Breeze);
+            foreach (var mode in new[] { Services.OrgVocab.Family, Services.OrgVocab.Team })
+            {
+                Services.Vocab.Current = mode;
+                var sv = new SettingsView { Width = 900, Height = 1500 };
+                Save(Themed(sv), Path.Combine(outDir, $"vocab-{mode.ToString().ToLowerInvariant()}.png"), 920, 1520);
+                // 消息栏里有“家庭动态/家庭范围”—— 真正能看出替换是否生效的一屏
+                var bd = new BriefingDrawerView { Width = 460, Height = 320 };
+                Save(Themed(bd), Path.Combine(outDir, $"vocab-brief-{mode.ToString().ToLowerInvariant()}.png"), 480, 340);
+            }
+            Services.Vocab.Current = Services.OrgVocab.Family;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: 用词表渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // ★ 系统页覆盖层(设置/模型/扩展):返回行 + 页面本体,盖在 BgWindow 上。
         //   为什么必须画出来:第一版这里"很错乱" —— 覆盖层用 ContentControl 承载,
         //   而它的默认模板根本不画 Background,于是底下的工作页整个透出来。

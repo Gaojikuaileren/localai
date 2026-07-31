@@ -54,12 +54,17 @@ public static class Strings
     /// 取文案。缺键返回 "⟦key⟧" —— 故意刺眼:漏翻译要在界面上一眼看见,
     /// 而不是静默显示成另一种语言让人以为没问题。
     /// </summary>
+    /// <summary>
+    /// 取文案。★ 出口处过一层【界面用词表】(家庭 / 团队) ——
+    ///   放在这里而不是去改几十个调用点:这是 i18n 的唯一入口,一钩全覆盖。
+    ///   默认档(家庭)时 Apply 直接原样返回,零开销。
+    /// </summary>
     public static string Get(string key)
     {
         if (Table.TryGetValue(key, out var per))
         {
-            if (per.TryGetValue(_lang, out var v)) return v;
-            if (per.TryGetValue("zh-CN", out var zh)) return zh;   // 有键但缺某语言 -> 回退中文(基准语言)
+            if (per.TryGetValue(_lang, out var v)) return Services.Vocab.Apply(v);
+            if (per.TryGetValue("zh-CN", out var zh)) return Services.Vocab.Apply(zh);   // 有键但缺某语言 -> 回退中文(基准语言)
         }
         return "⟦" + key + "⟧";
     }

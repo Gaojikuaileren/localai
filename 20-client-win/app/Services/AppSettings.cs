@@ -13,6 +13,12 @@ public sealed class AppSettings
 {
     public string Language { get; set; } = "zh-CN";      // zh-CN | en-US | ja-JP
     public Skin Skin { get; set; } = Skin.Breeze;
+
+    /// <summary>
+    /// 界面用词:对「共用这台中枢的这群人」的称谓(家庭 / 团队)。默认家庭。
+    /// ★ 只影响界面文案,不影响任何存储值(见 Services/Vocab)。与皮肤/语言同类:每台设备各自的选择。
+    /// </summary>
+    public OrgVocab OrgVocab { get; set; } = OrgVocab.Family;
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public Density Density { get; set; } = Density.Comfortable;
     public bool Autostart { get; set; }

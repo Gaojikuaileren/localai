@@ -2998,6 +2998,63 @@ public static class Selftest
                            "★ Icons.Live 摄还清扫 —— 不再只靠换肤回收(常驻托盘无界增长)");
             }
 
+            // ---- 界面用词表:家庭 / 团队(用户裁定 2026-07-31)----
+            {
+                var before = Services.Vocab.Current;
+                try
+                {
+                    // 默认档 = 家庭:原样返回,零替换
+                    Services.Vocab.Current = Services.OrgVocab.Family;
+                    Assert(Services.Vocab.Apply("家庭成员") == "家庭成员", "默认(家庭)不做任何替换");
+
+                    Services.Vocab.Current = Services.OrgVocab.Team;
+                    Assert(Services.Vocab.Apply("家庭成员") == "团队成员", "★ 选团队后界面用词整体替换");
+                    Assert(Services.Vocab.Apply("暂无家庭范围的消息。") == "暂无团队范围的消息。", "句中的称谓也换");
+                    // ★★ 专有名词不许动 —— Apple 的功能就叫「家庭共享」,换成"团队共享"是把产品名说错
+                    Assert(Services.Vocab.Apply("Apple 家庭共享日历:计划接入").Contains("Apple 家庭共享"),
+                           "★★ Apple 家庭共享是产品名,不跟着换(换了就是伪造信息)");
+                    // 同一句里既有产品名又有我们的称谓:各归各的
+                    Assert(Services.Vocab.Apply("家庭日历与 Apple 家庭共享同步") == "团队日历与 Apple 家庭共享同步",
+                           "★ 一句里产品名保留、我们的称谓照换");
+                    // 其它语言
+                    var lang0 = I18n.Strings.Language;
+                    try
+                    {
+                        I18n.Strings.Language = "en-US";
+                        Assert(Services.Vocab.Apply("Family members") == "Team members", "英文也换(含大小写两式)");
+                        I18n.Strings.Language = "ja-JP";
+                        Assert(Services.Vocab.Apply("家族メンバー") == "チームメンバー", "日文也换");
+                    }
+                    finally { I18n.Strings.Language = lang0; }
+
+                    // 下拉自己的选项名【不过】替换 —— 否则"家庭"那一项会显示成"团队"
+                    Assert(Services.Vocab.LabelOf(Services.OrgVocab.Family, "zh-CN") == "家庭",
+                           "★ 下拉里「家庭」这一项永远显示「家庭」(它是选项名,不是文案)");
+
+                    // ★★ 数据安全:日历分组表是【存储键】,绝不能被替换掉
+                    Assert(Views.CalendarData.Groups.Contains("家庭"),
+                           "★★ 日历分组的【存储值】仍是原词 —— 换掉会让老档案匹配不上、日程被静默改组");
+                }
+                finally { Services.Vocab.Current = before; }
+            }
+
+            // 用词表的【挂点】—— 两处中央入口,漏一处就有半边界面不跟着变
+            {
+                var strSrc = TryReadSource(Path.Combine("I18n", "Strings.cs"));
+                var uiSrc = TryReadSource(Path.Combine("Views", "Ui.cs"));
+                var ceSrc = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
+                if (strSrc is not null)
+                    Assert(strSrc.Contains("Services.Vocab.Apply(v)") && strSrc.Contains("Services.Vocab.Apply(zh)"),
+                           "★ Strings.Get 出口过用词表(覆盖 strings.json 全部文案)");
+                if (uiSrc is not null)
+                    Assert(uiSrc.Split("Services.Vocab.Apply(").Length - 1 >= 5,
+                           "★ Ui 的 Title/Subtitle/Body/Caption/Panel 都过用词表(覆盖代码里硬编码的中文)");
+                if (ceSrc is not null)
+                    Assert(ceSrc.Contains("group.Items.Add(Services.Vocab.Apply(g))")
+                           && ceSrc.Contains("CalendarGroup: CalendarData.Groups["),
+                           "★★ 日历分组:【显示】过用词表、【存储】仍用原值(否则老档案匹配不上、日程被静默改组)");
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {

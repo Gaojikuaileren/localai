@@ -133,6 +133,9 @@ public partial class MainWindow : Window
         // 做法说明:界面是代码构建的,文案在构造时取一次;所以最简洁可靠的方式是重建导航
         // 并重新进入当前页面(视图本来就是每次导航新建的,重建成本很低)。
         Strings.LanguageChanged += OnLanguageChanged;
+        // ★ 界面用词(家庭/团队)换了 —— 跟换语言完全同类:文案就地重建,不用重启。
+        //   复用同一条路径,免得两套重建逻辑各漏一半。
+        Services.Vocab.Changed += OnLanguageChanged;
 
         // ★ 中枢连接状态一变就刷顶栏(启动探测连上、配对成功、调用中被解除等任一路径)——
         //   否则右上角会停在启动时的"尚未配对/未连接",连上后也不改显 token 速率。

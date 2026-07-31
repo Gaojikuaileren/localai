@@ -14,16 +14,19 @@ public static class Ui
     public static T Dyn<T>(this T el, DependencyProperty prop, string resourceKey) where T : FrameworkElement
     { el.SetResourceReference(prop, resourceKey); return el; }
 
-    public static TextBlock Title(string text) => new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) }
+    // ★★ 四个文本构造器都过【界面用词表】(家庭 / 团队,见 Services/Vocab):
+    //   代码里硬编码的中文文案几乎全从这里出去,钩这一处 = 几十个调用点一次性覆盖。
+    //   默认档(家庭)时 Apply 原样返回,零开销。
+    public static TextBlock Title(string text) => new TextBlock { Text = Services.Vocab.Apply(text), FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) }
         .Dyn(TextBlock.FontSizeProperty, "FontTitle").Dyn(TextBlock.ForegroundProperty, "FgPrimary");
 
-    public static TextBlock Subtitle(string text) => new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) }
+    public static TextBlock Subtitle(string text) => new TextBlock { Text = Services.Vocab.Apply(text), FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) }
         .Dyn(TextBlock.FontSizeProperty, "FontSubtitle").Dyn(TextBlock.ForegroundProperty, "FgPrimary");
 
-    public static TextBlock Body(string text, bool muted = false) => new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4) }
+    public static TextBlock Body(string text, bool muted = false) => new TextBlock { Text = Services.Vocab.Apply(text), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4) }
         .Dyn(TextBlock.ForegroundProperty, muted ? "FgSecondary" : "FgPrimary");
 
-    public static TextBlock Caption(string text) => new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }
+    public static TextBlock Caption(string text) => new TextBlock { Text = Services.Vocab.Apply(text), TextWrapping = TextWrapping.Wrap }
         .Dyn(TextBlock.FontSizeProperty, "FontCaption").Dyn(TextBlock.ForegroundProperty, "FgMuted");
 
     /// <summary>
@@ -89,7 +92,7 @@ public static class Ui
                 titleRow.Children.Add(hit);
             }
         }
-        var t = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        var t = new TextBlock { Text = Services.Vocab.Apply(title), FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         t.Dyn(TextBlock.ForegroundProperty, "FgPrimary").Dyn(TextBlock.FontSizeProperty, "FontSubtitle");
         titleRow.Children.Add(t);
         // 紧跟标题右侧的小控件(如待办的"分类下拉箭头")
