@@ -27,6 +27,13 @@ public sealed class ToggleSwitch : UserControl
     const double Knob = 22;
     const double Inset = 4;
 
+    // ★ 紧凑档(用户裁定 2026-07-31):同传设置那一格里两个开关并排,
+    //   窗口缩到最小时原尺寸会把右边的设备选择挤出去 —— 那一格是【不给滚动条】的,
+    //   挤出去就是真的看不见了。所以给一个窄档,而不是靠"窗口别缩太小"。
+    const double TrackWc = 24;
+    const double TrackHc = 40;
+    const double Knobc = 17;
+
     readonly Border _track;
     readonly Border _knob;
     readonly TranslateTransform _slide = new();
@@ -39,16 +46,21 @@ public sealed class ToggleSwitch : UserControl
     /// false = 灰掉、拨不动。★ 用在"前提没满足"的场合(比如虚拟声卡没装,
     /// 译文语音根本送不进会议软件)—— 给一个能拨却不生效的开关就是骗人。
     /// </param>
-    public ToggleSwitch(string label, bool on, Action<bool> onChanged, bool enabled = true)
+    readonly double _tw, _th, _kn;
+
+    public ToggleSwitch(string label, bool on, Action<bool> onChanged, bool enabled = true, bool compact = false)
     {
         _on = on;
         _onChanged = onChanged;
         _enabled = enabled;
+        _tw = compact ? TrackWc : TrackW;
+        _th = compact ? TrackHc : TrackH;
+        _kn = compact ? Knobc : Knob;
 
         _knob = new Border
         {
-            Width = Knob, Height = Knob,
-            CornerRadius = new CornerRadius(Knob / 2),
+            Width = _kn, Height = _kn,
+            CornerRadius = new CornerRadius(_kn / 2),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, Inset, 0, 0),
@@ -57,8 +69,8 @@ public sealed class ToggleSwitch : UserControl
 
         _track = new Border
         {
-            Width = TrackW, Height = TrackH,
-            CornerRadius = new CornerRadius(TrackW / 2),
+            Width = _tw, Height = _th,
+            CornerRadius = new CornerRadius(_tw / 2),
             BorderThickness = new Thickness(1),
             Child = _knob,
             Cursor = Cursors.Hand,
@@ -74,13 +86,13 @@ public sealed class ToggleSwitch : UserControl
             Text = label,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 6, 0, 0),
-            MaxWidth = 72,
+            Margin = new Thickness(0, compact ? 4 : 6, 0, 0),
+            MaxWidth = compact ? 58 : 72,
         };
         text.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         text.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        var box = new StackPanel { Margin = new Thickness(0, 0, 18, 0), Opacity = enabled ? 1 : 0.4 };
+        var box = new StackPanel { Margin = new Thickness(0, 0, compact ? 10 : 18, 0), Opacity = enabled ? 1 : 0.4 };
         box.Children.Add(_track);
         box.Children.Add(text);
         Content = box;
@@ -99,7 +111,7 @@ public sealed class ToggleSwitch : UserControl
     void Apply(bool animate)
     {
         // 开 = 钮在上;关 = 钮滑到底
-        var to = _on ? 0 : TrackH - Knob - Inset * 2;
+        var to = _on ? 0 : _th - _kn - Inset * 2;
         if (animate)
         {
             _slide.BeginAnimation(TranslateTransform.YProperty,

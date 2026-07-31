@@ -446,6 +446,17 @@ public sealed class ChatCenter
     }
 
     /// <summary>
+    /// 播种/导入用:直接写一条消息,【不】附带"AI 未接入"的系统说明。
+    /// ★ 只给示例数据和(将来的)同传转写用 —— 用户发消息仍然走 Send,
+    ///   那条诚实说明不能因为多了这个入口就绕过去。
+    /// </summary>
+    public void SeedMessage(string sessionId, ChatRole role, string text, DateTime at)
+    {
+        if (!_sessions.Any(x => x.SessionId == sessionId)) return;
+        _messages.Add(new ChatMessage(sessionId, role, text, at, null, NewMsgId()));
+    }
+
+    /// <summary>
     /// 往会话里写一条【带选项按钮】的系统提问。返回这条消息的稳定标识,便于之后作答。
     /// ★ 这不是"伪造 AI 回复":它是客户端自己要问的事(翻成哪种语言),
     ///   与 AI 未接入无关,所以照常写进会话。

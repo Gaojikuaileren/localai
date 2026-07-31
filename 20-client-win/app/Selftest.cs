@@ -1299,7 +1299,7 @@ public static class Selftest
                 Assert(ip2.MyLang == ip.MyLang && ip2.TheirLang == ip.TheirLang, "语言方向会被记住");
                 Assert(!ip2.Subtitles, "字幕开关会被记住");
                 Assert(!ip2.SpeakTranslation,
-                       "★ 实时翻译输出【不】自动恢复 —— 不能因为上次开着就自动接管你的麦克风");
+                       "★ 我方译文语音【不】自动恢复 —— 不能因为上次开着就自动接管你的麦克风");
             }
             // ★ 三套皮肤各画各的图标 —— 新加一个图标只加了一套,换肤时那里就会空着。
             //   这条把三套都得有钉死,不用等换肤时肉眼发现。
@@ -1365,6 +1365,20 @@ public static class Selftest
                 var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");
                 Assert(inst is not null && inst.Contains("已拒绝运行"),
                        "★ 自备的安装包同样要过校验");
+            }
+
+            // ---- 示例同传记录(用户要求:放到普通会话列表里可测) ----
+            {
+                var demoSrc = TryReadSource("App.xaml.cs");
+                if (demoSrc is not null)
+                {
+                    Assert(demoSrc.Contains("void SeedDemoInterpret()") && demoSrc.Contains("interpret: true"),
+                           "★ 有一段示例同传记录,和普通会话排在同一个列表里");
+                    Assert(demoSrc.Contains("(示例)同传记录"),
+                           "★ 示例标着「(示例)」—— 语音链路还没接入,不能让它看起来像真转写");
+                    Assert(demoSrc.Contains("var hadInterpret = Chat.AllTranslationSessions().Any(x => x.Interpret);"),
+                           "★ 判据是“一条同传会话都没有”而不是首次运行 —— 老用户也看得到,删掉之后不再冒出来");
+                }
             }
 
             // ---- 同传会话:进普通会话列表、带标记、不可搬走、点开自动切界面 ----
@@ -1446,8 +1460,8 @@ public static class Selftest
             {
                 Assert(cvMode.Contains("FrameworkElement ModeSwitcher()") && cvMode.Contains("ModeSwitch = true"),
                        "★ 会话板块左上角有三个场景的入口(位置由用户指定)");
-                Assert(cvMode.Contains("new InterpretPanel()") && cvMode.Contains("ReservedScenePlaceholder()"),
-                       "同传有自己的面板;第三个场景如实说\"还没定\"");
+                Assert(cvMode.Contains("new InterpretPanel(_sessionId)") && cvMode.Contains("ReservedScenePlaceholder()"),
+                       "★ 同传面板拿得到当前会话 —— 否则点开一条同传记录却看不到它的转写;第三个场景如实说\"还没定\"");
             }
             var barMode = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (barMode is not null)
@@ -1461,14 +1475,21 @@ public static class Selftest
                        "★ 同传模式右边那格是【同传设置】,不是翻译历史");
                 Assert(barMode.Contains("\"同传设置\", action: _latency, scroll: false, badge: _driverBadge"),
                        "★ 同传设置不给滚动条;状态灯紧跟标题,最右边留给延迟读数");
-                Assert(barMode.Contains("实时翻译输出不可用"),
+                Assert(barMode.Contains("我方译文语音不可用"),
                        "★ 没装虚拟声卡时,右上角直接说【为什么用不了】,而不是显示一个没意义的延迟");
-                Assert(barMode.Contains("new ToggleSwitch(\"实时翻译输出\"") && barMode.Contains("new ToggleSwitch(\"实时对方字幕\""),
+                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("new ToggleSwitch(\"对方实时字幕\""),
                        "两个开关名字等长(各六字),排在一起不长短不齐");
-                Assert(barMode.Contains("DevicePicker(\"我方麦克风\"") && barMode.Contains("DevicePicker(\"译文送到\""),
+                Assert(barMode.Contains("DevicePicker(\"我方麦克风\"") && barMode.Contains("DevicePicker(\"音频输出\""),
                        "★ 开关右边那半边放输入/输出设备选择(原来是空的)");
                 Assert(barMode.Contains("LevelColumn(\"对方\")") && barMode.Contains("LevelColumn(\"我方\")"),
                        "★ 两条竖直音量挪到同传设置的最左边,开关相应右移");
+                // ---- 对方那侧只出字幕、不合成语音(用户裁定 2026-07-31) ----
+                Assert(!Body(barMode).Contains("ToggleSwitch(\"实时翻译输出\""),
+                       "★ 不再有“把对方的话也同传成语音”这回事 —— 对方原声一直在响,再叠一层机器声等于两个人同时说话");
+                Assert(barMode.Contains("PlacementMode.Top") && barMode.Contains("PART_Popup"),
+                       "★ 两个设备选择器【上拉】—— 它们坐在窗口最底下,往下弹会被窗口边缘裁掉");
+                Assert(barMode.Contains("compact: true"),
+                       "★ 开关用紧凑档 —— 窗口缩到最小时别把右边的设备选择挤出去(那一格不给滚动条)");
                 var badge = Slice(barMode, "_driverBadge.Children.Clear();", "_switchRow.Children.Clear();");
                 Assert(badge is not null && badge.Contains("RiskDanger") && badge.Contains("RiskWarning") && badge.Contains("RiskSafe"),
                        "★ 声卡状态是红/黄/绿三态灯");
@@ -1476,7 +1497,7 @@ public static class Selftest
                        "★ 状态要【写全】—— 光一个彩点看不出它在说什么;点只负责一眼可扫,不承担表意");
                 Assert(badge is not null && badge.Contains("去设置") && badge.Contains("一键开启"),
                        "红=去设置、黄=一键开启;绿的时候直接显示版本号,没有按钮");
-                Assert(barMode.Contains("new ToggleSwitch(\"实时翻译输出\"") && barMode.Contains("enabled: drv.Installed"),
+                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: drv.Installed"),
                        "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
                 Assert(barMode.Contains("_notesCardHost.Visibility"), "翻译历史只在文字模式出现");
                 Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),
@@ -2749,6 +2770,23 @@ public static class Selftest
                 hidden.Measure(new System.Windows.Size(800, 800));
                 Assert(Views.FocusPolicy.FindChatInput(hidden) is null, "折叠起来的分支里的输入框不被 Tab 到");
             }
+            // ---- 系统页(设置/模型/扩展)是【覆盖式】的,不销毁底下正在工作的页面 ----
+            var mwSys = TryReadSource("MainWindow.xaml.cs");
+            if (mwSys is not null)
+            {
+                Assert(mwSys.Contains("static bool IsSystemPage(string key) => key is \"settings\" or \"models\" or \"extensions\";"),
+                       "设置/模型/扩展三页走覆盖式");
+                var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
+                Assert(nav is not null && nav.Contains("if (IsSystemPage(key))") && nav.Contains("OpenSystemPage(key);"),
+                       "★ 进系统页 = 盖上来,不替换底下的工作页(否则回来时会话/滚动/草稿全没了)");
+                Assert(mwSys.Contains("public void CloseSystemPage()") && mwSys.Contains("BackChevron("),
+                       "★ 左上角有返回箭头,点它回到底下那一页 —— 那一页一直活着,不用重建");
+                Assert(mwSys.Contains("SettingsInOverlay()?.RevealAudioDriver()"),
+                       "从别处跳到某块设置时,也从覆盖层里取设置页");
+                Assert(!Body(mwSys).Contains("(ContentHost.Content as SettingsView)"),
+                       "不再从工作页宿主里找设置页(它已经不在那儿了)");
+            }
+
             var mwTab = TryReadSource("MainWindow.xaml.cs");
             if (mwTab is not null)
             {

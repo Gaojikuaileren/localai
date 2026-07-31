@@ -100,11 +100,15 @@ public partial class App : Application
         var mergedOnLoad = LoadStores();      // 合并了重复项目就得补存(见下)
         if (!hadStore) SeedDemoTasks();       // 聊天/项目/待办示例
         if (!hadCalendar) SeedDemoEvents();   // 日历示例(独立:老用户有其它存档但还没日历档,也补一次)
+        // 同传示例同样【独立判断】:这台机器上已经有存档的用户,也该看得到这条记录长什么样。
+        // 判据是"一条同传会话都没有",而不是"是不是首次运行" —— 删掉之后不会再冒出来。
+        var hadInterpret = Chat.AllTranslationSessions().Any(x => x.Interpret);
+        if (!hadInterpret) SeedDemoInterpret();
         AttachAutoSave();
         // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
         //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。
         //   合并重复项目同理:它发生在订阅【之前】,不补这一次就不会落盘,下次启动又是一堆重复。
-        if (!hadStore || !hadCalendar || mergedOnLoad) SaveStores();
+        if (!hadStore || !hadCalendar || !hadInterpret || mergedOnLoad) SaveStores();
         // 按"自动删除超过 X 天的已完成"设置清一次(0 = 关闭)。放在建窗口前,界面直接看到清理后的结果。
         Todos.PurgeCompletedOlderThan(Settings.TodoAutoPurgeDays);
 
@@ -138,6 +142,31 @@ public partial class App : Application
         Chat.NewSession("p1", "chat", ProjectScope.Family, "(示例)行程讨论");
 
         SeedDemoTodos();   // 日历示例由 SeedDemoEvents 独立播种(日历单独落盘)
+    }
+
+    /// <summary>
+    /// 一段示例同传记录 —— 和普通会话排在同一个列表里(用户裁定),用来看版面:
+    /// 左边对方、右边我方,和聊天空间同一套气泡。
+    /// ★ 标着「(示例)」:语音链路还没接入,这不是真的转写,不能让它看起来像。
+    /// </summary>
+    void SeedDemoInterpret()
+    {
+        var s = Chat.NewSession(null, "translation", ProjectScope.Personal, "(示例)同传记录 · 中↔日", interpret: true);
+        var t0 = DateTime.Now.AddMinutes(-26);
+        (bool me, string text)[] lines =
+        {
+            // ★ 对方那侧【原文一行、译文一行】—— 同传里对方只出字幕不出语音,
+            //   所以原话必须留在记录里:字幕会改口,记录不该只剩译文这一面之词。
+            (false, "お忙しいところありがとうございます。今日は納期の件で相談させてください。\n(感谢百忙之中抽空。今天想就交期的事情和您商量。)"),
+            (true,  "没问题。我们这边把测试排到了下周三,交期我想确认一下有没有余量。"),
+            (false, "テストが水曜に終わるなら、金曜の出荷に間に合います。ただ検品は木曜の午前中までにお願いしたいです。\n(如果测试周三结束,周五发货来得及。不过检验希望在周四上午之前完成。)"),
+            (true,  "周四上午可以。检验报告我们当天下午发给你们。"),
+            (false, "助かります。では金曜出荷で進めますね。\n(帮大忙了。那就按周五发货推进。)"),
+            (true,  "好的,我这边同步给生产。"),
+        };
+        for (int i = 0; i < lines.Length; i++)
+            Chat.SeedMessage(s.SessionId, lines[i].me ? ChatRole.User : ChatRole.Assistant,
+                             lines[i].text, t0.AddSeconds(i * 47));
     }
 
     // 待办/家务同理:没有条目就只剩空态,没法评审列表与勾选交互。全部标注「(示例)」。

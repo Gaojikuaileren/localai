@@ -439,15 +439,95 @@ public partial class MainWindow : Window
         _nav.Add((item, b));
     }
 
+    /// <summary>系统组的三页 —— 它们是【覆盖式】的,不替换底下正在工作的页面。</summary>
+    static bool IsSystemPage(string key) => key is "settings" or "models" or "extensions";
+
+    /// <summary>当前盖在上面的系统页(null = 没盖)。返回箭头据此回到底下那一页。</summary>
+    string? _systemKey;
+
     public void Navigate(string key)
     {
         var hit = _nav.FirstOrDefault(n => n.item.Key == key);
         if (hit.item is null) return;
+
+        // ★★ 系统页盖在工作页上,不销毁它(用户裁定):
+        //   此前从聊天切到设置再切回来,ChatView 是【重建】的 ——
+        //   选中的会话、滚动位置、正在打的字全没了,每次去改个设置都要重来一遍。
+        //   现在底下那个实例一直活着,返回就是原样。
+        if (IsSystemPage(key))
+        {
+            OpenSystemPage(key);
+            return;
+        }
+
+        CloseSystemPage();
         _currentKey = key;
         ContentHost.Content = hit.item.Build();
         // 主页右上角已经有日历板块了,顶栏就不再重复放按钮(用户裁定)。
         CalendarButton.Visibility = key == "home" ? Visibility.Collapsed : Visibility.Visible;
         HighlightNav(key);
+    }
+
+    /// <summary>把某个系统页盖上来。左上角一个返回箭头,点它回到底下那一页。</summary>
+    /// <summary>覆盖层里的设置页 —— 三个"跳到某块设置"的入口都从这儿取。</summary>
+    SettingsView? SettingsInOverlay()
+    {
+        if (SystemPageHost.Content is not DockPanel d) return null;
+        foreach (var c in d.Children) if (c is SettingsView sv) return sv;
+        return null;
+    }
+
+    public void OpenSystemPage(string key)
+    {
+        var hit = _nav.FirstOrDefault(n => n.item.Key == key);
+        if (hit.item is null) return;
+
+        // 已经盖着同一页就不重建 —— 免得从别处跳进来时把刚滚到的位置又冲掉
+        if (_systemKey != key)
+        {
+            _systemKey = key;
+            var back = BackChevron(CloseSystemPage);
+            var head = new DockPanel { LastChildFill = false, Margin = new Thickness(20, 14, 20, 0) };
+            DockPanel.SetDock(back, Dock.Left);
+            head.Children.Add(back);
+
+            var dock = new DockPanel { LastChildFill = true };
+            DockPanel.SetDock(head, Dock.Top);
+            dock.Children.Add(head);
+            dock.Children.Add(hit.item.Build());
+            SystemPageHost.Content = dock;
+        }
+        SystemPageHost.Visibility = Visibility.Visible;
+        HighlightNav(key);
+    }
+
+    /// <summary>收起系统页,回到底下那一页 —— 它一直都在,不用重建。</summary>
+    public void CloseSystemPage()
+    {
+        if (_systemKey is null) return;
+        _systemKey = null;
+        SystemPageHost.Visibility = Visibility.Collapsed;
+        SystemPageHost.Content = null;
+        HighlightNav(_currentKey);
+    }
+
+    /// <summary>左上角的返回箭头。★ 与项目抽屉那个「‹ 返回」同一个形状,不另造一种。</summary>
+    static FrameworkElement BackChevron(Action onClick)
+    {
+        var t = new TextBlock { Text = "‹ 返回", VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border
+        {
+            Child = t, Padding = new Thickness(10, 5, 12, 5), Cursor = Cursors.Hand,
+            Background = System.Windows.Media.Brushes.Transparent, BorderThickness = new Thickness(1),
+        };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = System.Windows.Media.Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        return b;
     }
 
     // 仅刷新导航栏的选中高亮(不重建内容)——扩展里改显示项后复用它,别把正在看的页面也重建。
@@ -491,7 +571,7 @@ public partial class MainWindow : Window
     {
         Overlay.CloseActive();
         Navigate("settings");
-        (ContentHost.Content as SettingsView)?.RevealLanguagePool();
+        SettingsInOverlay()?.RevealLanguagePool();
     }
 
     /// <summary>同传界面检测到没装虚拟声卡时点进来:跳到设置里的「声音驱动」并框出来。</summary>
@@ -499,7 +579,7 @@ public partial class MainWindow : Window
     {
         Overlay.CloseActive();
         Navigate("settings");
-        (ContentHost.Content as SettingsView)?.RevealAudioDriver();
+        SettingsInOverlay()?.RevealAudioDriver();
     }
 
     /// <summary>主页日历/待办的图标(hover 变齿轮)点进来:跳到设置里的「与 Apple 同步」并高亮那一块。</summary>
@@ -507,7 +587,7 @@ public partial class MainWindow : Window
     {
         Overlay.CloseActive();      // 可能有抽屉开着,先收起再跳页
         Navigate("settings");
-        (ContentHost.Content as SettingsView)?.RevealAppleSync();
+        SettingsInOverlay()?.RevealAppleSync();
     }
 
     /// <summary>从项目抽屉/主页进入某项目的项目聊天:关抽屉 -> 切到聊天 -> 选中该项目上下文。</summary>

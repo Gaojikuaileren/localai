@@ -210,7 +210,8 @@ public sealed class TranslationBar : UserControl
     /// 版面:标题右边一个【状态灯 + 相应动作】;下方一排上下拨的开关,名字在开关下面,
     /// 从左往右排,右侧【故意留空】给以后加的开关或滑条。
     /// </summary>
-    readonly StackPanel _deviceCol = new() { VerticalAlignment = VerticalAlignment.Top, MinWidth = 190 };
+    // ★ 窗口缩到最小时这一格也得放得下:设备名很长,给下拉一个上限而不是让它把开关挤出去
+    readonly StackPanel _deviceCol = new() { VerticalAlignment = VerticalAlignment.Top, MinWidth = 150, MaxWidth = 210 };
     readonly TextBlock _latency = new() { VerticalAlignment = VerticalAlignment.Center };
 
     FrameworkElement InterpretSettingsCard()
@@ -277,7 +278,14 @@ public sealed class TranslationBar : UserControl
             return box;
         }
 
+        // ★ 【上拉】而不是下拉(用户裁定):这两个选择器坐在整个窗口的最底下一格,
+        //   往下弹的话列表要么被窗口边缘裁掉,要么盖到任务栏上去 —— 往上弹才有地方展开。
         var cb = new ComboBox { Margin = new Thickness(0, 2, 0, 0) };
+        cb.DropDownOpened += (_, _) =>
+        {
+            if (cb.Template?.FindName("PART_Popup", cb) is System.Windows.Controls.Primitives.Popup pop)
+                pop.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
+        };
         cb.Items.Add(new ComboBoxItem { Content = "跟随系统默认", Tag = "" });
         foreach (var d in devices) cb.Items.Add(new ComboBoxItem { Content = d.Name, Tag = d.Id });
         var idx = string.IsNullOrEmpty(currentId) ? 0 : devices.FindIndex(d => d.Id == currentId) + 1;
@@ -337,15 +345,17 @@ public sealed class TranslationBar : UserControl
         // ★ 没装虚拟声卡时,「实时语音翻译输出」【灰掉禁用】(用户裁定):
         //   译文语音根本送不进会议软件,给一个能拨的开关就是骗人。
         //   去安装的入口只在上面那个状态栏里 —— 同一件事不给两个入口。
-        _switchRow.Children.Add(new ToggleSwitch("实时翻译输出", st.SpeakTranslation,
-            on => TheApp.Interpret.SetSpeakTranslation(on), enabled: drv.Installed));
-        _switchRow.Children.Add(new ToggleSwitch("实时对方字幕", st.Subtitles,
-            on => TheApp.Interpret.SetSubtitles(on)));
+        // ★ 只有【我这一侧】有语音输出 —— 对方那侧只出字幕(用户裁定 2026-07-31):
+        //   对方的原声一直在响,再叠一层机器声等于两个人同时说话。
+        _switchRow.Children.Add(new ToggleSwitch("我方译文语音", st.SpeakTranslation,
+            on => TheApp.Interpret.SetSpeakTranslation(on), enabled: drv.Installed, compact: true));
+        _switchRow.Children.Add(new ToggleSwitch("对方实时字幕", st.Subtitles,
+            on => TheApp.Interpret.SetSubtitles(on), compact: true));
         // —— 右侧:设备选择(原来空着的那半边)
         _deviceCol.Children.Clear();
         _deviceCol.Children.Add(DevicePicker("我方麦克风", Services.AudioDevices.Inputs(),
             st.InputDeviceId, id => TheApp.Interpret.SetInputDevice(id)));
-        _deviceCol.Children.Add(DevicePicker("译文送到", Services.AudioDevices.Outputs(),
+        _deviceCol.Children.Add(DevicePicker("音频输出", Services.AudioDevices.Outputs(),
             st.OutputDeviceId, id => TheApp.Interpret.SetOutputDevice(id)));
 
         // —— 右上角:实时延迟。★ 没在跑就显示"—",不显示 0.0s ——
@@ -354,7 +364,7 @@ public sealed class TranslationBar : UserControl
         //   延迟读数在那种情况下没有意义,而"为什么用不了"才是用户此刻要知道的。
         if (!drv.Installed)
         {
-            _latency.Text = "实时翻译输出不可用";
+            _latency.Text = "我方译文语音不可用";
             _latency.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
         }
         else

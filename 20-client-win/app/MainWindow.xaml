@@ -233,7 +233,14 @@
           </Grid>
         </Border>
 
-        <ContentControl x:Name="ContentHost"/>
+        <!-- ★ 工作页与系统页【叠在一起】而不是互相替换(用户裁定):
+             此前从聊天切到设置再切回来,ChatView 是重建的 —— 选中的会话、滚动位置、
+             正在打的字全没了。现在系统页盖在上面,底下那个实例一直活着,返回就是原样。 -->
+        <Grid>
+          <ContentControl x:Name="ContentHost"/>
+          <ContentControl x:Name="SystemPageHost" Visibility="Collapsed" Focusable="False"
+                          Background="{DynamicResource BgWindow}"/>
+        </Grid>
       </DockPanel>
     </Grid>
 

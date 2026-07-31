@@ -870,7 +870,7 @@ public sealed class ChatView : UserControl
                 DockPanel.SetDock(head, Dock.Top);
                 body.Children.Add(head);
                 body.Children.Add(mode == TranslationMode.Interpret
-                    ? new InterpretPanel()
+                    ? new InterpretPanel(_sessionId)
                     : ReservedScenePlaceholder());
                 var only = ConvCard(body);
                 if (spec.BottomAccessory is null) return only;

@@ -40,7 +40,13 @@ public sealed class InterpretState
     /// 最不能猜错的东西 —— 猜错就是整场翻反。拖过一次之后记住,下次沿用。
     /// </summary>
     public string MyLang { get; private set; } = "";
-    /// <summary>对方的语言 —— 我的话翻成它,对方的话从它翻回来。同样初始为空。</summary>
+    /// <summary>
+    /// 对方的语言 —— 我的话翻成它送出去;对方的话【只转成字幕】,不合成语音(用户裁定 2026-07-31)。
+    /// ★ 为什么不给对方也配一路合成语音:会议里对方的原声一直在响,再叠一层机器声
+    ///   等于两个人同时说话 —— 既盖住原声的语气,也让人分不清哪句是真的。
+    ///   字幕是叠加,语音是覆盖;只有我这一侧【必须】变成语音,因为对方听不懂我的语言。
+    /// 同样初始为空。
+    /// </summary>
     public string TheirLang { get; private set; } = "";
 
     /// <summary>两端都设好了才谈得上开始同传。</summary>
@@ -52,7 +58,7 @@ public sealed class InterpretState
     /// </summary>
     public bool SpeakTranslation { get; private set; }
 
-    /// <summary>对方声音的实时字幕。</summary>
+    /// <summary>对方声音的实时字幕 —— 对方这一侧【只有】这个,没有语音输出。</summary>
     public bool Subtitles { get; private set; } = true;
 
     /// <summary>用哪个声音说话。null = 通用音色;将来可指向"我的声音"(设置里注册)。</summary>
@@ -60,7 +66,7 @@ public sealed class InterpretState
 
     /// <summary>我方麦克风(端点 ID)。空 = 跟随系统默认。</summary>
     public string? InputDeviceId { get; private set; }
-    /// <summary>译文语音送到哪(端点 ID)。同传要送进虚拟声卡;空 = 跟随系统默认。</summary>
+    /// <summary>音频输出设备(端点 ID)。我的译文语音送到这里(同传时送进虚拟声卡);空 = 跟随系统默认。</summary>
     public string? OutputDeviceId { get; private set; }
 
     /// <summary>

@@ -35,8 +35,12 @@ public sealed class InterpretPanel : UserControl
     readonly TextBlock _subtitle = new();
     readonly Border _subtitleBar;
 
-    public InterpretPanel()
+    /// <summary>当前打开的同传会话 —— 它的转写就是上方的气泡。null = 没选会话。</summary>
+    readonly string? _sessionId;
+
+    public InterpretPanel(string? sessionId = null)
     {
+        _sessionId = sessionId;
         _subtitleBar = SubtitleBar();
 
         var dock = new DockPanel { LastChildFill = true };
@@ -108,19 +112,23 @@ public sealed class InterpretPanel : UserControl
             { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
         bubble.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)));
 
+        if (_sessionId is not null)
+            TheApp.Chat.SeedMessage(_sessionId, fromMe ? ChatRole.User : ChatRole.Assistant, text, DateTime.Now);
+
         _subtitle.Text = "";
     }
 
     void Refresh()
     {
         var st = TheApp.Interpret;
+        LoadTranscript();
 
         // 字幕开关关掉 -> 整条收起,不留一条空槽占地方
         _subtitleBar.Visibility = st.Subtitles ? Visibility.Visible : Visibility.Collapsed;
 
         if (InterpretState.PipelineReady) return;
 
-        // ★ 未接入:如实说明,不伪造字幕
+        // ★ 未接入:如实说明,不伪造字幕(已有的转写照常显示 —— 那是记录,不是伪造的实时输出)
         _subtitle.Text = st.DirectionReady
             ? "语音链路尚未接入 —— 接上之后,对方说的话会在这里逐字出现,成句后飞到上面。"
             : "先把语言方向的两个坑填上(从语言池拖过去),再开始同传。";
@@ -132,6 +140,24 @@ public sealed class InterpretPanel : UserControl
             hint.HorizontalAlignment = HorizontalAlignment.Center;
             hint.Margin = new Thickness(0, 24, 0, 0);
             _messages.Children.Add(hint);
+        }
+    }
+
+    /// <summary>
+    /// 把这条会话已有的转写铺出来。
+    /// ★ 每次都【重建】而不是增量补:同一个元素不能有两个逻辑父级 ——
+    ///   留着旧气泡再往里塞,迟早撞上那个异常(这个项目里已经撞过好几次了)。
+    /// </summary>
+    void LoadTranscript()
+    {
+        _messages.Children.Clear();
+        if (_sessionId is null) return;
+        foreach (var m in TheApp.Chat.MessagesOf(_sessionId))
+        {
+            var fromMe = m.Role == ChatRole.User;
+            var body = ChatView.MessageText(fromMe);
+            body.Text = m.Text;
+            _messages.Children.Add(ChatView.BubbleShell(body, fromMe));
         }
     }
 }
