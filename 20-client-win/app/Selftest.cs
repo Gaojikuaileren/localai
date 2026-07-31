@@ -2295,13 +2295,107 @@ public static class Selftest
                        "★ 只有右下角手柄能起手拖拽(不是整张卡)");
                 Assert(homeTodo.Contains("AnimateShift") && homeTodo.Contains("TranslateTransform.YProperty"),
                        "★ 其余卡片【带动画】挤开/归位");
-                Assert(homeTodo.Contains("SetWeatherFocus(-1, animate: true)"),
-                       "★★ 拖起来先把三张全收起 —— 高度一致后“挪到第几位”才是一道简单的整数题");
+                // ★★ 这条断言【原来钉的正是那个 bug】(收起走 260ms 动画)。
+                //   动画期间卡片的布局位置每帧都在变,而位移是相对布局位置算的 ——
+                //   基准一直在动,画面就跟不上手(用户报的"拖拽不跟鼠标")。
+                //   现在钉住修法:立即收起 + 当场把布局跑完,基准从起手那刻就是死的。
+                Assert(homeTodo.Contains("SetWeatherFocus(-1, animate: false)")
+                       && homeTodo.Contains("_weatherStack.UpdateLayout()"),
+                       "★★ 拖起来【立即】把三张全收起并跑完布局 —— 基准不动,位移才跟得住手");
+                Assert(homeTodo.Contains("_dragFromY = e.GetPosition(_weatherStack).Y"),
+                       "★ 拖拽基准取天气栈自己的坐标系(整页外面套着 ScrollViewer,以页面为基准会凭空多一段)");
+                Assert(homeTodo.Contains("var minDy = (1 - from) * CityRowStride")
+                       && homeTodo.Contains("dy = Math.Clamp(dy, minDy, maxDy)"),
+                       "★★ 拖拽位移【夹在板块内】—— 不许超出最上/最下那一格(用户反馈会拖到板块以外)");
                 Assert(homeTodo.Contains("if (index <= 0 || index >= _cityCards.Length) return;"),
                        "★ 首格(当前所在地)不可拖动");
                 Assert(homeTodo.Contains("if (_draggingCity) return;"),
                        "★ 拖拽期间不响应悬停展开(否则卡片一边被拖一边变高)");
             }
+            // ---------------------------------------------------------------- 周时间轴(2026-07-31 一批裁定)
+            var tl = TryReadSource(Path.Combine("Views", "WeekTimeline.cs"));
+            if (tl is not null)
+            {
+                Assert(tl.Contains("public const double MinHours = 6"),
+                       "★ 时间轴放到最大 = 6 小时(用户裁定)");
+                Assert(tl.Contains("public const double DayMin = -1") && tl.Contains("public const double DayMax = 25"),
+                       "★★ 竖轴可视域是 -1~25 点而不是 0~24 —— 露出前后各一小时,跨零点的日程才看得全、拖得出来");
+                Assert(tl.Contains("public const double SnapHours = 0.5"),
+                       "★ 拖动改时间的颗粒 = 半小时(用户裁定)");
+                Assert(!tl.Contains("Zoom(1.5, 0.5)") && !tl.Contains("\uff0b"),
+                       "★ 加减号缩放按钮已移除(缩放归滚轮)");
+                Assert(tl.Contains("Canvas _canvas = new() { ClipToBounds = true, Background = Brushes.Transparent }")
+                       && tl.Contains("Canvas _gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent }"),
+                       "★★ 画布与刻度列都铺透明底 —— Background 为 null 的容器【不参与命中测试】,"
+                       + "滚轮事件根本不从那里发出(用户反馈:只有可交互元素才能缩放)");
+                Assert(tl.Contains("_pan = new Pan(") && tl.Contains("RebuildVertical()"),
+                       "★ 左键在空白处上下拖 = 平移");
+                Assert(tl.Contains("static List<(CalendarEvent Ev, int Col, int Total)> LayOut"),
+                       "★ 重叠的日程【平分当天宽度】(按重叠簇分列)");
+                Assert(tl.Contains("TextOutsideBelow") && tl.Contains("Canvas.SetTop(outside,"),
+                       "★ 条太矮时标题挪到条【外面】(上方)");
+                Assert(tl.Contains("edge.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, \"FgOnAccent\")"),
+                       "★ 日程条的起止各画一条【着重色的反色】线");
+                Assert(tl.Contains("Math.Clamp(y - 8, 0, Math.Max(0, h - 15))"),
+                       "★ 刻度标签上下都夹进可视区(用户报过\"底部的 0 点被吃掉了一半\")");
+                Assert(tl.Contains("Places.CoordOf(Places.Current()) is { } coord") && tl.Contains("SunClock.ForDay("),
+                       "★★ 夜晚压暗用【本地算】的日出日落(SunClock),坐标认不出就整块不画 —— 不编一个 6:00–18:00");
+                Assert(tl.Contains("if (_resize is not null) return;") && tl.Contains("void OnDataChanged()"),
+                       "★ 拖动期间挡掉 Changed 重建 —— 否则手底下那个元素会被换掉(拖着拖着就脱手)");
+                Assert(tl.Contains("protected override void OnLostMouseCapture"),
+                       "★ 捕获丢失也收尾(拖到窗口外松手/Alt+Tab),否则拖拽状态永远挂着");
+                // ★★ 全天条带：拿掉月历左下角那份当日列表之后，
+                //   全天日程就【看不见也点不着】了 —— 时间轴画的是 TimedOn，全天的根本不在里面。
+                //   这是"把入口连同界面元素一起删掉"的典型漏洞，必须有东西接住。
+                Assert(tl.Contains("void BuildAllDay()") && tl.Contains("CalendarData.SpansIn(_weekStart, 7)"),
+                       "★★ 时间轴有【全天】条带 —— 全天日程不在 TimedOn 里，不补就看不见也点不着");
+                Assert(tl.Contains("chip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OnEditEvent?.Invoke(captured); }"),
+                       "★ 全天条可点 —— 走的仍是日历那个编辑抽屉");
+                Assert(tl.Contains("_allDay.Visibility = Visibility.Collapsed; _allDay.Height = 0;"),
+                       "★ 这一周没有全天日程就整条塌掉，不白占纵向空间");
+                Assert(tl.Contains("还有 {overflow} 条全天日程"),
+                       "★ 摆不下的全天日程【如实说有几条】，不惄惄少画");
+                Assert(tl.Contains("_canvas.ToolTip = \"滚轮 = 缩放"),
+                       "★ 三个手势都没有可见按钮 —— 得有一句提示，否则没人猜得到");
+            }
+
+            var sun = TryReadSource(Path.Combine("Services", "SunClock.cs"));
+            if (sun is not null)
+            {
+                Assert(sun.Contains("SunDay.AllNight") && sun.Contains("SunDay.AllDay"),
+                       "★ 极昼/极夜有明确返回值(高纬度那几天真的不日出/不日落,不是算错了)");
+                Assert(!sun.Contains("http") && !sun.Contains("Http"),
+                       "★★ 日出日落是【算】的不是【拉】的 —— 一个字节都不出网");
+            }
+
+            var calSrc2 = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
+            if (calSrc2 is not null)
+            {
+                Assert(calSrc2.Contains("public bool HideDayArea") && calSrc2.Contains("_dayArea.Visibility = HideDayArea ?")
+                       && calSrc2.Contains("_hideDayArea = value; Rebuild();"),
+                       "★ 合并板块里藏掉左下角当日区(那里重复,而且把月历挤得显示不全)");
+                Assert(calSrc2.Contains("public double LeftGutter") && calSrc2.Contains("panel.Margin = new Thickness(_leftGutter, 0, 0, 0)"),
+                       "★★ 月历七列左边留出与时间轴同宽的刻度列 —— 上下两块的同一天才对得齐");
+                Assert(calSrc2.Contains("for (int w = 0; w < 6; w++)"),
+                       "★ 月排布【恒画 6 行】—— 5 行月/6 行月高度不同的话,下方时间轴会随翻月上下跳");
+                Assert(calSrc2.Contains("public void FocusWeekStart"),
+                       "★ 时间轴翻周 -> 月历跟过去(否则上下两块各说各的周)");
+                Assert(calSrc2.Contains("public void OpenEditorAt"),
+                       "★ 拿掉「+ 新增日程」之后仍有新建路径(时间轴空白处双击)");
+            }
+
+            if (homeTodo is not null)
+            {
+                Assert(homeTodo.Contains("timeline.OnCreateAt = when => calView.OpenEditorAt(when)"),
+                       "★★ 新建入口没有随按钮一起消失 —— 换成了时间轴上双击");
+                Assert(homeTodo.Contains("Height = CalendarView.MonthOnlyHeight"),
+                       "★ 合并板块用【只有月历】的高度(用含当日区的 268 会把月历压矮、最后一行裁掉)");
+                Assert(homeTodo.Contains("_cityMeta[i].Text = diffText;"),
+                       "★ 展开卡右侧只留一个时段词(用户反馈\"右侧有两个晚上\")");
+                Assert(homeTodo.Contains("_places[k].IsCurrent && k == i ? _places[k].City"),
+                       "★ 「· 当前」只在展开那张上出现,折叠行不显示");
+            }
+
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
             if (todoEd is not null)
             {

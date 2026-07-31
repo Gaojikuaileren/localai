@@ -76,6 +76,7 @@ public sealed class HomeView : UserControl
     TextBlock[] _miniTime = Array.Empty<TextBlock>();
     TextBlock[] _miniSky = Array.Empty<TextBlock>();     // 当前气候(晴/多云/阴…)
     TextBlock[] _miniPart = Array.Empty<TextBlock>();    // 时段词(早上/下午/晚上…)
+    TextBlock[] _miniName = Array.Empty<TextBlock>();    // 城市名(只有展开那张才补「· 当前」)
     FrameworkElement[] _miniBar = Array.Empty<FrameworkElement>();   // 温度滑条
     int _weatherFocus;                       // 当前展开的是第几个
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -135,12 +136,27 @@ public sealed class HomeView : UserControl
             //   上半 = 月历,左右切【月】;下半 = 那一周的时间轴,左右切【周】。
             //   于是"哪一天"由上面选,"那天几点干什么"由下面看 —— 两件事各有各的横轴,不再挤在一起。
             //   周排布因此从主页取消(月历 + 时间轴已经把它要表达的都表达了)。
-            var calView = new CalendarView(CalendarView.Mode.Month) { Height = CalendarView.PanelHeight, HideModeSwitch = true };
+            var calView = new CalendarView(CalendarView.Mode.Month)
+            {
+                // ★ 高度取【只有月历】的那个 —— 之前用 PanelHeight(268) 是含下方当日区的尺寸,
+                //   而合并板块里当日区已经交给时间轴了;再用 268 就是月历被压矮
+                //   -> 最后一行裁掉一截(用户说的"日历的构造超高了、显示不全")。
+                Height = CalendarView.MonthOnlyHeight,
+                HideModeSwitch = true,
+                HideDayArea = true,
+                LeftGutter = WeekTimeline.GutterWidth,   // 七列与下方时间轴对齐
+            };
             var timeline = new WeekTimeline { MinHeight = 150 };
             // ★ 点时间轴里的日程 -> 走【日历自己的那个编辑抽屉】,不另造一套(用户裁定)
             timeline.OnEditEvent = ev => calView.OpenEditorFor(ev);
+            // ★★ 新建的入口:时间轴空白处【双击】就在那个半小时上建。
+            //   月历左下角那个「+ 新增日程」已按用户要求拿掉,
+            //   但【不能把新建路径一并拿掉】—— 换成了不占界面的手势。
+            timeline.OnCreateAt = when => calView.OpenEditorAt(when);
             // 上面选中哪天 -> 下面聚焦那一周(两块说的是同一周)
             calView.SelectionChanged = d => timeline.FocusWeekOf(d);
+            // ★ 反向也要跟:在时间轴上翻周、月历却还停在旧月 —— 那就是上下两块各说各的周。
+            timeline.WeekChanged = ws => calView.FocusWeekStart(ws);
 
             var calStack = new DockPanel { LastChildFill = true };
             DockPanel.SetDock(calView, Dock.Top);
@@ -155,9 +171,10 @@ public sealed class HomeView : UserControl
             // ★ 底部与【武汉】那一行持平(用户裁定)—— 而不是一直拉到末尾的札幌。
             //   做法:跨两行,但下边距留出【最后一条折叠行 + 间隔】的高度。
             //   下方"正在进行的项目"与上方的间隔因此不变(它跟的是行 2 的底,不是日历的底)。
-            //   天气栈内:札幌占最后 34,它上面还有 10 的间隔 -> 武汉下沿距栈底 44。
-            //   日历下边距取同一个 44,两者下沿就持平。
-            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, CollapsedCityHeight + CityGap);
+            // ★★ 2026-07-31 用户改口:【日历板块高度 = 待办 + 一个展开的天气 + 两个折叠的天气】,
+            //   也就是下沿与【整个天气栈】齐,而不是停在倒数第二行。
+            //   既然天气栈总高恒定(WeatherStackHeight),两边都不留下边距就自然对齐。
+            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, 0);
             calPanel.VerticalAlignment = VerticalAlignment.Stretch;
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
             if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
@@ -369,6 +386,7 @@ public sealed class HomeView : UserControl
         _miniTime = new TextBlock[n];
         _miniSky = new TextBlock[n];
         _miniPart = new TextBlock[n];
+        _miniName = new TextBlock[n];
         _miniBar = new FrameworkElement[n];
 
         for (int i = 0; i < n; i++)
@@ -485,6 +503,9 @@ public sealed class HomeView : UserControl
             //   同一个东西在一张卡里出现两次看着像排版出了错。时间与气候照旧留着。
             if (k < _miniBar.Length && _miniBar[k] is { } mbar)
                 mbar.Visibility = k == i ? Visibility.Hidden : Visibility.Visible;
+            // 「· 当前」只在展开那张上出现
+            if (k < _miniName.Length && _miniName[k] is { } mname && k < _places.Count)
+                mname.Text = _places[k].IsCurrent && k == i ? _places[k].City + " · 当前" : _places[k].City;
             var to = k == i ? ExpandedCityHeight : CollapsedCityHeight;
             if (!animate)
             {
@@ -521,8 +542,18 @@ public sealed class HomeView : UserControl
         _dragTarget = index;
         _draggingCity = true;
         _weatherReset.Stop();
-        SetWeatherFocus(-1, animate: true);                     // 全部收起(-1 = 谁都不展开)
-        _dragFromY = e.GetPosition(this).Y;
+
+        // ★★ 这里是"拖拽不跟鼠标"的根因,记一笔:
+        //   原来收起是走【260ms 高度动画】的。动画期间每一帧卡片的【布局位置】都在变,
+        //   而位移 shift.Y = dy 是相对布局位置算的 —— 基准一直在动,画面自然跟不上手;
+        //   等动画停下来,基准又已经整体上移了一截,于是卡片永久地和光标错开。
+        //   改成【立即收起 + 当场把布局跑完】,基准从起手那一刻就是死的,dy 就是真位移。
+        SetWeatherFocus(-1, animate: false);
+        _weatherStack.UpdateLayout();
+
+        // ★ 基准取【_weatherStack 自己的坐标系】而不是整页:整页外面套着 ScrollViewer,
+        //   拖拽期间页面一滚,以页面为基准的 dy 就会凭空多出一段。
+        _dragFromY = e.GetPosition(_weatherStack).Y;
 
         Panel.SetZIndex(_cityCards[index], 10);                 // 被拖的那张浮在最上
         _cityCards[index].Opacity = 0.94;
@@ -536,7 +567,15 @@ public sealed class HomeView : UserControl
     void OnCityDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
     {
         if (_dragIndex is not int from) return;
-        var dy = e.GetPosition(this).Y - _dragFromY;
+        var dy = e.GetPosition(_weatherStack).Y - _dragFromY;
+
+        // ★ 夹在板块内(用户反馈"会拖到板块以外去,超上或者超下"):
+        //   所有卡此刻都是折叠高,所以第 k 位的位置就是 k * 行距 —— 能挪到的范围
+        //   就是 [第 1 位, 最后一位] 换算成的位移。首格锁定,所以上限是第 1 位而不是第 0 位。
+        var minDy = (1 - from) * CityRowStride;
+        var maxDy = (_cityCards.Length - 1 - from) * CityRowStride;
+        dy = Math.Clamp(dy, minDy, maxDy);
+
         _shifts[from].Y = dy;                                   // 被拖的跟手(不用动画,要贴着鼠标)
 
         // 落点 = 位移换算成"挪过几行"。首格锁定,所以下限是 1。
@@ -616,12 +655,15 @@ public sealed class HomeView : UserControl
     FrameworkElement MiniRow(int i)
     {
         var place = _places[i];
-        var name = new TextBlock
+        // ★ 「· 当前」只在【展开时】补上(用户裁定)—— 折叠行就那么一条,
+        //   名字后面再挂一个标签会把温度滑条挤得无地自容。
+        _miniName[i] = new TextBlock
         {
-            Text = place.IsCurrent ? place.City + " · 当前" : place.City,
+            Text = place.City,
             VerticalAlignment = VerticalAlignment.Center,
             FontWeight = FontWeights.SemiBold,
         };
+        var name = _miniName[i];
         name.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
@@ -1245,8 +1287,9 @@ public sealed class HomeView : UserControl
                 _cityTime[i].Text = t.ToString("HH:mm");
                 var diff = (z.GetUtcOffset(DateTime.UtcNow) - localOffset).TotalHours;
                 var diffText = Math.Abs(diff) < 0.01 ? "本地" : diff > 0 ? $"+{diff:0.#}h" : $"{diff:0.#}h";
-                // ★ 主显示也改用时段词(用户裁定)—— "昼/夜"太粗,说不清是早是晚。
-                _cityMeta[i].Text = $"{Greetings.PartOfDay(t.Hour)} · {diffText}";
+                // ★ 时段词只留【摘要行右上角】那一份(用户裁定:"右侧有两个晚上")——
+                //   这里只说时差(本地 / +7h),不再把早上晚上重复一遍。
+                _cityMeta[i].Text = diffText;
                 if (i < _miniPart.Length && _miniPart[i] is { } mp) mp.Text = Greetings.PartOfDay(t.Hour);
                 // 折叠行也要跑铟 —— 它虽然只显示摘要,但时间必须是真的
                 if (i < _miniTime.Length && _miniTime[i] is { } mt) mt.Text = t.ToString("HH:mm");

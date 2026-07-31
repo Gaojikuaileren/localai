@@ -245,6 +245,49 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 主页渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★★ 时间轴的三种难画情形 —— 【必须看图】,这些光靠断言看不出来:
+        //   ① 重叠的几条要平分当天宽度;② 半小时那种极短的条,标题得跑到条外面去;
+        //   ③ 跨零点的条要一直画到 24 点线以下(可视域到 25 点)。
+        //   两张:默认 6 小时,以及缩到最小(-1~25 全览)。
+        try
+        {
+            ThemeManager.Initialize(Skin.Breeze);
+            var day = DateTime.Today;
+            var saved = CalendarData.Export();
+            CalendarData.Events.Clear();
+            void Ev(string title, double from, double to)
+                => CalendarData.Events.Add(new CalendarEvent(
+                    day.AddHours(from), day.AddHours(to), title, "me", "private", Id: "wt-" + title));
+
+            Ev("晨会", 9, 10);
+            Ev("重叠A", 10, 12);        // 与 重叠B / 重叠C 互相压
+            Ev("重叠B", 10.5, 11.5);
+            Ev("重叠C", 11, 13);
+            Ev("站会", 14, 14.5);       // 半小时 —— 标题应当跑到条上方
+            Ev("闪", 15, 15.25);        // 更短
+            Ev("通宵", 22.5, 25);       // 跨零点 —— 画到 24 点线以下
+            // 全天/跨天：它们不在 TimedOn 里，只能靠【全天条带】看得见、点得着
+            CalendarData.Events.Add(new CalendarEvent(day.AddDays(-1), day.AddDays(1), "出差", "me", "private", AllDay: true, Id: "wt-trip"));
+            CalendarData.Events.Add(new CalendarEvent(day, day, "体检", "me", "private", AllDay: true, Id: "wt-med"));
+
+            var tl = new WeekTimeline { Width = 900, Height = 420 };
+            tl.SetVisibleRange(9, WeekTimeline.DefaultHours);   // 常态缩放，对准测试日程那一段
+            Save(Themed(tl), Path.Combine(outDir, "timeline-events.png"), 940, 460);
+
+            // 缩到最小 = 全览 -1~25 点：看重叠平分、短条标题外置、昨夜/次日那两条带
+            var tl2 = new WeekTimeline { Width = 900, Height = 420 };
+            tl2.SetVisibleRange(WeekTimeline.DayMin, WeekTimeline.MaxHours);
+            Save(Themed(tl2), Path.Combine(outDir, "timeline-fullday.png"), 940, 460);
+
+            CalendarData.Events.Clear();
+            foreach (var e in saved) CalendarData.Events.Add(e);
+            CalendarData.NotifyChanged();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: 时间轴渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // ★ 界面用词表:同一张设置页,家庭档 vs 团队档 —— 看替换是否真的到位、且排版不碎。
         try
         {

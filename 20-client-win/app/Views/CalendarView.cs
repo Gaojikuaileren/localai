@@ -35,6 +35,43 @@ public sealed class CalendarView : UserControl
     /// </summary>
     public const double PanelHeight = 268;
 
+    /// <summary>
+    /// 【只有月历】时的高度(主页那个"月历 + 时间轴"合并板块用)。
+    /// = 顶栏 34 + 星期表头 15 + 6 行 × 40。★ 月排布【恒画 6 行】(见 MonthGrid):
+    /// 5 行月和 6 行月若高度不同,下面的时间轴会随翻月上下跳 40px。
+    /// </summary>
+    public const double MonthOnlyHeight = 34 + 15 + 6 * (MonthCellHeight + SpanRowHeight + DotsRowHeight);
+
+    // ★★★ 下面这几个是【宿主配置】属性,一律写成"改了就重建",不能用自动属性。
+    //   踩过的坑:new CalendarView(Mode.Month) { HideDayArea = true, LeftGutter = 44 } ——
+    //   C# 的对象初始化器是在【构造函数跑完之后】才赋值的,而构造函数末尾已经 Rebuild() 过一次了,
+    //   于是这几个开关对那次(也是唯一一次)重建【完全没赶上】,界面上看起来像"设了没用"。
+    //   现在 setter 自己补一次重建;值没变则不重建,免得白白重画。
+
+    /// <summary>
+    /// 月历七列左边要空出的宽度 —— 给下方时间轴的时刻刻度列让位,
+    /// 这样上下两块的【七列是对齐的】(用户裁定 2026-07-31:"上面日历的周与下面时间轴的日期周没对齐")。
+    /// 0 = 不留(顶栏浮窗那种独立用法)。
+    /// </summary>
+    public double LeftGutter
+    {
+        get => _leftGutter;
+        set { if (Math.Abs(_leftGutter - value) < 0.01) return; _leftGutter = value; Rebuild(); }
+    }
+    double _leftGutter;
+
+    /// <summary>
+    /// 藏掉下方的「当日日期 + 新增按钮 + 当日日程列表」整块。
+    /// 主页合并板块里由时间轴负责"那天几点干什么",这一块纯属重复,而且把高度吃掉了
+    /// (用户裁定:"左下角的日期很多多余且显示不全""月视图下原本没有新建日程的按钮,现在多出来了")。
+    /// </summary>
+    public bool HideDayArea
+    {
+        get => _hideDayArea;
+        set { if (_hideDayArea == value) return; _hideDayArea = value; Rebuild(); }
+    }
+    bool _hideDayArea;
+
     // 收紧日期区,把腾出的纵向空间让给周排布下方的当日日程表(用户裁定)
     const double MonthCellHeight = 28;
     const double WeekCellHeight = 32;
@@ -163,6 +200,28 @@ public sealed class CalendarView : UserControl
     /// <summary>用【日历自己的那个编辑抽屉】打开某条 —— 时间轴点击时调它,保证两边共用一套。</summary>
     public void OpenEditorFor(CalendarEvent ev) => OpenEditor(ev.Start.Date, ev);
 
+    /// <summary>
+    /// 下方时间轴翻到了别的周 —— 月历也跟过去,免得上下两块各说各的周(用户反馈)。
+    /// ★ 跨月的那一周按【周四归属】定月(ISO 周的惯例):7/27–8/2 这一周的周四是 7/30,
+    ///   所以它算七月的周 —— 若按周一或周日定,同一周会在两个月之间来回横跳。
+    /// </summary>
+    public void FocusWeekStart(DateTime weekStart)
+    {
+        var keepDow = ((int)_selected.DayOfWeek + 6) % 7;   // 保持"星期几"不变,跨周更连贯
+        _selected = weekStart.AddDays(keepDow);
+        var pivot = weekStart.AddDays(3);
+        if (pivot.Year != _anchor.Year || pivot.Month != _anchor.Month) _anchor = pivot;
+        Rebuild();
+    }
+
+    /// <summary>在【指定时刻】新建 —— 时间轴空白处双击走这里，用的仍是日历自己那个编辑抽屉。</summary>
+    public void OpenEditorAt(DateTime when)
+    {
+        _selected = when.Date;
+        OpenEditor(when.Date, null, when.TimeOfDay);
+        Rebuild();
+    }
+
     internal void Rebuild()
     {
         _label.Text = _mode == Mode.Month ? _anchor.ToString("yyyy年 M月", Zh) : WeekRangeLabel();
@@ -190,12 +249,20 @@ public sealed class CalendarView : UserControl
         //   想看看那天有什么安排反而做不到。现在点日期 = 选中并列出当天,
         //   新建走旁边那个「+」—— 两件事各走各的入口。
         // ★ 主页已取消周排布(月历 + 时间轴已经把它要表达的都表达了)—— 模式切换键不再显示。
-        _dayArea.Visibility = Visibility.Visible;
+        // ★ 主页合并板块里【整块藏掉】：那里的下半是时间轴，
+        //   "那天几点干什么"已经画出来了，再摆一行日期 + 一个新增按钮既重复又吃高度。
+        _dayArea.Visibility = HideDayArea ? Visibility.Collapsed : Visibility.Visible;
+        if (HideDayArea) return;
         RebuildDayList();
     }
 
     /// <summary>宿主可以藏掉【月/周】切换键(主页合并板块里只要月排布)。</summary>
-    public bool HideModeSwitch { get; set; }
+    public bool HideModeSwitch
+    {
+        get => _hideModeSwitch;
+        set { if (_hideModeSwitch == value) return; _hideModeSwitch = value; Rebuild(); }
+    }
+    bool _hideModeSwitch;
 
     /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
     void RefreshTodayButton()
@@ -362,10 +429,17 @@ public sealed class CalendarView : UserControl
         var lead = ((int)first.DayOfWeek + 6) % 7;
         var days = DateTime.DaysInMonth(_anchor.Year, _anchor.Month);
         var gridStart = first.AddDays(-lead);
-        var weeks = (int)Math.Ceiling((lead + days) / 7.0);
 
-        for (int w = 0; w < weeks; w++)
+        // ★ 【恒画 6 行】而不是算出来几行就画几行：
+        //   5 行月与 6 行月差一整行(40px)，翻月时下方的时间轴会跟着上下跳。
+        //   多出来的那一行是下月的灰日，本来就要画。
+        for (int w = 0; w < 6; w++)
             panel.Children.Add(MonthWeekBand(gridStart.AddDays(w * 7), first, days));
+
+        // ★★ 七列左边留出与下方时间轴【同宽】的刻度列 ——
+        //   不留的话月历的周一在最左，而时间轴的周一在 44px 之后，
+        //   上下两块的同一天对不上(用户反馈"日历的周与时间轴的周没对齐")。
+        if (_leftGutter > 0) panel.Margin = new Thickness(_leftGutter, 0, 0, 0);
         return panel;
     }
 
@@ -721,10 +795,10 @@ public sealed class CalendarView : UserControl
     /// 打开日程编辑。★ 用【右侧全高抽屉】而不是浮窗(用户裁定):字段有九项,
     /// 浮窗放不下会变成套娃滚动;抽屉一页能显示完。
     /// </summary>
-    void OpenEditor(DateTime day, CalendarEvent? existing)
+    void OpenEditor(DateTime day, CalendarEvent? existing, TimeSpan? startAt = null)
     {
         var title = day.ToString("M月 d日", Zh) + (existing is null ? " · 新增日程" : " · 编辑日程");
-        var body = CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); });
+        var body = CalendarEditor.Build(day, existing, onSaved: () => { Overlay.CloseActive(); Rebuild(); }, presetStart: startAt);
         (Application.Current.MainWindow as MainWindow)?.OpenSideDrawer(title, body, Theme.IconName.Calendar);
     }
 }

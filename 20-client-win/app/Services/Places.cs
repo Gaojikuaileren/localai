@@ -22,6 +22,39 @@ public sealed record Place(string City, string TimeZoneId, bool IsCurrent = fals
 
 public static class Places
 {
+    /// <summary>
+    /// 几个已知城市的坐标(纬度北正 / 经度东正)—— 【只用来本地算日出日落】,不出网、不发给任何人。
+    /// 这些是公开的地理常识,写死在这里正是为了避免为了一个日出时刻去做地理编码请求。
+    /// ★ 表里没有的城市 -> CoordOf 返回 null -> 界面上就【不画昼夜】,不拿一个猜的顶上。
+    /// </summary>
+    static readonly Dictionary<string, (double Lat, double Lon)> CityCoord = new(StringComparer.Ordinal)
+    {
+        ["科隆"] = (50.94, 6.96),
+        ["华沙"] = (52.23, 21.01),
+        ["巴黎"] = (48.86, 2.35),
+        ["伦敦"] = (51.51, -0.13),
+        ["武汉"] = (30.59, 114.30),
+        ["东京"] = (35.68, 139.69),
+        ["札幌"] = (43.06, 141.35),
+        ["首尔"] = (37.57, 126.98),
+        ["纽约"] = (40.71, -74.01),
+        ["洛杉矶"] = (34.05, -118.24),
+        ["芝加哥"] = (41.88, -87.63),
+        ["新加坡"] = (1.35, 103.82),
+        ["悉尼"] = (-33.87, 151.21),
+    };
+
+    /// <summary>
+    /// 一个地点的坐标:先按城市名认,认不出再按时区取该时区的代表城市。
+    /// 两条都不中就返回 null —— 调用方据此【不显示昼夜】,而不是编一个。
+    /// </summary>
+    public static (double Lat, double Lon)? CoordOf(Place p)
+    {
+        if (CityCoord.TryGetValue(p.City, out var c)) return c;
+        if (ZoneCity.TryGetValue(p.TimeZoneId, out var rep) && CityCoord.TryGetValue(rep, out var c2)) return c2;
+        return null;
+    }
+
     /// <summary>Windows 时区 → 该时区的代表城市。只覆盖用户关心的几个大区 + 常见时区。</summary>
     static readonly Dictionary<string, string> ZoneCity = new(StringComparer.OrdinalIgnoreCase)
     {
