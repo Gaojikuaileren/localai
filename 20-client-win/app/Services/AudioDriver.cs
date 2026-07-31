@@ -63,14 +63,10 @@ public static class AudioDriver
                 return new AudioDriverStatus(true, ver, sysPath);
             }
 
-            // 兜底:注册表读不到时,再去磁盘找 .sys —— DriverStore 与 drivers 都找(递归),
-            //   别再只盯 drivers 顶层。找到也算装了。
-            var hit = FindDriverSys();
-            if (hit is not null)
-            {
-                var ver = FileVersionInfo.GetVersionInfo(hit).FileVersion;
-                return new AudioDriverStatus(true, string.IsNullOrWhiteSpace(ver) ? null : ver, hit);
-            }
+            // ★★ 没有注册表卸载项 = 未安装(2026-07-31 实测教训:用户卸载后仍报"已安装"就是这)。
+            //   【绝不】拿 DriverStore\FileRepository 里的 .sys 兜底 —— 那是 Windows 的驱动【缓存副本】,
+            //   卸载后会一直留着(要重启 / pnputil 才清)。拿它当"装没装"的依据,就成了"卸了也说已安装"。
+            //   权威信号只有注册表卸载项(与 Add/Remove Programs 一致):装上就有、卸了就没。
             return new AudioDriverStatus(false, null, null);
         }
         catch

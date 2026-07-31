@@ -1408,8 +1408,10 @@ public static class Selftest
                            "★ pkg.Version 拼进路径前先清洗(挡路径穿越)");
                     Assert(adSrc2.Contains("Authenticode.VerifySignedByVbAudio(packagePath, out var signer)"),
                            "★★ 提权运行安装程序前必须过 Authenticode 签名(用户裁定:信任模型 = 官方签名)");
-                    Assert(adSrc2.Contains("foreach (var e in FindUninstallers())") && adSrc2.Contains("FindDriverSys()"),
+                    Assert(adSrc2.Contains("foreach (var e in FindUninstallers())"),
                            "★ Detect 以注册表卸载项为主判据(装好后 .sys 落在 DriverStore、可能待重启才进 drivers,靠文件位置会漏报)");
+                    Assert(adSrc2.Contains("没有注册表卸载项 = 未安装"),
+                           "★★ 没有注册表项就是未安装 —— 绝不拿 DriverStore 缓存 .sys 兜底(卸载后它仍在,会报“卸了也已安装”)");
                     Assert(adSrc2.Contains("ResolveLatestUrl(http, pkg.Url)"),
                            "★ 下载前动态解析最新 PackNN(通用名会 404 —— 用户反馈的“下载失败”成因)");
                     Assert(adSrc2.Contains("!string.IsNullOrWhiteSpace(pkg.Sha256) && !Verify(target"),
