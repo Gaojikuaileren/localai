@@ -16,4 +16,11 @@ public static class TokenUsage
     public static long? Week => null;
     public static long? Month => null;
     public static long? Total => null;
+
+    /// <summary>
+    /// 当前【预期】token 输出速率(tok/s)—— 顶栏配对成功后显示它(用户裁定 2026-07-31)。
+    /// ★ 诚实:模型在 P4 才装载,现在没有任何模型在跑,更没有真实速率 —— 恒为 null,
+    ///   界面显示"待接入",绝不编一个数字。接入后由中枢按当前装载的模型给出预期吞吐即可,界面结构不变。
+    /// </summary>
+    public static double? ExpectedOutputRate => null;
 }

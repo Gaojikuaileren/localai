@@ -2984,6 +2984,13 @@ public static class Selftest
                 var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
                 Assert(nav is not null && nav.Contains("if (IsSystemPage(key))") && nav.Contains("OpenSystemPage(key);"),
                        "★ 进系统页 = 盖上来,不替换底下的工作页(否则回来时会话/滚动/草稿全没了)");
+                Assert(mwSys.Contains("TheApp.Hub.State == HubState.Online") && mwSys.Contains("ExpectedOutputRate is { } r")
+                       && mwSys.Contains("tok/s"),
+                       "★ 连上中枢后顶栏改显预期 token 输出速率;未接时待接入(不编数字)");
+                Assert(mwSys.Contains("TheApp.Hub.Changed +="),
+                       "★ 中枢状态一变就刷顶栏(启动探测连上也能及时改显)");
+                Assert(Services.TokenUsage.ExpectedOutputRate is null,
+                       "★ 预期速率现在恒为 null(模型 P4 未接,不编数字)");
                 Assert(mwSys.Contains("static bool IsSystemPage(string key) => key is \"settings\" or \"model\" or \"extensions\";"),
                        "★ 键名照抄导航注册处 —— 模型那页是 \"model\" 不是 \"models\"(写错就绕过覆盖层、照旧拆重建)");
                 Assert(mwSys.Contains("ContentHost.IsEnabled = false;") && mwSys.Contains("ContentHost.IsEnabled = true;"),

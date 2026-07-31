@@ -134,6 +134,10 @@ public partial class MainWindow : Window
         // 并重新进入当前页面(视图本来就是每次导航新建的,重建成本很低)。
         Strings.LanguageChanged += OnLanguageChanged;
 
+        // ★ 中枢连接状态一变就刷顶栏(启动探测连上、配对成功、调用中被解除等任一路径)——
+        //   否则右上角会停在启动时的"尚未配对/未连接",连上后也不改显 token 速率。
+        TheApp.Hub.Changed += () => Dispatcher.Invoke(() => { RefreshStatus(); TheApp.UpdateTrayTooltip(); });
+
         // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
         VramHost.Content = _vram;
         TheApp.Vram.Updated += s => Dispatcher.Invoke(() => _vram.Update(s));
@@ -723,9 +727,20 @@ public partial class MainWindow : Window
 
     public void RefreshStatus()
     {
+        // ★ 连上中枢后,顶栏右上角改显【当前预期 token 输出速率】(用户裁定 2026-07-31)——
+        //   连接这件事已由绿点表达,这块地方留给更有用的读数。其它状态(尚未配对/证书过期/被解除/
+        //   连不上)仍如实显示,那些是必须让用户看见的事,不能被一个速率盖掉。
+        if (TheApp.Hub.State == HubState.Online)
+        {
+            StatusText.Text = TokenUsage.ExpectedOutputRate is { } r
+                ? $"≈ {r:0} tok/s"
+                : Strings.Get("status.rate_pending");   // 模型未接入(P4)-> 待接入,不编数字
+            StatusDot.Fill = (Brush)FindResource("RiskSafe");
+            return;
+        }
+
         var (key, brushKey) = TheApp.Hub.State switch
         {
-            HubState.Online => ("status.online", "RiskSafe"),
             HubState.Connecting => ("status.connecting", "FgMuted"),
             HubState.NotPaired => ("status.not_paired", "RiskWarning"),
             HubState.Revoked => ("status.revoked", "RiskDanger"),

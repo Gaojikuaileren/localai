@@ -25,7 +25,17 @@ public sealed class HubClient
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
     public ClientProfile? Profile { get; private set; }
-    public HubState State { get; private set; } = HubState.NotPaired;
+
+    HubState _state = HubState.NotPaired;
+    /// <summary>连接状态。★ 换值时广播 Changed —— 顶栏据此刷新(连上后改显 token 速率,见 RefreshStatus)。</summary>
+    public HubState State
+    {
+        get => _state;
+        private set { if (_state != value) { _state = value; Changed?.Invoke(); } }
+    }
+    /// <summary>状态变化(探测/配对/调用中被解除等任一路径)。界面订阅它刷新顶栏与托盘。</summary>
+    public event Action? Changed;
+
     public string? LastError { get; private set; }
 
     public bool IsPaired => Profile is not null;

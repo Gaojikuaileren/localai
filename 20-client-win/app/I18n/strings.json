@@ -56,6 +56,7 @@
 
   "status.connecting":    { "zh-CN": "正在连接…",           "en-US": "Connecting…",             "ja-JP": "接続しています…" },
   "status.online":        { "zh-CN": "已连接",              "en-US": "Connected",               "ja-JP": "接続済み" },
+  "status.rate_pending":  { "zh-CN": "输出速率 · 待接入",   "en-US": "Output rate · pending",   "ja-JP": "出力速度 · 未接続" },
   "status.offline":       { "zh-CN": "未连接",              "en-US": "Offline",                 "ja-JP": "未接続" },
   "status.not_paired":    { "zh-CN": "尚未配对",            "en-US": "Not paired",              "ja-JP": "未ペアリング" },
   "status.revoked":       { "zh-CN": "本设备已被解除",      "en-US": "This device was removed",  "ja-JP": "このデバイスは解除されました" },
