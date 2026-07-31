@@ -3137,7 +3137,60 @@ public static class Selftest
                 Assert(Views.CalendarData.MergeInto(box, uz) == 0, "★ 再拉一次不重复加(同 Apple UID)");
             }
 
-                        var mwSys = TryReadSource("MainWindow.xaml.cs");
+                        // ---- CalDAV 响应解析(不需要真账号就能验)----
+            {
+                static string X(params string[] ls) => string.Join(Environment.NewLine, ls);
+
+                // ★ 命名空间不敏感:iCloud 用 d: 前缀,别的服务端可能用 D: 或默认命名空间
+                var principal = Services.AppleCalDav.FirstHref(X(
+                    "<?xml version=" + (char)34 + "1.0" + (char)34 + "?>",
+                    "<d:multistatus xmlns:d=" + (char)34 + "DAV:" + (char)34 + ">",
+                    "<d:response><d:propstat><d:prop>",
+                    "<d:current-user-principal><d:href>/123456/principal/</d:href></d:current-user-principal>",
+                    "</d:prop></d:propstat></d:response></d:multistatus>"), "current-user-principal");
+                Assert(principal == "/123456/principal/", "能从响应里取出账号主体");
+
+                // ★★ iCloud 会把后续请求指到【带编号的主机】—— 一直打入口会拿不到数据
+                Assert(Services.AppleCalDav.Absolute("https://caldav.icloud.com", "/123456/calendars/")
+                       == "https://caldav.icloud.com/123456/calendars/", "相对路径拼成绝对 URL");
+                Assert(Services.AppleCalDav.Absolute("https://caldav.icloud.com", "https://p52-caldav.icloud.com/123/")
+                       == "https://p52-caldav.icloud.com/123/",
+                       "★★ 服务端给的绝对 URL(带编号主机)原样跟随,不被入口域覆盖");
+
+                // 列出日历集合:只要 VEVENT 的,提醒事项(VTODO)这一版不接
+                var cols = Services.AppleCalDav.ParseCollections(X(
+                    "<d:multistatus xmlns:d=" + (char)34 + "DAV:" + (char)34 + " xmlns:c=" + (char)34 + "urn:ietf:params:xml:ns:caldav" + (char)34 + ">",
+                    "<d:response><d:href>/123/home/work/</d:href><d:propstat><d:prop>",
+                    "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>",
+                    "<d:displayname>工作</d:displayname>",
+                    "<c:supported-calendar-component-set><c:comp name=" + (char)34 + "VEVENT" + (char)34 + "/></c:supported-calendar-component-set>",
+                    "</d:prop></d:propstat></d:response>",
+                    "<d:response><d:href>/123/home/reminders/</d:href><d:propstat><d:prop>",
+                    "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>",
+                    "<d:displayname>提醒</d:displayname>",
+                    "<c:supported-calendar-component-set><c:comp name=" + (char)34 + "VTODO" + (char)34 + "/></c:supported-calendar-component-set>",
+                    "</d:prop></d:propstat></d:response>",
+                    "</d:multistatus>"));
+                Assert(cols.Count == 2, "两个集合都解析出来");
+                var vevent = cols.Where(x => x.comps.Contains("VEVENT")).ToList();
+                var vtodo = cols.Where(x => x.comps.Contains("VTODO")).ToList();
+                Assert(vevent.Count == 1 && vevent[0].name == "工作", "认出 VEVENT 日历及其名字");
+                Assert(vtodo.Count == 1 && vtodo[0].name == "提醒",
+                       "★ 提醒事项集合能识别出来 —— 这一版按用户裁定不接,但得能认出来好排掉");
+
+                // REPORT 响应里取 ics 正文,并贯通到解析器
+                var datas = Services.AppleCalDav.ParseCalendarData(X(
+                    "<d:multistatus xmlns:d=" + (char)34 + "DAV:" + (char)34 + " xmlns:c=" + (char)34 + "urn:ietf:params:xml:ns:caldav" + (char)34 + ">",
+                    "<d:response><d:propstat><d:prop><c:calendar-data>BEGIN:VEVENT",
+                    "UID:e-1", "SUMMARY:晚会", "DTSTART:20260731T090000Z",
+                    "END:VEVENT</c:calendar-data></d:prop></d:propstat></d:response></d:multistatus>"));
+                Assert(datas.Count == 1, "取出一份 calendar-data");
+                var (pe, _) = Services.ICalParser.ParseEvents(datas[0], "我", "家庭");
+                Assert(pe.Count == 1 && pe[0].Title == "晚会" && pe[0].ExternalId == "e-1",
+                       "★ CalDAV 响应 -> ics -> CalendarEvent 整条链路贯通");
+            }
+
+            var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
                 var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
