@@ -94,8 +94,21 @@ $env:RAG_OPENAI_API_BASE_URL = "http://127.0.0.1:18084/v1"
 $env:RAG_OPENAI_API_KEY = "localai"
 $env:RAG_EMBEDDING_MODEL = "bge-m3"
 
+# ★★ STT / TTS / 图像 / 图像编辑四条子链路(2026-07-31 审计):
+#   config.py:357 把标量 OPENAI_API_BASE_URL 无条件重置回 api.openai.com,而这四项都以它为默认。
+#   不显式钉死的话,在 Admin Settings 里一开就【直接出网】—— 绕过网关 / E1 / E4 / 审计,
+#   把语音和图片明文送到 OpenAI。且 ENABLE_PERSISTENT_CONFIG=false 下 UI 里改的值不落库、重启即丢,
+#   环境变量是唯一持久修法。全部指回本地网关。
+$env:AUDIO_STT_OPENAI_API_BASE_URL   = "http://127.0.0.1:8080/v1"
+$env:AUDIO_TTS_OPENAI_API_BASE_URL   = "http://127.0.0.1:8080/v1"
+$env:IMAGES_OPENAI_API_BASE_URL      = "http://127.0.0.1:8080/v1"
+$env:IMAGES_EDIT_OPENAI_API_BASE_URL = "http://127.0.0.1:8080/v1"
+# 图像引擎默认就是 'openai'(config.py:1312):一开 ENABLE_IMAGE_GENERATION 就打到外网。
+# 本项目图像后端是本地 ComfyUI(见 paths.toml 的 [external] comfyui),默认值必须改掉。
+$env:IMAGE_GENERATION_ENGINE = "comfyui"
+
 Say "[4] 启动 Open WebUI @ :8081,指向网关 :8080 …"
-Say "    数据目录 $DataDir · 关遥测 · RAG 走本地 18084"
+Say "    数据目录 $DataDir · 关遥测 · RAG/STT/TTS/图像全部走本地(不出网)"
 Say "    ★ 首次启动要跑几十条数据库迁移,可能 1-3 分钟,属正常(2026-07-28 实测)。"
 Say "    ★ 浏览器开 http://127.0.0.1:8081 注册第一个账户 —— 它即 admin。脚本不代你建账户。"
 # ★ 入口是 Scripts\open-webui.exe;`python -m open_webui` 不可用(包内无 __main__,实测确认)
