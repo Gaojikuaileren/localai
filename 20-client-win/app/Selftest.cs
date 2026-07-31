@@ -1398,6 +1398,35 @@ public static class Selftest
                        "★ 命中区是透明方块,图标本身不接事件(自绘图标是描边,点笔画空隙会点不中)");
             }
 
+            {
+                // ★ 语言方向初始是【空坑】—— 不预设一个看似合理的默认:
+                //   方向恰恰是同传里最不能猜错的东西,猜错就是整场翻反。
+                var fresh = new Services.InterpretState();
+                Assert(fresh.MyLang.Length == 0 && fresh.TheirLang.Length == 0, "★ 语言方向初始为空坑");
+                Assert(!fresh.DirectionReady, "两端没设好就不算就绪");
+                Assert(fresh.TryStart().Contains("语言方向"), "★ 没设方向时如实说要先设方向");
+                fresh.SetMyLang("zh"); fresh.SetTheirLang("en");
+                Assert(fresh.DirectionReady, "两端设好了才就绪");
+                // 拖一次就记住,下次沿用
+                var reopened = new Services.InterpretState();
+                reopened.Import(fresh.Export());
+                Assert(reopened.MyLang == "zh" && reopened.TheirLang == "en", "★ 语言方向沿用上次退出时的设定");
+            }
+            var tsSrc = TryReadSource(Path.Combine("Views", "ToggleSwitch.cs"));
+            if (tsSrc is not null)
+            {
+                Assert(tsSrc.Contains("DoubleAnimation") && tsSrc.Contains("TranslateTransform.YProperty"),
+                       "★ 开关是【滑】过去的,不是硬跳");
+                Assert(tsSrc.Contains("if (_enabled) Set("), "禁用时拨不动");
+                Assert(tsSrc.Contains("SetResourceReference"), "配色走令牌 —— 为将来的皮肤预留");
+                Assert(tsSrc.Contains("_track.Background = Brushes.Transparent"),
+                       "整根槽都是命中区(圆钮才 22px,只让它可点会经常按空)");
+            }
+            var ipPanel = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
+            if (ipPanel is not null)
+                Assert(!Body(ipPanel).Contains("去安装"),
+                       "★ 装驱动的入口只在同传设置那一格 —— 同一件事不给两个入口");
+
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {
@@ -1424,7 +1453,16 @@ public static class Selftest
                        "★ 方向是从语言池【拖进坑里】的,不是下拉菜单选");
                 Assert(!Body(barMode).Contains("ComboBox _myLang"), "下拉菜单已撤掉");
                 Assert(barMode.Contains("FrameworkElement InterpretSettingsCard()") && barMode.Contains("同传设置"),
-                       "★ 同传模式右边那格是【同传设置】(声卡状态/开关/设备),不是翻译历史");
+                       "★ 同传模式右边那格是【同传设置】,不是翻译历史");
+                Assert(barMode.Contains("Card(_switchRow, \"同传设置\"") || barMode.Contains("\"同传设置\", action: _driverBadge, scroll: false"),
+                       "★ 同传设置不给滚动条 —— 要滚就说明版面没排好");
+                var badge = Slice(barMode, "_driverBadge.Children.Clear();", "_switchRow.Children.Clear();");
+                Assert(badge is not null && badge.Contains("RiskDanger") && badge.Contains("RiskWarning") && badge.Contains("RiskSafe"),
+                       "★ 声卡状态是红/黄/绿三态灯");
+                Assert(badge is not null && badge.Contains("去设置") && badge.Contains("一键开启"),
+                       "红=去设置、黄=一键开启;绿的时候直接显示版本号,没有按钮");
+                Assert(barMode.Contains("new ToggleSwitch(\"实时语音翻译输出\"") && barMode.Contains("enabled: drv.Installed"),
+                       "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
                 Assert(barMode.Contains("_notesCardHost.Visibility"), "翻译历史只在文字模式出现");
                 Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),
                        "两套版面按模式切换,不是各建一份");

@@ -201,63 +201,72 @@ public sealed class TranslationBar : UserControl
     }
 
     // ---------------------------------------------------------------- 同传设置(取代翻译历史那一格)
-    readonly StackPanel _settingsBody = new();
+    readonly StackPanel _switchRow = new() { Orientation = Orientation.Horizontal };
+    readonly StackPanel _driverBadge = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
     /// <summary>
-    /// 同传模式下右边那一格不是翻译历史,而是【这一场的全部开关】:
-    /// 虚拟声卡连接情况、实时翻译输出、字幕、我方设备。
-    /// 放这里而不是设置页:开会当下要改的东西,不该让人切走界面去找。
+    /// 同传设置。★ 不给滚动条(用户裁定):一格能装下的东西不该滚 ——
+    /// 要滚就说明版面没排好,那不是滚动条能补的。
+    /// 版面:标题右边一个【状态灯 + 相应动作】;下方一排上下拨的开关,名字在开关下面,
+    /// 从左往右排,右侧【故意留空】给以后加的开关或滑条。
     /// </summary>
-    FrameworkElement InterpretSettingsCard() => Card(_settingsBody, "同传设置");
+    FrameworkElement InterpretSettingsCard()
+    {
+        var body = new StackPanel();
+        _switchRow.Margin = new Thickness(0, 6, 0, 0);
+        body.Children.Add(_switchRow);
+        return Card(body, "同传设置", action: _driverBadge, scroll: false);
+    }
 
     void RefreshInterpretSettings()
     {
         var st = TheApp.Interpret;
-        _settingsBody.Children.Clear();
-
-        // —— 虚拟声卡:装了就自动认出来,没装才出现入口
         var drv = Services.AudioDriver.Detect();
-        var drvLine = Ui.Caption(drv.Installed
-            ? $"虚拟声卡:已连接 · {drv.Version ?? "版本未知"}"
-            : "虚拟声卡:未安装 —— 译文语音送不进会议软件");
-        drvLine.SetResourceReference(TextBlock.ForegroundProperty, drv.Installed ? "FgSecondary" : "RiskWarning");
-        _settingsBody.Children.Add(drvLine);
+
+        // —— 标题右边:绿 / 黄 / 红 三态灯(用户裁定)
+        //    绿 = 已连接 -> 直接显示版本号,没有按钮
+        //    黄 = 装了但同传没开启 -> 给「一键开启」
+        //    红 = 没找到驱动 -> 给「去设置」
+        _driverBadge.Children.Clear();
+        var connected = drv.Installed && Services.InterpretState.PipelineReady;
+        var (dotKey, text) = !drv.Installed ? ("RiskDanger", "未找到")
+                           : connected      ? ("RiskSafe", drv.Version ?? "已连接")
+                                            : ("RiskWarning", "未开启");
+        var dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };
+        dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, dotKey);
+        _driverBadge.Children.Add(dot);
+        var lab = Ui.Caption(text);
+        lab.VerticalAlignment = VerticalAlignment.Center;
+        lab.Margin = new Thickness(5, 0, 0, 0);
+        _driverBadge.Children.Add(lab);
+
         if (!drv.Installed)
         {
-            var go = Chip("去安装", () => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
-            go.HorizontalAlignment = HorizontalAlignment.Left;
-            go.Margin = new Thickness(0, 4, 0, 0);
-            _settingsBody.Children.Add(go);
+            var go = Chip("去设置", () => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
+            go.Margin = new Thickness(8, 0, 0, 0);
+            _driverBadge.Children.Add(go);
+        }
+        else if (!connected)
+        {
+            var open = Chip("一键开启", () =>
+            {
+                var why = TheApp.Interpret.TryStart();
+                if (why.Length > 0) ConfirmDialog.Show("还开不了", why, confirmText: "知道了", cancelText: "关闭");
+            });
+            open.Margin = new Thickness(8, 0, 0, 0);
+            _driverBadge.Children.Add(open);
         }
 
-        _settingsBody.Children.Add(new Border { Height = 8 });
-        _settingsBody.Children.Add(Toggle("实时翻译输出", st.SpeakTranslation,
-            () => TheApp.Interpret.SetSpeakTranslation(!st.SpeakTranslation)));
-        _settingsBody.Children.Add(Toggle("对方字幕", st.Subtitles,
-            () => TheApp.Interpret.SetSubtitles(!st.Subtitles)));
-
-        _settingsBody.Children.Add(new Border { Height = 8 });
-        _settingsBody.Children.Add(Ui.Caption("我方设备"));
-        _settingsBody.Children.Add(Ui.Caption("· 输入:系统默认麦克风"));
-        _settingsBody.Children.Add(Ui.Caption(drv.Installed
-            ? "· 输出:虚拟声卡(会议软件里把麦克风选成 CABLE Output)"
-            : "· 输出:尚无 —— 需要先装虚拟声卡"));
-        // ★ 诚实:设备可选列表要等语音链路接入才有意义,在那之前不摆能点却不生效的下拉。
-        _settingsBody.Children.Add(Ui.Caption("★ 可选设备列表等语音链路接入后开放。"));
-    }
-
-    /// <summary>一行开关:左边名字、右边状态。开着用着重色实心,一眼看得出。</summary>
-    FrameworkElement Toggle(string label, bool on, Action onClick)
-    {
-        var chip = Chip(on ? "开" : "关", onClick, on);
-        chip.VerticalAlignment = VerticalAlignment.Center;
-        var t = Ui.Caption(label);
-        t.VerticalAlignment = VerticalAlignment.Center;
-        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 5) };
-        DockPanel.SetDock(chip, Dock.Right);
-        row.Children.Add(chip);
-        row.Children.Add(t);
-        return row;
+        // —— 开关:上下拨,名字在下面,从左往右排;右边留空给以后
+        _switchRow.Children.Clear();
+        // ★ 没装虚拟声卡时,「实时语音翻译输出」【灰掉禁用】(用户裁定):
+        //   译文语音根本送不进会议软件,给一个能拨的开关就是骗人。
+        //   去安装的入口只在上面那个状态栏里 —— 同一件事不给两个入口。
+        _switchRow.Children.Add(new ToggleSwitch("实时语音翻译输出", st.SpeakTranslation,
+            on => TheApp.Interpret.SetSpeakTranslation(on), enabled: drv.Installed));
+        _switchRow.Children.Add(new ToggleSwitch("实时对方字幕", st.Subtitles,
+            on => TheApp.Interpret.SetSubtitles(on)));
+        // ★ 右侧【故意空着】—— 以后加开关或滑条往这排后面接,不用再动版面。
     }
 
     // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡

@@ -143,21 +143,8 @@ public sealed class InterpretPanel : UserControl
             }
         }
 
-        // ★ 虚拟声卡没装 -> 就在【你需要它的地方】给入口,而不是让用户自己去设置里翻。
-        //   装了就自动接上,连提示都不出现 —— 用户裁定的"察觉不到它的存在"就是这个意思。
-        var drv = AudioDriver.Detect();
-        _driverHint.Children.Clear();
-        if (!drv.Installed)
-        {
-            var t = Ui.Caption($"要把译文语音送进会议软件,还差一个虚拟声卡({AudioDriver.ProductName})。");
-            t.HorizontalAlignment = HorizontalAlignment.Center;
-            var go = Ui.Primary("去安装", (_, _) => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
-            go.HorizontalAlignment = HorizontalAlignment.Center;
-            go.Margin = new Thickness(0, 6, 0, 0);
-            _driverHint.Children.Add(t);
-            _driverHint.Children.Add(go);
-        }
-
+        // ★ 虚拟声卡的状态与入口【只在同传设置那一格】(用户裁定):
+        //   同一件事不给两个入口 —— 两处都放,用户会以为是两回事。
         if (_speakBtn is not null) _speakBtn.Content = st.SpeakTranslation ? "实时翻译输出:开" : "实时翻译输出:关";
         if (_subsBtn is not null) _subsBtn.Content = st.Subtitles ? "字幕:开" : "字幕:关";
 

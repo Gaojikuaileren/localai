@@ -34,10 +34,17 @@ public sealed class InterpretState
 
     public TranslationMode Mode { get; private set; } = TranslationMode.Text;
 
-    /// <summary>我说话用的语言。</summary>
-    public string MyLang { get; private set; } = "zh";
-    /// <summary>对方的语言 —— 我的话翻成它,对方的话从它翻回来。</summary>
-    public string TheirLang { get; private set; } = "en";
+    /// <summary>
+    /// 我说话用的语言。★ 初始【为空】—— 界面上是两个"拖入"的空坑,和目标池一个样子。
+    /// 不预设一个看似合理的默认(比如中/英):那会让人以为已经设好了,而方向恰恰是同传里
+    /// 最不能猜错的东西 —— 猜错就是整场翻反。拖过一次之后记住,下次沿用。
+    /// </summary>
+    public string MyLang { get; private set; } = "";
+    /// <summary>对方的语言 —— 我的话翻成它,对方的话从它翻回来。同样初始为空。</summary>
+    public string TheirLang { get; private set; } = "";
+
+    /// <summary>两端都设好了才谈得上开始同传。</summary>
+    public bool DirectionReady => Languages.Find(MyLang) is not null && Languages.Find(TheirLang) is not null;
 
     /// <summary>
     /// 实时翻译输出总开关。★ 关 = 我们只做【透传】(把真麦克风原样送过去),
@@ -69,6 +76,17 @@ public sealed class InterpretState
     /// </summary>
     public static bool PipelineReady => false;
 
+    /// <summary>
+    /// 试着把同传链路跑起来。★ 现在必然失败 —— 语音链路未接入(P4)。
+    /// 如实返回原因,而不是让按钮点下去毫无反应:一个按了没动静的按钮比没有按钮更让人困惑。
+    /// </summary>
+    public string TryStart()
+    {
+        if (!DirectionReady) return "先把语言方向的两个坑填上 —— 从语言池拖进来。";
+        if (!PipelineReady) return "语音链路尚未接入(P4)—— 采集、识别、合成三段都还没就位。";
+        return "";
+    }
+
     /// <summary>同传模式需要的模型清单(切进来时由 GPU Broker 装卸,聊天模型明确不在内)。</summary>
     public static readonly string[] RequiredModels = { "asr-streaming", "translate", "tts-voice" };
 
@@ -80,6 +98,7 @@ public sealed class InterpretState
     public void Import(Snapshot? s)
     {
         if (s is null) return;
+        // ★ 语言方向【沿用上次退出时的设定】(用户裁定):拖一次就记住,不用每次开会重设。
         if (Languages.Find(s.MyLang) is not null) MyLang = s.MyLang;
         if (Languages.Find(s.TheirLang) is not null) TheirLang = s.TheirLang;
         Subtitles = s.Subtitles;
