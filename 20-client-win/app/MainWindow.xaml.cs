@@ -64,6 +64,10 @@ public partial class MainWindow : Window
         {
             if (ke.Key != Key.Tab) return;
             ke.Handled = true;
+            // ★ 抽屉/浮窗开着时,背后那个聊天输入框是【被遮罩盖住】的 —— 不能把焦点交给它,
+            //   否则打字进一个看不见的地方,回车还会直接把消息发出去(审计 2026-07-31)。
+            //   这和"系统页盖着时停用底层页"是同一条规矩,只是遮罩这条当时漏了。
+            if (Overlay.IsOpen) { FocusPolicy.Park(this, FocusPark); return; }
             FocusPolicy.HandleTab(this, FocusPark);
         };
 
@@ -72,6 +76,11 @@ public partial class MainWindow : Window
         PreviewKeyDown += (_, ke) =>
         {
             if (ke.Key != System.Windows.Input.Key.Escape) return;
+            // ★★ 下拉框开着时,Esc 属于下拉,与它开在哪一层无关(审计 2026-07-31):
+            //   抽屉(新增日程/编辑项目/待办)里全是 ComboBox,而抽屉归 Overlay 管 ——
+            //   不先让路的话,想收个下拉却把整个抽屉关掉,没保存的表单一起丢。
+            //   查验范围必须是【整个窗口】而不只是覆盖层:下拉可能开在抽屉里。
+            if (AnyDropDownOpen(this)) return;   // 不设 Handled,让 ComboBox 自己收
             if (Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; }
             if (MenuHost.IsOpen) { MenuHost.CloseAll(); ke.Handled = true; }
             // 系统页(设置/模型/扩展)盖着的时候,Esc 就是那个返回箭头 ——
@@ -79,8 +88,7 @@ public partial class MainWindow : Window
             // ★ 但下拉框开着时 Esc 归下拉 —— 用户按它是想"收起这个下拉",不是"整页退出"。
             //   ComboBox 的下拉既不在 Overlay 也不在 MenuHost 的账上,只能【实地查验】(与 MenuHost 同一套哲学:
             //   状态是查出来的,不是攒出来的)。这里不设 Handled、直接放行,让 ComboBox 自己去关。
-            else if (!ke.Handled && _systemKey is not null && !AnyDropDownOpen(SystemPageHost))
-            { CloseSystemPage(); ke.Handled = true; }
+            else if (!ke.Handled && _systemKey is not null) { CloseSystemPage(); ke.Handled = true; }
         };
 
         // ★ 全局拦截(用户裁定):浮层开着时,窗口里【任何】按钮的第一次点击都只负责关闭浮层,
@@ -95,6 +103,11 @@ public partial class MainWindow : Window
             //   不吞的话一次点击会顺带按到背后的按钮(用户反馈)。统一在这里拦,不靠各按钮自己判。
             if (MenuHost.SwallowClick) { me.Handled = true; _swallowUp = true; return; }
             if (!Overlay.IsOpen) return;
+            // ★★ 下拉框开着时整条拦截让路(审计 2026-07-31,抽屉里最要命的一条):
+            //   ComboBox 的下拉是【独立的 Popup 窗口】,点选项时 OriginalSource 在那个窗口里,
+            //   IsInsideDrawer 顺着本窗口的树找不到它 -> 判成"点在抽屉外面" -> 关掉整个抽屉。
+            //   现象:在新增日程里点一下"重复方式"的某个选项,选没选上,抽屉没了,填的全丢。
+            if (AnyDropDownOpen(this)) return;
             if (me.OriginalSource is DependencyObject d && IsInsideDrawer(d)) return;   // 抽屉内部照常操作
             Overlay.CloseActive();
             me.Handled = true;   // 吞掉这一次点击,不让它落到按钮上
@@ -159,6 +172,11 @@ public partial class MainWindow : Window
         var wasCollapsed = _collapsed;
         Overlay.CloseActive();          // 抽屉里的文案也来自旧语言,先收起
         BuildNav();
+        // ★ 必须【先收起覆盖层再 Navigate】(审计 2026-07-31 抓到的一条我自己造的回归):
+        //   Navigate 里有一条守卫 —— "覆盖层盖着且目标就是底下那页 → 只收起,不重建"。
+        //   在这里它会把 Navigate(current) 整个吃掉,于是底下那张工作页永远停在旧语言。
+        //   先 Close 让 _systemKey 归零,守卫就不成立了,重建照常发生。
+        CloseSystemPage();
         Navigate(current);      // 重新构建当前页 -> 新语言
         if (sys is not null) OpenSystemPage(sys);   // 再把系统页按新语言盖回来
         if (wasCollapsed) { _collapsed = false; OnToggleNav(this, new RoutedEventArgs()); }   // 保持收起状态

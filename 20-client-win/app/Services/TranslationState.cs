@@ -69,6 +69,19 @@ public sealed class TranslationState
         return true;
     }
 
+    /// <summary>
+    /// 设置里增删了【常用语言池】—— 池子不归我管(它在 AppSettings 里),
+    /// 但翻译界面得照新池子重画一次。
+    /// ★ 为什么需要它(审计 2026-07-31):设置页是【覆盖式】的 ——
+    ///   返回时底下那个 TranslationBar 实例不重建(这正是覆盖式的目的),
+    ///   而它只在这三个事件时重读池子。不广播的话,
+    ///   从空坑的「+」进设置加了一个语言、回来却看不到 ——
+    ///   而那正是设计上唯一的加语言入口。
+    ///   更糟的是兵底级联是【实时读池】的:它会把新语言当候选提出来,
+    ///   而屏幕上六个坑里根本没有它 —— 同一份数据的两个视图当场矛盾。
+    /// </summary>
+    public void NotifyPoolChanged() => Changed?.Invoke();
+
     public void RemoveTarget(string code)
     {
         if (_targets.Remove(code)) Changed?.Invoke();

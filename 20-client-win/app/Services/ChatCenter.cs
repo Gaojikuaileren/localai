@@ -156,6 +156,7 @@ public sealed class ChatCenter
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        PurgeArchives(ids);   // ★ 幽灵会话的承诺是【不留痕】,温层当然也不能留
         Changed?.Invoke();
     }
 
@@ -300,7 +301,22 @@ public sealed class ChatCenter
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        PurgeArchives(ids);   // ★ 温层一并清 —— 否则明文原文永久留在盘上且再也删不到
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 把这几条会话的【温层归档】一并清掉。
+    /// ★ 为什么单抽出来(审计 2026-07-31):四条销毁路径里只有两条清了温层,
+    ///   手动"全部清除"与 30 天自动清除只删了内存里那两张表 ——
+    ///   于是会话在界面上没了,而归档里的【明文原文】永久留在盘上,
+    ///   之后再没有任何入口能定点删到它(删需要 sessionId,而记录已经没了)。
+    ///   界面对这两个动作的承诺是"不可恢复"/"全部清除" —— 那就得真的清干净。
+    ///   四条路径现在全走这一个,免得将来第五条又漏。
+    /// </summary>
+    void PurgeArchives(IEnumerable<string> ids)
+    {
+        foreach (var id in ids) { _loadedArchive.Remove(id); SessionArchive.Delete(id); }
     }
 
     // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
@@ -343,6 +359,7 @@ public sealed class ChatCenter
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
+        PurgeArchives(ids);   // ★ 温层一并清 —— 否则明文原文永久留在盘上且再也删不到
         Changed?.Invoke();
     }
 
@@ -391,7 +408,11 @@ public sealed class ChatCenter
             var ordered = g.OrderBy(m => m.At).ToList();
             if (ordered.Count <= keepRecent) continue;
             var older = ordered.Take(ordered.Count - keepRecent).ToList();
-            SessionArchive.Append(g.Key, older);
+            // ★★ 写成了才能从热层拿掉(审计 2026-07-31 的高危):
+            //   以前是无条件 Remove —— 归档写盘失败(盘满/权限/被锁)时,
+            //   原文从内存里没了、盘上也没有,一声不响地永久丢掉。
+            //   写不成就留在热层,下次启动再归 —— 多占点内存远比丢掉对话好。
+            if (!SessionArchive.Append(g.Key, older)) continue;
             foreach (var m in older) _messages.Remove(m);
             moved += older.Count;
         }

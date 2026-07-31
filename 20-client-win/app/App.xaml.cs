@@ -102,8 +102,10 @@ public partial class App : Application
         if (!hadCalendar) SeedDemoEvents();   // 日历示例(独立:老用户有其它存档但还没日历档,也补一次)
         // 同传示例同样【独立判断】:这台机器上已经有存档的用户,也该看得到这条记录长什么样。
         // 判据是"一条同传会话都没有",而不是"是不是首次运行" —— 删掉之后不会再冒出来。
-        var hadInterpret = Chat.AllTranslationSessions().Any(x => x.Interpret);
-        if (!hadInterpret) SeedDemoInterpret();
+        // ★ 判据是【播没播过】而不是【列表里有没有】—— 删除是软删除,
+        //   拿"有没有"反推的话用户删一次它就长回来一条新的。
+        var hadInterpret = Settings.InterpretDemoSeeded;
+        if (!hadInterpret) { SeedDemoInterpret(); Settings.InterpretDemoSeeded = true; Settings.Save(); }
         AttachAutoSave();
         // ★ 首次运行必须【立刻】把示例落盘:播种发生在订阅之前,不会触发自动保存;
         //   不补这一次,下次启动仍算"无存档"→ 又播一遍种,用户删掉的示例还会复活。

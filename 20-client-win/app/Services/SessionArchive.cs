@@ -42,21 +42,56 @@ public static class SessionArchive
         catch { return new List<ChatMessage>(); }   // 坏档不阻塞:当作没有归档
     }
 
-    /// <summary>把更早的消息追加进温层(与已有的按时间合并)。原子写。</summary>
-    public static void Append(string sessionId, IEnumerable<ChatMessage> older)
+    /// <summary>
+    /// 读归档,并告诉调用方这份归档是【真的没有】还是【读坏了】。
+    /// ★ 这两件事必须分开(审计 2026-07-31):Load 对两者都返回空表,
+    ///   而 Append 拿空表加上新消息写回去 —— 一份只是暂时读不动的归档
+    ///   (杀毒软件锁着、盘满写一半、同步工具插一脚)就被【静默整份覆盖】,
+    ///   里面所有旧原文一次性消失。
+    /// </summary>
+    static (List<ChatMessage> msgs, bool corrupt) LoadChecked(string sessionId)
+    {
+        var f = FileFor(sessionId);
+        if (!File.Exists(f)) return (new List<ChatMessage>(), false);
+        try
+        {
+            var got = JsonSerializer.Deserialize<List<ChatMessage>>(File.ReadAllText(f), J);
+            return got is null ? (new List<ChatMessage>(), true) : (got, false);
+        }
+        catch { return (new List<ChatMessage>(), true); }
+    }
+
+    /// <summary>
+    /// 把更早的消息追加进温层(与已有的按时间合并)。原子写。
+    /// ★★ 返回值必须被看(审计 2026-07-31 的高危):以前这里是 void +
+    ///   "归档失败不该影响使用:消息仍在热层" —— 而调用方紧接着就把它们
+    ///   从热层删了。那句注释描述的是一个没有人实现过的行为:
+    ///   写盘失败 = 原文【永久静默丢失】。现在写不成就说写不成。
+    /// </summary>
+    /// <returns>true = 真的落盘了,调用方才可以从热层移除。</returns>
+    public static bool Append(string sessionId, IEnumerable<ChatMessage> older)
     {
         try
         {
             Directory.CreateDirectory(Dir);
-            var all = Load(sessionId);
+            var f = FileFor(sessionId);
+            var (all, corrupt) = LoadChecked(sessionId);
+            if (corrupt)
+            {
+                // ★ 坏档【不覆盖】—— 先攒到一边留作证据,再从头开一份。
+                //   里面可能是可救的原文;就算真的救不回来,
+                //   "文件还在但坏了" 也比 "一声不响地没了" 诚实得多。
+                var bak = f + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                try { File.Move(f, bak, overwrite: false); } catch { return false; }
+            }
             all.AddRange(older);
             all = all.OrderBy(m => m.At).ToList();
-            var f = FileFor(sessionId);
             var tmp = f + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(all, J));
             File.Move(tmp, f, overwrite: true);
+            return true;
         }
-        catch { /* 归档失败不该影响使用:消息仍在热层,下次再归 */ }
+        catch { return false; }   // 没落盘 —— 调用方必须把消息留在热层
     }
 
     /// <summary>温层里有归档的会话 id —— 删除归档原文时用来标注记忆"原文已删除"。</summary>

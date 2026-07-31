@@ -130,6 +130,15 @@ public sealed class AppSettings
     // ---- 模型(在"系统 › 模型"里设置)。★ 这些是【偏好】:接入 GPU Broker(P4)后才真正装载模型。----
     /// <summary>各模型权重的统一存放目录(接入后中枢按此路径加载)。</summary>
     public string? ModelStorePath { get; set; }
+
+    /// <summary>
+    /// 示例同传记录已经播过种了(一次性标记)。
+    /// ★ 为什么不用"列表里有没有同传会话"反推(审计 2026-07-31):
+    ///   界面上的删除是【软删除】,而那个查询会滤掉已删除的 ——
+    ///   于是用户删一次,下次启动它就长回来一条新的,回收站里还越攒越多。
+    ///   "有没有"和"播没播过"是两回事,只有后者才能当播种判据。
+    /// </summary>
+    public bool InterpretDemoSeeded { get; set; }
     /// <summary>被【停用】的模型 key(存停用项 -> 新模型默认启用)。</summary>
     public List<string> DisabledModels { get; set; } = new();
     /// <summary>空闲时自动卸载模型腾显存(接入后由 Broker 执行)。</summary>

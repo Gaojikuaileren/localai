@@ -158,7 +158,17 @@ public sealed class ChatView : UserControl
         }
         _sessions.Children.Add(Ui.Caption($"保留 {ChatCenter.TrashRetentionDays} 天,过期自动清除(不可恢复)。"));
         foreach (var s in items) _sessions.Children.Add(TrashRow(s, BuildSessions));
-        var clear = Ui.DangerFilled("全部清除", (_, _) => TheApp.Chat.ClearDeleted(_wsKey));
+        // ★ 不可恢复的动作要有二次确认(审计 2026-07-31):
+        //   单条恢复/删除都在旁边,一次误点就把整篮子原文连同温层归档一起清掉 ——
+        //   这是这一屏里唯一一个【没有任何回头路】的按钮,不该和其它按钮一样一点就走。
+        var clear = Ui.DangerFilled("全部清除", (_, _) =>
+        {
+            var n = items.Count;
+            if (!ConfirmDialog.Show("全部清除",
+                    $"彻底删除这 {n} 条已删除的会话?\n\n连同它们归档到本机的对话原文一起清掉,【无法恢复】。",
+                    confirmText: "彻底删除", danger: true)) return;
+            TheApp.Chat.ClearDeleted(_wsKey);
+        });
         clear.Height = 28;
         clear.Margin = new Thickness(0, 8, 0, 0);
         clear.HorizontalAlignment = HorizontalAlignment.Left;
@@ -425,7 +435,10 @@ public sealed class ChatView : UserControl
                 Application.Current.Dispatcher.BeginInvoke(new Action(() =>
                 {
                     var ok = ConfirmDialog.Show("删除共享会话",
-                        $"删除共享会话「{s.Title}」?\n\n这是共享会话 —— 删除会对【家里所有设备】生效,不只是这台。\n\n" +
+                        // ★ 不能写"对家里所有设备生效"(审计 2026-07-31):中枢尚未接入,
+                        //   共享目前只是【本机的一个标记】,从来没上传过。把尚未发生的事写成确凿后果,
+                        //   比不说更坏 —— 用户会以为别的机器上也没了,而实际上什么都没发生。
+                        $"删除共享会话「{s.Title}」?\n\n这条标了共享。中枢尚未接入 —— 共享目前只是本机的一个标记,删除也只影响这台。接入之后才会同步到其它设备。\n\n" +
                         $"会先进「已删除」,{ChatCenter.TrashRetentionDays} 天内可恢复。",
                         confirmText: "删除", danger: true);
                     if (!ok) return;

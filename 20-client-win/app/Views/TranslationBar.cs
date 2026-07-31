@@ -188,14 +188,14 @@ public sealed class TranslationBar : UserControl
 
     void RefreshDirection()
     {
-        _mySlot.Child = SlotContent(TheApp.Interpret.MyLang);
-        _theirSlot.Child = SlotContent(TheApp.Interpret.TheirLang);
+        _mySlot.Child = SlotContent(TheApp.Interpret.MyLang, "my");
+        _theirSlot.Child = SlotContent(TheApp.Interpret.TheirLang, "their");
     }
 
-    UIElement SlotContent(string code)
+    UIElement SlotContent(string code, string which)
     {
         if (Languages.Find(code) is not { } l) return EmptySlot("拖入");
-        var card = Bubble(l, selected: true);
+        var card = Bubble(l, selected: true, slot: which);
         card.Margin = new Thickness(0);
         return card;
     }
@@ -348,7 +348,12 @@ public sealed class TranslationBar : UserControl
         // ★ 只有【我这一侧】有语音输出 —— 对方那侧只出字幕(用户裁定 2026-07-31):
         //   对方的原声一直在响,再叠一层机器声等于两个人同时说话。
         _switchRow.Children.Add(new ToggleSwitch("我方译文语音", st.SpeakTranslation,
-            on => TheApp.Interpret.SetSpeakTranslation(on), enabled: drv.Installed, compact: true));
+            // ★★ 装了声卡【也不能拨】(审计 2026-07-31):声卡只是必要条件,
+            //   真正决定它生不生效的是语音链路(采集/ASR/合成/注入),而那一整套还没接。
+            //   只看 drv.Installed 的话,装完 VB-CABLE 的用户会得到一个能拨、会亮、
+            //   但什么都不会发生的开关 —— 那正是本项目最该避免的“假开关”。
+            on => TheApp.Interpret.SetSpeakTranslation(on),
+            enabled: drv.Installed && InterpretState.PipelineReady, compact: true));
         _switchRow.Children.Add(new ToggleSwitch("对方实时字幕", st.Subtitles,
             on => TheApp.Interpret.SetSubtitles(on), compact: true));
         // —— 右侧:设备选择(原来空着的那半边)
@@ -597,8 +602,15 @@ public sealed class TranslationBar : UserControl
     {
         var st = TheApp.Translation;
 
-        // ★ 目标池满了 -> 语言池整体灰掉禁用(拖不动)
-        var poolDisabled = st.IsFull;
+        // ★ 池子满了 -> 语言池整体灰掉禁用(拖不动)
+        // ★★ 两个场景的"满"是两回事(审计 2026-07-31 抓到的高危):
+        //   此前一律看 st.IsFull——那是【文字翻译的目标池】。
+        //   于是只要目标池满了 3 个,切到同传后语言池也是灰的,
+        //   而同传的方向只能从语言池拖 —— 方向永远设不了,功能直接死掉。
+        //   同传的"满"应该是【我说/对方说两个坑都填了】。
+        var poolDisabled = TheApp.Interpret.Mode == TranslationMode.Interpret
+            ? TheApp.Interpret.DirectionReady
+            : st.IsFull;
         _poolBox.Opacity = poolDisabled ? 0.45 : 1;
         _poolBox.IsHitTestVisible = !poolDisabled;
 
@@ -647,7 +659,11 @@ public sealed class TranslationBar : UserControl
     ///   · 微风(苹果风)/ 墨白 = 克制的胶囊,不歪不叠,只有干净的圆角。
     /// 拖动一律是【自己捕获鼠标】做的 —— OLE 拖放不移动元素,做不出跟手效果。
     /// </summary>
-    Border Bubble(Lang l, bool selected, int stackIndex = 0)
+    /// <param name="slot">
+    /// 不为空 = 这张卡坐在同传的方向坑里("my" / "their"),不属于文字翻译的目标池。
+    /// ★ 外形共用、来历不共用 —— 见 BeginDrag 的 fromSlot。
+    /// </param>
+    Border Bubble(Lang l, bool selected, int stackIndex = 0, string? slot = null)
     {
         var t = new TextBlock
         {
@@ -676,7 +692,7 @@ public sealed class TranslationBar : UserControl
         b.SetResourceReference(Border.BorderBrushProperty, selected ? "Accent" : "Border");
 
         b.Tag = l.Code;   // 重排后靠它认出"这还是同一张卡"(FLIP 动画要配对前后位置)
-        b.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(b, l, selected, e);
+        b.PreviewMouseLeftButtonDown += (_, e) => BeginDrag(b, l, selected && slot is null, e, slot);
         return b;
     }
 
@@ -724,8 +740,17 @@ public sealed class TranslationBar : UserControl
     Point _dragOffset;
     bool _dragging;
     Point _dragStart;
+    string? _dragFromSlot;    // "my" / "their" / null：这一拖是不是从方向坑里出来的
 
-    void BeginDrag(Border source, Lang l, bool fromTarget, MouseButtonEventArgs e)
+    /// <param name="fromSlot">
+    /// 从同传的【我说/对方说】坑里拖出来的。
+    /// ★ 必须与 fromTarget 分开(审计 2026-07-31 抓到的高危):
+    ///   坑里那张卡和目标池里那张用的是同一个 Bubble(selected: true),
+    ///   于是从坑里往外拖会被当成"从目标池拖" ——
+    ///   静默删掉【文字翻译目标池】里的同一个语言,而坑里那张还原地不动。
+    ///   两个场景共用卡片外形是对的,共用"我从哪里来"是错的。
+    /// </param>
+    void BeginDrag(Border source, Lang l, bool fromTarget, MouseButtonEventArgs e, string? fromSlot = null)
     {
         // ★ 抓不到鼠标就【别开始拖】:抓不到的话松开事件不一定回到我们身上,
         //   处理器就会一直挂着、状态清不掉。宁可这一下不拖,也不要留个半拖状态。
@@ -734,6 +759,7 @@ public sealed class TranslationBar : UserControl
         _dragOffset = e.GetPosition(source);                              // 抓在卡片的哪一点上
         _dragLang = l;
         _dragFromTarget = fromTarget;
+        _dragFromSlot = fromSlot;
         _dragging = false;
         _dragStart = e.GetPosition(this);
         MouseMove += OnDragMove;
@@ -756,7 +782,14 @@ public sealed class TranslationBar : UserControl
             //   手上那张卡才真是"被拿起来的那一张" —— 否则同一个语言会同时出现在两个地方,
             //   看着像复制而不是搬运。落空了在 FinishDrag 里原样放回去。
             _liftedFromTarget = _dragFromTarget;
-            if (_dragFromTarget) TheApp.Translation.RemoveTarget(_dragLang.Code);
+            if (_dragFromSlot is not null)
+            {
+                // 从方向坑里拿起来 -> 清空那个坑,别去碰文字翻译的目标池
+                if (_dragFromSlot == "my") TheApp.Interpret.SetMyLang("");
+                else TheApp.Interpret.SetTheirLang("");
+                RefreshDirection();
+            }
+            else if (_dragFromTarget) TheApp.Translation.RemoveTarget(_dragLang.Code);
             else { _liftedFromPool = _dragLang.Code; RefreshPools(); }
 
             // ★ 手上那张卡要和坑里那张【一模一样大】(用户裁定):

@@ -312,6 +312,7 @@ public sealed class SettingsView : UserControl
                 s.TranslationPool.Remove(code);
                 s.Save();
                 TheApp.Translation.RemoveTarget(code);   // 从池里删掉的,目标池也不该再留着
+                TheApp.Translation.NotifyPoolChanged();  // ★ 设置页是覆盖式的,底下那个翻译界面不重建 —— 得告诉它
                 RefreshLangPool();
             }));
         }
@@ -337,6 +338,7 @@ public sealed class SettingsView : UserControl
                 if (pick.SelectedItem is not ComboBoxItem { Tag: string code }) return;
                 s.TranslationPool.Add(code);
                 s.Save();
+                TheApp.Translation.NotifyPoolChanged();  // ★ 同上:不广播的话,回到翻译空间会发现刚加的语言不在池里
                 RefreshLangPool();
             });
             add.Margin = new Thickness(8, 0, 0, 0);

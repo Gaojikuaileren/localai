@@ -496,9 +496,12 @@ public static class Selftest
             {
                 // Esc 是总闸:浮层和菜单都要能关。只管浮层的话,菜单状态一卡住就只能杀进程。
                 var esc = mwSwallow[mwSwallow.IndexOf("Key.Escape", StringComparison.Ordinal)..];
-                esc = esc[..400];
+                esc = esc[..700];
                 Assert(esc.Contains("Overlay.CloseActive()") && esc.Contains("MenuHost.CloseAll()"),
                        "★ Esc 同时关浮层与菜单(留一条自救路径)");
+                Assert(esc.IndexOf("AnyDropDownOpen(this)", StringComparison.Ordinal) is int di && di >= 0
+                       && di < esc.IndexOf("Overlay.CloseActive()", StringComparison.Ordinal),
+                       "★ 但下拉框【排在浮层之前】—— 抽屉里全是 ComboBox,想收个下拉却把整个抽屉关掉,没保存的表单一起丢");
                 Assert(mwSwallow.Contains("MenuHost.SwallowClick") && mwSwallow.Contains("me.Handled = true"),
                        "★ 菜单开着时点背后:主窗口一次性吞掉这次点击(只关菜单)");
                 var pmd = mwSwallow[mwSwallow.IndexOf("PreviewMouseDown +=", StringComparison.Ordinal)..];
@@ -941,8 +944,8 @@ public static class Selftest
             {
                 Assert(cvShare.Contains("提升为共享") && cvShare.Contains("无法收回"), "★ 提升确认框写明【不可收回】");
                 Assert(cvShare.Contains("条消息)会一起共享"), "★ 确认框写明整段历史一起共享(用户裁定 A)");
-                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("所有设备】生效"),
-                       "★ 删共享会话前提示会影响所有设备(任何机器都能删)");
+                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("中枢尚未接入") && cvShare.Contains("只影响这台"),
+                       "★ 删共享会话前【不得】断言对所有设备生效 —— 中枢未接入时共享只是本机标记,什么都没发生");
                 Assert(cvShare.Contains("· 共享"), "会话行标出共享状态");
                 Assert(cvShare.Contains("中枢尚未接入"), "★ 如实说明现在只是标记、接入后才上传");
             }
@@ -1376,8 +1379,9 @@ public static class Selftest
                            "★ 有一段示例同传记录,和普通会话排在同一个列表里");
                     Assert(demoSrc.Contains("(示例)同传记录"),
                            "★ 示例标着「(示例)」—— 语音链路还没接入,不能让它看起来像真转写");
-                    Assert(demoSrc.Contains("var hadInterpret = Chat.AllTranslationSessions().Any(x => x.Interpret);"),
-                           "★ 判据是“一条同传会话都没有”而不是首次运行 —— 老用户也看得到,删掉之后不再冒出来");
+                    Assert(demoSrc.Contains("var hadInterpret = Settings.InterpretDemoSeeded;")
+                           && demoSrc.Contains("Settings.InterpretDemoSeeded = true;"),
+                           "★ 判据是【播没播过】而不是【列表里有没有】—— 删除是软删除,拿“有没有”反推会让它删一次长回来一条");
                 }
             }
 
@@ -1548,8 +1552,8 @@ public static class Selftest
                 Assert(tbSrc.Contains("CornerRadius(14)"), "语言是大圆角胶囊,池子是方形板块");
                 Assert(tbSrc.Contains("new Slider") && tbSrc.Contains("IsSnapToTickEnabled = true"), "★ 翻译程度是滑条(四档吸附)");
                 Assert(tbSrc.Contains("ShowTip(cell") && tbSrc.Contains("_tipBubble"), "★ 每个档位节点 hover 有解释气泡");
-                Assert(tbSrc.Contains("var poolDisabled = st.IsFull") && tbSrc.Contains("_poolBox.IsHitTestVisible = !poolDisabled"),
-                       "★ 目标池满 3 个 -> 语言池灰掉禁用");
+                Assert(tbSrc.Contains("? TheApp.Interpret.DirectionReady") && tbSrc.Contains(": st.IsFull"),
+                       "★ “满”分场景:文字看目标池、同传看方向两个坑 —— 一律看目标池会让同传方向永远设不了");
                 Assert(tbSrc.Contains("_targetBox.Width = TargetPoolWidth") && tbSrc.Contains("_poolBox.Width = LangPoolWidth"),
                        "两个池子各自用自己的宽度");
                 Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.Contains("Grid.SetColumn(rightStack, 2)"),
@@ -2808,6 +2812,56 @@ public static class Selftest
                 Assert(!bad, $"{vf} 的界面文案里没有字面 **(不渲染 markdown,写了就是画星号)");
             }
 
+            // ---- 归档不能静默丢原文(审计 2026-07-31 的三条高危) ----
+            {
+                var arcSrc = TryReadSource(Path.Combine("Services", "SessionArchive.cs"));
+                var ccSrc = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                if (arcSrc is not null)
+                {
+                    Assert(arcSrc.Contains("public static bool Append(string sessionId"),
+                           "★ Append 要告诉调用方落盘没落盘(以前是 void,写失败也没人知道)");
+                    Assert(arcSrc.Contains("LoadChecked") && arcSrc.Contains(".corrupt-"),
+                           "★ 坏档【不覆盖】—— 攒到一边留作证据,而不是静默整份写掉");
+                }
+                if (ccSrc is not null)
+                {
+                    Assert(ccSrc.Contains("if (!SessionArchive.Append(g.Key, older)) continue;"),
+                           "★ 写成了才能从热层拿掉 —— 否则写盘失败 = 原文永久静默丢失");
+                    Assert(ccSrc.Contains("void PurgeArchives(IEnumerable<string> ids)"),
+                           "四条销毁路径走同一个温层清理(免得第五条又漏)");
+                    Assert(ccSrc.Split("PurgeArchives(ids);").Length - 1 >= 3,
+                           "★ 幽灵会话/全部清除/30 天自动清除都要清温层(界面对它们的承诺是“不留痕”/“不可恢复”)");
+                }
+            }
+
+            // ---- 审计 2026-07-31 其余几条的回归防线 ----
+            {
+                var sv2 = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+                var tb2 = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+                var cv2 = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                var dv2 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (sv2 is not null)
+                {
+                    Assert(sv2.Split("NotifyPoolChanged();").Length - 1 >= 2,
+                           "★ 设置里增删语言池要广播 —— 设置页是覆盖式的,底下那个翻译界面不重建");
+                    Assert(sv2.Contains("校验不了这个安装包 —— 已拒绝运行"),
+                           "★ 没有清单就不装 —— 装驱动提权且不可逆,“不确定”必须等于“不做”");
+                }
+                if (tb2 is not null)
+                {
+                    Assert(tb2.Contains("enabled: drv.Installed && InterpretState.PipelineReady"),
+                           "★ 装了声卡也不能拨 —— 语音链路没接时那就是个假开关");
+                    Assert(tb2.Contains("string? fromSlot = null") && tb2.Contains("_dragFromSlot"),
+                           "★ 从方向坑里往外拖 ≠ 从目标池拖(否则会静默删掉文字翻译目标池里同一个语言)");
+                }
+                if (cv2 is not null)
+                    Assert(cv2.Contains("彻底删除") && cv2.Contains("【无法恢复】"),
+                           "★ “全部清除”这个不可恢复的动作要二次确认");
+                if (dv2 is not null)
+                    Assert(!dv2.Contains("主机还没有开放设备管理接口") && dv2.Contains("D37 / D48"),
+                           "★ 设备管理的 404 要说真原因(结构性到不了),不是“主机没升级”");
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
@@ -2818,8 +2872,16 @@ public static class Selftest
                        "★ 键名照抄导航注册处 —— 模型那页是 \"model\" 不是 \"models\"(写错就绕过覆盖层、照旧拆重建)");
                 Assert(mwSys.Contains("ContentHost.IsEnabled = false;") && mwSys.Contains("ContentHost.IsEnabled = true;"),
                        "★ 盖上时停用底下那页 —— 否则 Tab 会聚焦到被盖住的输入框,打字打进看不见的地方");
-                Assert(mwSys.Contains("_systemKey is not null && !AnyDropDownOpen(SystemPageHost))"),
+                Assert(mwSys.Contains("_systemKey is not null) { CloseSystemPage(); ke.Handled = true; }"),
                        "★ Esc 就是那个返回箭头(排在浮层/菜单之后,不一下退两层)");
+                Assert(mwSys.Contains("if (AnyDropDownOpen(this)) return;"),
+                       "★ 下拉框开着时,点选项不会把整个抽屉关掉(它的弹出层是独立窗口,IsInsideDrawer 认不出来)");
+                Assert(mwSys.Contains("if (Overlay.IsOpen) { FocusPolicy.Park(this, FocusPark); return; }"),
+                       "★ 抽屉/浮窗开着时 Tab 不把焦点交给被遮罩盖住的输入框");
+                var lang2 = Slice(mwSys, "void OnLanguageChanged()", "BuildChromeIcons();");
+                Assert(lang2 is not null && lang2.IndexOf("CloseSystemPage();", StringComparison.Ordinal)
+                       < lang2.IndexOf("Navigate(current);", StringComparison.Ordinal),
+                       "★ 换语言时先收起覆盖层再 Navigate —— 否则那条守卫会把重建吃掉,底下那页永远停在旧语言");
                 Assert(mwSys.Contains("public void CloseSystemPage()") && mwSys.Contains("BackChevron("),
                        "★ 左上角有返回箭头,点它回到底下那一页 —— 那一页一直活着,不用重建");
                 // ---- 覆盖式导航的回归防线(2026-07-31 审计确认的几条) ----
