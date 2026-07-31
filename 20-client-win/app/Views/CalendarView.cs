@@ -208,7 +208,8 @@ public sealed class CalendarView : UserControl
     public void FocusWeekStart(DateTime weekStart)
     {
         var keepDow = ((int)_selected.DayOfWeek + 6) % 7;   // 保持"星期几"不变,跨周更连贯
-        _selected = weekStart.AddDays(keepDow);
+        // notify: false —— 这一路是【时间轴通知过来的】,再回传就绕成环了
+        SelectDay(weekStart.AddDays(keepDow), notify: false);
         var pivot = weekStart.AddDays(3);
         if (pivot.Year != _anchor.Year || pivot.Month != _anchor.Month) _anchor = pivot;
         Rebuild();
@@ -217,7 +218,7 @@ public sealed class CalendarView : UserControl
     /// <summary>在【指定时刻】新建 —— 时间轴空白处双击走这里，用的仍是日历自己那个编辑抽屉。</summary>
     public void OpenEditorAt(DateTime when)
     {
-        _selected = when.Date;
+        SelectDay(when.Date, notify: false);   // 时间轴已经在那一周了,不必回传
         OpenEditor(when.Date, null, when.TimeOfDay);
         Rebuild();
     }
@@ -264,6 +265,37 @@ public sealed class CalendarView : UserControl
     }
     bool _hideModeSwitch;
 
+    /// <summary>
+    /// ★★ 唯一允许改 _selected 的地方。所有改视野的入口都要经过它。
+    /// 踩过的坑:翻月只改了 _anchor,_selected 留在旧月那一天 ——
+    ///   于是在 8 月的页面上点「+ 新增日程」,抽屉标题写着"7月 31日",存下去也真的落在 7/31。
+    ///   而定时日程的编辑器里【没有日期字段】(只有时:分两列转盘,日期转盘只在勾了"全天"时才出现),
+    ///   用户在编辑器里根本无从纠正 —— 这是静默把数据写错,不是显示问题。
+    ///   同一个陈旧值还会让下方时间轴停在旧的那一周、让「周/月」切换把视野弹回旧月。
+    /// </summary>
+    void SelectDay(DateTime day, bool notify = true)
+    {
+        _selected = day.Date;
+        if (notify) SelectionChanged?.Invoke(_selected);
+    }
+
+    /// <summary>
+    /// 翻页/跳月之后把选中日【带进新视野】:优先保留"几号",那个月没有这一号就取当月最后一天;
+    /// 今天若正好在新视野里则取今天(最符合直觉)。
+    /// </summary>
+    void CarrySelectionInto(DateTime anchor)
+    {
+        if (_mode == Mode.Week)
+        {
+            var keepDow = ((int)_selected.DayOfWeek + 6) % 7;
+            SelectDay(anchor.Date.AddDays(keepDow));
+            return;
+        }
+        if (DateTime.Today.Year == anchor.Year && DateTime.Today.Month == anchor.Month) { SelectDay(DateTime.Today); return; }
+        var days = DateTime.DaysInMonth(anchor.Year, anchor.Month);
+        SelectDay(new DateTime(anchor.Year, anchor.Month, Math.Min(_selected.Day, days)));
+    }
+
     /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
     void RefreshTodayButton()
     {
@@ -271,8 +303,8 @@ public sealed class CalendarView : UserControl
         if (ShowsToday()) return;
         var today = Btn("回到今日", () =>
         {
-            _selected = DateTime.Today;
             _anchor = _mode == Mode.Month ? DateTime.Today : StartOfWeek(DateTime.Today);
+            SelectDay(DateTime.Today);
             Rebuild();
         });
         today.Margin = new Thickness(10, 0, 0, 0);
@@ -292,7 +324,11 @@ public sealed class CalendarView : UserControl
             : DateTime.Today >= _anchor && DateTime.Today < _anchor.AddDays(14);
 
     // 周排布每次走【一周】—— 于是第二行(下周)被提到第一行
-    void Step(int dir) => _anchor = _mode == Mode.Month ? _anchor.AddMonths(dir) : _anchor.AddDays(dir * 7);
+    void Step(int dir)
+    {
+        _anchor = _mode == Mode.Month ? _anchor.AddMonths(dir) : _anchor.AddDays(dir * 7);
+        CarrySelectionInto(_anchor);   // ★ 选中日必须跟进新视野,否则「+ 新增日程」会建到上一个视野那天
+    }
 
     /// <summary>
     /// 翻页 = 【横向滑动】,让人看清前后关系(硬切分不清方向)。
@@ -351,7 +387,7 @@ public sealed class CalendarView : UserControl
     /// <summary>翻页动画收尾:两种排布都要刷新下方当日日程区。</summary>
     void AfterPage()
     {
-        _dayArea.Visibility = Visibility.Visible;
+        _dayArea.Visibility = HideDayArea ? Visibility.Collapsed : Visibility.Visible;
         RebuildDayList();
     }
 
@@ -631,8 +667,7 @@ public sealed class CalendarView : UserControl
     /// <summary>点某一天:选中它;月排布另外弹当日浮窗(周排布下方已就地显示)。</summary>
     void OnDayClicked(DateTime day)
     {
-        _selected = day;
-        SelectionChanged?.Invoke(day);   // 下方时间轴跟着聚焦到这一周
+        SelectDay(day);   // 下方时间轴跟着聚焦到这一周
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
         // ★★ 点日期 = 【查看当天日程】,不再直接开新增抽屉(用户 2026-07-31 报的 bug):
         //   日历最常用的动作是"看看那天有什么",把它接成新建,查看反而无路可走。
@@ -769,7 +804,7 @@ public sealed class CalendarView : UserControl
                     // 选定年月:月排布跳到该月;周排布跳到该月第一周
                     var target = new DateTime(capturedYear, capturedMonth, 1);
                     _anchor = _mode == Mode.Month ? target : StartOfWeek(target);
-                    _selected = target;
+                    SelectDay(target);
                     Overlay.CloseActive();
                     Rebuild();
                 };

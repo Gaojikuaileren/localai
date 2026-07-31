@@ -23,6 +23,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
 
@@ -75,6 +76,16 @@ public sealed class WeekTimeline : UserControl
     /// <summary>周变了(翻周/回到今天)—— 宿主据此把上方月历也翻过去,免得上下说的不是同一周。</summary>
     public Action<DateTime>? WeekChanged;
 
+    /// <summary>跨过了午夜 —— 宿主据此把月历也刷一遍(否则"今天"高亮还停在昨天)。</summary>
+    public Action? DayRolled;
+
+    // ★ 「此刻」那条红线、昼夜带、今天整列高亮,建好之后不会自己变 ——
+    //   客户端一开一整天的话,红线会一直停在打开界面的那一刻,跨零点之后"今天"还高亮着昨天。
+    //   右上角的城市时钟每秒都在走,唯独这半边是死的,看着就像坏了。
+    //   低频(30 秒)重画一次竖向部分就够;不可见/被系统页盖住时停表(与主页时钟同一条规矩)。
+    readonly DispatcherTimer _tick = new() { Interval = TimeSpan.FromSeconds(30) };
+    DateTime _tickDay = DateTime.Today;
+
     public WeekTimeline()
     {
         _weekStart = StartOfWeek(DateTime.Today);
@@ -121,10 +132,14 @@ public sealed class WeekTimeline : UserControl
         //   鼠标事件根本不从那里发出,自然也冒泡不到这里。上面几个容器都铺了透明底就好了。
         MouseWheel += (_, e) =>
         {
-            e.Handled = true;       // 别让整页的 ScrollViewer 也跟着滚
             var f = e.Delta > 0 ? 1 / 1.2 : 1.2;
             var anchor = _canvas.ActualHeight > 0 ? e.GetPosition(_canvas).Y / _canvas.ActualHeight : 0.5;
-            Zoom(f, Math.Clamp(anchor, 0, 1));
+            // ★★ 只有【真的缩放了】才吞掉这个事件。
+            //   无条件 e.Handled = true 会把整页的兜底滚动堵死:_hours 起手就等于 MinHours,
+            //   于是开屏第一下向上滚就已经在边界上 —— 时间轴不动、整页也不动,滚轮当场失灵。
+            //   而时间轴是这一页上最大的一块命中区,光标最容易停在它上面。
+            //   这与项目里 Wheel.PassThrough 的规矩是同一条:自己滚不动了就把事件还给父级。
+            e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1));
         };
 
         // 左键在空白处:单击拖 = 平移;双击 = 在那个半小时上新建
@@ -146,9 +161,12 @@ public sealed class WeekTimeline : UserControl
         };
 
         SizeChanged += (_, _) => Rebuild();
-        Loaded += (_, _) => { CalendarData.Changed += OnDataChanged; Rebuild(); };
+        _tick.Tick += OnTick;
+        Loaded += (_, _) => { CalendarData.Changed += OnDataChanged; Rebuild(); SyncTick(); };
         // ★ 订阅必须成对 —— 静态事件只加不减会把已卸载的视图一直吊着(WPF-PITFALLS 第 7 条)
-        Unloaded += (_, _) => { CalendarData.Changed -= OnDataChanged; EndPan(); EndResize(); };
+        Unloaded += (_, _) => { CalendarData.Changed -= OnDataChanged; _tick.Stop(); EndPan(); EndResize(); };
+        IsVisibleChanged += (_, _) => SyncTick();
+        IsEnabledChanged += (_, _) => SyncTick();
     }
 
     /// <summary>
@@ -160,6 +178,24 @@ public sealed class WeekTimeline : UserControl
         _hours = Math.Clamp(hours, MinHours, MaxHours);
         _top = ClampTop(topHour);
         Rebuild();
+    }
+
+    void SyncTick()
+    {
+        if (IsVisible && IsEnabled) _tick.Start(); else _tick.Stop();
+    }
+
+    void OnTick(object? sender, EventArgs e)
+    {
+        if (_resize is not null || _pan is not null) return;      // 手里正拖着就别打断
+        if (DateTime.Today != _tickDay)
+        {
+            _tickDay = DateTime.Today;
+            Rebuild();
+            DayRolled?.Invoke();       // 让月历也把"今天"挪过去
+            return;
+        }
+        RebuildVertical();             // 红线往下走一格;昼夜带同一天不变,一起重画也无妨
     }
 
     /// <summary>把上方月历选中的那一天所在周同步过来 —— 两块要说的是同一周。</summary>
@@ -193,14 +229,17 @@ public sealed class WeekTimeline : UserControl
     static DateTime StartOfWeek(DateTime d) => d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7));   // 周一起始
 
     /// <param name="anchor">0..1,画布上要保持不动的那个纵向位置。</param>
-    void Zoom(double factor, double anchor)
+    /// <returns>真的动了才 true —— 调用方据此决定要不要吞掉滚轮事件。</returns>
+    bool Zoom(double factor, double anchor)
     {
         var hourAt = _top + _hours * anchor;                 // 锚点处对应的时刻
         var next = Math.Clamp(_hours * factor, MinHours, MaxHours);
-        if (Math.Abs(next - _hours) < 0.001) return;
+        var nextTop = Math.Clamp(hourAt - next * anchor, DayMin, Math.Max(DayMin, DayMax - next));
+        if (Math.Abs(next - _hours) < 0.001 && Math.Abs(nextTop - _top) < 0.001) return false;
         _hours = next;
-        _top = ClampTop(hourAt - _hours * anchor);
+        _top = nextTop;
         Rebuild();
+        return true;
     }
 
     double ClampTop(double t) => Math.Clamp(t, DayMin, Math.Max(DayMin, DayMax - _hours));
@@ -661,7 +700,18 @@ public sealed class WeekTimeline : UserControl
     }
 
     // ---------------------------------------------------------------- 拖动:平移 与 改时间
-    sealed record Resize(CalendarEvent Ev, bool IsStart, double FromY);
+    /// <summary>
+    /// ★★ 【绝对】口径:Ev0 与 FromY 记的都是【按下那一刻】的原始值,全程不更新。
+    /// 之前用的是增量口径(每帧算 dy、四舍五入、施加、然后把基准挪到当前位置),有两个硬伤:
+    ///   ① 不足半个颗粒时直接 return 且【不更新基准】,于是位移一路攒到跨过半颗粒才施加整整一颗粒,
+    ///      余量被吞掉 —— 慢拖时误差同号累加,实测边界跑得比光标快近一倍;
+    ///   ② 越界/最小长度那几条守卫也是 return,拖过头的位移全积在基准里,
+    ///      回拖时得先把这段还完才动 —— 就是用户会遇到的"死区"。
+    /// 绝对口径下这两条都不存在:每帧都从原始值重算,守卫一律【夹住】而不是 return。
+    /// 顺带,吸附是对【绝对时刻】做的,所以 9:07 这种脏时刻会一次性归到 9:00/9:30 ——
+    /// 这才是"颗粒半小时"该有的效果(增量吸附永远绕着自己的脏偏移转)。
+    /// </summary>
+    sealed record Resize(CalendarEvent Ev0, bool IsStart, double FromY);
     sealed record Pan(double FromY, double Top0);
     Resize? _resize;
     Pan? _pan;
@@ -684,31 +734,36 @@ public sealed class WeekTimeline : UserControl
 
         if (_resize is not { } rz) return;
 
-        var dh = (e.GetPosition(_canvas).Y - rz.FromY) / h * _hours;      // 位移换算成小时
-        var snapped = Math.Round(dh / SnapHours) * SnapHours;             // ★ 半小时颗粒(用户裁定)
-        if (Math.Abs(snapped) < 0.001) return;
+        var ev0 = rz.Ev0;
+        var day = ev0.Start.Date;
+        var moved = (e.GetPosition(_canvas).Y - rz.FromY) / h * _hours;    // 从【起手那一刻】算起的总位移
+        var s0 = HoursFrom(day, ev0.Start);
+        var e0 = HoursFrom(day, ev0.End);
 
-        var ev = rz.Ev;
-        var start = ev.Start;
-        var end = ev.End;
-        if (rz.IsStart) start = start.AddHours(snapped);
-        else end = end.AddHours(snapped);
-
-        // ★ 开始不许离开它自己那一天:TimedOn 是按 Start.Date 归日的,
-        //   把开始拖过 0 点这条日程就整根跳到隔壁列去了 —— 那不是"跨天",是"换了一天"。
-        //   要一条 23:00→次日 01:00 的,应当在 23:00 那天建、把【结束】往下拖。
-        if (rz.IsStart && (start.Date != ev.Start.Date)) return;
-        // 结束可以越过 24 点 —— 这正是跨天日程的建法;但不许超出可视域下端(次日 1 点)。
-        if (!rz.IsStart && HoursFrom(ev.Start, end) > DayMax) return;
-        // 最小长度 = 一个颗粒
-        if (end - start < TimeSpan.FromHours(SnapHours)) return;
-
-        CalendarData.Update(ev with { Start = start, End = end });   // 按 Id 更新那一条 —— 日历会同步看到
-        _resize = rz with
+        DateTime start, end;
+        if (rz.IsStart)
         {
-            Ev = CalendarData.Events.FirstOrDefault(x => x.Id == ev.Id) ?? ev,
-            FromY = e.GetPosition(_canvas).Y,
-        };
+            var t = Math.Round((s0 + moved) / SnapHours) * SnapHours;
+            // ★ 一律【夹住】不 return:开始不许离开它自己那一天(TimedOn 按 Start.Date 归日,
+            //   拖过 0 点这条日程会整根跳到隔壁列 —— 那不是"跨天",是"换了一天");
+            //   也不许追上结束。要一条 23:00→次日 01:00 的,在 23:00 那天建、把【结束】往下拖。
+            t = Math.Clamp(t, 0, Math.Max(0, e0 - SnapHours));
+            start = day.AddHours(t);
+            end = ev0.End;
+        }
+        else
+        {
+            var t = Math.Round((e0 + moved) / SnapHours) * SnapHours;
+            // 结束可以越过 24 点 —— 这正是跨天日程的建法;但不许超出可视域下端(次日 1 点)。
+            t = Math.Clamp(t, s0 + SnapHours, DayMax);
+            start = ev0.Start;
+            end = day.AddHours(t);
+        }
+
+        var cur = CalendarData.Events.FirstOrDefault(x => x.Id == ev0.Id) ?? ev0;
+        if (cur.Start == start && cur.End == end) return;                 // 没变就别重画
+
+        CalendarData.Update(cur with { Start = start, End = end });       // 按 Id 更新那一条 —— 日历会同步看到
         RebuildVertical();     // ★ 自己重画。OnDataChanged 在拖动期间是主动让路的。
     }
 

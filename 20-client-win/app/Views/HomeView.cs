@@ -56,8 +56,28 @@ public sealed class HomeView : UserControl
     /// <summary>卡片间距(比原来的 12 略紧,好把展开高留够)。</summary>
     const double CityGap = 10;
 
-    /// <summary>展开态的卡片高度 = 总高 - 两条折叠行 - 两道间隔(倒推,保证总和恒定)。</summary>
-    const double ExpandedCityHeight = WeatherStackHeight - 2 * CollapsedCityHeight - 2 * CityGap;
+    /// <summary>展开态卡片的最矮可读高度 —— 低于它就不再压缩,改让整块可以滚。</summary>
+    const double ExpandedCityMin = 150;
+
+    /// <summary>
+    /// 展开态的卡片高度 = 总高 - 其余各张折叠行(含间隔),倒推保证总和恒定。
+    /// ★★ 【必须按实际张数算】。原来写死的是"减两张",只在正好 3 个地点时成立 ——
+    ///   而地点数是会变的:Places.Load 会把与当前所在地重名的那个去重(系统时区改成中国标准时间
+    ///   就只剩 2 张),用户也可以自己加城市。
+    ///   算错的后果不是"差一点点":张数少了栈底空一截(刚做的"日历底部与天气栈对齐"就对到了空白上),
+    ///   张数多了第 4 张起整张落在 300 的框外,被 ClipToBounds 裁得一点不剩 —— 看不见、碰不到、
+    ///   于是永远展不开。
+    /// ★ 下限 ExpandedCityMin 也是必须的:张数一多这个式子会算成负数,
+    ///   而 detail.Height 拿到负值会【在构造期抛】—— 就是 WPF-PITFALLS 第 2 条那种"自检全过、程序打不开"。
+    /// </summary>
+    double ExpandedCityHeight
+    {
+        get
+        {
+            var n = Math.Max(1, _places.Count);
+            return Math.Max(ExpandedCityMin, WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap));
+        }
+    }
 
     readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 30, TextWrapping = TextWrapping.Wrap };
     readonly TextBlock _greetingSub = new() { FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
@@ -177,7 +197,9 @@ public sealed class HomeView : UserControl
             calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, 0);
             calPanel.VerticalAlignment = VerticalAlignment.Stretch;
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
-            if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
+            // ★ 只有右列【真的空了】(待办与天气都不显示)才让日历横跨两列;
+            //   否则会盖住同在右列的天气块。
+            if (!_todoVisible && !_weatherVisible) Grid.SetColumnSpan(calPanel, 2);
             _root.Children.Add(calPanel);
         }
 
@@ -227,11 +249,23 @@ public sealed class HomeView : UserControl
             BuildWeather();
             // ★★ 固定总高的宿主:不管展开谁,整块高度恒定(用户裁定)。ClipToBounds 让收起的细节被裁掉,
             //   于是"折叠"就是卡片变矮、摘要行留在原处 —— 而不是换掉一个元素。
+            // ★ 地点多到 300px 装不下时【可以滚】—— 否则超出的那几张会被 ClipToBounds 裁掉,
+            //   看不见也碰不到。三个地点以内根本不会出现滚动条,现状不受影响。
+            var weatherScroll = new ScrollViewer
+            {
+                Content = _weatherStack,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            }.PassThrough();
             var weatherHost = new Border
             {
-                Child = _weatherStack,
+                Child = weatherScroll,
                 Height = WeatherStackHeight,
                 ClipToBounds = true,
+                // ★ 铺一层透明底:卡与卡之间那道 10px 的缝原来【不参与命中测试】,
+                //   光标停在缝里 220ms 就被当成"离开了天气板块",展开的卡啪地跳回第 0 张。
+                //   人明明还在板块上 —— 这正是用户之前报过的那种"乱跳"的同一个形状。
+                Background = System.Windows.Media.Brushes.Transparent,
             };
             // ★ 鼠标真的离开整块才恢复默认 —— 【延迟一拍再确认】:
             //   卡片变高变矮时,光标底下的元素会短暂易主,WPF 会瞬时抛一次 MouseLeave;
@@ -338,12 +372,14 @@ public sealed class HomeView : UserControl
         var contentW = ActualWidth - 48;                       // _root 左右各 24 外边距
         // 待办列 = 一个天气卡宽 ->与下方天气对齐;日历列吃剩余(= 两卡 + 间隔)。
         // 待办隐藏时列宽归 0(日历已 colspan 占满整行,列宽无所谓)。
-        if (_todoVisible)
-        {
-            var n = Math.Max(1, _places.Count);
-            var cardOuter = (contentW - (n - 1) * WeatherGap) / n;
-            _todoColumn.Width = new GridLength(Math.Max(150, cardOuter));
-        }
+        // ★★ 右列宽度【不能再按地点数算】:天气早已改成竖排,一列到底,
+        //   宽度与"有几个城市"没关系了;按张数算会让整页比例随时区变(2 张时右列宽到 1/2)。
+        //   取内容宽的三分之一,与原来 3 张时的结果几乎一样,但从此稳定。
+        // ★★ 而且【待办隐藏 ≠ 右列可以归零】—— 天气也在这一列。
+        //   归零的话天气整块被压成 0 宽、彻底消失,日历再跨列盖上去,
+        //   四个板块的显隐组合里这一种直接坏掉。只有两块都不显示时才归零。
+        if (_todoVisible || _weatherVisible)
+            _todoColumn.Width = new GridLength(Math.Max(240, contentW / 3.0 - WeatherGap));
         else _todoColumn.Width = new GridLength(0);
         // 问候块占约 1/3 宽
         _greetingBox.Width = Math.Max(200, contentW / 3.0);
@@ -531,6 +567,7 @@ public sealed class HomeView : UserControl
     int? _dragIndex;
     int _dragTarget;
     double _dragFromY;
+    double _dragHomeTop;        // 全收起之后被拖那张的布局位置(位移都相对它算)
     bool _draggingCity;
 
     double CityRowStride => CollapsedCityHeight + CityGap;
@@ -551,9 +588,14 @@ public sealed class HomeView : UserControl
         SetWeatherFocus(-1, animate: false);
         _weatherStack.UpdateLayout();
 
-        // ★ 基准取【_weatherStack 自己的坐标系】而不是整页:整页外面套着 ScrollViewer,
-        //   拖拽期间页面一滚,以页面为基准的 dy 就会凭空多出一段。
+        // ★★ 光收起还不够 —— 手柄在【展开卡的右下角】,而卡一收起只剩 34px,
+        //   抓点在卡内的位置凭空上移了一大截(展开高 - 折叠高,约 180px)。
+        //   若位移仍从 0 起算,卡片就会停在光标上方一大截 —— 用户报的"不跟手"
+        //   在最常见的那条路径(拖展开卡下面那张)上会原样保留。
+        //   做法:直接按【光标的绝对位置】反推卡片该在哪 —— 让手柄(卡片底部)贴着光标。
+        //   全程绝对口径,不做增量累加,所以永远不会越拖越偏。
         _dragFromY = e.GetPosition(_weatherStack).Y;
+        _dragHomeTop = index * CityRowStride;                   // 全收起之后第 index 张的位置
 
         Panel.SetZIndex(_cityCards[index], 10);                 // 被拖的那张浮在最上
         _cityCards[index].Opacity = 0.94;
@@ -567,7 +609,11 @@ public sealed class HomeView : UserControl
     void OnCityDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
     {
         if (_dragIndex is not int from) return;
-        var dy = e.GetPosition(_weatherStack).Y - _dragFromY;
+        // ★ 绝对口径:卡片底部(手柄所在处)贴着光标 -> 卡顶 = 光标 - 折叠高 + 手柄半高。
+        //   位移 = 该在的位置 - 全收起后的布局位置。
+        var cursorY = e.GetPosition(_weatherStack).Y;
+        var wantTop = cursorY - CollapsedCityHeight + 11;       // 11 = 手柄区 22px 的一半
+        var dy = wantTop - _dragHomeTop;
 
         // ★ 夹在板块内(用户反馈"会拖到板块以外去,超上或者超下"):
         //   所有卡此刻都是折叠高,所以第 k 位的位置就是 k * 行距 —— 能挪到的范围

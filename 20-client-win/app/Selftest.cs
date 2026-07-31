@@ -2282,7 +2282,14 @@ public static class Selftest
                 Assert(homeTodo.Contains("p.Pinned ? 2 : 1"), "置顶方块描边更粗");
                 Assert(homeTodo.Contains("Opacity = 0") && homeTodo.Contains("pinBtn.Opacity = 1"), "置顶按钮平时隐藏、hover 才显示");
                 Assert(homeTodo.Contains("AnimateTodoOut") && homeTodo.Contains("IsHitTestVisible = false"), "完成项向右划出、动画期间不可交互");
-                Assert(homeTodo.Contains("_todoColumn.Width = new GridLength(Math.Max(150, cardOuter))"), "待办列宽=一个天气卡宽(与天气对齐)");
+                // ★★ 右列宽【不再按地点数算】—— 天气已经改成竖排一列到底,
+                //   宽度与"有几个城市"无关;按张数算会让整页比例随时区变(2 张时右列宽到 1/2)。
+                Assert(homeTodo.Contains("_todoColumn.Width = new GridLength(Math.Max(240, contentW / 3.0 - WeatherGap))"),
+                       "★ 右列宽 = 内容宽的 1/3(稳定值,不随地点数变)");
+                Assert(homeTodo.Contains("if (_todoVisible || _weatherVisible)"),
+                       "★★ 待办隐藏 ≠ 右列归零 —— 天气也在这一列,归零会把它压成 0 宽彻底消失");
+                Assert(homeTodo.Contains("if (!_todoVisible && !_weatherVisible) Grid.SetColumnSpan(calPanel, 2)"),
+                       "★ 只有右列真的空了才让日历横跨两列(否则盖住天气)");
                 var uiSrc = TryReadSource(Path.Combine("Views", "Ui.cs"));
                 if (uiSrc is not null)
                     Assert(uiSrc.Contains("用两条【居中的矩形】拼"), "+ 号用居中矩形绘制(不再偏移)");
@@ -2355,6 +2362,19 @@ public static class Selftest
                        "★ 这一周没有全天日程就整条塌掉，不白占纵向空间");
                 Assert(tl.Contains("还有 {overflow} 条全天日程"),
                        "★ 摆不下的全天日程【如实说有几条】，不惄惄少画");
+                // ---- 对抗式审计(2026-07-31)确认的三条,钉住 ----
+                Assert(tl.Contains("e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1))") && tl.Contains("bool Zoom("),
+                       "★★ 滚轮【只有真的缩放了才吞】—— _hours 起手就等于 MinHours,"
+                       + "无条件 Handled 会让开屏第一下向上滚就卡死(时间轴不动、整页也不动)");
+                Assert(tl.Contains("sealed record Resize(CalendarEvent Ev0, bool IsStart, double FromY)")
+                       && tl.Contains("var moved = (e.GetPosition(_canvas).Y - rz.FromY) / h * _hours;")
+                       && tl.Contains("t = Math.Clamp(t, s0 + SnapHours, DayMax);"),
+                       "★★ 拖动改时间是【绝对】口径(从起手那一刻重算 + 对绝对时刻吸附 + 守卫夹住)"
+                       + " —— 增量口径会吞掉四舍五入的余量,慢拖时边界跑得比光标快近一倍,还留反向死区");
+                Assert(tl.Contains("readonly DispatcherTimer _tick") && tl.Contains("if (DateTime.Today != _tickDay)")
+                       && tl.Contains("void SyncTick()"),
+                       "★ 「此刻」红线/昼夜带/今天高亮会随时间走,且不可见时停表");
+
                 Assert(tl.Contains("_canvas.ToolTip = \"滚轮 = 缩放"),
                        "★ 三个手势都没有可见按钮 —— 得有一句提示，否则没人猜得到");
             }
@@ -2382,6 +2402,19 @@ public static class Selftest
                        "★ 时间轴翻周 -> 月历跟过去(否则上下两块各说各的周)");
                 Assert(calSrc2.Contains("public void OpenEditorAt"),
                        "★ 拿掉「+ 新增日程」之后仍有新建路径(时间轴空白处双击)");
+                // ★★ 对抗式审计确认:翻月只动 _anchor 不动 _selected ——
+                //   在 8 月的页面上点「+ 新增日程」会把日程建到 7 月去,
+                //   而定时日程的编辑器里没有日期字段,用户无从纠正 —— 静默写错数据。
+                Assert(calSrc2.Contains("void SelectDay(DateTime day, bool notify = true)")
+                       && calSrc2.Contains("void CarrySelectionInto(DateTime anchor)")
+                       && calSrc2.Contains("CarrySelectionInto(_anchor);"),
+                       "★★ 选中日【跟进新视野】且只有 SelectDay 一个入口");
+                // 全文只允许 SelectDay 里那一处给 _selected 赋值
+                Assert(calSrc2.Split("_selected = ").Length == 3,   // 声明一处 + SelectDay 一处
+                       "★ 不再有绕过 SelectDay 直接给 _selected 赋值的地方");
+                Assert(calSrc2.Split("_dayArea.Visibility = HideDayArea").Length == 3,
+                       "★ Rebuild 与 AfterPage 两处都认 HideDayArea"
+                       + " —— AfterPage 原来无条件把当日区放回来,主页第一次翻页就会冒出来");
             }
 
             if (homeTodo is not null)
@@ -2394,6 +2427,12 @@ public static class Selftest
                        "★ 展开卡右侧只留一个时段词(用户反馈\"右侧有两个晚上\")");
                 Assert(homeTodo.Contains("_places[k].IsCurrent && k == i ? _places[k].City"),
                        "★ 「· 当前」只在展开那张上出现,折叠行不显示");
+                Assert(homeTodo.Contains("var wantTop = cursorY - CollapsedCityHeight + 11;"),
+                       "★★ 拖拽按【光标绝对位置】反推卡片该在哪 —— 手柄在展开卡的右下角,"
+                       + "卡一收起只剩 34px,抓点凭空上移一大截;从 0 起算的话卡片会停在光标上方");
+                Assert(homeTodo.Contains("Background = System.Windows.Media.Brushes.Transparent,"),
+                       "★ 天气宿主铺透明底 —— 卡与卡之间那道 10px 的缝本来不参与命中测试,"
+                       + "光标停在缝里 220ms 就被当成离开了板块,展开的卡啤地跳回第 0 张");
             }
 
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
@@ -2714,8 +2753,15 @@ public static class Selftest
                            "★ 天气:一张展开、其余折叠(靠高度动画,不是换元素)");
                     Assert(homeSrc.Contains("const double WeatherStackHeight") && homeSrc.Contains("Height = WeatherStackHeight"),
                            "★★ 整块【固定总高】—— 不管展开哪一个,三者始终在同一个框内(用户裁定)");
-                    Assert(homeSrc.Contains("ExpandedCityHeight = WeatherStackHeight - 2 * CollapsedCityHeight"),
-                           "★ 展开高由总高【倒推】,保证三张之和恒等于总高");
+                    // ★★ 原来写死的是"减两张",只在正好 3 个地点时成立 ——
+                    //   而地点数是会变的:Places.Load 会把与当前所在地重名的那个去重
+                    //   (系统时区改成中国标准时间就只剩 2 张),用户也可以自己加城市。
+                    Assert(homeSrc.Contains("WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap)"),
+                           "★★ 展开高按【实际张数】倒推,不再假定正好 3 张");
+                    Assert(homeSrc.Contains("Math.Max(ExpandedCityMin,"),
+                           "★ 展开高有下限 —— 张数一多式子会算成负数,而 Height 拿到负值会【在构造期抛】(程序打不开)");
+                    Assert(homeSrc.Contains("Content = _weatherStack") && homeSrc.Contains("VerticalScrollBarVisibility = ScrollBarVisibility.Auto"),
+                           "★ 装不下时天气栈可滚 —— 否则超出的卡被 ClipToBounds 裁得看不见也碰不着");
                     Assert(homeSrc.Contains("BeginAnimation(FrameworkElement.HeightProperty, anim)"),
                            "★ 切换走高度动画(用户要丝滑切换)");
                     Assert(homeSrc.Contains("ScheduleWeatherReset") && homeSrc.Contains("!host.IsMouseOver"),
