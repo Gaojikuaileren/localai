@@ -1,18 +1,26 @@
 // P3c -- 同声传译的会话板块(骨架)。
 //
-// ★ 诚实第一:语音链路(采集 / 识别 / 合成 / 虚拟麦克风)都还没接入,
-//   所以这里【不放能按下去却什么都不做的开关】,也不伪造字幕。
-//   位置先摆好、规则先写死,等模型与驱动定了往里填。
+// 版面(用户裁定 2026-07-31):板块本身要【干净】——
+//   左上角  场景切换(由 ChatView 放,不在这里);
+//   左边缘  对方的音量(竖条);右边缘  我方的音量(竖条)
+//           ★ 左右分边与气泡一致:对方在左、我在右 —— 同一套空间隐喻,不用另学一遍;
+//   中间    对话气泡(与聊天空间同一个 BubbleShell,所以左右分边、可选中复制全都一致);
+//   底部    一条独立的、略高的半透明灰色横条 —— 字幕在这里【逐字生成】,
+//           攒成完整句子之后【动画飞到上方的气泡里】。
 //
-// 版面:
-//   顶部  —— 两条电平(我 / 对方)。★ 它不是装饰:一旦我们成了用户的麦克风,
-//            "声音还在流动"必须能被【看见】,而不是靠一个绿灯说"已开启"。
-//   中间  —— 对方声音的实时字幕(可关)。
-//   底部  —— 两个开关:实时翻译输出 / 字幕;以及当前的透传状态。
+// ★★ 为什么字幕要先落在底部、成句后再飞上去,而不是直接往气泡里追加:
+//   同传的字幕是【还在变的】—— 识别会改口、断句会重来。把没定稿的文字直接写进对话记录,
+//   等于让记录里出现过一句从没说过的话。
+//   底部横条是"正在听",气泡是"已经定稿";中间那一下飞行,正是"这句从此不再变了"的可见交代。
+//
+// ★ 诚实:语音链路(采集/识别/合成/虚拟麦克风)尚未接入 ——
+//   电平画【空槽】,不给会动的假动画:那正好会骗过"声音还在流动吗"这个
+//   最该被诚实回答的问题;字幕区如实说明,不伪造文字。
 
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using LocalAI.Client.Services;
 using LocalAI.Client.Theme;
 
@@ -22,21 +30,43 @@ public sealed class InterpretPanel : UserControl
 {
     static App TheApp => (App)Application.Current;
 
-    readonly StackPanel _subtitles = new();
+    const double MeterWidth = 6;
+    const double SubtitleHeight = 62;
+
+    readonly StackPanel _messages = new();
+    readonly TextBlock _subtitle = new();
+    readonly Border _subtitleBar;
+    readonly Border _myLevel, _theirLevel;
 
     public InterpretPanel()
     {
+        _myLevel = Meter();
+        _theirLevel = Meter();
+        _subtitleBar = SubtitleBar();
+
         var dock = new DockPanel { LastChildFill = true };
 
-        var meters = Meters();
-        DockPanel.SetDock(meters, Dock.Top);
-        dock.Children.Add(meters);
+        // 底部:字幕横条(独立、略高、半透明灰)
+        DockPanel.SetDock(_subtitleBar, Dock.Bottom);
+        dock.Children.Add(_subtitleBar);
 
-        var controls = Controls();
-        DockPanel.SetDock(controls, Dock.Bottom);
-        dock.Children.Add(controls);
+        // 左右边缘:两条竖直电平。★ 对方在左、我在右 —— 与气泡的左右分边完全一致。
+        var theirs = MeterColumn(_theirLevel, "对方");
+        DockPanel.SetDock(theirs, Dock.Left);
+        dock.Children.Add(theirs);
 
-        dock.Children.Add(SubtitleArea());
+        var mine = MeterColumn(_myLevel, "我");
+        DockPanel.SetDock(mine, Dock.Right);
+        dock.Children.Add(mine);
+
+        // 中间:对话
+        var scroll = new ScrollViewer
+        {
+            Content = _messages,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        }.PassThrough();
+        dock.Children.Add(scroll);
 
         Content = dock;
         Refresh();
@@ -44,116 +74,103 @@ public sealed class InterpretPanel : UserControl
         Unloaded += (_, _) => TheApp.Interpret.Changed -= Refresh;
     }
 
-    // ---------------------------------------------------------------- 电平
-    FrameworkElement Meters()
+    // ---------------------------------------------------------------- 竖直电平
+    /// <summary>
+    /// 一条竖直电平槽。★ 现在没有数据源,所以是【空槽】——
+    /// 一旦我们成了用户的麦克风,"声音还在流动"必须能被看见;
+    /// 那时这里是实时电平,而不是一个说"已开启"的绿灯。
+    /// </summary>
+    static Border Meter()
     {
-        var row = new Grid { Margin = new Thickness(0, 0, 0, 10) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var mine = Meter("我(麦克风)");
-        var theirs = Meter("对方(会议音频)");
-        Grid.SetColumn(mine, 0);
-        Grid.SetColumn(theirs, 2);
-        row.Children.Add(mine);
-        row.Children.Add(theirs);
-        return row;
+        var b = new Border { Width = MeterWidth, VerticalAlignment = VerticalAlignment.Stretch };
+        b.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        b.CornerRadius = new CornerRadius(MeterWidth / 2);
+        return b;
     }
+
+    static FrameworkElement MeterColumn(Border meter, string who)
+    {
+        var t = Ui.Caption(who);
+        t.TextAlignment = TextAlignment.Center;
+        t.Margin = new Thickness(0, 6, 0, 0);
+
+        var dock = new DockPanel { LastChildFill = true, Width = 26, Margin = new Thickness(2, 0, 2, 0) };
+        DockPanel.SetDock(t, Dock.Bottom);
+        dock.Children.Add(t);
+        dock.Children.Add(meter);
+        return dock;
+    }
+
+    // ---------------------------------------------------------------- 底部字幕横条
+    Border SubtitleBar()
+    {
+        _subtitle.TextWrapping = TextWrapping.Wrap;
+        _subtitle.VerticalAlignment = VerticalAlignment.Center;
+        _subtitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+
+        var b = new Border
+        {
+            Child = _subtitle,
+            Height = SubtitleHeight,
+            Padding = new Thickness(12, 8, 12, 8),
+            Margin = new Thickness(0, 10, 0, 0),
+            // ★ 半透明的灰:它是"正在听"的暂存区,不该和已定稿的气泡一样实 ——
+            //   浓淡本身就在说"这段还会变"。
+            Opacity = 0.72,
+        };
+        b.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        return b;
+    }
+
+    /// <summary>字幕逐字生长(识别侧每来一小段就调一次)。★ 还没定稿,只待在底部横条里。</summary>
+    public void AppendSubtitle(string partial) => _subtitle.Text += partial;
 
     /// <summary>
-    /// 一条电平。★ 现在没有数据源,所以画的是【空槽】并注明"未接入" ——
-    /// 不给一个会动的假动画:那正好会骗过"声音还在流动吗"这个最该被诚实回答的问题。
+    /// 一句定稿了:把它作为气泡落到上方,并演一段【从字幕条飞上去】的动画。
+    /// ★ 这个动画不是装饰 —— 它是"这句话从此不再变了"的可见交代。
+    ///   接入语音后由识别侧在断句时调用。
     /// </summary>
-    static FrameworkElement Meter(string title)
+    public void CommitSubtitle(string text, bool fromMe)
     {
-        var t = Ui.Caption(title);
-        var track = new Border { Height = 6, Margin = new Thickness(0, 4, 0, 0) };
-        track.SetResourceReference(Border.BackgroundProperty, "BgSunken");
-        track.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        if (string.IsNullOrWhiteSpace(text)) return;
 
-        var box = new StackPanel();
-        box.Children.Add(t);
-        box.Children.Add(track);
-        return box;
+        var body = ChatView.MessageText(fromMe);
+        body.Text = text;
+        var bubble = ChatView.BubbleShell(body, fromMe);
+        _messages.Children.Add(bubble);
+
+        var lift = new TranslateTransform { Y = SubtitleHeight + 10 };
+        bubble.RenderTransform = lift;
+        lift.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(lift.Y, 0, TimeSpan.FromMilliseconds(260))
+            { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+        bubble.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)));
+
+        _subtitle.Text = "";
     }
-
-    // ---------------------------------------------------------------- 字幕
-    FrameworkElement SubtitleArea()
-    {
-        var scroll = new ScrollViewer
-        {
-            Content = _subtitles,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        }.PassThrough();
-        return scroll;
-    }
-
-    // ---------------------------------------------------------------- 开关
-    FrameworkElement Controls()
-    {
-        var speak = Ui.Secondary("实时翻译输出", (_, _) =>
-            TheApp.Interpret.SetSpeakTranslation(!TheApp.Interpret.SpeakTranslation));
-        var subs = Ui.Secondary("字幕", (_, _) =>
-            TheApp.Interpret.SetSubtitles(!TheApp.Interpret.Subtitles));
-        _speakBtn = speak;
-        _subsBtn = subs;
-
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
-        row.Children.Add(speak);
-        row.Children.Add(new Border { Width = 8 });
-        row.Children.Add(subs);
-
-        var box = new StackPanel();
-        box.Children.Add(_driverHint);
-        box.Children.Add(row);
-        box.Children.Add(_passthrough);
-        return box;
-    }
-
-    Button? _speakBtn, _subsBtn;
-    readonly StackPanel _driverHint = new() { Margin = new Thickness(0, 0, 0, 8) };
-    readonly TextBlock _passthrough = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
     void Refresh()
     {
         var st = TheApp.Interpret;
 
-        _subtitles.Children.Clear();
-        if (!InterpretState.PipelineReady)
+        // 字幕开关关掉 -> 整条收起,不留一条空槽占地方
+        _subtitleBar.Visibility = st.Subtitles ? Visibility.Visible : Visibility.Collapsed;
+
+        if (InterpretState.PipelineReady) return;
+
+        // ★ 未接入:如实说明,不伪造字幕
+        _subtitle.Text = st.DirectionReady
+            ? "语音链路尚未接入 —— 接上之后,对方说的话会在这里逐字出现,成句后飞到上面。"
+            : "先把语言方向的两个坑填上(从语言池拖过去),再开始同传。";
+        _subtitle.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+
+        if (_messages.Children.Count == 0)
         {
-            var head = Ui.Body("语音链路尚未接入。", muted: true);
-            head.HorizontalAlignment = HorizontalAlignment.Center;
-            head.Margin = new Thickness(0, 24, 0, 6);
-            _subtitles.Children.Add(head);
-
-            foreach (var line in new[]
-                     {
-                         "位置与规则已经定好,等语音模型与虚拟麦克风就绪后填内容:",
-                         $"· 我说【{Languages.NameOf(st.MyLang)}】-> 对方听到【{Languages.NameOf(st.TheirLang)}】;",
-                         "· 对方的声音只从会议软件那个进程取,不会录进系统里其它声音;",
-                         "· 麦克风与会议音频【两路分开】,不混流 —— 谁在说话是确定的,不靠事后分离。",
-                     })
-            {
-                var c = Ui.Caption(line);
-                c.HorizontalAlignment = HorizontalAlignment.Center;
-                c.TextAlignment = TextAlignment.Center;
-                _subtitles.Children.Add(c);
-            }
+            var hint = Ui.Caption("对方的话在左边、我的话在右边 —— 和聊天里一样。");
+            hint.HorizontalAlignment = HorizontalAlignment.Center;
+            hint.Margin = new Thickness(0, 24, 0, 0);
+            _messages.Children.Add(hint);
         }
-
-        // ★ 虚拟声卡的状态与入口【只在同传设置那一格】(用户裁定):
-        //   同一件事不给两个入口 —— 两处都放,用户会以为是两回事。
-        if (_speakBtn is not null) _speakBtn.Content = st.SpeakTranslation ? "实时翻译输出:开" : "实时翻译输出:关";
-        if (_subsBtn is not null) _subsBtn.Content = st.Subtitles ? "字幕:开" : "字幕:关";
-
-        // ★ 无论开关在哪一边,透传都在 —— 这条要一直写在用户眼前,
-        //   因为它是"我们崩了会不会让你在会议里静音"的答案。
-        _passthrough.Text = st.SpeakTranslation
-            ? "会议里听到的是同传的合成语音。★ 同传一旦出错会立刻退回你的原声,不会静音。"
-            : "会议里听到的是你的原声(我们只做透传)。打开上面的开关才用同传取代它。";
-        _passthrough.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        _passthrough.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
     }
 }

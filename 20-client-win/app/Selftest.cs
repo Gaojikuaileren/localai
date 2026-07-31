@@ -1430,10 +1430,18 @@ public static class Selftest
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {
-                Assert(ipSrc.Contains("我(麦克风)") && ipSrc.Contains("对方(会议音频)"),
+                // ★ 两条电平【竖直、分列左右】:对方在左、我在右 —— 与气泡的左右分边同一套隐喻
+                Assert(ipSrc.Contains("MeterColumn(_theirLevel, \"对方\")") && ipSrc.Contains("MeterColumn(_myLevel, \"我\")"),
                        "★ 两条电平分开:麦克风与会议音频不混流,谁在说话是确定的");
-                Assert(ipSrc.Contains("不会静音"),
-                       "★ 界面上写明:同传出错会退回原声,不会让你在会议里静音");
+                Assert(ipSrc.Contains("DockPanel.SetDock(theirs, Dock.Left)") && ipSrc.Contains("DockPanel.SetDock(mine, Dock.Right)"),
+                       "★ 对方在左、我在右(与气泡一致)");
+                // ★ 字幕先在底部横条逐字长出来,成句才飞进气泡 ——
+                //   没定稿的文字不许直接写进对话记录,否则记录里会出现一句从没说过的话。
+                Assert(ipSrc.Contains("void AppendSubtitle(") && ipSrc.Contains("void CommitSubtitle("),
+                       "★ 字幕逐字生成 / 成句定稿是两件事,分开两个入口");
+                var commit = Slice(ipSrc, "public void CommitSubtitle(", "_subtitle.Text = \"\";");
+                Assert(commit is not null && commit.Contains("TranslateTransform") && commit.Contains("DoubleAnimation"),
+                       "★ 成句之后【动画飞到上方气泡】—— 那是\"这句从此不再变了\"的可见交代");
                 Assert(!Body(ipSrc).Contains("Random"), "不画会动的假电平(那正好会骗过\"声音还在流动吗\"这个问题)");
             }
             var cvMode = TryReadSource(Path.Combine("Views", "ChatView.cs"));
