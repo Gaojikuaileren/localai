@@ -62,31 +62,41 @@ public sealed class TranslationBar : UserControl
     {
         Height = BarHeight;
 
-        // ★ 四列并排(用户第三轮裁定):程度【竖排】| 目标池 | 语言池 | 学习笔记。
-        //   目标池与语言池是【并列关系】—— 左右排布、同宽同高,而不是一上一下。
-        //   语言在两者之间拖来拖去,并排才看得出"从这边搬到那边"。
-        var grid = new Grid();
-        // ★ 三个板块之间的间距【一律相同】(用户裁定):每一列都比卡片宽出一个 Gap,
-        //   于是间隔全落在卡片右侧、大小一致;剩下的宽度全归学习笔记。
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth + Gap) });      // 翻译程度(竖)
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + Gap) }); // 目标池 1×3
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });   // 语言池 2×3(两倍宽)
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 学习笔记(占剩下的)
+        // ★ 版面:[ 会随模式切换的左半 ][ 翻译历史(两种模式都要,占剩下的) ]
+        //   ★★ 翻译历史卡【只建一次】,放在两套版面【之外】。
+        //   血的教训:上一版让同传版面又调了一次 NotesCard(),于是历史预览面板被挂到
+        //   第二个父节点上 —— WPF 当场抛 InvalidOperationException,整个翻译界面打不开。
+        //   这是同一天里第三次栽在"一个元素两个父节点"上(收藏夹、收藏开关、这次),
+        //   所以不再打补丁:凡是【两种模式都要显示】的东西,一律建在切换范围之外。
+        //
+        //   文字翻译:程度【竖排】| 目标池 1×3 | 语言池 2×3(两倍宽,并排才看得出语言从哪搬到哪);
+        //   同声传译:换成一对固定方向(我说的语言 -> 对方的语言),程度不适用(同传就是直译)。
+        //   三个板块之间间距一律相同:每列比卡片宽出一个 Gap,间隔全落在卡片右侧。
+        var textGrid = new Grid();
+        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth + Gap) });
+        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + Gap) });
+        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
 
         var lvl = LevelCard(); Grid.SetColumn(lvl, 0);
         var target = TargetCard(); Grid.SetColumn(target, 1);
         var pool = PoolCard(); Grid.SetColumn(pool, 2);
-        var notes = NotesCard(); Grid.SetColumn(notes, 3);
-        grid.Children.Add(lvl); grid.Children.Add(target); grid.Children.Add(pool); grid.Children.Add(notes);
+        textGrid.Children.Add(lvl); textGrid.Children.Add(target); textGrid.Children.Add(pool);
 
-        // ★ 同传模式下这一条完全换一套(用户裁定):
-        //   没有"目标池"这个概念,取而代之的是【一对固定方向】—— 我说的语言 -> 对方的语言。
-        //   翻译程度也不适用:同传就是直译,没有例句和语法可讲。
-        _textLayout = grid;
+        _textLayout = textGrid;
         _interpretLayout = InterpretLayout();
+        var leftStack = new Grid();
+        leftStack.Children.Add(_textLayout);
+        leftStack.Children.Add(_interpretLayout);
+        Grid.SetColumn(leftStack, 0);
+
+        var notes = NotesCard();          // ★ 只此一处
+        Grid.SetColumn(notes, 1);
+
         var stack = new Grid();
-        stack.Children.Add(_textLayout);
-        stack.Children.Add(_interpretLayout);
+        stack.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });               // 随模式变宽窄
+        stack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        stack.Children.Add(leftStack);
+        stack.Children.Add(notes);
 
         var root = new Grid();
         root.Children.Add(stack);
@@ -136,10 +146,6 @@ public sealed class TranslationBar : UserControl
     /// </summary>
     FrameworkElement InterpretLayout()
     {
-        var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
         foreach (var cb in new[] { _myLang, _theirLang })
         {
             cb.Margin = new Thickness(0, 3, 0, 0);
@@ -162,14 +168,8 @@ public sealed class TranslationBar : UserControl
         var card = Card(body, "语言方向", scroll: false);
         card.Width = LangPoolWidth;
         card.HorizontalAlignment = HorizontalAlignment.Left;
-        Grid.SetColumn(card, 0);
-
-        var notes = NotesCard();
-        Grid.SetColumn(notes, 1);
-
-        grid.Children.Add(card);
-        grid.Children.Add(notes);
-        return grid;
+        card.Margin = new Thickness(0, 0, Gap, 0);   // 与文字版面同一个间距
+        return card;
     }
 
     void RefreshInterpret()

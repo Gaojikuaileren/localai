@@ -183,6 +183,13 @@ public static class WheelTest
         ClearTargets(app);
         Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-empty.png"), 1000, (int)TranslationBar.BarHeight + 48);
 
+        // ★★ 同传模式也要画出来 —— 上一版就是【只在文字模式下建过】,
+        //   切到同传时才发现历史卡被建了第二次、元素挂上两个父节点,整个界面打不开。
+        //   结构断言看不见这种事:它只在【真的把界面建出来】时才现形。
+        app.Interpret.SetMode(TranslationMode.Interpret);
+        Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-interpret.png"), 1000, (int)TranslationBar.BarHeight + 48);
+        app.Interpret.SetMode(TranslationMode.Text);
+
         // ★ 消息气泡的【正文对比度】:三种皮肤各画一张。
         //   这类毛病(底色被模板写死 -> 白字糊在灰底上)无头断言看不见,只有画出来才发现 —— 已经栽过一次。
         foreach (var (skin, file) in new[] { (Skin.Breeze, "bubbles-breeze.png"), (Skin.Ink, "bubbles-ink.png"), (Skin.Warm, "bubbles-warm.png") })
