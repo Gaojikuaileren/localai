@@ -33,6 +33,13 @@ public static class Selftest
         Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, tmp);
         Autostart.KeyPath = testRunKey;
 
+        // ★★ 建一个【App】而不是裸 Application —— 界面里到处是 (App)Application.Current
+        //   取各个中心,裸 Application 会当场 InvalidCastException。
+        //   只构造、不跑 OnStartup:各个中心是字段初始化器建的,拿到的就是一份干净空数据。
+        //   (SingleInstance.Acquire 在已有实例时不阻塞,直接返回一个非拥有者。)
+        if (System.Windows.Application.Current is null)
+            _ = new App(SingleInstance.Acquire(), startHidden: true);
+
         try
         {
             // ---- 状态目录 ----
@@ -3344,6 +3351,53 @@ public static class Selftest
                 if (hv4 is not null)
                     Assert(hv4.Contains("SyncNowButton") && hv4.Contains("glyph.IsHitTestVisible = false"),
                            "★ 主页日历右上角刷新:图标不做按钮,外套透明命中块");
+            }
+
+            // ---- ★★ 主要视图【构造冒烟】(2026-07-31 加:HomeView 构造期崩溃,而 1096 条断言全过)----
+            // 为什么单独留这一条:业务断言检查的是"逻辑对不对",而视图【从来没被真正构造过】——
+            //   一个在构造函数里抛的异常(比如"元素已有另一个逻辑父级"),对所有断言都是不可见的,
+            //   而它的后果是【整个客户端打不开】。
+            // 这与中枢侧 test_imports.py 是同一类护栏:"这东西根本起不来"只能靠冒烟抓。
+            {
+                var app0 = System.Windows.Application.Current;
+                var added = new List<System.Windows.ResourceDictionary>();
+                foreach (var src in new[] { "Theme/Breeze.xaml", "Theme/Controls.xaml" })
+                {
+                    try
+                    {
+                        var d = new System.Windows.ResourceDictionary
+                        { Source = new Uri("pack://application:,,,/" + src, UriKind.Absolute) };
+                        app0.Resources.MergedDictionaries.Add(d);
+                        added.Add(d);
+                    }
+                    catch { }
+                }
+                try
+                {
+                    // ★ 逐个真的 new 一遍。只断言【不抛】—— 长什么样是 --wheeltest 的事。
+                    foreach (var (name, make) in new (string, Func<System.Windows.FrameworkElement>)[]
+                             {
+                                 ("HomeView",       () => new Views.HomeView()),
+                                 ("SettingsView",   () => new Views.SettingsView()),
+                                 ("ModelsView",     () => new Views.ModelsView()),
+                                 ("ExtensionsView", () => new Views.ExtensionsView()),
+                                 ("WeekTimeline",   () => new Views.WeekTimeline()),
+                                 ("CalendarView",   () => new Views.CalendarView(Views.CalendarView.Mode.Month)),
+                                 ("ChatView",       () => new Views.ChatView("chat")),
+                             })
+                    {
+                        try { _ = make(); Assert(true, $"{name} 能构造出来(构造期不抛)"); }
+                        catch (Exception ex)
+                        {
+                            Assert(false, $"★★ {name} 构造期就抛了 —— 这会让整个客户端打不开:"
+                                          + ex.GetType().Name + ": " + ex.Message);
+                        }
+                    }
+                }
+                finally
+                {
+                    foreach (var d in added) app0.Resources.MergedDictionaries.Remove(d);
+                }
             }
 
             var mwSys = TryReadSource("MainWindow.xaml.cs");

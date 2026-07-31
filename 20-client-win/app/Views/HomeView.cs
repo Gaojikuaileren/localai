@@ -452,7 +452,11 @@ public sealed class HomeView : UserControl
             var index = i;
             gripZone.PreviewMouseLeftButtonDown += (_, e) => { e.Handled = true; BeginCityDrag(index, e); };
 
-            // 手柄要浮在卡片内容之上 -> 卡片内容与手柄叠在一个 Grid 里
+            // 手柄要浮在卡片内容之上 -> 内容与手柄叠在一个 Grid 里。
+            // ★★ 先【断开】再挂:body 此刻已经是 card.Child,直接 stackHost.Children.Add(body)
+            //   会抛「元素已有另一个逻辑父级」—— 这个项目里已经撞过好几次了,
+            //   而且它在构造期抛,效果就是【整个程序打不开】。
+            card.Child = null;
             var stackHost = new Grid();
             stackHost.Children.Add(body);
             stackHost.Children.Add(gripZone);
