@@ -2323,6 +2323,10 @@ public static class Selftest
             var tl = TryReadSource(Path.Combine("Views", "WeekTimeline.cs"));
             if (tl is not null)
             {
+                Assert(tl.Contains("public const double DefaultTop = 8;")
+                       && tl.Contains("public const double DefaultHours = 22 - DefaultTop;")
+                       && tl.Contains("_top = ClampTop(DefaultTop);"),
+                       "★ 默认视野 = 早上八点到晚上十点(用户裁定)");
                 Assert(tl.Contains("public const double MinHours = 6"),
                        "★ 时间轴放到最大 = 6 小时(用户裁定)");
                 Assert(tl.Contains("public const double DayMin = -1") && tl.Contains("public const double DayMax = 25"),
@@ -2350,11 +2354,14 @@ public static class Selftest
                        "★ 重叠的日程【平分当天宽度】(按重叠簇分列)");
                 Assert(tl.Contains("var wrapInside = !wideEnough && height >= WrapInsideAbove;")
                        && tl.Contains("var lyMid = yTop + (yBottom - yTop) / 2 - LabelLine / 2;")
-                       && tl.Contains("var lx = roomRight >= 16 ? right : x + 2;")
-                       && tl.Contains("placedLabels.Add(new Rect(x, yTop, w, height));"),
+                       && tl.Contains("var lx = (roomRight >= 16 && !rightBusy) ? right : x + 2;")
+                       && tl.Contains("placed.Add(new Rect(x, y0, Math.Max(10, bw), Math.Max(3, y1 - y0)));"),
                        "★★ 外置标题【永远画、且永远与条同高】—— 同一个 y 是最硬的归属提示。"
                        + "前后错过两次:往上让会飘得认不出主、被占就不画会直接消失"
                        + "(用户反馈:多个共享宽度时名字被省略成'…',什么都看不见)");
+                Assert(tl.Contains("var rightBusy = placedLabels.Any(o =>"),
+                       "★★ 右边那个位置不能落在【别人的色块】上 —— 落上去名字会认错主;"
+                       + "挤不开就盖在自己头上,宁可截断成一两个字");
                 Assert(tl.Contains("BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),")
                        && tl.Contains("var edgeThick = height >= EdgeLinesAbove ? 2.0 : 1.0;"),
                        "★★ 定时日程用【描边框】,上下两条边加粗 = 起止标记"
@@ -2412,10 +2419,10 @@ public static class Selftest
                        && tl.Contains("var blocked = new bool[AllDayRows, 7];"),
                        "★★ 两行【都能放任何一条】(先长后短贪心),单日的还能在同一格里共享宽度"
                        + " —— 之前跨天的只有一行,两条一重叠就挤掉一条,那个「+1」就是这么来的");
-                Assert(tl.Contains("$\"还有 {hiddenNames.Count} 条全天\"")
+                Assert(tl.Contains("$\"+{hiddenNames.Count}\"") && tl.Contains("_allDayMore.ToolTip")
                        && tl.Contains("string.Join(\"、\", hiddenNames)"),
-                       "★ 没画出来的【如实说一句白话、悬停列出是哪几条】"
-                       + "—— 原来只写一个「+1」,用户直接问「这个 +1 是什么」,要人猜的标记等于没标");
+                       "★ 没画出来的【悬停列出是哪几条】,且这个计数摆在【左侧刻度列】"
+                       + "—— 钉在画布右端的话会盖住周日那一格的日期与条");
                 Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("if (e.OriginalSource is not Canvas) return;"),
                        "★★ 外置标题悬停出全名、点一下能编辑 —— 前提是画布【只在真的按在自己身上时】才抢捕获;"
                        + "无条件捕获会把画布里任何可点元素的点击整个吃掉(CaptureMode.Element 下松手不经过子元素)");

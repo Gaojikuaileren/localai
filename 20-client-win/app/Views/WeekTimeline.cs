@@ -42,8 +42,9 @@ public sealed class WeekTimeline : UserControl
     public const double MinHours = 6;
     /// <summary>缩到最小时能看到的小时数 = 整个可视域。</summary>
     public const double MaxHours = DayMax - DayMin;
-    /// <summary>默认常态:只显示 6 小时。</summary>
-    public const double DefaultHours = 6;
+    /// <summary>默认常态:早上八点到晚上十点(用户裁定 2026-08-01)。</summary>
+    public const double DefaultTop = 8;
+    public const double DefaultHours = 22 - DefaultTop;
 
     /// <summary>改时间的颗粒度(用户裁定:半小时。夹取的边界也要落在这个格子上)。</summary>
     public const double SnapHours = 0.5;
@@ -90,6 +91,7 @@ public sealed class WeekTimeline : UserControl
     readonly StackPanel _navCell = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
     readonly Border _allDay = new() { Height = TopBlockHeight, ClipToBounds = true };
     readonly Canvas _allDayCanvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
+    TextBlock? _allDayMore;   // 左侧"全天"下面那个 "+N"
     readonly Canvas _canvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
     readonly Canvas _gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent, Cursor = Cursors.SizeNS };
 
@@ -121,7 +123,7 @@ public sealed class WeekTimeline : UserControl
     public WeekTimeline()
     {
         _weekStart = StartOfWeek(DateTime.Today);
-        _top = ClampTop(DateTime.Now.Hour - 1);
+        _top = ClampTop(DefaultTop);
 
         // ★★ 顶栏那行【整行去掉】(用户裁定 2026-07-31):
         //   "7月20日–7月26日"这个标签是多余的 —— 横轴上每一格都写着日期了,
@@ -140,16 +142,22 @@ public sealed class WeekTimeline : UserControl
 
         // ★★ 全天条带也要【让开左侧刻度列】—— 否则它的七列比下面的表格向左偏 44px，
         //   一条周四到周六的全天日程会看起来像是周三到周五的。
-        var allDayTag = new TextBlock
+        // ★ 左侧那一小块:上行写"全天",下行在有没画出来的时候写 "+N"。
+        //   之前把"还有 N 条全天"钉在画布右端 —— 它会盖在周日那一格的日期与条上。
+        _allDayMore = new TextBlock { Text = "", Visibility = Visibility.Collapsed, Background = Brushes.Transparent };
+        _allDayMore.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _allDayMore.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var tagText = new TextBlock { Text = "全天", IsHitTestVisible = false };
+        tagText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        tagText.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var allDayTag = new StackPanel
         {
-            Text = "全天",
             Width = GutterWidth,
             Margin = new Thickness(4, AllDayRowTop + 1, 0, 0),
             VerticalAlignment = VerticalAlignment.Top,
-            IsHitTestVisible = false,
         };
-        allDayTag.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        allDayTag.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        allDayTag.Children.Add(tagText);
+        allDayTag.Children.Add(_allDayMore);
         var allDayRow = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(allDayTag, Dock.Left);
         allDayRow.Children.Add(allDayTag);
@@ -501,23 +509,15 @@ public sealed class WeekTimeline : UserControl
 
         // ★ 真的没画出来的【如实说】。★★ 原来只写一个「+1」—— 用户直接问"这个 +1 是什么",
         //   一个要人猜的标记等于没标。改成一句白话,悬停再列出是哪几条。
-        if (hiddenNames.Count > 0)
+        if (_allDayMore is not null)
         {
-            var more = new TextBlock
-            {
-                Text = $"还有 {hiddenNames.Count} 条全天",
-                Background = Brushes.Transparent,
-                ToolTip = "这一周还有这几条全天日程没能画出来:" + string.Join("、", hiddenNames)
-                          + "\n(上方月历那一格里仍然看得到)",
-            };
-            more.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            more.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            more.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Canvas.SetLeft(more, Math.Max(0, w - more.DesiredSize.Width - 2));
-            // ★ 摆在【表头那一行】的右端 —— 原来钉在第二行右端,会盖住周日那一格的条。
-            Canvas.SetTop(more, 1);
-            Panel.SetZIndex(more, 9);
-            _allDayCanvas.Children.Add(more);
+            var any = hiddenNames.Count > 0;
+            _allDayMore.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+            _allDayMore.Text = any ? $"+{hiddenNames.Count}" : "";
+            _allDayMore.ToolTip = any
+                ? "这一周还有这几条全天日程没能画出来:" + string.Join("、", hiddenNames)
+                  + "(上方月历那一格里仍然看得到)"
+                : null;
         }
     }
 
@@ -748,18 +748,25 @@ public sealed class WeekTimeline : UserControl
         {
             var day = _weekStart.AddDays(i);
             var items = ItemsFor(day);
-            // ★ 避让清单里既要有【已放下的外置标题】,也要有【已画出的日程块】——
-            //   只避标题的话,标题会落到上一条日程的色块上,同色叠同色等于看不见(实测)。
+            // ★★ 避让清单先【把这一天所有日程块的位置全算出来】,再开始画。
+            //   只靠"边画边攻入清单"不够:先画的那条根本不知道右边还会来一条,
+            //   于是它的名字照样会被后来那条压住(默认 14 小时视野下特别明显)。
+            var laid = LayOut(items);
             var placed = new List<Rect>();
-            foreach (var (idx, col, total) in LayOut(items))
+            var draw = new List<(Seg It, double X, double W, double Y0, double Y1)>();
+            foreach (var (idx, col, total) in laid)
             {
                 var it = items[idx];
                 if (it.E <= _top || it.S >= _top + _hours) continue;
                 var slotW = Math.Max(8, (colW - 6) / total);
                 var x = i * colW + 3 + col * slotW;
-                AddEventBlock(it, day, x, YAt(it.S, h), YAt(it.E, h), slotW - (total > 1 ? 2 : 0), placed,
-                              i * colW, (i + 1) * colW, h);
+                var y0 = YAt(it.S, h); var y1 = YAt(it.E, h);
+                var bw = slotW - (total > 1 ? 2 : 0);
+                draw.Add((it, x, bw, y0, y1));
+                placed.Add(new Rect(x, y0, Math.Max(10, bw), Math.Max(3, y1 - y0)));
             }
+            foreach (var (it, x, bw, y0, y1) in draw)
+                AddEventBlock(it, day, x, y0, y1, bw, placed, i * colW, (i + 1) * colW, h);
         }
 
         // ⑥ 此刻的红线(只在本周画)
@@ -908,16 +915,34 @@ public sealed class WeekTimeline : UserControl
             //   所以现在:【永远画,且永远与条同高】—— 同一个 y 是最硬的归属提示。
             //   优先摆在条的右边;右边挤不下就盖在条自己头上向右溢出。
             //   宁可两个名字在横向上碰一点,也不让它飘走或者消失。
+            // ★★ 右边那个位置【不能落在别人的色块上】——
+            //   落上去的话,那个名字看起来就像是那一条的(归属整个反了)。
+            //   挤不开就盖在【自己】头上 —— 宁可截断成一两个字,也不让它认错主。
             var right = x + w + 3;
+            var bandTop = yTop + (yBottom - yTop) / 2 - LabelLine / 2;
+            var rightBusy = placedLabels.Any(o =>
+                Math.Abs(o.Left - x) > 0.5 &&                       // 不算它自己那个块
+                o.Right > right && o.Left < colRight &&
+                o.Top < bandTop + LabelLine && o.Bottom > bandTop);
             var roomRight = colRight - right;
-            var lx = roomRight >= 16 ? right : x + 2;
+            var lx = (roomRight >= 16 && !rightBusy) ? right : x + 2;
             var lyMid = yTop + (yBottom - yTop) / 2 - LabelLine / 2;   // 与条垂直居中
-            lb.MaxWidth = Math.Max(16, colRight - lx);
+
+            // ★★ 宽度收到【右边第一个已占位置】之前。不收的话,同一高度上的
+            //   几个名字会直接叠在一起(默认 14 小时视野下尤其明显)。
+            //   收了之后最差也只是截断成省略号 —— 但【仍然贴着自己那一条、仍然一定会画】,
+            //   前面错过的两版(往上让得飘走 / 被占就不画)都不会回来。
+            var limit = colRight;
+            foreach (var o in placedLabels)
+                if (o.Left > lx + 1 && o.Top < lyMid + LabelLine && o.Bottom > lyMid)
+                    limit = Math.Min(limit, o.Left - 2);
+            lb.MaxWidth = Math.Max(14, limit - lx);
             Canvas.SetLeft(lb, lx);
             Canvas.SetTop(lb, Math.Clamp(lyMid, 0, Math.Max(0, h - LabelLine)));
             Panel.SetZIndex(lb, 5);      // 标题浮在所有色块之上
             _canvas.Children.Add(lb);
             placedLabels.Add(new Rect(lx, lyMid, lb.MaxWidth, LabelLine));
+            Panel.SetZIndex(lb, 6);
         }
 
         var grab = Math.Min(6, Math.Max(2, height / 3));
@@ -957,7 +982,6 @@ public sealed class WeekTimeline : UserControl
         Canvas.SetLeft(box, x);
         Canvas.SetTop(box, yTop);
         _canvas.Children.Add(box);
-        placedLabels.Add(new Rect(x, yTop, w, height));   // 后面的外置标题要绕开这个色块
     }
 
     // ---------------------------------------------------------------- 拖动
