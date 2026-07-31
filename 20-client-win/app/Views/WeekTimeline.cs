@@ -177,7 +177,10 @@ public sealed class WeekTimeline : UserControl
             var t = new TextBlock { Text = ((int)hr % 24).ToString("00") + ":00" };
             t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            Canvas.SetTop(t, y - 8);
+            // ★ 顶上那条要【夹住】—— 标签是骑在刻度线上居中的(y-8),
+            //   而首个刻度往往正好落在 y=0(比如默认从 08:00 起),于是上半截被裁掉,
+            //   看起来像"08:00"被切了一刀。夹到 0 之后最多偏 8px,只影响最上面一条。
+            Canvas.SetTop(t, Math.Max(0, y - 8));
             Canvas.SetLeft(t, 4);
             _gutter.Children.Add(t);
         }

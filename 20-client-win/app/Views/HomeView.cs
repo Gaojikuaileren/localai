@@ -746,7 +746,11 @@ public sealed class HomeView : UserControl
         timeCol.HorizontalAlignment = HorizontalAlignment.Right;
         DockPanel.SetDock(timeCol, Dock.Right);
 
-        var temp = new TextBlock { Text = "—°", FontSize = 30, FontWeight = FontWeights.Light, VerticalAlignment = VerticalAlignment.Center };
+        // ★★ 无数据态【不要】写成 30px 的「—°」:那么大的破折号加一个小圈,
+        //   在界面上看着不像"没有读数",而像字体渲染坏了(实测截图里就是这个效果)。
+        //   接上之后这里才变成 30px 的「18°」;现在先用小一号的一句白话占着位子。
+        //   卡片高度是固定的,所以将来换成大号数字也不会顶动版面。
+        var temp = new TextBlock { Text = "暂无读数", FontSize = 19, FontWeight = FontWeights.Light, VerticalAlignment = VerticalAlignment.Center };
         temp.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
 
         var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 2) };
