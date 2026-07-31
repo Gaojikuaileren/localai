@@ -275,12 +275,15 @@ public sealed class TranslationBar : UserControl
         var (dotKey, text) = !drv.Installed ? ("RiskDanger", "未找到")
                            : connected      ? ("RiskSafe", drv.Version ?? "已连接")
                                             : ("RiskWarning", "未开启");
+        // ★ 光一个彩点看不出它在说什么(用户反馈):把话【写全】——
+        //   「· VB-CABLE 声卡驱动状态:未找到」。点只是让状态一眼可扫,不承担表意。
         var dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };
         dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, dotKey);
         _driverBadge.Children.Add(dot);
-        var lab = Ui.Caption(text);
+        var lab = Ui.Caption("VB-CABLE 声卡驱动状态:" + text);
         lab.VerticalAlignment = VerticalAlignment.Center;
-        lab.Margin = new Thickness(5, 0, 0, 0);
+        lab.Margin = new Thickness(6, 0, 0, 0);
+        lab.SetResourceReference(TextBlock.ForegroundProperty, drv.Installed ? "FgSecondary" : dotKey);
         _driverBadge.Children.Add(lab);
 
         if (!drv.Installed)

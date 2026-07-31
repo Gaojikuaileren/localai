@@ -1473,6 +1473,8 @@ public static class Selftest
                 var badge = Slice(barMode, "_driverBadge.Children.Clear();", "_switchRow.Children.Clear();");
                 Assert(badge is not null && badge.Contains("RiskDanger") && badge.Contains("RiskWarning") && badge.Contains("RiskSafe"),
                        "★ 声卡状态是红/黄/绿三态灯");
+                Assert(badge is not null && badge.Contains("VB-CABLE 声卡驱动状态:"),
+                       "★ 状态要【写全】—— 光一个彩点看不出它在说什么;点只负责一眼可扫,不承担表意");
                 Assert(badge is not null && badge.Contains("去设置") && badge.Contains("一键开启"),
                        "红=去设置、黄=一键开启;绿的时候直接显示版本号,没有按钮");
                 Assert(barMode.Contains("new ToggleSwitch(\"实时翻译输出\"") && barMode.Contains("enabled: drv.Installed"),
