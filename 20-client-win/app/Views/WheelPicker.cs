@@ -105,9 +105,52 @@ public sealed class WheelColumn : Border
             SetIndex(_index + (e.Delta > 0 ? -1 : 1));
         };
 
+        // ★★ 长按左键上下拖 = 转盘跟着转(用户裁定 2026-07-31)。
+        //   之前只能滚轮或者点某一行 —— 而转盘长得就像个可以拨的东西,
+        //   伸手去拨却没反应,这本身就是个误导。
+        //   ★ 按【行高】换算格数,走的是【绝对口径】:每帧都从按下那一刻的
+        //     起始格 + 总位移重算,不做增量累加 —— 增量口径会把四舍五入的余量吞掉,
+        //     慢拖时误差同号累加(这个坑在时间轴上刚踩过,见 WPF-PITFALLS)。
+        MouseLeftButtonDown += (_, e) =>
+        {
+            _dragFrom = e.GetPosition(this).Y;
+            _dragIndex0 = _index;
+            _dragMoved = false;
+            CaptureMouse();
+        };
+        MouseMove += (_, e) =>
+        {
+            if (_dragFrom is not double from) return;
+            var dy = e.GetPosition(this).Y - from;
+            if (!_dragMoved)
+            {
+                if (Math.Abs(dy) < DragThreshold) return;   // 还没拖动 -> 仍然算"点某一行"
+                _dragMoved = true;
+            }
+            e.Handled = true;
+            SetIndex(_dragIndex0 - (int)Math.Round(dy / RowHeight));   // 往下拖 = 往前翻
+        };
+        MouseLeftButtonUp += (_, e) =>
+        {
+            if (_dragFrom is null) return;
+            _dragFrom = null;
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            // 拖过了就把这一下吞掉 —— 否则松手那一刻又会被底下那一行当成"点选"，
+            // 把刚拖好的值拉回去。
+            if (_dragMoved) e.Handled = true;
+        };
+        LostMouseCapture += (_, _) => { _dragFrom = null; };
+
         _slide.Y = OffsetFor(_index);   // 初始位置直接就位,不做入场动画
         Restyle();
     }
+
+    /// <summary>拖动超过这么多像素才算"拖",否则算"点一下"。</summary>
+    const double DragThreshold = 3;
+
+    double? _dragFrom;      // 按下那一刻的 Y(null = 没在拖)
+    int _dragIndex0;        // 按下那一刻选中的格 —— 全程不变,保证绝对口径
+    bool _dragMoved;
 
     public int SelectedIndex
     {
@@ -125,10 +168,19 @@ public sealed class WheelColumn : Border
         if (next == _index) return;
         _index = next;
 
-        // ★ 动画滑到目标行(而不是瞬间跳过去)
-        var anim = new DoubleAnimation(OffsetFor(_index), TimeSpan.FromMilliseconds(Duration))
-        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
-        _slide.BeginAnimation(TranslateTransform.YProperty, anim);
+        // ★ 动画滑到目标行(而不是瞬间跳过去)。
+        //   ★★ 正在拖的时候不走动画:手已经在控位置了,再加一层缓动只会让它拖在后面。
+        if (_dragMoved && _dragFrom is not null)
+        {
+            _slide.BeginAnimation(TranslateTransform.YProperty, null);
+            _slide.Y = OffsetFor(_index);
+        }
+        else
+        {
+            var anim = new DoubleAnimation(OffsetFor(_index), TimeSpan.FromMilliseconds(Duration))
+            { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+            _slide.BeginAnimation(TranslateTransform.YProperty, anim);
+        }
 
         Restyle();
         SelectionChanged?.Invoke();

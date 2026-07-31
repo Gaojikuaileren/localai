@@ -2445,9 +2445,9 @@ public static class Selftest
                        "★★ 导航键放在表头【外面】(挂在里面会被 IsHitTestVisible=false 一起传染成不可点)");
                 Assert(tl.Contains("_top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);"),
                        "★ 按「今」【保持当前缩放】,只把此刻挪到视野中间");
-                Assert(tl.Contains("if (!sc.Moved && at is { } when) OnCreateAt?.Invoke(when);")
-                       && tl.Contains("_createAt = AtPoint(e.GetPosition(_canvas));"),
-                       "★★ 表格空白处【单击 = 新建】(不是双击);按住拖才是缩放 —— 靠「有没有真的挪动过」区分");
+                // ★ 【点空白新建】已按用户要求取消：新建只走板块标题栏那个「+」。
+                Assert(!tl.Contains("_createAt") && !tl.Contains("OnCreateAt?.Invoke(when)"),
+                       "★ 表格空白处不再新建 —— 那里只剩一件事:按住拖 = 缩放");
                 Assert(tl.Contains("for (int back = 0; back <= 7; back++)")
                        && tl.Contains("if (back > 0 && LastDayOf(ev) < day.Date) continue;"),
                        "★★ 往回找【整周】而不是只找前一天 —— 一条跨三天的定时日程,"
@@ -3691,7 +3691,19 @@ public static class Selftest
                            + "(一根线横跨两个分类的话,那根线到底是谁的说不清)");
                     Assert(cv4.Contains("if (isToday) { d.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, \"FgOnAccent\")"),
                            "★ 今天那格底色是着重色 —— 分类色圆点要描一圈反色边才分得开");
-                    Assert(!cv4.Contains("void ShowDayFlyout"),
+                    // 时间转盘:长按拖也能拨
+                var wp = TryReadSource(Path.Combine("Views", "WheelPicker.cs"));
+                if (wp is not null)
+                {
+                    Assert(wp.Contains("MouseLeftButtonDown += (_, e) =>") && wp.Contains("SetIndex(_dragIndex0 - (int)Math.Round(dy / RowHeight));"),
+                           "★★ 时间转盘【长按左键上下拖】也能拨"
+                           + "(长得就像个可以拨的东西,伸手去拨却没反应,本身就是误导)");
+                    Assert(wp.Contains("int _dragIndex0;"),
+                           "★ 走【绝对口径】:每帧从按下那一刻的起始格 + 总位移重算,不做增量累加");
+                    Assert(wp.Contains("if (_dragMoved) e.Handled = true;"),
+                           "★ 拖过了就把松手那一下吞掉 —— 否则底下那一行会把刚拖好的值拉回去");
+                }
+                Assert(!cv4.Contains("void ShowDayFlyout"),
                            "★ 当日预览浮窗已移除 —— 同一份日程下方时间轴已经画着,再列一遍是重复的");
                 }
                 // 主页刷新按钮:透明命中块 + 图标不吃命中

@@ -208,7 +208,8 @@ public sealed class WeekTimeline : UserControl
         {
             e.Handled = true;
             if (_canvas.ActualHeight <= 0) return;
-            _createAt = AtPoint(e.GetPosition(_canvas));
+            // ★ 【点空白新建】已按用户要求取消 —— 新建只走板块标题栏那个「+」。
+            //   空白处只剩一件事:按住拖 = 缩放。
             BeginScale(e.GetPosition(_canvas).Y, _canvas.ActualHeight, _canvas);
         };
 
@@ -283,9 +284,6 @@ public sealed class WeekTimeline : UserControl
         _scale = new ScaleDrag(y, _hours, anchor, _top + _hours * anchor, src, false);
         src.CaptureMouse();
     }
-
-    /// <summary>按下空白处那一刻对应的时刻 —— 松手时若没挪动过,就在这里新建。</summary>
-    DateTime? _createAt;
 
     void OnTick(object? sender, EventArgs e)
     {
@@ -1035,11 +1033,7 @@ public sealed class WeekTimeline : UserControl
     {
         if (_scale is not { } sc) return;
         _scale = null;
-        var at = _createAt;
-        _createAt = null;
         if (sc.Src.IsMouseCaptured) sc.Src.ReleaseMouseCapture();
-        // ★ 没挪动过 = 点了一下空白处 -> 直接开【新建日程】抽屉(用户裁定)
-        if (!sc.Moved && at is { } when) OnCreateAt?.Invoke(when);
     }
 
     void EndEventDrag()
