@@ -172,9 +172,16 @@ public sealed class AppSettings
 
     public void Save()
     {
-        AppPaths.EnsureStateDir();
-        var tmp = AppPaths.SettingsPath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(this, J));
-        File.Move(tmp, AppPaths.SettingsPath, overwrite: true);   // 原子替换,防写一半断电留下坏文件
+        // ★ 包 try(审计 2026-07-31):设置里的滑条每拖一格就整文件重写一次,
+        //   盘满/权限/被占时 File.WriteAllText 会抛 —— 而滑条回调里没有 catch,
+        //   一次拖动就能把整个界面推倒。写不成就下次再写,不该霍掉 UI。
+        try
+        {
+            AppPaths.EnsureStateDir();
+            var tmp = AppPaths.SettingsPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, J));
+            File.Move(tmp, AppPaths.SettingsPath, overwrite: true);   // 原子替换,防写一半断电留下坏文件
+        }
+        catch { /* 写盘失败不该抛到 UI 线程;内存里的值仍在,下次 Save 再试 */ }
     }
 }

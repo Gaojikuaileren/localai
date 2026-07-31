@@ -138,8 +138,8 @@ public partial class MainWindow : Window
         VramHost.Content = _vram;
         TheApp.Vram.Updated += s => Dispatcher.Invoke(() => _vram.Update(s));
         _vram.Update(TheApp.Vram.Last);
-        IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) TheApp.Vram.Resume(); else TheApp.Vram.Pause(); };
-        StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) TheApp.Vram.Pause(); else TheApp.Vram.Resume(); };
+        IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) TheApp.Vram.Resume(); else TheApp.Vram.Pause(); RefreshTaskBar(); };
+        StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) TheApp.Vram.Pause(); else TheApp.Vram.Resume(); RefreshTaskBar(); };
     }
 
     readonly VramBar _vram = new();
@@ -238,9 +238,12 @@ public partial class MainWindow : Window
 
         TaskBar.Visibility = Visibility.Visible;
         _taskRotate.Interval = TaskDwell;
-        // 多个任务才轮播;单个固定显示
-        if (tasks.Count > 1) { if (!_taskRotate.IsEnabled) _taskRotate.Start(); }
-        else { _taskRotate.Stop(); _taskIndex = 0; }
+        // 多个任务才轮播;单个固定显示。★ 不可见/最小化时停表(审计 2026-07-31)——
+        //   与显存条同一条纪律(见 VramMonitor 头部)。暂停时【不重置 _taskIndex】,
+        //   否则恢复可见时会跳回第一条。
+        var canRotate = tasks.Count > 1 && IsVisible && WindowState != WindowState.Minimized;
+        if (canRotate) { if (!_taskRotate.IsEnabled) _taskRotate.Start(); }
+        else { _taskRotate.Stop(); if (tasks.Count <= 1) _taskIndex = 0; }
 
         ShowTask(tasks[_taskIndex % tasks.Count], tasks.Count, animate: false);
         if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
@@ -755,6 +758,10 @@ public partial class MainWindow : Window
         MemberText.Visibility = _collapsed ? Visibility.Collapsed : Visibility.Visible;   // 收起时只留头像
         MemberInitial.Text = FirstGlyph(who.DisplayName);
         MemberAvatar.SetResourceReference(Border.BackgroundProperty, who.IsGuess ? "BgSunken" : "BgSelected");
+        // ★ 前景要跟着底色走(审计 2026-07-31):推测态把底色换成 BgSunken 了,
+        //   而前景仍是 FgOnSelected(白)—— 在墨白皮肤下 BgSunken 近白底,白字直接消失。
+        //   而推测态本就是常态(未接入中枢时没有真名字缓存)。FgSecondary 三皮肤都够看。
+        MemberInitial.SetResourceReference(TextBlock.ForegroundProperty, who.IsGuess ? "FgSecondary" : "FgOnSelected");
         MemberBlock.ToolTip = $"当前使用者:{who.DisplayName}({who.SourceNote})";
 
         // ★ token 用量尚未接入 -> 如实标注"待接入",绝不编数字(见 TokenUsage)。

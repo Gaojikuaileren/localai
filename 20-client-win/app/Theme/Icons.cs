@@ -155,6 +155,7 @@ public static class Icons
     //   而且换肤时会去刷早已不在可视树里的死对象。改用弱引用登记 + 换肤时顺带清理。
     static readonly List<WeakReference<ContentControl>> Live = new();
     static bool _hooked;
+    static int _sweepAt = 256;   // ★ 下次摊还清扫的水位(审计 2026-07-31)
 
     public static FrameworkElement Make(IconName name, double size = 18, string foregroundKey = "FgSecondary")
     {
@@ -164,7 +165,22 @@ public static class Icons
 
         if (!_hooked) { _hooked = true; ThemeManager.SkinChanged += RefreshAll; }
         Live.Add(new WeakReference<ContentControl>(host));
+        // ★ 摊还清扫:此前只有【换肤】才回收死登记项 —— 常驻托盘、从不换肤的话,
+        //   每次导航新建整页图标,Live 只增不减,无界增长。到水位就清一次死项,
+        //   并把水位定在"当前活图标数的 2 倍",表长恒定被压住,不再依赖换肤。
+        if (Live.Count >= _sweepAt)
+        {
+            SweepDead();
+            _sweepAt = Math.Max(256, Live.Count * 2);
+        }
         return host;
+    }
+
+    /// <summary>清掉已被 GC 回收的弱引用登记项(不重画,只收表)。</summary>
+    static void SweepDead()
+    {
+        for (int i = Live.Count - 1; i >= 0; i--)
+            if (!Live[i].TryGetTarget(out _)) Live.RemoveAt(i);
     }
 
     /// <summary>换肤时重画所有仍存活的图标,并顺手清掉已被回收的登记项。</summary>

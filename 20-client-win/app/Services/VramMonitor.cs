@@ -51,6 +51,7 @@ public sealed class VramMonitor : IDisposable
     double _totalGiB;
     bool _nvmlOk;
     bool _triedInit;
+    bool _smiDead;   // ★ nvidia-smi 也读不到 -> 不再重试(与 _triedInit 对称;否则无 N 卡机器每 2 秒起一次进程)
 
     public VramSnapshot Last { get; private set; } = new(0, 0, 0, false, "尚未读取");
 
@@ -81,8 +82,11 @@ public sealed class VramMonitor : IDisposable
 
         double usedGiB, totalGiB;
         if (_nvmlOk && TryReadNvml(out usedGiB, out totalGiB)) { /* ok */ }
-        else if (!TryReadSmi(out usedGiB, out totalGiB))
+        else if (_smiDead || !TryReadSmi(out usedGiB, out totalGiB))
+        {
+            _smiDead = true;   // ★ 一次读不到就死心(无 N 卡机器不该每次 Tick 都去 Process.Start)
             return new VramSnapshot(0, 0, 0, false, "读不到 GPU 显存(无 NVIDIA 驱动或不可用)");
+        }
 
         _totalGiB = totalGiB;
 

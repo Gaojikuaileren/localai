@@ -205,17 +205,47 @@ public sealed class HomeView : UserControl
 
         UpdateClocks();
         _timer.Tick += (_, _) => UpdateClocks();
-        Loaded += (_, _) => { _timer.Start(); RelayoutContinuous(); RelayoutDiscrete(); };
-        Unloaded += (_, _) => _timer.Stop();
+        Loaded += (_, _) => { RelayoutContinuous(); RelayoutDiscrete(); HookWindowVisibility(); SyncClockTimer(); };
+        Unloaded += (_, _) => { _timer.Stop(); UnhookWindowVisibility(); };
         // ★ 被系统页(设置/模型/扩展)盖住时停表:那时主页整个不可见,
         //   秒针再走也没人看得到 —— 和显存条"不可见就停表"是同一条规矩(省电远比调长间隔有效)。
         //   盖住的做法是把宿主 IsEnabled 置 false(见 MainWindow.OpenSystemPage),所以认这个信号。
-        IsEnabledChanged += (_, e) => { if ((bool)e.NewValue) _timer.Start(); else _timer.Stop(); };
+        IsEnabledChanged += (_, _) => SyncClockTimer();
+    }
+
+    // ★ 最小化/缩到托盘时也停表(审计 2026-07-31):那两种情况下 UserControl 的 IsVisible 仍为 true、
+    //   Unloaded 也不触发(实测),所以光靠 IsEnabledChanged 收不住 —— 得盯【窗口】的状态。
+    Window? _hostWin;
+    void HookWindowVisibility()
+    {
+        _hostWin = Window.GetWindow(this);
+        if (_hostWin is null) return;
+        _hostWin.StateChanged += OnHostStateChanged;
+        _hostWin.IsVisibleChanged += OnHostVisChanged;
+    }
+    void UnhookWindowVisibility()
+    {
+        if (_hostWin is null) return;
+        _hostWin.StateChanged -= OnHostStateChanged;
+        _hostWin.IsVisibleChanged -= OnHostVisChanged;
+        _hostWin = null;
+    }
+    void OnHostStateChanged(object? s, EventArgs e) => SyncClockTimer();
+    void OnHostVisChanged(object? s, DependencyPropertyChangedEventArgs e) => SyncClockTimer();
+
+    /// <summary>秒针表:只在【主页真正可见】时走 —— 窗口可见且非最小化,且本控件启用(未被系统页盖住)。</summary>
+    void SyncClockTimer()
+    {
+        var winVisible = _hostWin is null ? true : (_hostWin.IsVisible && _hostWin.WindowState != WindowState.Minimized);
+        var shouldRun = IsEnabled && winVisible && IsLoaded;
+        if (shouldRun) { if (!_timer.IsEnabled) _timer.Start(); }
+        else _timer.Stop();
     }
 
     // ---------------------------------------------------------------- 随尺寸重排
     readonly DispatcherTimer _resizeThrottle = new() { Interval = TimeSpan.FromMilliseconds(60) };
     int _cols, _slots;
+    int _tileCount;   // ★ BuildTiles 实际铺了几个方块 —— 列数上限只能是它(审计 2026-07-31)
 
     void ScheduleRelayout()
     {
@@ -246,8 +276,9 @@ public sealed class HomeView : UserControl
         var w = ActualWidth;
         if (w <= 0) return;
 
-        // 列数不超过项目数 —— 否则多出的空列就是右侧一块空白
-        var cols = Layout.ProjectColumns(w - 8, _cols, TheApp.Projects.Items.Count);
+        // ★ 列数上限用【实际铺了几个方块】(Recent = 进行中),不是全部项目数 ——
+        //   Items.Count 含已完成/已删/不可见,比方块多,于是最右一格是空白(审计 2026-07-31)。
+        var cols = Layout.ProjectColumns(w - 8, _cols, Math.Max(1, _tileCount));
         if (cols != _cols) { _cols = cols; _tiles.Columns = cols; }
 
         // 天气隐藏时不建卡片(_cityHourly 为空),跳过逐小时重排,避免越界。
@@ -737,6 +768,7 @@ public sealed class HomeView : UserControl
     {
         _tiles.Children.Clear();
         var items = TheApp.Projects.Recent().ToList();
+        _tileCount = items.Count;   // ★ 列数上限只能是实际铺出的方块数(见 RelayoutDiscrete)
         if (items.Count == 0)
         {
             _tiles.Columns = 1;

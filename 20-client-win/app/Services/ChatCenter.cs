@@ -237,7 +237,7 @@ public sealed class ChatCenter
         if (ids.Count == 0) return;
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
-        foreach (var id in ids) { _loadedArchive.Remove(id); SessionArchive.Delete(id); }   // 温层一并清
+        foreach (var id in ids) { _loadedArchive.Remove(id); _archiveCount.Remove(id); SessionArchive.Delete(id); }   // 温层一并清
         Changed?.Invoke();
     }
 
@@ -307,6 +307,7 @@ public sealed class ChatCenter
         {
             _messages.RemoveAll(m => m.SessionId == sessionId);
             _loadedArchive.Remove(sessionId);
+            _archiveCount.Remove(sessionId);
             SessionArchive.Delete(sessionId);   // 连温层一起清,别留孤儿归档
             Changed?.Invoke();
         }
@@ -334,7 +335,7 @@ public sealed class ChatCenter
     /// </summary>
     void PurgeArchives(IEnumerable<string> ids)
     {
-        foreach (var id in ids) { _loadedArchive.Remove(id); SessionArchive.Delete(id); }
+        foreach (var id in ids) { _loadedArchive.Remove(id); _archiveCount.Remove(id); SessionArchive.Delete(id); }
     }
 
     // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
@@ -397,9 +398,20 @@ public sealed class ChatCenter
             : hot.OrderBy(m => m.At);
     }
 
+    // ★ 归档条数缓存(审计 2026-07-31 · 性能):UnloadedArchivedCount 此前每次都 SessionArchive.Count()
+    //   整档读盘 + 反序列化,而它被【每次会话区重建】调用(回车即触发),O(N) 读盘白烧。
+    //   缓存它;失效点只有三处:Append 之后写新值、LoadArchived 后置 0、Delete 时清掉。
+    readonly Dictionary<string, int> _archiveCount = new();
+
     /// <summary>该会话还有多少条【更早的消息】没加载(界面据此显示"加载更早的 N 条")。</summary>
     public int UnloadedArchivedCount(string sessionId)
-        => _loadedArchive.ContainsKey(sessionId) ? 0 : SessionArchive.Count(sessionId);
+    {
+        if (_loadedArchive.ContainsKey(sessionId)) return 0;
+        if (_archiveCount.TryGetValue(sessionId, out var n)) return n;
+        n = SessionArchive.Count(sessionId);   // 缺失才落盘统计一次
+        _archiveCount[sessionId] = n;
+        return n;
+    }
 
     /// <summary>把该会话的温层消息读进来(用户点"加载更早")。</summary>
     public void LoadArchived(string sessionId)
@@ -408,6 +420,7 @@ public sealed class ChatCenter
         var older = SessionArchive.Load(sessionId);
         if (older.Count == 0) return;
         _loadedArchive[sessionId] = older;
+        _archiveCount[sessionId] = 0;   // 已全部读进热层,没有"未加载"的了
         Changed?.Invoke();
     }
 
@@ -432,6 +445,7 @@ public sealed class ChatCenter
             //   写不成就留在热层,下次启动再归 —— 多占点内存远比丢掉对话好。
             if (!SessionArchive.Append(g.Key, older)) continue;
             foreach (var m in older) _messages.Remove(m);
+            _archiveCount[g.Key] = SessionArchive.Count(g.Key);   // ★ 归档缓存跟着更新
             moved += older.Count;
         }
         if (moved > 0) Changed?.Invoke();

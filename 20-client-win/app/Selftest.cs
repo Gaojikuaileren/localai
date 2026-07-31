@@ -1464,8 +1464,9 @@ public static class Selftest
             {
                 Assert(cvMode.Contains("FrameworkElement ModeSwitcher()") && cvMode.Contains("ModeSwitch = true"),
                        "★ 会话板块左上角有三个场景的入口(位置由用户指定)");
-                Assert(cvMode.Contains("new InterpretPanel(_sessionId)") && cvMode.Contains("ReservedScenePlaceholder()"),
-                       "★ 同传面板拿得到当前会话 —— 否则点开一条同传记录却看不到它的转写;第三个场景如实说\"还没定\"");
+                Assert(cvMode.Contains("new InterpretPanel(interpSid)") && cvMode.Contains("Find(isid)?.Interpret == true")
+                       && cvMode.Contains("ReservedScenePlaceholder()"),
+                       "★ 只有【真同传会话】才把转写交给 InterpretPanel(fail-closed)—— 否则普通翻译会话的系统说明会被当成对方的话渲染;第三个场景如实说\"还没定\"");
             }
             var barMode = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (barMode is not null)
@@ -2892,6 +2893,34 @@ public static class Selftest
                 if (pu3 is not null)
                     Assert(pu3.Contains("AiNotConnected") && pu3.Contains("接入后:"),
                            "★ 项目 AI 权限标明“尚未接入、这是偏好”且解释用未来时");
+            }
+
+            // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----
+            {
+                var hv = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                var mw2 = TryReadSource("MainWindow.xaml.cs");
+                var vm2 = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
+                var cc4 = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                var ic2 = TryReadSource(Path.Combine("Theme", "Icons.cs"));
+                if (hv is not null)
+                {
+                    Assert(hv.Contains("Math.Max(1, _tileCount)"),
+                           "★ 主页田字格列数上限用【实际铺的方块数】,不是全部项目数(否则右侧空一列)");
+                    Assert(hv.Contains("_hostWin.WindowState != WindowState.Minimized") && hv.Contains("SyncClockTimer()"),
+                           "★ 主页秒针表最小化/缩到托盘时停(最小化时 IsVisible 仍 true,得盯窗口状态)");
+                }
+                if (mw2 is not null)
+                    Assert(mw2.Contains("who.IsGuess ? \"FgSecondary\" : \"FgOnSelected\""),
+                           "★ 头像首字前景跟着底色走(墨白皮肤下白字压近白底看不见)");
+                if (vm2 is not null)
+                    Assert(vm2.Contains("_smiDead"),
+                           "★ nvidia-smi 读不到就死心(无 N 卡机器不再每 2 秒起一次进程)");
+                if (cc4 is not null)
+                    Assert(cc4.Contains("Dictionary<string, int> _archiveCount") && cc4.Contains("_archiveCount.Remove"),
+                           "★ 归档条数缓存 —— 不再每次会话区重建都整档读盘");
+                if (ic2 is not null)
+                    Assert(ic2.Contains("SweepDead()") && ic2.Contains("_sweepAt"),
+                           "★ Icons.Live 摄还清扫 —— 不再只靠换肤回收(常驻托盘无界增长)");
             }
 
             var mwSys = TryReadSource("MainWindow.xaml.cs");

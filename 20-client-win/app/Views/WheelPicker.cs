@@ -222,11 +222,16 @@ public static class WheelPicker
     /// <summary>年 / 月 / 日 三列滚轮 —— 与时间滚轮同一外观。</summary>
     public static FrameworkElement Date(DateTime initial, Action<DateTime> onChanged)
     {
-        var years = Enumerable.Range(DateTime.Today.Year - 1, 6).Select(y => y.ToString()).ToArray();
+        // ★ 年份列必含 initial.Year(审计 2026-07-31):原来固定 [今年-1, 今年+4] 6 格,
+        //   超出这个窗口时 Math.Max(0, IndexOf=-1) 把它夹成 0 —— 静默显示一个凭空捧的年份,
+        //   保存时还会把日期悔改成那个年。现在窗口只在需要时向外撜,默认仍是 6 格观感。
+        var yLo = Math.Min(DateTime.Today.Year - 1, initial.Year);
+        var yHi = Math.Max(DateTime.Today.Year + 4, initial.Year);
+        var years = Enumerable.Range(yLo, yHi - yLo + 1).Select(y => y.ToString()).ToArray();
         var months = Enumerable.Range(1, 12).Select(m => m.ToString("00")).ToArray();
         var days = Enumerable.Range(1, 31).Select(d => d.ToString("00")).ToArray();
 
-        var yIdx = Math.Max(0, Array.IndexOf(years, initial.Year.ToString()));
+        var yIdx = Array.IndexOf(years, initial.Year.ToString());   // 现在恒 >= 0
         var yCol = new WheelColumn(years, yIdx, YearW);
         var mCol = new WheelColumn(months, initial.Month - 1, MonW);
         var dCol = new WheelColumn(days, initial.Day - 1, DayW);

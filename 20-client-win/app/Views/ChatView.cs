@@ -887,8 +887,12 @@ public sealed class ChatView : UserControl
                 var head = ModeSwitcher();
                 DockPanel.SetDock(head, Dock.Top);
                 body.Children.Add(head);
+                // ★ fail-closed(审计 2026-07-31):只有【真正的同传会话】才把转写交给 InterpretPanel。
+                //   否则在同传场景下点开一条普通文字翻译会话,客户端自己那条
+                //   "AI 未接入"系统说明会被当成【对方说的话】渲染到左边。
+                var interpSid = _sessionId is { } isid && TheApp.Chat.Find(isid)?.Interpret == true ? _sessionId : null;
                 body.Children.Add(mode == TranslationMode.Interpret
-                    ? new InterpretPanel(_sessionId)
+                    ? new InterpretPanel(interpSid)
                     : ReservedScenePlaceholder());
                 var only = ConvCard(body);
                 if (spec.BottomAccessory is null) return only;
