@@ -506,11 +506,43 @@ public sealed class SettingsView : UserControl
         // —— 未连接:填账号
         if (acct is null || !acct.HasPassword)
         {
-            var id = new TextBox { Margin = new Thickness(0, 8, 0, 4), Padding = new Thickness(9, 6, 9, 6) };
+            // ★ 未连接时先给【怎么弄】—— 专用密码不是人人都知道在哪生成,
+            //   把步骤和入口摆在这里,比让用户自己去搜要好。
+            _appleBody.Children.Add(new Border { Height = 8 });
+            _appleBody.Children.Add(Ui.Body("怎么连:"));
+            _appleBody.Children.Add(Ui.Caption("① 你的 Apple 账号要先开启【双重认证】—— 这是生成专用密码的前提。"));
+            _appleBody.Children.Add(Ui.Caption("② 打开下面的链接 → 登录与安全 → App 专用密码 → 生成一个(可以叫 LocalAI)。"));
+            _appleBody.Children.Add(Ui.Caption("③ 把生成的 16 位密码【原样】粘到下面 —— 连字符不要去掉。"));
+
+            var open = Ui.Secondary("打开 Apple 账户页面生成专用密码", (_, _) =>
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                        "https://account.apple.com/account/manage") { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    _appleStatus.Text = "打不开浏览器:" + ex.Message + " —— 请手动访问 account.apple.com。";
+                }
+            });
+            open.Margin = new Thickness(0, 6, 0, 2);
+            open.HorizontalAlignment = HorizontalAlignment.Left;
+            _appleBody.Children.Add(open);
+            _appleBody.Children.Add(Ui.Caption("链接指向 account.apple.com(Apple 官方)。用你系统默认的浏览器打开,我们不经手你的登录。"));
+
+            // ★ 有效期:这事必须提前说清,否则哪天突然连不上会以为是我们坏了
+            _appleBody.Children.Add(new Border { Height = 8 });
+            _appleBody.Children.Add(Ui.Caption("★ 专用密码【不会】按时间过期,但你【改了或重置了 Apple ID 主密码】时,"
+                                               + "Apple 会把所有专用密码一次性全部撤销 —— 那时需要回到这里重新生成并填写。"
+                                               + "(同时最多 25 个;也可以随时在同一页面单独撤销它,撤销只影响本客户端,不影响你的账号。)"));
+
+            _appleBody.Children.Add(new Border { Height = 8 });
+            var id = new TextBox { Margin = new Thickness(0, 4, 0, 4), Padding = new Thickness(9, 6, 9, 6) };
             var pw = new PasswordBox { Margin = new Thickness(0, 0, 0, 4), Padding = new Thickness(9, 6, 9, 6) };
-            _appleBody.Children.Add(Ui.Caption("Apple ID(邮箱)"));
+            _appleBody.Children.Add(Ui.Caption("Apple ID(邮箱全称)"));
             _appleBody.Children.Add(id);
-            _appleBody.Children.Add(Ui.Caption("专用密码(形如 xxxx-xxxx-xxxx-xxxx)"));
+            _appleBody.Children.Add(Ui.Caption("专用密码(形如 xxxx-xxxx-xxxx-xxxx,原样粘贴)"));
             _appleBody.Children.Add(pw);
 
             var connect = Ui.Primary("连接并检测日历", async (_, _) =>
@@ -524,6 +556,7 @@ public sealed class SettingsView : UserControl
                 if (!ok) return;
                 // ★ 先连通了再存 —— 连不通的凭据存下来,只会让下次启动又试一遍失败
                 AppleCredentials.Save(aid, p);
+                AppleAutoSync.ResetTrip();   // 新密码填过了 -> 允许自动拉取再跑
                 _appleCals = cals;
                 RefreshApple();
             });
@@ -566,6 +599,42 @@ public sealed class SettingsView : UserControl
             _appleBody.Children.Add(Ui.Caption("还没选日历 —— 点「刷新日历列表」把 iCloud 里的日历取过来。"));
         }
 
+        // ---- 自动拉取(用户要求 2026-07-31)----
+        // ★ 熔断优先显示:被自动关掉时必须说清为什么,否则用户只会觉得"开关自己关了"。
+        if (AppleAutoSync.TrippedReason is { } trip)
+        {
+            var warn = Ui.Body(trip, muted: false);
+            warn.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+            warn.Margin = new Thickness(0, 10, 0, 0);
+            _appleBody.Children.Add(warn);
+        }
+
+        var auto = new CheckBox
+        {
+            Content = "自动拉取",
+            IsChecked = s.AppleAutoPull,
+            Margin = new Thickness(0, 10, 0, 0),
+            IsEnabled = AppleAutoSync.TrippedReason is null,
+        };
+        auto.Checked += (_, _) => { s.AppleAutoPull = true; s.Save(); AppleAutoSync.Apply(); };
+        auto.Unchecked += (_, _) => { s.AppleAutoPull = false; s.Save(); AppleAutoSync.Apply(); };
+        _appleBody.Children.Add(auto);
+
+        var every = new ComboBox { Width = 200, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0) };
+        foreach (var m in new[] { 15, 30, 60, 180, 360, 720 })
+            every.Items.Add(new ComboBoxItem { Content = m < 60 ? $"每 {m} 分钟" : $"每 {m / 60} 小时", Tag = m });
+        var mi = Array.IndexOf(new[] { 15, 30, 60, 180, 360, 720 }, Math.Max(15, s.AppleAutoPullMinutes));
+        every.SelectedIndex = mi < 0 ? 2 : mi;
+        every.SelectionChanged += (_, _) =>
+        {
+            if (every.SelectedItem is ComboBoxItem { Tag: int m }) { s.AppleAutoPullMinutes = m; s.Save(); AppleAutoSync.Apply(); }
+        };
+        _appleBody.Children.Add(every);
+        _appleBody.Children.Add(Ui.Caption("★ 一旦某次自动拉取被 Apple 拒绝认证(比如你改了 Apple ID 主密码,"
+                                           + "所有专用密码会被一次性撤销),自动拉取会【立刻自动关闭】并告诉你原因 —— "
+                                           + "绝不反复重试:反复失败会导致 Apple 锁定你的账号。"));
+        if (AppleAutoSync.LastMessage is { } lm) _appleBody.Children.Add(Ui.Caption(lm));
+
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         row.Children.Add(Ui.Secondary("刷新日历列表", async (_, _) =>
         {
@@ -594,6 +663,10 @@ public sealed class SettingsView : UserControl
                     + "★ 已经同步到本机的日程【不会】被删掉;也不会动 Apple 那边的任何东西。",
                     confirmText: "断开", danger: true)) return;
             AppleCredentials.Clear();
+            TheApp.Settings.AppleAutoPull = false;
+            TheApp.Settings.AppleCalendarUrls.Clear();
+            TheApp.Settings.Save();
+            AppleAutoSync.Stop();          // 停表 + 清熔断 —— 断开后不该还留着上次的报错
             _appleCals = new List<AppleCalendar>();
             _appleStatus.Text = "已断开。本机已有的日程原样保留。";
             RefreshApple();

@@ -119,6 +119,9 @@ public partial class App : Application
         _main.Closing += OnMainWindowClosing;
         if (!_startHidden) _main.Show();
 
+        // Apple 日历的自动拉取(默认关;认证失败会自动熔断,见 AppleAutoSync)
+        AppleAutoSync.Install(() => Settings, () => MemberContext.Current);
+
         _instance.ListenForWake(() => Dispatcher.Invoke(ShowMainWindow));
 
         // 启动即用已保存的档案连一次:配对过就自动连上,不再打扰用户(用户要求 3)。

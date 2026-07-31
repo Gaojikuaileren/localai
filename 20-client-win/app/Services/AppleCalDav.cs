@@ -121,10 +121,14 @@ public static class AppleCalDav
             //   再继续会把用户【真实的 Apple ID 锁掉】(得去 iforgot.apple.com 重置)。
             //   所以:401 = 凭据错,停下来让人改;403 = 已被节流,必须硬性停。
             //   ★ 这条链路上【没有任何自动重试/定时重试】,全部由用户按钮驱动 —— 存心如此。
+            // ★ 401 无法区分三种原因(Apple 没定义可区分的错误码),所以【一次列全】而不是猜。
+            //   其中第三条最容易被当成"程序坏了":主密码一改,Apple 会静默撤销所有专用密码。
             if (c1 == HttpStatusCode.Unauthorized)
-                return (false, "Apple 拒绝了这组账号密码(401)。★ 必须用【专用密码】而不是 Apple ID 密码 —— " +
-                               "开了两步验证后 Apple 只认它。到 appleid.apple.com 生成后【原样】粘进来(连字符不要去掉)。" +
-                               "⚠ 别反复试 —— 多次失败会被 Apple 锁账号。", cals);
+                return (false, "Apple 拒绝了这组账号密码(401)。可能是下面三种之一:" +
+                               "\n① 专用密码填错了(请原样粘贴,连字符不要去掉);" +
+                               "\n② 填成了 Apple ID 主密码 —— 必须用【专用密码】;" +
+                               "\n③ 专用密码已失效 —— 改过/重置过 Apple ID 主密码的话,Apple 会把所有专用密码全部撤销,需要重新生成。" +
+                               "\n⚠ 别反复试 —— 多次失败会被 Apple 锁账号。", cals);
             if (c1 == HttpStatusCode.Forbidden)
                 return (false, "Apple 暂时拒绝了这个账号的请求(403)。★ 这通常是前面失败次数太多被临时节流了。" +
                                "请【停下来】隔一段时间再试,并先确认专用密码是对的 —— " +

@@ -11,7 +11,12 @@ namespace LocalAI.Client.Services;
 /// <param name="Fetched">从 Apple 取到的条数。</param>
 /// <param name="Skipped">解析不了而跳过的条数。</param>
 /// <param name="Message">给人看的一句话。</param>
-public sealed record AppleSyncResult(bool Ok, int Added, int Fetched, int Skipped, string Message);
+/// <param name="AuthFailed">
+/// 这一次是因【认证】而失败(401/403 或密码解不开)。
+/// ★★ 自动拉取必须据此【立即熔断】—— iCloud 按用户名节流,
+///   定时反复撞 401 会把用户真实的 Apple ID 锁掉。这不是优化,是安全要求。
+/// </param>
+public sealed record AppleSyncResult(bool Ok, int Added, int Fetched, int Skipped, string Message, bool AuthFailed = false);
 
 public static class AppleCalendarSync
 {
@@ -33,7 +38,8 @@ public static class AppleCalendarSync
         var pwd = AppleCredentials.Reveal();
         if (pwd is null)
             return new AppleSyncResult(false, 0, 0, 0,
-                "读不出已保存的专用密码 —— 多半是换了 Windows 用户或把配置拷来的(密码按当前用户加密)。请重新填一次。");
+                "读不出已保存的专用密码 —— 多半是换了 Windows 用户或把配置拷来的(密码按当前用户加密)。请重新填一次。",
+                AuthFailed: true);
 
         if (settings.AppleCalendarUrls.Count == 0)
             return new AppleSyncResult(false, 0, 0, 0, "还没有选择要同步的日历。");
@@ -43,7 +49,9 @@ public static class AppleCalendarSync
         {
             // 先发现一次 —— 拿到日历的当前名字与 URL(用户可能在 iCloud 那边改过名/删过)
             var (dok, dmsg, cals) = await AppleCalDav.DiscoverAsync(acct.AppleId, pwd, ct);
-            if (!dok) return new AppleSyncResult(false, 0, 0, 0, dmsg);
+            // ★ 认证类失败要标出来 —— 自动拉取据此熔断,不能定时反复撞(会锁账号)。
+            if (!dok) return new AppleSyncResult(false, 0, 0, 0, dmsg,
+                AuthFailed: dmsg.Contains("401") || dmsg.Contains("403"));
 
             var wanted = cals.Where(c => settings.AppleCalendarUrls.Contains(c.Url)).ToList();
             if (wanted.Count == 0)

@@ -3215,6 +3215,34 @@ public static class Selftest
                 }
             }
 
+            // ---- 自动拉取的【熔断】(安全要求,不是优化)----
+            {
+                var au = TryReadSource(Path.Combine("Services", "AppleAutoSync.cs"));
+                if (au is not null)
+                {
+                    Assert(au.Contains("if (r.AuthFailed)") && au.Contains("s.AppleAutoPull = false;"),
+                           "★★ 自动拉取遇认证失败【立即自动关掉】—— 定时反复撞 401 会锁掉用户真实的 Apple ID");
+                    Assert(au.Contains("TrippedReason"),
+                           "★ 熔断要记下原因并告诉用户(否则只会觉得开关自己关了)");
+                    Assert(!au.Contains("退避重试") || au.Contains("绝不退避重试"),
+                           "★ 认证失败后不做退避重试(那是在赌用户的账号)");
+                    Assert(au.Contains("Math.Max(15,"),
+                           "★ 自动拉取间隔下限9分钟以上(日历不是秒级数据,拉太勤只会更容易撞节流)".Replace("9分钟", "15 分钟"));
+                }
+                var sv3 = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+                if (sv3 is not null)
+                {
+                    Assert(sv3.Contains("Content = \"自动拉取\""),
+                           "设置里有【自动拉取】开关(用户要求)");
+                    Assert(sv3.Contains("AppleAutoSync.TrippedReason is { } trip"),
+                           "★ 被熔断时界面把原因显示出来");
+                    Assert(sv3.Contains("AppleAutoSync.ResetTrip()"),
+                           "★ 重新填过密码后清熔断,允许再自动跑");
+                    Assert(sv3.Contains("cb.Checked += (_, _) =>") && sv3.Contains("AppleCalendarUrls.Add(url)"),
+                           "★ 可以逐个勾选要拉取哪些日历(用户要求)");
+                }
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {

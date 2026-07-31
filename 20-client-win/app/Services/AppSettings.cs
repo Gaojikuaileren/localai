@@ -30,6 +30,11 @@ public sealed class AppSettings
     /// <summary>拉取区间:往前多少天 / 往后多少天。默认过去 90 天 + 未来一年。</summary>
     public int AppleSyncPastDays { get; set; } = 90;
     public int AppleSyncFutureDays { get; set; } = 365;
+
+    /// <summary>自动拉取(默认关)。★ 认证失败会被【自动关掉】—— 见 AppleAutoSync 的熔断。</summary>
+    public bool AppleAutoPull { get; set; }
+    /// <summary>自动拉取间隔(分钟)。下限 15 —— 日历不是秒级数据,拉太勤只会更容易撞上节流。</summary>
+    public int AppleAutoPullMinutes { get; set; } = 60;
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public Density Density { get; set; } = Density.Comfortable;
     public bool Autostart { get; set; }
