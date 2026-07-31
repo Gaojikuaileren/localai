@@ -233,6 +233,18 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 会话面板渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★ 主页整页(天气改竖排折叠 + 日历往下延伸)—— 版面改动必须看图
+        try
+        {
+            ThemeManager.Initialize(Skin.Breeze);
+            var hv = new HomeView { Width = 1180, Height = 820 };
+            Save(Themed(hv), Path.Combine(outDir, "home-layout.png"), 1200, 840);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: 主页渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // ★ 界面用词表:同一张设置页,家庭档 vs 团队档 —— 看替换是否真的到位、且排版不碎。
         try
         {

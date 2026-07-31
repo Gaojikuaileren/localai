@@ -2280,9 +2280,11 @@ public static class Selftest
                 if (uiSrc is not null)
                     Assert(uiSrc.Contains("用两条【居中的矩形】拼"), "+ 号用居中矩形绘制(不再偏移)");
 
-                // 天气拖拽只能从右下角手柄起手,不是整块板块(用户裁定)
-                Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown"), "天气拖拽从右下角手柄区起手");
-                Assert(!homeTodo.Contains("card.PreviewMouseLeftButtonDown"), "整块卡片不再作为拖拽起手区");
+                // ★ 横向拖拽换位已停用(2026-07-31 改成竖排折叠):只剩一张展开卡 + 两行折叠,
+                //   按 dx 算的横拖无处可去,而且会与悬停展开打架。
+                Assert(homeTodo.Contains("gripZone.Visibility = Visibility.Collapsed"),
+                       "★ 竖排折叠后不再留一个拖不动的把手");
+                Assert(!homeTodo.Contains("card.PreviewMouseLeftButtonDown"), "整块卡片不作为拖拽起手区");
             }
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
             if (todoEd is not null)
@@ -2597,8 +2599,13 @@ public static class Selftest
                     Assert(homeSrc.Contains("const double WeatherGap"), "天气卡间距是统一常量");
                     Assert(!homeSrc.Contains("i < _places.Count - 1 ? 12"),
                            "不再按'是否末格'给不同边距(那会让末格宽出一截)");
-                    Assert(homeSrc.Contains("new Thickness(0, 0, -WeatherGap, 12)"),
-                           "容器用负右边距吸收末格多出的间距,整排右缘仍对齐");
+                    // ★ 天气改成【一展开 + 其余折叠】的竖排(用户裁定 2026-07-31)
+                    Assert(homeSrc.Contains("void SetWeatherFocus(int i)") && homeSrc.Contains("_cityCollapsed"),
+                           "★ 天气:一张展开、其余折叠成窄行");
+                    Assert(homeSrc.Contains("_weatherStack.MouseLeave"),
+                           "★ 鼠标离开整块 -> 恢复默认展开项");
+                    Assert(homeSrc.Contains("Grid.SetRowSpan(calPanel, 2)"),
+                           "★ 日历往下延伸跨两行,与右侧天气栈对齐");
                 }
 
                 // 编辑器:时间/日期转盘必须【互斥显示】,且滚动要有动画

@@ -44,13 +44,26 @@ public sealed class HomeView : UserControl
     /// </summary>
     const double WeatherGap = 12;
 
+    /// <summary>折叠城市那一行的高度。★ 两行折叠 + 间隔 = 让左侧日历板块往下延伸的那段空间。</summary>
+    public const double CollapsedCityHeight = 34;
+
     readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 30, TextWrapping = TextWrapping.Wrap };
     readonly TextBlock _greetingSub = new() { FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     readonly StackPanel _greetingBox = new() { HorizontalAlignment = HorizontalAlignment.Left };
     TextBlock[] _cityTime = Array.Empty<TextBlock>();
     TextBlock[] _cityMeta = Array.Empty<TextBlock>();
     UniformGrid[] _cityHourly = Array.Empty<UniformGrid>();
-    readonly UniformGrid _weatherGrid = new() { Rows = 1 };
+
+    // ★ 天气改为【一张展开 + 其余折叠】(用户裁定 2026-07-31):
+    //   三张卡横排太占宽,而多数时候只关心当前所在地。折叠的那两个仍显示
+    //   地名/时间/最高最低 —— 折叠是"收起细节",不是"藏起来"。
+    //   悬停到折叠行 -> 它展开、其余收起;鼠标离开整块 -> 恢复默认(第 0 个 = 当前所在地)。
+    readonly StackPanel _weatherStack = new();
+    FrameworkElement[] _cityExpanded = Array.Empty<FrameworkElement>();
+    FrameworkElement[] _cityCollapsed = Array.Empty<FrameworkElement>();
+    TextBlock[] _miniTime = Array.Empty<TextBlock>();
+    TextBlock[] _miniTemp = Array.Empty<TextBlock>();
+    int _weatherFocus;                       // 当前展开的是第几个
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
 
     readonly Grid _root = new();
@@ -110,7 +123,9 @@ public sealed class HomeView : UserControl
                 iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
                 iconActionTip: "与 Apple 家庭共享日历同步的设置",
                 headerAction: SyncNowButton(calView));
-            Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
+            // ★ 日历【跨行 1-2】(用户裁定 2026-07-31):天气改成一展开+两折叠后挪到了右列,
+            //   左侧因此空出一整块 —— 日历往下延伸与它对齐,时间轴才有地方放。
+            Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
             if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
             _root.Children.Add(calPanel);
         }
@@ -158,11 +173,12 @@ public sealed class HomeView : UserControl
         _places = Places.Load(TheApp.Settings);   // 始终加载(供待办列宽对齐计算),但隐藏时不建 UI
         if (_weatherVisible)
         {
-            _weatherGrid.Height = WeatherHeight;
-            _weatherGrid.Margin = new Thickness(0, 0, -WeatherGap, 12);   // 吸收末格多出的右间距
             BuildWeather();
-            Grid.SetRow(_weatherGrid, 2); Grid.SetColumnSpan(_weatherGrid, 2);
-            _root.Children.Add(_weatherGrid);
+            // ★ 鼠标离开整块 -> 恢复默认展开项(用户裁定)。挂在栈上而不是每张卡上,
+            //   否则在卡与卡之间移动会反复触发"离开"。
+            _weatherStack.MouseLeave += (_, _) => SetWeatherFocus(0);
+            Grid.SetRow(_weatherStack, 2); Grid.SetColumn(_weatherStack, 1);
+            _root.Children.Add(_weatherStack);
         }
 
         // ④ 项目方块:占满剩余,平分整宽,可滚动。隐藏则让该行不再占用剩余空间。
@@ -299,16 +315,93 @@ public sealed class HomeView : UserControl
     // ---------------------------------------------------------------- 天气区(可拖拽排序)
     void BuildWeather()
     {
-        _weatherGrid.Children.Clear();
+        _weatherStack.Children.Clear();
         _shifts.Clear();
         _hosts.Clear();
-        _weatherGrid.Columns = _places.Count;
-        _cityTime = new TextBlock[_places.Count];
-        _cityMeta = new TextBlock[_places.Count];
-        _cityHourly = new UniformGrid[_places.Count];
-        for (int i = 0; i < _places.Count; i++) _weatherGrid.Children.Add(CityCard(i));
+        var n = _places.Count;
+        _cityTime = new TextBlock[n];
+        _cityMeta = new TextBlock[n];
+        _cityHourly = new UniformGrid[n];
+        _cityExpanded = new FrameworkElement[n];
+        _cityCollapsed = new FrameworkElement[n];
+        _miniTime = new TextBlock[n];
+        _miniTemp = new TextBlock[n];
+
+        for (int i = 0; i < n; i++)
+        {
+            var idx = i;
+            _cityExpanded[i] = CityCard(i);
+            _cityExpanded[i].Height = WeatherHeight;
+            _cityCollapsed[i] = CollapsedCity(i);
+            // 悬停折叠行 -> 换成展开它(用户裁定)
+            _cityCollapsed[i].MouseEnter += (_, _) => SetWeatherFocus(idx);
+            _weatherStack.Children.Add(_cityExpanded[i]);
+            _weatherStack.Children.Add(_cityCollapsed[i]);
+        }
+        SetWeatherFocus(_weatherFocus < n ? _weatherFocus : 0);
         UpdateClocks();
         RelayoutDiscrete();
+    }
+
+    /// <summary>切换展开哪一个:被选中的展开、其余折叠成窄行。靠可见性切换,不重建。</summary>
+    void SetWeatherFocus(int i)
+    {
+        if (_cityExpanded.Length == 0) return;
+        if (i < 0 || i >= _cityExpanded.Length) i = 0;
+        _weatherFocus = i;
+        for (int k = 0; k < _cityExpanded.Length; k++)
+        {
+            _cityExpanded[k].Visibility = k == i ? Visibility.Visible : Visibility.Collapsed;
+            _cityCollapsed[k].Visibility = k == i ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    /// <summary>
+    /// 折叠态的一行:地名 · 时间 · 最高/最低。
+    /// ★ 折叠 = 收起细节,不是藏起来 —— 一眼仍能看到是哪座城、几点、冷热大概。
+    /// </summary>
+    FrameworkElement CollapsedCity(int i)
+    {
+        var place = _places[i];
+        var name = new TextBlock
+        {
+            Text = place.IsCurrent ? place.City + " · 当前" : place.City,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        name.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        _miniTime[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        _miniTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        _miniTemp[i] = new TextBlock { Text = "最高 —  最低 —", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+        _miniTemp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _miniTemp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        left.Children.Add(Icons.Make(IconName.Weather, 13, "FgMuted"));
+        var pad = new Border { Width = 6 };
+        left.Children.Add(pad);
+        left.Children.Add(name);
+        left.Children.Add(_miniTime[i]);
+
+        var row = new DockPanel { LastChildFill = false, Margin = new Thickness(12, 0, 12, 0) };
+        DockPanel.SetDock(left, Dock.Left); row.Children.Add(left);
+        DockPanel.SetDock(_miniTemp[i], Dock.Right); row.Children.Add(_miniTemp[i]);
+
+        var card = new Border
+        {
+            Child = row,
+            Height = CollapsedCityHeight,
+            Margin = new Thickness(0, 0, 0, WeatherGap),
+            BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+        card.SetResourceReference(Border.BorderBrushProperty, "Border");
+        card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        return card;
     }
 
     /// <summary>
@@ -435,8 +528,11 @@ public sealed class HomeView : UserControl
         _hosts[i] = host;
         _shifts[i] = shift;
 
-        var index = i;
-        gripZone.PreviewMouseLeftButtonDown += (_, e) => { e.Handled = true; BeginDrag(index, e); };
+        // ★ 横向拖拽换位【已停用】(2026-07-31 改成竖排折叠之后):
+        //   那套拖拽算的是横向位移(dx),而现在只有一张展开、其余是折叠行 ——
+        //   横拖无处可去。而且拖拽与悬停展开会打架。
+        //   需要改顺序时去【设置 › 地点】改 —— 不在这里留一个拖不动的把手。
+        gripZone.Visibility = Visibility.Collapsed;
         return host;
     }
 
@@ -458,22 +554,22 @@ public sealed class HomeView : UserControl
     {
         _dragIndex = index;
         _dragTarget = index;
-        _dragOrigin = e.GetPosition(_weatherGrid);
+        _dragOrigin = e.GetPosition(_weatherStack);
         if (_hosts.TryGetValue(index, out var host))
         {
             Panel.SetZIndex(host, 10);          // 拖起来的卡浮在其它卡之上
             host.Opacity = 0.94;
         }
-        _weatherGrid.CaptureMouse();
-        _weatherGrid.MouseMove += OnDragMove;
-        _weatherGrid.MouseLeftButtonUp += OnDragEnd;
-        _weatherGrid.LostMouseCapture += OnDragLost;
+        _weatherStack.CaptureMouse();
+        _weatherStack.MouseMove += OnDragMove;
+        _weatherStack.MouseLeftButtonUp += OnDragEnd;
+        _weatherStack.LostMouseCapture += OnDragLost;
     }
 
     void OnDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
     {
         if (_dragIndex is not int from) return;
-        var dx = e.GetPosition(_weatherGrid).X - _dragOrigin.X;
+        var dx = e.GetPosition(_weatherStack).X - _dragOrigin.X;
 
         // 被拖的卡逐帧跟手 —— 不用动画,否则永远追不上鼠标
         if (_shifts.TryGetValue(from, out var t))
@@ -511,10 +607,10 @@ public sealed class HomeView : UserControl
         if (_dragIndex is not int from) return;
         var target = _dragTarget;
 
-        _weatherGrid.MouseMove -= OnDragMove;
-        _weatherGrid.MouseLeftButtonUp -= OnDragEnd;
-        _weatherGrid.LostMouseCapture -= OnDragLost;
-        if (_weatherGrid.IsMouseCaptured) _weatherGrid.ReleaseMouseCapture();
+        _weatherStack.MouseMove -= OnDragMove;
+        _weatherStack.MouseLeftButtonUp -= OnDragEnd;
+        _weatherStack.LostMouseCapture -= OnDragLost;
+        if (_weatherStack.IsMouseCaptured) _weatherStack.ReleaseMouseCapture();
         _dragIndex = null;
 
         var swap = commit && target != from;
@@ -557,7 +653,7 @@ public sealed class HomeView : UserControl
     double ColumnWidth()
     {
         var n = Math.Max(1, _places.Count);
-        return _weatherGrid.ActualWidth > 0 ? _weatherGrid.ActualWidth / n : 220;
+        return _weatherStack.ActualWidth > 0 ? _weatherStack.ActualWidth / n : 220;
     }
 
     static void SetHourly(UniformGrid grid, int slots)
@@ -999,8 +1095,15 @@ public sealed class HomeView : UserControl
                 var diff = (z.GetUtcOffset(DateTime.UtcNow) - localOffset).TotalHours;
                 var diffText = Math.Abs(diff) < 0.01 ? "本地" : diff > 0 ? $"+{diff:0.#}h" : $"{diff:0.#}h";
                 _cityMeta[i].Text = $"{(t.Hour is >= 6 and < 18 ? "昼" : "夜")} · {diffText}";
+                // 折叠行也要跑铟 —— 它虽然只显示摘要,但时间必须是真的
+                if (i < _miniTime.Length && _miniTime[i] is { } mt) mt.Text = t.ToString("HH:mm");
+                // ★ 最高/最低仍是 "—":天气未接入,不编数字(与展开态同一口径)
             }
-            catch { _cityTime[i].Text = "—"; _cityMeta[i].Text = ""; }
+            catch
+            {
+                _cityTime[i].Text = "—"; _cityMeta[i].Text = "";
+                if (i < _miniTime.Length && _miniTime[i] is { } mt2) mt2.Text = "—";
+            }
         }
     }
 }
