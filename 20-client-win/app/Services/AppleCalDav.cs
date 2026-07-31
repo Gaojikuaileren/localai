@@ -21,7 +21,10 @@ namespace LocalAI.Client.Services;
 
 /// <param name="Url">日历集合的绝对 URL。</param>
 /// <param name="DisplayName">给人看的日历名。</param>
-public sealed record AppleCalendar(string Url, string DisplayName);
+/// <param name="ColorHex">Apple 给的日历颜色(#RRGGBB;没给就是 null)。
+/// ★ 用户裁定 2026-07-31:日程分类的颜色【读自 Apple】,不是我们自己配的。
+/// 拿不到就交给 CalendarGroups 按名字算一个【稳定】色,而不是随便挑。</param>
+public sealed record AppleCalendar(string Url, string DisplayName, string? ColorHex = null);
 
 public static class AppleCalDav
 {
@@ -31,6 +34,8 @@ public static class AppleCalDav
 
     const string DavNs = "DAV:";
     const string CalNs = "urn:ietf:params:xml:ns:caldav";
+    /// <summary>Apple 私有命名空间 —— 日历颜色 calendar-color 就在这里。</summary>
+    const string AppleIcalNs = "http://apple.com/ns/ical/";
 
     static HttpClient NewClient(string appleId, string appPassword)
     {
@@ -152,12 +157,13 @@ public static class AppleCalDav
 
             // ③ 列出日历集合
             var (c3, b3) = await PropfindAsync(c, homeUrl, 1,
-                $"<d:propfind xmlns:d=\"{DavNs}\" xmlns:c=\"{CalNs}\"><d:prop>" +
+                $"<d:propfind xmlns:d=\"{DavNs}\" xmlns:c=\"{CalNs}\" xmlns:i=\"{AppleIcalNs}\"><d:prop>" +
                 "<d:resourcetype/><d:displayname/><c:supported-calendar-component-set/>" +
+                "<i:calendar-color/>" +          // ★ Apple 私有属性:日历颜色(#RRGGBBAA)
                 "</d:prop></d:propfind>", ct);
             if ((int)c3 >= 400) return (false, $"列出日历失败(HTTP {(int)c3})。", cals, todos);
 
-            foreach (var (href, name, isCal, comps) in ParseCollections(b3))
+            foreach (var (href, name, isCal, comps, color) in ParseCollections(b3))
             {
                 if (!isCal) continue;
                 // ★ 日历(VEVENT)与提醒事项(VTODO)在 iCloud 里就是【两类集合】,
@@ -165,10 +171,11 @@ public static class AppleCalDav
                 //   混在一起的话"日历"里会冒出一堆待办。
                 var url = Absolute(homeUrl, href);
                 var disp = string.IsNullOrWhiteSpace(name) ? "(未命名)" : name;
+                var hex = CalendarGroups.Normalize(color);
                 if (comps.Contains("VTODO") && !comps.Contains("VEVENT"))
-                    todos.Add(new AppleCalendar(url, disp));
+                    todos.Add(new AppleCalendar(url, disp, hex));
                 else if (comps.Count == 0 || comps.Contains("VEVENT"))
-                    cals.Add(new AppleCalendar(url, disp));
+                    cals.Add(new AppleCalendar(url, disp, hex));
             }
             if (cals.Count == 0 && todos.Count == 0)
                 return (false, "连上了,但没有找到任何日历或提醒事项清单。", cals, todos);
@@ -301,10 +308,10 @@ public static class AppleCalDav
         catch { return null; }
     }
 
-    /// <summary>把 multistatus 里每个 response 拆成(href, 显示名, 是否日历, 支持的组件)。</summary>
-    public static List<(string href, string name, bool isCalendar, HashSet<string> comps)> ParseCollections(string xml)
+    /// <summary>把 multistatus 里每个 response 拆成(href, 显示名, 是否日历, 支持的组件, 颜色)。</summary>
+    public static List<(string href, string name, bool isCalendar, HashSet<string> comps, string? color)> ParseCollections(string xml)
     {
-        var outp = new List<(string, string, bool, HashSet<string>)>();
+        var outp = new List<(string, string, bool, HashSet<string>, string?)>();
         try
         {
             var doc = XDocument.Parse(xml);
@@ -319,7 +326,8 @@ public static class AppleCalDav
                              .Select(e => (e.Attribute("name")?.Value ?? "").ToUpperInvariant())
                              .Where(v => v.Length > 0)
                              .ToHashSet();
-                outp.Add((href!, name, isCal, comps));
+                var color = r.Descendants().FirstOrDefault(e => e.Name.LocalName == "calendar-color")?.Value?.Trim();
+                outp.Add((href!, name, isCal, comps, string.IsNullOrWhiteSpace(color) ? null : color));
             }
         }
         catch { }

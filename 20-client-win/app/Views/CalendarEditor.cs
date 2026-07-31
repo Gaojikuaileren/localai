@@ -109,7 +109,21 @@ public static class CalendarEditor
         //   见保存处 `CalendarGroup: CalendarData.Groups[index]`,以及下一行按【原值】反查选中项。
         //   若把存储值也换掉:老档案里 CalendarGroup="家庭" 将匹配不上分组表 -> IndexOf 得 -1
         //   -> 回落到第 0 项 -> 用户的日程被静默改到别的分组。存储与显示必须分开(见 Services/Vocab)。
-        foreach (var g in CalendarData.Groups) group.Items.Add(Services.Vocab.Apply(g));
+        // ★ 每一项前面点一个【该分类的颜色】—— 颜色本身也来自 Apple(见 CalendarGroups)。
+        foreach (var g in CalendarData.Groups)
+        {
+            var dot = new System.Windows.Shapes.Ellipse
+            {
+                Width = 8, Height = 8,
+                Margin = new Thickness(0, 0, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = new System.Windows.Media.SolidColorBrush(Services.CalendarGroups.ColorOf(g)),
+            };
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            row.Children.Add(dot);
+            row.Children.Add(new TextBlock { Text = Services.Vocab.Apply(g), VerticalAlignment = VerticalAlignment.Center });
+            group.Items.Add(new ComboBoxItem { Content = row, Tag = g });
+        }
         group.SelectedIndex = Math.Max(0, Array.IndexOf(CalendarData.Groups, existing?.CalendarGroup ?? CalendarData.Groups[0]));
 
         var location = Field(existing?.Location ?? "");

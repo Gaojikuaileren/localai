@@ -108,6 +108,8 @@ public sealed class CalendarView : UserControl
     readonly DockPanel _dayArea;
     readonly Button _addButton;
     readonly TextBlock _dayTitle;
+    /// <summary>日期 -> 那一天的格子。★ 每次 Rebuild 都会换新元素,浮窗必须挂在【重建后】的那个上。</summary>
+    readonly Dictionary<DateTime, FrameworkElement> _dayCells = new();
 
     public CalendarView(Mode mode)
     {
@@ -243,6 +245,7 @@ public sealed class CalendarView : UserControl
         _rightActions.Children.Add(modeBtn);
         // ★ 右上角【不放】新增按钮(用户裁定):月排布的新增在当日浮窗里,周排布的在日程列表下方。
 
+        _dayCells.Clear();     // ★ 旧元素在这一刻作废,浮窗只能挂在下面新建的那批上
         _body.Content = _mode == Mode.Week ? WeekRows() : MonthGrid();
 
         // ★ 两种排布都在下方列当日日程(用户 2026-07-31 推翻前让):
@@ -485,6 +488,8 @@ public sealed class CalendarView : UserControl
                 d => d < monthFirst || d >= monthFirst.AddDays(daysInMonth), showWeekday: false);
 
     /// <summary>一周的分层横带。</summary>
+    Border? _weekStrip;
+
     UIElement Band(DateTime weekStart, double numberHeight, Func<DateTime, bool> isDim, bool showWeekday)
     {
         var spans = CalendarData.SpansIn(weekStart, 7);
@@ -492,6 +497,22 @@ public sealed class CalendarView : UserControl
         var grid = new Grid();
         for (int i = 0; i < 7; i++)
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        // ★★ 下方时间轴正在显示的那一周,在月历上用【次要着重色】整排标出来(用户裁定 2026-07-31)。
+        //   不变式:时间轴显示的永远是【选中日所在的那一周】(见 HomeView 的双向接线),
+        //   所以这里直接按 _selected 判断,不用再从时间轴取一次状态 —— 少一条会不同步的线。
+        //   用次要色而不是着重色:着重色已经归"今天"和"选中日"了,三者同色就分不清谁是谁。
+        if (weekStart.Date == StartOfWeek(_selected).Date)
+        {
+            var strip = new Border { Margin = new Thickness(0, 0.5, 0, 0.5), Opacity = 0.16 };
+            strip.SetResourceReference(Border.BackgroundProperty, "AccentSecondary");
+            strip.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            Grid.SetColumn(strip, 0); Grid.SetColumnSpan(strip, 7);
+            Grid.SetRow(strip, 0);
+            Panel.SetZIndex(strip, -1);
+            grid.Children.Add(strip);
+            _weekStrip = strip;      // 行数要等 RowDefinitions 建完才知道,下面补 RowSpan
+        }
 
         // 行结构【恒定】:数字行 + 固定 SpanRowsReserved 条线行 + 圆点行。
         // 全部用绝对高度,不用 Auto —— Auto 会随内容有无而变,正是位置浮动的根源。
@@ -520,11 +541,13 @@ public sealed class CalendarView : UserControl
             if (isToday) { bg.SetResourceReference(Border.BackgroundProperty, "Accent"); bg.BorderBrush = Brushes.Transparent; }
             else if (isSelected) { bg.SetResourceReference(Border.BackgroundProperty, "BgSunken"); bg.SetResourceReference(Border.BorderBrushProperty, "BorderStrong"); }
             else { bg.Background = Brushes.Transparent; bg.BorderBrush = Brushes.Transparent; }
+            if (_weekStrip is not null) { Grid.SetRowSpan(_weekStrip, totalRows); _weekStrip = null; }
             Grid.SetColumn(bg, i); Grid.SetRow(bg, 0); Grid.SetRowSpan(bg, totalRows);
             Panel.SetZIndex(bg, 0);
             var captured = day.Date;
             bg.MouseLeftButtonUp += (_, _) => OnDayClicked(captured);
             grid.Children.Add(bg);
+            _dayCells[captured] = bg;
 
             // ② 日期数字(必要时带星期)
             // 数字底部对齐 -> 全天线紧贴在数字下方(用户裁定)
@@ -667,12 +690,54 @@ public sealed class CalendarView : UserControl
     /// <summary>点某一天:选中它;月排布另外弹当日浮窗(周排布下方已就地显示)。</summary>
     void OnDayClicked(DateTime day)
     {
+        var reopen = _mode == Mode.Month;
         SelectDay(day);   // 下方时间轴跟着聚焦到这一周
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
         // ★★ 点日期 = 【查看当天日程】,不再直接开新增抽屉(用户 2026-07-31 报的 bug):
         //   日历最常用的动作是"看看那天有什么",把它接成新建,查看反而无路可走。
         //   新建仍在 —— 当日标题右边那个「+」。
         Rebuild();
+
+        // ★★ 月排布【弹当日浮窗】(用户裁定 2026-07-31 恢复):里面是当天日程的预览 + 一个新建入口。
+        //   注意这是"预览 + 入口",不是"直接开新增抽屉" —— 后者正是之前报过的那个 bug。
+        // ★ 必须在 Rebuild【之后】再取格子:重建把旧元素整批换掉了,
+        //   挂在已经离开可视树的元素上,浮窗会定位到左上角或者干脆不出来。
+        if (reopen && _dayCells.TryGetValue(day.Date, out var cell) && cell.IsVisible)
+            ShowDayFlyout(day, cell);
+    }
+
+    /// <summary>当日浮窗:列出那天的日程(点一条 = 编辑),底部一个「新增日程」。</summary>
+    void ShowDayFlyout(DateTime day, FrameworkElement anchor)
+    {
+        var body = new StackPanel();
+        var evts = CalendarData.On(day).ToList();
+        if (evts.Count == 0)
+        {
+            var none = new TextBlock { Text = "这一天还没有日程。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(2, 2, 2, 8) };
+            none.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            none.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            body.Children.Add(none);
+        }
+        else
+        {
+            var list = new StackPanel();
+            foreach (var ev in evts) list.Children.Add(EventRow(ev, compact: true));
+            body.Children.Add(new ScrollViewer
+            {
+                Content = list,
+                MaxHeight = 220,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Margin = new Thickness(0, 0, 0, 6),
+            }.PassThrough());
+        }
+
+        var add = CompactAdd(() => { Overlay.CloseActive(); OpenEditor(day, null); });
+        add.Margin = new Thickness(0);
+        add.HorizontalAlignment = HorizontalAlignment.Left;
+        body.Children.Add(add);
+
+        Flyout.Show(anchor, day.ToString("M月d日 dddd", Zh), body, width: 240);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出

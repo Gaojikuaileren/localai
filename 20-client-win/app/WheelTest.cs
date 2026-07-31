@@ -255,9 +255,13 @@ public static class WheelTest
             var day = DateTime.Today;
             var saved = CalendarData.Export();
             CalendarData.Events.Clear();
+            // 分类轮着给 —— 每个分类一个颜色，图上才看得出颜色真的跟着分类走
+            var groups = Views.CalendarData.Groups;
+            int gi = 0;
             void Ev(string title, double from, double to)
                 => CalendarData.Events.Add(new CalendarEvent(
-                    day.AddHours(from), day.AddHours(to), title, "me", "private", Id: "wt-" + title));
+                    day.AddHours(from), day.AddHours(to), title, "me", "private",
+                    CalendarGroup: groups[gi++ % groups.Length], Id: "wt-" + title));
 
             Ev("晨会", 9, 10);
             Ev("重叠A", 10, 12);        // 与 重叠B / 重叠C 互相压
@@ -265,10 +269,16 @@ public static class WheelTest
             Ev("重叠C", 11, 13);
             Ev("站会", 14, 14.5);       // 半小时 —— 标题应当跑到条上方
             Ev("闪", 15, 15.25);        // 更短
+            // 多条共享宽度时名字被省略成"…" —— 应当改为放到块外
+            Ev("需求评审会", 16, 17);
+            Ev("一对一", 16.5, 17.5);
+            Ev("设计同步", 16.5, 17);
             Ev("通宵", 22.5, 25);       // 跨零点 —— 画到 24 点线以下
             // 全天/跨天：它们不在 TimedOn 里，只能靠【全天条带】看得见、点得着
-            CalendarData.Events.Add(new CalendarEvent(day.AddDays(-1), day.AddDays(1), "出差", "me", "private", AllDay: true, Id: "wt-trip"));
-            CalendarData.Events.Add(new CalendarEvent(day, day, "体检", "me", "private", AllDay: true, Id: "wt-med"));
+            CalendarData.Events.Add(new CalendarEvent(day.AddDays(-1), day.AddDays(1), "出差", "me", "private", AllDay: true, CalendarGroup: groups[0], Id: "wt-trip"));
+            CalendarData.Events.Add(new CalendarEvent(day, day, "体检", "me", "private", AllDay: true, CalendarGroup: groups[1], Id: "wt-med"));
+            CalendarData.Events.Add(new CalendarEvent(day, day, "年假", "me", "private", AllDay: true, CalendarGroup: groups[2], Id: "wt-vac"));
+            CalendarData.Events.Add(new CalendarEvent(day, day.AddDays(1), "课程", "me", "private", AllDay: true, CalendarGroup: groups[3], Id: "wt-course"));
 
             var tl = new WeekTimeline { Width = 900, Height = 420 };
             tl.SetVisibleRange(9, WeekTimeline.DefaultHours);   // 常态缩放，对准测试日程那一段

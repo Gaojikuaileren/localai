@@ -2332,23 +2332,42 @@ public static class Selftest
                 Assert(!tl.Contains("Zoom(1.5, 0.5)") && !tl.Contains("\uff0b"),
                        "★ 加减号缩放按钮已移除(缩放归滚轮)");
                 Assert(tl.Contains("Canvas _canvas = new() { ClipToBounds = true, Background = Brushes.Transparent }")
-                       && tl.Contains("Canvas _gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent }"),
+                       && tl.Contains("_gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent"),
                        "★★ 画布与刻度列都铺透明底 —— Background 为 null 的容器【不参与命中测试】,"
                        + "滚轮事件根本不从那里发出(用户反馈:只有可交互元素才能缩放)");
-                Assert(tl.Contains("_pan = new Pan(") && tl.Contains("RebuildVertical()"),
-                       "★ 左键在空白处上下拖 = 平移");
-                Assert(tl.Contains("static List<(CalendarEvent Ev, int Col, int Total)> LayOut"),
+                // ★★ 手势按【区域】分工(用户裁定 2026-07-31):
+                //   左侧刻度列 = 时间尺(滚轮缩放 / 拖也缩放);右侧表格 = 内容(滚轮上下滑 / 拖也上下滑)。
+                Assert(tl.Contains("_gutter.MouseWheel") && tl.Contains("e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1))")
+                       && tl.Contains("_gutter.MouseLeftButtonDown") && tl.Contains("_scale = new ScaleDrag("),
+                       "★★ 左侧刻度列:滚轮缩放 + 按住上下拖也是缩放");
+                Assert(tl.Contains("_canvas.MouseWheel") && tl.Contains("e.Handled = PanTo(")
+                       && tl.Contains("_pan = new Pan("),
+                       "★★ 右侧表格:滚轮上下滑 + 按住空白处上下拖也是上下滑");
+                Assert(tl.Contains("DragMode.Move") && tl.Contains("var dayShift = colW > 0"),
+                       "★ 拖日程中间 = 整体位移(竖向改时刻、横向换一天)");
+                Assert(tl.Contains("static List<(int Index, int Col, int Total)> LayOut"),
                        "★ 重叠的日程【平分当天宽度】(按重叠簇分列)");
-                Assert(tl.Contains("TextOutsideBelow") && tl.Contains("Canvas.SetTop(outside,"),
-                       "★ 条太矮时标题挪到条【外面】(上方)");
-                Assert(tl.Contains("edge.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, \"FgOnAccent\")"),
-                       "★ 日程条的起止各画一条【着重色的反色】线");
+                Assert(tl.Contains("var wrapInside = !wideEnough && height >= WrapInsideAbove;")
+                       && tl.Contains("placedLabels.Any(o => o.IntersectsWith(rect))")
+                       && tl.Contains("placedLabels.Add(new Rect(x, yTop, w, height));"),
+                       "★★ 太矮【或太窄】的条都把标题挪到条外，且外置标题要避开【其它标题与日程色块】"
+                       + "(用户反馈:多个共享宽度时名字被省略成'…',什么都看不见)");
+                Assert(tl.Contains("Fill = new SolidColorBrush(onBack),") && tl.Contains("EdgeLinesAbove"),
+                       "★ 日程条的起止各画一条【反色】线(反的是这条日程所属分类的颜色)");
+                Assert(tl.Contains("CalendarGroups.ColorOf(ev.CalendarGroup)") && tl.Contains("CalendarGroups.TextOn(back)"),
+                       "★★ 日程块用【分类的颜色】,字色按底色亮度反选(深底白字/浅底黑字)");
                 Assert(tl.Contains("Math.Clamp(y - 8, 0, Math.Max(0, h - 15))"),
                        "★ 刻度标签上下都夹进可视区(用户报过\"底部的 0 点被吃掉了一半\")");
                 Assert(tl.Contains("Places.CoordOf(Places.Current()) is { } coord") && tl.Contains("SunClock.ForDay("),
                        "★★ 夜晚压暗用【本地算】的日出日落(SunClock),坐标认不出就整块不画 —— 不编一个 6:00–18:00");
-                Assert(tl.Contains("if (_resize is not null) return;") && tl.Contains("void OnDataChanged()"),
+                Assert(tl.Contains("if (_evDrag is not null) return;") && tl.Contains("void OnDataChanged()"),
                        "★ 拖动期间挡掉 Changed 重建 —— 否则手底下那个元素会被换掉(拖着拖着就脱手)");
+                // ★★ 抖动的根:每动一下就把整块重画一遍。重画会销毁重建手底下那个 Border,
+                //   而且一旦拖到与别的日程重叠、重叠簇列数就变,方块会当场横向缩一半、拖回来又弹回全宽。
+                Assert(tl.Contains("Canvas.SetTop(dg.Box, y0);") && tl.Contains("dg.Box.Height = Math.Max(3, y1 - y0);"),
+                       "★★ 拖日程是【实时预览】——只挪这一个方块,不重建(用户反馈:拖顶部/底部会抖)");
+                Assert(tl.Contains("if (!dg.Moved) return;") && tl.Contains("CalendarData.Update(live with { Start = dg.Start, End = dg.End })"),
+                       "★★ 数据在【松手时提交一次】,拖动全程不写 CalendarData");
                 Assert(tl.Contains("protected override void OnLostMouseCapture"),
                        "★ 捕获丢失也收尾(拖到窗口外松手/Alt+Tab),否则拖拽状态永远挂着");
                 // ★★ 全天条带：拿掉月历左下角那份当日列表之后，
@@ -2358,25 +2377,45 @@ public static class Selftest
                        "★★ 时间轴有【全天】条带 —— 全天日程不在 TimedOn 里，不补就看不见也点不着");
                 Assert(tl.Contains("chip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OnEditEvent?.Invoke(captured); }"),
                        "★ 全天条可点 —— 走的仍是日历那个编辑抽屉");
-                Assert(tl.Contains("_allDay.Visibility = Visibility.Collapsed; _allDay.Height = 0;"),
-                       "★ 这一周没有全天日程就整条塌掉，不白占纵向空间");
-                Assert(tl.Contains("还有 {overflow} 条全天日程"),
-                       "★ 摆不下的全天日程【如实说有几条】，不惄惄少画");
+                Assert(tl.Contains("const double AllDayStripHeight = AllDayLabelHeight + AllDayRows * AllDayBarHeight + 4;")
+                       && tl.Contains("_allDay = new() { Height = AllDayStripHeight")
+                       && tl.Contains("const int AllDayRows = 2;"),
+                       "★★ 全天条带【常驻固定高】—— 不要那种有才出现的一栏(高度会一周一个样)");
+                Assert(tl.Contains("var lanes = Math.Clamp(perDay[sp.Col], 1, AllDayMaxLanes);")
+                       && tl.Contains("var slotW = colW / lanes;")
+                       && tl.Contains("var multi = spans.Where(x => x.Span > 1).ToList();"),
+                       "★★ 全天条带分两行:跨天的整条连通、只占一天的【共享那一天的宽度】"
+                       + "(横向分道与跨天连通几何上不兼容 —— 一条跨三天的在每天只占 1/N,三段槽位并不相邻)");
+                Assert(tl.Contains("$\"+{hidden}\""),
+                       "★ 名字没能标出来的【如实说有几条】,不惄惄少画");
                 // ---- 对抗式审计(2026-07-31)确认的三条,钉住 ----
                 Assert(tl.Contains("e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1))") && tl.Contains("bool Zoom("),
                        "★★ 滚轮【只有真的缩放了才吞】—— _hours 起手就等于 MinHours,"
                        + "无条件 Handled 会让开屏第一下向上滚就卡死(时间轴不动、整页也不动)");
-                Assert(tl.Contains("sealed record Resize(CalendarEvent Ev0, bool IsStart, double FromY)")
-                       && tl.Contains("var moved = (e.GetPosition(_canvas).Y - rz.FromY) / h * _hours;")
-                       && tl.Contains("t = Math.Clamp(t, s0 + SnapHours, DayMax);"),
+                Assert(tl.Contains("sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,")
+                       && tl.Contains("var moved = (cur.Y - dg.From.Y) / h * _hours;")
+                       && tl.Contains("Math.Clamp(Snap(e0 + moved), SnapUp(s0 + SnapHours), DayMax)"),
                        "★★ 拖动改时间是【绝对】口径(从起手那一刻重算 + 对绝对时刻吸附 + 守卫夹住)"
                        + " —— 增量口径会吞掉四舍五入的余量,慢拖时边界跑得比光标快近一倍,还留反向死区");
+                // ★ 夹取的【边界本身】也要落在半小时上 —— 否则顶到下限会得到 9:07 这种脏时刻
+                //   (用户报的"现在可以到 15 分钟"正是这么来的)。
+                Assert(tl.Contains("static double SnapUp(double hours)") && tl.Contains("static double SnapDown(double hours)")
+                       && tl.Contains("SnapDown(e0 - SnapHours)"),
+                       "★★ 连夹取的边界都落在半小时格子上(半小时颗粒不许被边界漏掉)");
                 Assert(tl.Contains("readonly DispatcherTimer _tick") && tl.Contains("if (DateTime.Today != _tickDay)")
                        && tl.Contains("void SyncTick()"),
                        "★ 「此刻」红线/昼夜带/今天高亮会随时间走,且不可见时停表");
 
-                Assert(tl.Contains("_canvas.ToolTip = \"滚轮 = 缩放"),
-                       "★ 三个手势都没有可见按钮 —— 得有一句提示，否则没人猜得到");
+                Assert(tl.Contains("_gutter.ToolTip = \"时间尺") && tl.Contains("_canvas.ToolTip = \"滚轮上下滑"),
+                       "★ 手势都没有可见按钮 —— 左右两块各有一句提示,否则没人猜得到");
+                Assert(!tl.Contains("_weekStart:M月d日}"),
+                       "★ 顶栏那行日期标签已去掉(横轴上每一格都写着日期了)");
+                Assert(tl.Contains("Grid.SetColumn(_navCell, 0);") && tl.Contains("FrameworkElement NavKey("),
+                       "★ ‹ 今 › 收进刻度列正上方那一格,且长得像按钮(有边框 + hover 底色)");
+                Assert(tl.Contains("_top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);"),
+                       "★ 按「今」【保持当前缩放】,只把此刻挪到视野中间");
+                Assert(tl.Contains("if (HoursFrom(prev, ev.End) <= 24) continue;"),
+                       "★★ 跨天日程在【隔壁那一天】续画 —— 否则从今天看过去那条日程就凭空消失了");
             }
 
             var sun = TryReadSource(Path.Combine("Services", "SunClock.cs"));
@@ -2425,8 +2464,13 @@ public static class Selftest
                        "★ 合并板块用【只有月历】的高度(用含当日区的 268 会把月历压矮、最后一行裁掉)");
                 Assert(homeTodo.Contains("_cityMeta[i].Text = diffText;"),
                        "★ 展开卡右侧只留一个时段词(用户反馈\"右侧有两个晚上\")");
-                Assert(homeTodo.Contains("_places[k].IsCurrent && k == i ? _places[k].City"),
-                       "★ 「· 当前」只在展开那张上出现,折叠行不显示");
+                Assert(!homeTodo.Contains("\" · 当前\""),
+                       "★ 城市名后面不再有「· 当前」(右侧那列已经写着「本地」,同一件事说两遍)");
+                Assert(!homeTodo.Contains("TempBar(i,"),
+                       "★ 天气摘要行【没有滑块】(用户裁定:长得像滑块却不能拖,本身就是误导)");
+                Assert(homeTodo.Contains("Margin = new Thickness(0, 0, 0, PanelGap),")
+                       && homeTodo.Contains("_todoVisible ? 12 : 0, PanelGap);"),
+                       "★ 日历与天气取同一个下边距 -> 下沿齐平,且与「正在进行的项目」留出间隔");
                 Assert(homeTodo.Contains("var wantTop = cursorY - CollapsedCityHeight + 11;"),
                        "★★ 拖拽按【光标绝对位置】反推卡片该在哪 —— 手柄在展开卡的右下角,"
                        + "卡一收起只剩 34px,抓点凭空上移一大截;从 0 起算的话卡片会停在光标上方");
@@ -3224,9 +3268,65 @@ public static class Selftest
                     Assert(uiSrc.Split("Services.Vocab.Apply(").Length - 1 >= 5,
                            "★ Ui 的 Title/Subtitle/Body/Caption/Panel 都过用词表(覆盖代码里硬编码的中文)");
                 if (ceSrc is not null)
-                    Assert(ceSrc.Contains("group.Items.Add(Services.Vocab.Apply(g))")
+                    Assert(ceSrc.Contains("Text = Services.Vocab.Apply(g)")
+                           && ceSrc.Contains("Fill = new System.Windows.Media.SolidColorBrush(Services.CalendarGroups.ColorOf(g))")
                            && ceSrc.Contains("CalendarGroup: CalendarData.Groups["),
                            "★★ 日历分组:【显示】过用词表、【存储】仍用原值(否则老档案匹配不上、日程被静默改组)");
+            }
+
+            // ---- 日程分类与颜色:读自 Apple(用户裁定 2026-07-31)----
+            {
+                var cg = TryReadSource(Path.Combine("Services", "CalendarGroups.cs"));
+                if (cg is not null)
+                {
+                    Assert(cg.Contains("public static void SetFromApple"),
+                           "★ 分类表可以整表换成 Apple 那边的日历清单");
+                    Assert(cg.Contains("_current = list.Count > 0 ? list : LocalDefaults.ToList();"),
+                           "★★ 传空 = 回到本地占位分类(断开连接时不许拿上一次的缓存假装还连着)");
+                    Assert(cg.Contains("public static bool FromApple"),
+                           "★ 界面能问出「这张表到底是不是真的来自 Apple」");
+                    Assert(cg.Contains("int h = 17;") && !cg.Contains(".GetHashCode()"),
+                           "★★ 认不出的分类按名字算【稳定】色 —— 不用 GetHashCode:"
+                           + ".NET 的字符串哈希每次进程启动都不同,那会让颜色每次开机都变");
+                }
+                // Apple 那边的颜色在私有命名空间里,PROPFIND 得显式要
+                var acd = TryReadSource(Path.Combine("Services", "AppleCalDav.cs"));
+                if (acd is not null)
+                    Assert(acd.Contains("AppleIcalNs = \"http://apple.com/ns/ical/\"")
+                           && acd.Contains("<i:calendar-color/>"),
+                           "★ PROPFIND 显式索取 Apple 的 calendar-color");
+
+                // 归一化:Apple 给的是 #RRGGBBAA
+                Assert(Services.CalendarGroups.Normalize("#FF2968FF") == "#FF2968", "#RRGGBBAA -> #RRGGBB");
+                Assert(Services.CalendarGroups.Normalize("#abc") == "#AABBCC", "#RGB -> #RRGGBB");
+                Assert(Services.CalendarGroups.Normalize("  1A2B3C ") == "#1A2B3C", "没有 # 也认");
+                Assert(Services.CalendarGroups.Normalize("不是颜色") is null, "不是颜色就返回 null(不瞎猜一个)");
+                Assert(Services.CalendarGroups.Normalize("") is null && Services.CalendarGroups.Normalize(null) is null, "空 -> null");
+
+                // 稳定色:同名同色
+                Assert(Services.CalendarGroups.StableColor("工作") == Services.CalendarGroups.StableColor("工作"),
+                       "同一个分类名每次都得到同一个颜色");
+                Assert(Services.CalendarGroups.StableColor("工作") != Services.CalendarGroups.StableColor("家庭"),
+                       "不同分类名给出不同颜色");
+
+                // 字色按底色亮度反选
+                Assert(Services.CalendarGroups.TextOn(System.Windows.Media.Color.FromRgb(0x10, 0x20, 0x30))
+                       == System.Windows.Media.Colors.White, "深底 -> 白字");
+                Assert(Services.CalendarGroups.TextOn(System.Windows.Media.Color.FromRgb(0xF0, 0xF0, 0xE0))
+                       != System.Windows.Media.Colors.White, "浅底 -> 深字");
+
+                // 整表往返
+                Services.CalendarGroups.SetFromApple(new[] { ("工作日历", (string?)"#112233"), ("家人", null) });
+                Assert(Services.CalendarGroups.FromApple && Services.CalendarGroups.Names.Length == 2,
+                       "换成 Apple 的两个日历");
+                Assert(Services.CalendarGroups.ColorOf("工作日历")
+                       == (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#112233"),
+                       "Apple 给了颜色就用它");
+                Assert(Services.CalendarGroups.ColorOf("家人") == Services.CalendarGroups.StableColor("家人"),
+                       "★ Apple 没给颜色的那个,退回按名字算的稳定色(不是随便挑一个)");
+                Services.CalendarGroups.SetFromApple(Array.Empty<(string, string?)>());
+                Assert(!Services.CalendarGroups.FromApple && Views.CalendarData.Groups.Contains("家庭"),
+                       "★ 断开后回到本地占位分类");
             }
 
             // ---- Apple 凭据保管(日历接入)----

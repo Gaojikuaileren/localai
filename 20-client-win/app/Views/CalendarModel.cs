@@ -140,8 +140,12 @@ public static class CalendarData
         return n;
     }
 
-    /// <summary>iCloud 日历组。接入前给一组占位;接入后由服务端下发真实分组。</summary>
-    public static readonly string[] Groups = { "家庭", "个人", "工作", "(未分组)" };
+    /// <summary>
+    /// 日程分类(= iCloud 的日历)。★ 用户裁定 2026-07-31:接上 Apple 后这里就是【Apple 的日历清单】。
+    /// 实现搬到 Services.CalendarGroups(那里还管颜色);这里保留同名入口,免得调用方到处改。
+    /// 没接 Apple 时是本地占位分类,CalendarGroups.FromApple 会如实说明它不是真的。
+    /// </summary>
+    public static string[] Groups => Services.CalendarGroups.Names;
 
     /// <summary>某天的定时日程(不含全天/跨天条,那些走 SpansIn 单独画长条)。</summary>
     public static IEnumerable<CalendarEvent> TimedOn(DateTime day)

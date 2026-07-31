@@ -299,6 +299,17 @@ public partial class App : Application
         Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
         Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
         Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
+        // ★ 日程分类表(= Apple 那边的日历清单 + 颜色)从存档恢复 ——
+        //   否则开机后到"去设置里刷新一次清单"之前，新建日程的归类会先退回本地占位，
+        //   颜色也跟着变一次 —— 看起来就像断连了。
+        {
+            var saved = Settings.AppleCalendarList
+                .Select(x => x.Split('|', 3))
+                .Where(a2 => a2.Length >= 2 && a2[1].Length > 0)
+                .Select(a2 => (a2[1], a2.Length >= 3 && a2[2].Length > 0 ? a2[2] : null))
+                .ToList();
+            if (saved.Count > 0) Services.CalendarGroups.SetFromApple(saved!);
+        }
         Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath));
         Notes.Import(ClientStore.Load<List<StudyNote>>(ClientStore.NotesPath));
         History.Import(ClientStore.Load<List<string>>(ClientStore.HistoryFavPath));

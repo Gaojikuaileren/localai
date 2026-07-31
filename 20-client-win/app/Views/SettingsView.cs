@@ -476,12 +476,22 @@ public sealed class SettingsView : UserControl
     readonly TextBlock _appleStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     // ★ 不再只活在内存里:清单【落盘保存】(见 AppSettings.AppleCalendarList / AppleReminderList)——
     //   此前切走再回来/重启就没了,用户得再点一次"刷新日历列表"才能勾选。
+    // 存盘格式：URL|显示名[|#RRGGBB] —— 颜色是后加的第三段，
+    // 旧存档只有两段也能读(颜色为 null -> 按名字算一个稳定色)。
     static List<AppleCalendar> Decode(List<string> raw)
-        => raw.Select(x => x.Split('|', 2))
-              .Where(a => a.Length == 2 && a[0].Length > 0)
-              .Select(a => new AppleCalendar(a[0], a[1])).ToList();
+        => raw.Select(x => x.Split('|', 3))
+              .Where(a => a.Length >= 2 && a[0].Length > 0)
+              .Select(a => new AppleCalendar(a[0], a[1], a.Length >= 3 && a[2].Length > 0 ? a[2] : null)).ToList();
     static List<string> Encode(List<AppleCalendar> cals)
-        => cals.Select(c => c.Url + "|" + c.DisplayName).ToList();
+        => cals.Select(c => c.Url + "|" + c.DisplayName + (c.ColorHex is null ? "" : "|" + c.ColorHex)).ToList();
+
+    /// <summary>
+    /// 把日历清单推给【日程分类表】—— 新建日程的归类与颜色都读它(用户裁定 2026-07-31)。
+    /// ★ 清单为空(没连/断开)时传空，CalendarGroups 会如实退回本地占位分类，
+    ///   而不是拿上一次的缓存假装还连着。
+    /// </summary>
+    static void PushGroups(List<AppleCalendar> cals)
+        => Services.CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));
 
     /// <summary>
     /// 范围裁定(用户 2026-07-31):【只读拉取 + 只做日历】。
@@ -565,6 +575,8 @@ public sealed class SettingsView : UserControl
                 AppleCredentials.Save(aid, p);
                 AppleAutoSync.ResetTrip();   // 新密码填过了 -> 允许自动拉取再跑
                 TheApp.Settings.AppleCalendarList = Encode(cals);
+            PushGroups(cals);
+                PushGroups(cals);
                 TheApp.Settings.AppleReminderList = Encode(rems);
                 TheApp.Settings.Save();
                 RefreshApple();
@@ -674,6 +686,7 @@ public sealed class SettingsView : UserControl
             _appleStatus.Text = msg;
             if (!ok) return;
             TheApp.Settings.AppleCalendarList = Encode(cals);
+            PushGroups(cals);
             TheApp.Settings.AppleReminderList = Encode(rems);
             TheApp.Settings.Save();
             RefreshApple();
@@ -701,6 +714,7 @@ public sealed class SettingsView : UserControl
             TheApp.Settings.AppleCalendarUrls.Clear();
             TheApp.Settings.AppleReminderUrls.Clear();
             TheApp.Settings.AppleCalendarList.Clear();
+            PushGroups(new List<AppleCalendar>());   // 断开 -> 分类表退回本地占位
             TheApp.Settings.AppleReminderList.Clear();
             TheApp.Settings.Save();
             AppleAutoSync.Stop();          // 停表 + 清熔断 —— 断开后不该还留着上次的报错

@@ -56,6 +56,9 @@ public sealed class HomeView : UserControl
     /// <summary>卡片间距(比原来的 12 略紧,好把展开高留够)。</summary>
     const double CityGap = 10;
 
+    /// <summary>板块之间的标准间隔(日历/天气 与下方"正在进行的项目"之间)。</summary>
+    const double PanelGap = 12;
+
     /// <summary>展开态卡片的最矮可读高度 —— 低于它就不再压缩,改让整块可以滚。</summary>
     const double ExpandedCityMin = 150;
 
@@ -177,6 +180,7 @@ public sealed class HomeView : UserControl
             calView.SelectionChanged = d => timeline.FocusWeekOf(d);
             // ★ 反向也要跟:在时间轴上翻周、月历却还停在旧月 —— 那就是上下两块各说各的周。
             timeline.WeekChanged = ws => calView.FocusWeekStart(ws);
+            timeline.DayRolled = () => calView.Rebuild();   // 跨零点：月历的"今天"也要挪过去
 
             var calStack = new DockPanel { LastChildFill = true };
             DockPanel.SetDock(calView, Dock.Top);
@@ -193,8 +197,10 @@ public sealed class HomeView : UserControl
             //   下方"正在进行的项目"与上方的间隔因此不变(它跟的是行 2 的底,不是日历的底)。
             // ★★ 2026-07-31 用户改口:【日历板块高度 = 待办 + 一个展开的天气 + 两个折叠的天气】,
             //   也就是下沿与【整个天气栈】齐,而不是停在倒数第二行。
-            //   既然天气栈总高恒定(WeatherStackHeight),两边都不留下边距就自然对齐。
-            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, 0);
+            //   既然天气栈总高恒定(WeatherStackHeight),两边留【同样的】下边距就自然对齐。
+            // ★ 下边距不能是 0 —— 那样下面的「正在进行的项目」会贴上来,间隔就没了(用户反馈)。
+            //   与天气宿主取同一个 PanelGap,两者下沿仍然齐平。
+            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, PanelGap);
             calPanel.VerticalAlignment = VerticalAlignment.Stretch;
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
             // ★ 只有右列【真的空了】(待办与天气都不显示)才让日历横跨两列;
@@ -261,6 +267,7 @@ public sealed class HomeView : UserControl
             {
                 Child = weatherScroll,
                 Height = WeatherStackHeight,
+                Margin = new Thickness(0, 0, 0, PanelGap),   // ★ 与日历同一个下边距 -> 下沿齐平 + 与项目板块留出间隔
                 ClipToBounds = true,
                 // ★ 铺一层透明底:卡与卡之间那道 10px 的缝原来【不参与命中测试】,
                 //   光标停在缝里 220ms 就被当成"离开了天气板块",展开的卡啪地跳回第 0 张。
@@ -535,13 +542,6 @@ public sealed class HomeView : UserControl
 
         for (int k = 0; k < _cityCards.Length; k++)
         {
-            // ★ 展开那张把摘要行的温度滑条隐掉 —— 细节里已有完整的最高/最低/降水一行,
-            //   同一个东西在一张卡里出现两次看着像排版出了错。时间与气候照旧留着。
-            if (k < _miniBar.Length && _miniBar[k] is { } mbar)
-                mbar.Visibility = k == i ? Visibility.Hidden : Visibility.Visible;
-            // 「· 当前」只在展开那张上出现
-            if (k < _miniName.Length && _miniName[k] is { } mname && k < _places.Count)
-                mname.Text = _places[k].IsCurrent && k == i ? _places[k].City + " · 当前" : _places[k].City;
             var to = k == i ? ExpandedCityHeight : CollapsedCityHeight;
             if (!animate)
             {
@@ -701,8 +701,8 @@ public sealed class HomeView : UserControl
     FrameworkElement MiniRow(int i)
     {
         var place = _places[i];
-        // ★ 「· 当前」只在【展开时】补上(用户裁定)—— 折叠行就那么一条,
-        //   名字后面再挂一个标签会把温度滑条挤得无地自容。
+        // ★ 城市名后面【不再加「· 当前」】(用户裁定 2026-07-31):
+        //   右侧那一列已经写着「本地」了,同一件事说两遍。
         _miniName[i] = new TextBlock
         {
             Text = place.City,
@@ -729,19 +729,19 @@ public sealed class HomeView : UserControl
         _miniTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        _miniBar[i] = TempBar(i, low: null, high: null, now: null);
-
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         left.Children.Add(Icons.Make(IconName.Weather, 13, "FgSecondary"));
         left.Children.Add(new Border { Width = 6 });
         left.Children.Add(name);
         left.Children.Add(_miniSky[i]);
 
-        var row = new DockPanel { LastChildFill = true, Height = CollapsedCityHeight, Margin = new Thickness(12, 0, 12, 0) };
+        // ★ 温度滑条【已移除】(用户裁定 2026-07-31:"天气不应该有滑块")。
+        //   天气未接入时它本就是一条空槽,接入后也不是一个可拖的控件 ——
+        //   长得像滑块却不能拖,本身就是个误导。
+        var row = new DockPanel { LastChildFill = false, Height = CollapsedCityHeight, Margin = new Thickness(12, 0, 12, 0) };
         DockPanel.SetDock(left, Dock.Left); row.Children.Add(left);
         DockPanel.SetDock(_miniTime[i], Dock.Right); row.Children.Add(_miniTime[i]);
         DockPanel.SetDock(_miniPart[i], Dock.Right); row.Children.Add(_miniPart[i]);
-        row.Children.Add(_miniBar[i]);        // 中间那段吃掉剩余宽度
         return row;
     }
 
