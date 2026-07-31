@@ -3264,12 +3264,39 @@ public static class Selftest
 
                 // VTODO 解析
                 static string V(params string[] ls) => string.Join(Environment.NewLine, ls);
-                var (tds, _) = Services.ICalParser.ParseTodos(V(
+                var (tds, _, _) = Services.ICalParser.ParseTodos(V(
                     "BEGIN:VTODO", "UID:t-1", "SUMMARY:交电费", "DUE;VALUE=DATE:20260805",
                     "PRIORITY:1", "STATUS:COMPLETED", "END:VTODO"), TodoKind.Personal);
                 Assert(tds.Count == 1 && tds[0].Title == "交电费", "VTODO 能解析");
                 Assert(tds[0].Done && tds[0].Priority == TodoPriority.High, "★ 完成状态与优先级都读到(PRIORITY 1-4 = 高)");
                 Assert(tds[0].Source == "apple" && tds[0].ExternalId == "t-1", "回填来源与 UID");
+
+                // ---- Apple「提醒事项已升级】的墓碑条目(用户实遇 2026-07-31,已查证)----
+                // ★★ 这两条不是待办,是 Apple 在说"东西不在这儿"。当任务导入 =
+                //   替 Apple 把一句通知伪装成两条任务,用户会以为同步成功了。
+                Assert(Services.AppleReminderNotice.IsUpgradeNotice("在哪里可以找到我的提醒事项？", null),
+                       "★ 认得出中文公告一(全角问号也要能匹配)");
+                Assert(Services.AppleReminderNotice.IsUpgradeNotice("此列表的创建者已升级这些提醒事项。", null),
+                       "★ 认得出中文公告二");
+                Assert(Services.AppleReminderNotice.IsUpgradeNotice("Where are my reminders?", null),
+                       "认得出英文公告一");
+                Assert(Services.AppleReminderNotice.IsUpgradeNotice("The creator of this list has upgraded these reminders.", null),
+                       "认得出英文公告二");
+                Assert(Services.AppleReminderNotice.IsUpgradeNotice("随便什么", "详见 support.apple.com/HT210220"),
+                       "★ 描述里的 Apple 支持链接是【与语言无关】的标记(换什么语言都认得出)");
+                Assert(!Services.AppleReminderNotice.IsUpgradeNotice("买菜", null),
+                       "★ 普通待办不会被误判成公告");
+                Assert(Services.AppleReminderNotice.IsUpgradedList("提醒 ⚠️") && !Services.AppleReminderNotice.IsUpgradedList("工作"),
+                       "★ 清单名带 ⚠ = Apple 的占位清单(集合层判定,最稳)");
+
+                // 解析层:公告不入待办,且【单独计数】—— 与"读不懂而跳过"分开
+                var (nt, nsk, nnotice) = Services.ICalParser.ParseTodos(string.Join(Environment.NewLine,
+                    "BEGIN:VTODO", "UID:n-1", "SUMMARY:在哪里可以找到我的提醒事项？", "END:VTODO",
+                    "BEGIN:VTODO", "UID:n-2", "SUMMARY:此列表的创建者已升级这些提醒事项。", "END:VTODO",
+                    "BEGIN:VTODO", "UID:r-9", "SUMMARY:真的待办", "END:VTODO"), TodoKind.Personal);
+                Assert(nt.Count == 1 && nt[0].Title == "真的待办", "★ 只有真待办被导入");
+                Assert(nnotice == 2 && nsk == 0,
+                       "★★ Apple 公告单独计数(2),不混进「读不懂」那个数 —— 混了就只能说「没东西」,而真相是「拿不到」");
 
                 // 自动拉取:三道闸
                 var au2 = TryReadSource(Path.Combine("Services", "AppleAutoSync.cs"));

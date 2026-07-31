@@ -65,11 +65,18 @@ public static class ICalParser
     /// ★ 与 VEVENT 共用折行/转义/时间那三套 —— 那几个坑两边一模一样。
     /// 只取能对上号的字段:标题 / 截止 / 完成 / 优先级 / 备注 / UID。
     /// </summary>
-    public static (List<TodoItem> todos, int skipped) ParseTodos(string ics, TodoKind kind)
+    /// <param name="notices">
+    /// 这个清单里有几条是 Apple 的【已升级】公告(不是用户的待办)。
+    /// ★★ 必须与 "skipped" 分开计:前者意味着【拿不到】(这条路永远拿不到),
+    ///   后者只是【这几条读不懂】。混在一起的话界面就只能说"没东西",
+    ///   而真相是"拿不到" —— 后者才是用户真正需要知道的那句话。
+    /// </param>
+    public static (List<TodoItem> todos, int skipped, int notices) ParseTodos(string ics, TodoKind kind)
     {
         var list = new List<TodoItem>();
         var skipped = 0;
-        if (string.IsNullOrWhiteSpace(ics)) return (list, 0);
+        var notices = 0;
+        if (string.IsNullOrWhiteSpace(ics)) return (list, 0, 0);
 
         var lines = Unfold(ics);
         List<(string name, Dictionary<string, string> parms, string value)>? cur = null;
@@ -81,6 +88,15 @@ public static class ICalParser
             {
                 if (cur is not null)
                 {
+                    // ★ 先看是不是 Apple 的「已升级」公告 —— 那不是待办,不能当任务导入
+                    string? sm = null, de = null;
+                    foreach (var (nm, _, vl) in cur)
+                    {
+                        if (nm.Equals("SUMMARY", StringComparison.OrdinalIgnoreCase)) sm = Unescape(vl);
+                        else if (nm.Equals("DESCRIPTION", StringComparison.OrdinalIgnoreCase)) de = Unescape(vl);
+                    }
+                    if (AppleReminderNotice.IsUpgradeNotice(sm, de)) { notices++; cur = null; continue; }
+
                     var t = BuildTodo(cur, kind);
                     if (t is not null) list.Add(t); else skipped++;
                 }
@@ -90,7 +106,7 @@ public static class ICalParser
             if (cur is null) continue;
             if (TryParseLine(line, out var pr)) cur.Add(pr);
         }
-        return (list, skipped);
+        return (list, skipped, notices);
     }
 
     static TodoItem? BuildTodo(

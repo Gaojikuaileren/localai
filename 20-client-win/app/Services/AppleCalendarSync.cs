@@ -82,7 +82,7 @@ public static class AppleCalendarSync
             foreach (var lst in wantedTodos)
             {
                 ct.ThrowIfCancellationRequested();
-                var (ok, msg, ts, sk) = await AppleCalDav.FetchTodosAsync(
+                var (ok, msg, ts, sk, _) = await AppleCalDav.FetchTodosAsync(
                     acct.AppleId, pwd, lst, TodoKind.Personal, ct);
                 if (!ok) { failures.Add(msg); continue; }
                 allTodos.AddRange(ts);

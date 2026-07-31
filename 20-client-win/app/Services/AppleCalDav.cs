@@ -239,7 +239,8 @@ public static class AppleCalDav
     /// ★ 不加 time-range:待办很多是【没有截止日期】的,按时间筛会把它们全滤掉。
     ///   清单本身条数不大,全拉反而简单且不会漏。
     /// </summary>
-    public static async Task<(bool ok, string message, List<TodoItem> todos, int skipped)> FetchTodosAsync(
+    /// <param name="notices">这份清单里有几条是 Apple 的【已升级】公告(已排除,不当待办)。</param>
+    public static async Task<(bool ok, string message, List<TodoItem> todos, int skipped, int notices)> FetchTodosAsync(
         string appleId, string appPassword, AppleCalendar list, TodoKind kind, CancellationToken ct = default)
     {
         var outp = new List<TodoItem>();
@@ -255,24 +256,32 @@ public static class AppleCalDav
 
             var (code, text) = await SendFollowingAsync(c, "REPORT", list.Url, body, 1, ct);
             if ((int)code >= 400)
-                return (false, $"拉取提醒「{list.DisplayName}」失败(HTTP {(int)code})。", outp, 0);
+                return (false, $"拉取提醒「{list.DisplayName}」失败(HTTP {(int)code})。", outp, 0, 0);
 
-            var skipped = 0;
+            var skipped = 0; var notices = 0;
             foreach (var ics in ParseCalendarData(text))
             {
-                var (part, sk) = ICalParser.ParseTodos(ics, kind);
+                var (part, sk, nt) = ICalParser.ParseTodos(ics, kind);
                 outp.AddRange(part);
                 skipped += sk;
+                notices += nt;
             }
-            return (true, $"「{list.DisplayName}」取到 {outp.Count} 条待办。", outp, skipped);
+
+            // ★★ 整份清单只有 Apple 的公告(或清单名带 ⚠)-> 它已被升级,CalDAV 【永远】拿不到真内容。
+            //   这时候说"取到 0 条"是在误导 —— 用户会以为自己没建待办。必须说"拿不到"。
+            if (outp.Count == 0 && (notices > 0 || AppleReminderNotice.IsUpgradedList(list.DisplayName)))
+                return (false, $"「{list.DisplayName}」拿不到内容。" + AppleReminderNotice.Explain, outp, skipped, notices);
+
+            var noticeNote = notices > 0 ? $"(已排除 {notices} 条 Apple 公告)" : "";
+            return (true, $"「{list.DisplayName}」取到 {outp.Count} 条待办。{noticeNote}", outp, skipped, notices);
         }
         catch (TaskCanceledException)
         {
-            return (false, $"拉取提醒「{list.DisplayName}」超时。", outp, 0);
+            return (false, $"拉取提醒「{list.DisplayName}」超时。", outp, 0, 0);
         }
         catch (Exception ex)
         {
-            return (false, "拉取提醒出错:" + AppleCredentials.Redact(ex.Message), outp, 0);
+            return (false, "拉取提醒出错:" + AppleCredentials.Redact(ex.Message), outp, 0, 0);
         }
     }
 
