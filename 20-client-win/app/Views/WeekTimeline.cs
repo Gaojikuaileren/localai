@@ -62,17 +62,17 @@ public sealed class WeekTimeline : UserControl
     //     · 上面一行 = 跨天的,整条连通(这一行才读得出"从哪天到哪天");
     //     · 下面一行 = 只占一天的,同一天有几条就【共享那一天的宽度】(用户要的就是这个)。
     //   两行都是固定高 -> 整条带常驻、高度恒定。
-    const double AllDayLabelHeight = 14;
     const double AllDayBarHeight = 17;   // 条高 —— 减去下留白后要能完整装下一行 FontCaption
     const int AllDayRows = 2;
-    const double AllDayStripHeight = AllDayLabelHeight + AllDayRows * AllDayBarHeight + 4;
+    // ★ 两行【贴在一起】(用户裁定 2026-07-31:"两个全天之间的间隔过大了,可以不要间隔")。
+    //   原来两行之间夹着一条"名字行" —— 现在名字与定时日程同一套规矩:摆在条的右边、同高,
+    //   不再单占一行,那条间隔自然就没了。
+    const double AllDayStripHeight = AllDayRows * AllDayBarHeight + 3;
     const int AllDayMaxLanes = 4;
 
     // 表头 + 全天条带合成一块。自上而下:表头 / 跨天条 / 名字行 / 单日条。
     const double TopBlockHeight = HeadHeight + AllDayStripHeight;
-    const double MultiBarTop = HeadHeight;                                   // 跨天条紧贴表头下沿
-    const double AllDayLabelTop = MultiBarTop + AllDayBarHeight;             // 名字行
-    const double SingleBarTop = AllDayLabelTop + AllDayLabelHeight;          // 单日条
+    const double AllDayRowTop = HeadHeight;                                  // 第一行紧贴表头下沿
 
     const double TextOutsideBelow = 20;   // 比这还矮的条:标题挪到条外
     const double TextNeedsWidth = 52;     // 比这还窄的条:标题挪到条外(用户裁定:省略号什么都看不见)
@@ -143,7 +143,7 @@ public sealed class WeekTimeline : UserControl
         {
             Text = "全天",
             Width = GutterWidth,
-            Margin = new Thickness(4, SingleBarTop + 1, 0, 0),
+            Margin = new Thickness(4, AllDayRowTop + 1, 0, 0),
             VerticalAlignment = VerticalAlignment.Top,
             IsHitTestVisible = false,
         };
@@ -420,52 +420,89 @@ public sealed class WeekTimeline : UserControl
         var spans = CalendarData.SpansIn(_weekStart, 7);
         if (spans.Count == 0) return;
 
-        var multi = spans.Where(x => x.Span > 1).ToList();
-        var single = spans.Where(x => x.Span <= 1).ToList();
+        // ★★ 两行【都能放任何一条】(不再是"上行只给跨天、下行只给单日")——
+        //   之前跨天的只有一行,两条跨天日程一重叠就有一条被挤掉,于是常常冒出那个「+1」。
+        //   现在按"先长后短"贪心塞进两行:长的先占,短的补空。
+        //   单日的还可以【在同一格里共享宽度】—— 那是横向分道与跨天连通唯一能共存的地方
+        //   (一条跨三天的若也横向分道,三段槽位并不相邻,连不成一根)。
+        var ordered = spans.OrderByDescending(x => x.Span).ThenBy(x => x.Col).ToList();
+        var blocked = new bool[AllDayRows, 7];     // 被跨天条占死的格
+        var singles = new List<(CalendarEvent Ev, int Col, int Row)>();
+        var placedMulti = new List<(CalendarEvent Ev, int Col, int Span, bool ClipStart, bool ClipEnd, int Row)>();
         var hiddenNames = new List<string>();
 
-        // ---- 第一行:跨天的,整条连通 ----
-        var rowEnd = -1;
-        foreach (var sp in multi)
-        {
-            if (sp.Col <= rowEnd) { hiddenNames.Add(sp.Ev.Title); continue; }     // 这一行放不下了(重叠)
-            rowEnd = sp.Col + sp.Span - 1;
-            var x = sp.Col * colW + (sp.ClipStart ? 0 : 2);
-            var bw = Math.Max(6, sp.Span * colW - (sp.ClipStart ? 0 : 2) - (sp.ClipEnd ? 0 : 2));
-            AddAllDayChip(sp.Ev, x, MultiBarTop, bw, sp.Span, colW, null, coverHeader: true);
-        }
-
-        // ---- 第二行:只占一天的,同一天【共享宽度】 ----
-        var perDay = new int[7];
-        foreach (var sp in single) if (sp.Col is >= 0 and < 7) perDay[sp.Col]++;
-        var used = new int[7];
-        var labelRight = new double[7];
-        foreach (var sp in single)
+        foreach (var sp in ordered)
         {
             if (sp.Col is < 0 or > 6) continue;
-            var lanes = Math.Clamp(perDay[sp.Col], 1, AllDayMaxLanes);
-            if (used[sp.Col] >= lanes) { hiddenNames.Add(sp.Ev.Title); continue; }
-            var slotW = colW / lanes;
-            var x = sp.Col * colW + used[sp.Col] * slotW + 2;
-            used[sp.Col]++;
-            AddAllDayChip(sp.Ev, x, SingleBarTop, Math.Max(6, slotW - 4), 1, colW, labelRight, coverHeader: false);
+            int row = -1;
+            for (int r = 0; r < AllDayRows && row < 0; r++)
+            {
+                var free = true;
+                for (int k = 0; k < sp.Span && free; k++)
+                {
+                    var c = sp.Col + k;
+                    if (c is < 0 or > 6) continue;
+                    // 跨天的要整段干净;单日的允许与同格的其它单日共享宽度
+                    if (blocked[r, c]) free = false;
+                }
+                if (free) row = r;
+            }
+            if (row < 0) { hiddenNames.Add(sp.Ev.Title); continue; }
+
+            if (sp.Span > 1)
+            {
+                for (int k = 0; k < sp.Span; k++)
+                    if (sp.Col + k is >= 0 and <= 6) blocked[row, sp.Col + k] = true;
+                placedMulti.Add((sp.Ev, sp.Col, sp.Span, sp.ClipStart, sp.ClipEnd, row));
+            }
+            else singles.Add((sp.Ev, sp.Col, row));
         }
 
-        // ★ 名字/条没能画出来的【如实说有几条】—— 悄悄少画会让人以为那几天真的没安排
+        foreach (var (ev, col, span, clipStart, clipEnd, row) in placedMulti)
+        {
+            var x = col * colW + (clipStart ? 0 : 2);
+            var bw = Math.Max(6, span * colW - (clipStart ? 0 : 2) - (clipEnd ? 0 : 2));
+            // ★ 只有【贴着表头那一行】才在表头上铺横幅 —— 第二行离表头隔着一条,铺了反而对不上。
+            AddAllDayChip(ev, x, AllDayRowTop + row * AllDayBarHeight, bw, span, colW,
+                          coverHeader: row == 0);
+        }
+
+        // 同一(行, 格)里的单日条共享那一格的宽度
+        var perCell = new Dictionary<(int Row, int Col), int>();
+        foreach (var it in singles)
+        {
+            perCell.TryGetValue((it.Row, it.Col), out var n);
+            perCell[(it.Row, it.Col)] = n + 1;
+        }
+        var used = new Dictionary<(int Row, int Col), int>();
+        foreach (var (ev, col, row) in singles)
+        {
+            var lanes = Math.Clamp(perCell[(row, col)], 1, AllDayMaxLanes);
+            used.TryGetValue((row, col), out var k);
+            if (k >= lanes) { hiddenNames.Add(ev.Title); continue; }
+            used[(row, col)] = k + 1;
+            var slotW = colW / lanes;
+            AddAllDayChip(ev, col * colW + k * slotW + 2, AllDayRowTop + row * AllDayBarHeight,
+                          Math.Max(6, slotW - 4), 1, colW, coverHeader: row == 0);
+        }
+
+        // ★ 真的没画出来的【如实说】。★★ 原来只写一个「+1」—— 用户直接问"这个 +1 是什么",
+        //   一个要人猜的标记等于没标。改成一句白话,悬停再列出是哪几条。
         if (hiddenNames.Count > 0)
         {
-            // ★ 不只说"还有几条"，悬停就【把名字列出来】—— 否则你知道漏了东西却不知道漏了什么。
             var more = new TextBlock
             {
-                Text = $"+{hiddenNames.Count}",
+                Text = $"还有 {hiddenNames.Count} 条全天",
                 Background = Brushes.Transparent,
-                ToolTip = "没画出来的全天日程：" + string.Join("、", hiddenNames),
+                ToolTip = "这一周还有这几条全天日程没能画出来:" + string.Join("、", hiddenNames)
+                          + "\n(上方月历那一格里仍然看得到)",
             };
             more.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             more.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             more.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             Canvas.SetLeft(more, Math.Max(0, w - more.DesiredSize.Width - 2));
-            Canvas.SetTop(more, AllDayLabelTop);
+            Canvas.SetTop(more, AllDayRowTop + (AllDayRows - 1) * AllDayBarHeight + 1);
+            Panel.SetZIndex(more, 9);
             _allDayCanvas.Children.Add(more);
         }
     }
@@ -474,12 +511,11 @@ public sealed class WeekTimeline : UserControl
     /// 一条全天日程的横条。塞不下名字就把名字放到条【上方那一行】——
     /// 与定时日程的窄条同一套规矩(用户裁定:省略成一个"…"等于什么都没显示)。
     /// </summary>
-    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, int span, double colW,
-                       double[]? labelRight, bool coverHeader)
+    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, int span, double colW, bool coverHeader)
     {
         var back = CalendarGroups.ColorOf(ev.CalendarGroup);
 
-        // ★ 跨天的那一行:在【表头】上再铺一层同色淡底,与下面的实心条连成一整根横幅,
+        // ★ 贴着表头那一行:在表头上再铺一层同色淡底,与下面的实心条连成一整根横幅,
         //   把它覆盖的那几天连"周四 30 / 周五 31"一起框进去(用户裁定)。
         //   用淡底而不是实心:日期文字要照旧读得清,不必为它改字色。
         if (coverHeader)
@@ -496,6 +532,7 @@ public sealed class WeekTimeline : UserControl
             Canvas.SetTop(banner, 0);
             _allDayCanvas.Children.Add(banner);
         }
+
         var fits = bw >= TextNeedsWidth;
         var chip = new Border
         {
@@ -527,26 +564,26 @@ public sealed class WeekTimeline : UserControl
         Canvas.SetTop(chip, y);
         _allDayCanvas.Children.Add(chip);
 
-        if (fits || labelRight is null) return;
-        var col = Math.Clamp((int)(x / colW), 0, 6);
-        if (x < labelRight[col]) return;                 // 这一行已经被占了 -> 让 hidden 去如实计数
+        if (fits) return;
+
+        // ★★ 塞不下就把名字摆在条【右边、同高】—— 与定时日程的窄条同一套规矩。
+        //   不再单占一行(那正是两行之间那条多余间隔的来历),也不会因为位置被占就消失。
         var lb = new TextBlock
         {
             Text = ev.Title,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = Math.Max(24, (col + span) * colW - x),
             Foreground = new SolidColorBrush(back),
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
             ToolTip = chip.ToolTip,
+            MaxWidth = Math.Max(16, _allDayCanvas.ActualWidth - (x + bw + 3)),
         };
-        lb.MouseLeftButtonUp += (_, le) => { le.Handled = true; OnEditEvent?.Invoke(captured); };
         lb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        lb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        Canvas.SetLeft(lb, x);
-        Canvas.SetTop(lb, AllDayLabelTop);
+        lb.MouseLeftButtonUp += (_, le) => { le.Handled = true; OnEditEvent?.Invoke(captured); };
+        Canvas.SetLeft(lb, x + bw + 3);
+        Canvas.SetTop(lb, y + 1);
+        Panel.SetZIndex(lb, 8);
         _allDayCanvas.Children.Add(lb);
-        labelRight[col] = x + Math.Min(lb.DesiredSize.Width, lb.MaxWidth) + 6;
     }
 
     int TickStep => _hours <= 8 ? 1 : _hours <= 16 ? 2 : 3;

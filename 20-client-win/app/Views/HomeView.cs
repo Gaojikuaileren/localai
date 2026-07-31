@@ -985,7 +985,9 @@ public sealed class HomeView : UserControl
             var spin = new System.Windows.Media.Animation.DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(900))
             { RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever };
             var rot = new System.Windows.Media.RotateTransform();
-            glyph.RenderTransformOrigin = Icons.SpinOrigin(IconName.Refresh);   // ★ 绕【圆心】转,不是绕包围盒中心
+            // ★ 刷新图标的几何已保证"包围盒 = 以圆心为心的正方形"(见 Icons 里的说明),
+            //   所以绕中心转就是绕圆心转。
+            glyph.RenderTransformOrigin = new Point(0.5, 0.5);
             glyph.RenderTransform = rot;
             rot.BeginAnimation(System.Windows.Media.RotateTransform.AngleProperty, spin);
             try

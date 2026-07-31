@@ -2398,7 +2398,7 @@ public static class Selftest
                        "★★ 时间轴有【全天】条带 —— 全天日程不在 TimedOn 里，不补就看不见也点不着");
                 Assert(tl.Contains("chip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OnEditEvent?.Invoke(captured); }"),
                        "★ 全天条可点 —— 走的仍是日历那个编辑抽屉");
-                Assert(tl.Contains("const double AllDayStripHeight = AllDayLabelHeight + AllDayRows * AllDayBarHeight + 4;")
+                Assert(tl.Contains("const double AllDayStripHeight = AllDayRows * AllDayBarHeight + 3;")
                        && tl.Contains("_allDay = new() { Height = TopBlockHeight")
                        && tl.Contains("const double TopBlockHeight = HeadHeight + AllDayStripHeight;")
                        && tl.Contains("const int AllDayRows = 2;"),
@@ -2407,14 +2407,15 @@ public static class Selftest
                        && tl.Contains("_head.IsHitTestVisible = false;"),
                        "★★ 跨天的全天日程把横轴的【周几/几号】也囊括进去"
                        + "(表头铺一层同色淡底与下面的实心条连成一根横幅;表头不参与命中,横幅仍然点得着)");
-                Assert(tl.Contains("var lanes = Math.Clamp(perDay[sp.Col], 1, AllDayMaxLanes);")
+                Assert(tl.Contains("var lanes = Math.Clamp(perCell[(row, col)], 1, AllDayMaxLanes);")
                        && tl.Contains("var slotW = colW / lanes;")
-                       && tl.Contains("var multi = spans.Where(x => x.Span > 1).ToList();"),
-                       "★★ 全天条带分两行:跨天的整条连通、只占一天的【共享那一天的宽度】"
-                       + "(横向分道与跨天连通几何上不兼容 —— 一条跨三天的在每天只占 1/N,三段槽位并不相邻)");
-                Assert(tl.Contains("$\"+{hiddenNames.Count}\"")
+                       && tl.Contains("var blocked = new bool[AllDayRows, 7];"),
+                       "★★ 两行【都能放任何一条】(先长后短贪心),单日的还能在同一格里共享宽度"
+                       + " —— 之前跨天的只有一行,两条一重叠就挤掉一条,那个「+1」就是这么来的");
+                Assert(tl.Contains("$\"还有 {hiddenNames.Count} 条全天\"")
                        && tl.Contains("string.Join(\"、\", hiddenNames)"),
-                       "★ 名字没能标出来的【如实说有几条、悬停还列出是哪几条】");
+                       "★ 没画出来的【如实说一句白话、悬停列出是哪几条】"
+                       + "—— 原来只写一个「+1」,用户直接问「这个 +1 是什么」,要人猜的标记等于没标");
                 Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("ToolTip = chip.ToolTip,"),
                        "★ 外置标题悬停出全名、点一下能编辑(它比那条细色块好碰得多)");
                 // ---- 对抗式审计(2026-07-31)确认的三条,钉住 ----
