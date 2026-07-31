@@ -339,6 +339,9 @@ public partial class App : Application
         Todos.Changed += Touch;
         Chat.Changed += Touch;
         Views.CalendarData.Changed += Touch;
+        // ★ 天气缓存也要落盘 —— 不接这一行的话,缓存只活在内存里,
+        //   重启/断网时"显示上次那份 + 它的时间"根本无从谈起(设计 §8 第 6 条的整个意义就没了)。
+        Services.Weather.Changed += Touch;
         Memory.Changed += Touch;
         Notes.Changed += Touch;
         History.Changed += Touch;

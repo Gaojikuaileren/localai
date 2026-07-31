@@ -3449,6 +3449,12 @@ public static class Selftest
                            "★ 标出数据来源(Open-Meteo 要求署名)");
                     Assert(hvw.Contains("if (Services.Places.CoordOf(p) is not { } c) continue;"),
                            "★ 认不出坐标的城市直接跳过 —— 不拿别处的坐标顶替");
+                    var appw = TryReadSource("App.xaml.cs");
+                    if (appw is not null)
+                        Assert(appw.Contains("Services.Weather.Changed += Touch;")
+                               && appw.Contains("ClientStore.Save(ClientStore.WeatherPath"),
+                               "★★ 天气缓存【真的会落盘】—— 不接变更通知的话它只活在内存里,"
+                               + "重启/断网时「显示上次那份」无从谈起");
                     Assert(hvw.Contains("NetworkInterface.GetIsNetworkAvailable()"),
                            "★ 没网就不试(与 Apple 自动拉取同一条规矩)");
                 }
