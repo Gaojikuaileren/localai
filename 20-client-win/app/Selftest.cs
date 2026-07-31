@@ -1430,11 +1430,8 @@ public static class Selftest
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {
-                // ★ 两条电平【竖直、分列左右】:对方在左、我在右 —— 与气泡的左右分边同一套隐喻
-                Assert(ipSrc.Contains("MeterColumn(_theirLevel, \"对方\")") && ipSrc.Contains("MeterColumn(_myLevel, \"我\")"),
-                       "★ 两条电平分开:麦克风与会议音频不混流,谁在说话是确定的");
-                Assert(ipSrc.Contains("DockPanel.SetDock(theirs, Dock.Left)") && ipSrc.Contains("DockPanel.SetDock(mine, Dock.Right)"),
-                       "★ 对方在左、我在右(与气泡一致)");
+                // ★ 音量条挪到同传设置那一格:会议中要盯的是内容,仪表不该常占会话版面
+                Assert(!Body(ipSrc).Contains("MeterColumn"), "★ 主会话板块不再放音量条");
                 // ★ 字幕先在底部横条逐字长出来,成句才飞进气泡 ——
                 //   没定稿的文字不许直接写进对话记录,否则记录里会出现一句从没说过的话。
                 Assert(ipSrc.Contains("void AppendSubtitle(") && ipSrc.Contains("void CommitSubtitle("),
@@ -1470,6 +1467,8 @@ public static class Selftest
                        "两个开关名字等长(各六字),排在一起不长短不齐");
                 Assert(barMode.Contains("DevicePicker(\"我方麦克风\"") && barMode.Contains("DevicePicker(\"译文送到\""),
                        "★ 开关右边那半边放输入/输出设备选择(原来是空的)");
+                Assert(barMode.Contains("LevelColumn(\"对方\")") && barMode.Contains("LevelColumn(\"我方\")"),
+                       "★ 两条竖直音量挪到同传设置的最左边,开关相应右移");
                 var badge = Slice(barMode, "_driverBadge.Children.Clear();", "_switchRow.Children.Clear();");
                 Assert(badge is not null && badge.Contains("RiskDanger") && badge.Contains("RiskWarning") && badge.Contains("RiskSafe"),
                        "★ 声卡状态是红/黄/绿三态灯");

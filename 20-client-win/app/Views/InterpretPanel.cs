@@ -2,8 +2,6 @@
 //
 // 版面(用户裁定 2026-07-31):板块本身要【干净】——
 //   左上角  场景切换(由 ChatView 放,不在这里);
-//   左边缘  对方的音量(竖条);右边缘  我方的音量(竖条)
-//           ★ 左右分边与气泡一致:对方在左、我在右 —— 同一套空间隐喻,不用另学一遍;
 //   中间    对话气泡(与聊天空间同一个 BubbleShell,所以左右分边、可选中复制全都一致);
 //   底部    一条独立的、略高的半透明灰色横条 —— 字幕在这里【逐字生成】,
 //           攒成完整句子之后【动画飞到上方的气泡里】。
@@ -13,9 +11,10 @@
 //   等于让记录里出现过一句从没说过的话。
 //   底部横条是"正在听",气泡是"已经定稿";中间那一下飞行,正是"这句从此不再变了"的可见交代。
 //
-// ★ 诚实:语音链路(采集/识别/合成/虚拟麦克风)尚未接入 ——
-//   电平画【空槽】,不给会动的假动画:那正好会骗过"声音还在流动吗"这个
-//   最该被诚实回答的问题;字幕区如实说明,不伪造文字。
+// ★ 音量条【不在这里】——(用户裁定)挪到了「同传设置」那一格:
+//   会议中要盯的是对话内容,仪表需要时瞟一眼就够,不该常占版面。
+//
+// ★ 诚实:语音链路(采集/识别/合成/虚拟麦克风)尚未接入 —— 字幕区如实说明,不伪造文字。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -30,18 +29,14 @@ public sealed class InterpretPanel : UserControl
 {
     static App TheApp => (App)Application.Current;
 
-    const double MeterWidth = 6;
     const double SubtitleHeight = 62;
 
     readonly StackPanel _messages = new();
     readonly TextBlock _subtitle = new();
     readonly Border _subtitleBar;
-    readonly Border _myLevel, _theirLevel;
 
     public InterpretPanel()
     {
-        _myLevel = Meter();
-        _theirLevel = Meter();
         _subtitleBar = SubtitleBar();
 
         var dock = new DockPanel { LastChildFill = true };
@@ -50,15 +45,8 @@ public sealed class InterpretPanel : UserControl
         DockPanel.SetDock(_subtitleBar, Dock.Bottom);
         dock.Children.Add(_subtitleBar);
 
-        // 左右边缘:两条竖直电平。★ 对方在左、我在右 —— 与气泡的左右分边完全一致。
-        var theirs = MeterColumn(_theirLevel, "对方");
-        DockPanel.SetDock(theirs, Dock.Left);
-        dock.Children.Add(theirs);
-
-        var mine = MeterColumn(_myLevel, "我");
-        DockPanel.SetDock(mine, Dock.Right);
-        dock.Children.Add(mine);
-
+        // ★ 音量条已挪到【同传设置】那一格(用户裁定):
+        //   主会话板块只留对话与字幕,越干净越好 —— 会议中要盯的是内容,不是仪表。
         // 中间:对话
         var scroll = new ScrollViewer
         {
@@ -72,33 +60,6 @@ public sealed class InterpretPanel : UserControl
         Refresh();
         Loaded += (_, _) => TheApp.Interpret.Changed += Refresh;
         Unloaded += (_, _) => TheApp.Interpret.Changed -= Refresh;
-    }
-
-    // ---------------------------------------------------------------- 竖直电平
-    /// <summary>
-    /// 一条竖直电平槽。★ 现在没有数据源,所以是【空槽】——
-    /// 一旦我们成了用户的麦克风,"声音还在流动"必须能被看见;
-    /// 那时这里是实时电平,而不是一个说"已开启"的绿灯。
-    /// </summary>
-    static Border Meter()
-    {
-        var b = new Border { Width = MeterWidth, VerticalAlignment = VerticalAlignment.Stretch };
-        b.SetResourceReference(Border.BackgroundProperty, "BgSunken");
-        b.CornerRadius = new CornerRadius(MeterWidth / 2);
-        return b;
-    }
-
-    static FrameworkElement MeterColumn(Border meter, string who)
-    {
-        var t = Ui.Caption(who);
-        t.TextAlignment = TextAlignment.Center;
-        t.Margin = new Thickness(0, 6, 0, 0);
-
-        var dock = new DockPanel { LastChildFill = true, Width = 26, Margin = new Thickness(2, 0, 2, 0) };
-        DockPanel.SetDock(t, Dock.Bottom);
-        dock.Children.Add(t);
-        dock.Children.Add(meter);
-        return dock;
     }
 
     // ---------------------------------------------------------------- 底部字幕横条

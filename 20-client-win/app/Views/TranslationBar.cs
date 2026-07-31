@@ -217,6 +217,18 @@ public sealed class TranslationBar : UserControl
     {
         // 一行:左边是开关(从左往右排),右边是设备选择 —— 原来空着的那半边现在有活干了
         var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 6, 0, 0) };
+
+        // ★ 最左边是两条竖直音量(对方 / 我方)—— 从主会话板块挪过来的(用户裁定):
+        //   会议中要盯的是对话内容,仪表放在设置这一格里,需要时瞟一眼就够。
+        //   ★ 仍是空槽:没有数据源就不画会动的假动画 —— 那正好会骗过
+        //     "声音还在流动吗"这个我们最该诚实回答的问题。
+        var meters = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Stretch,
+                                      Margin = new Thickness(0, 0, 16, 0) };
+        meters.Children.Add(LevelColumn("对方"));
+        meters.Children.Add(LevelColumn("我方"));
+        DockPanel.SetDock(meters, Dock.Left);
+        row.Children.Add(meters);
+
         _switchRow.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(_switchRow, Dock.Left);
         row.Children.Add(_switchRow);
@@ -231,6 +243,23 @@ public sealed class TranslationBar : UserControl
         _latency.Margin = new Thickness(0, 0, 10, 0);
         // 状态灯紧跟标题;最右边是延迟读数
         return Card(body, "同传设置", action: _latency, scroll: false, badge: _driverBadge);
+    }
+
+    /// <summary>一条竖直音量 + 底下的名字。空槽 —— 接入采集后才有数据。</summary>
+    static FrameworkElement LevelColumn(string who)
+    {
+        var bar = new Border { Width = 6, VerticalAlignment = VerticalAlignment.Stretch, CornerRadius = new CornerRadius(3) };
+        bar.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+
+        var t = Ui.Caption(who);
+        t.TextAlignment = TextAlignment.Center;
+        t.Margin = new Thickness(0, 5, 0, 0);
+
+        var col = new DockPanel { LastChildFill = true, Width = 28, Margin = new Thickness(0, 0, 4, 0) };
+        DockPanel.SetDock(t, Dock.Bottom);
+        col.Children.Add(t);
+        col.Children.Add(bar);
+        return col;
     }
 
     /// <summary>一个设备下拉(输入/输出)。第一项永远是"跟随系统默认"。</summary>
