@@ -78,7 +78,9 @@ public sealed class HomeView : UserControl
         get
         {
             var n = Math.Max(1, _places.Count);
-            return Math.Max(ExpandedCityMin, WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap));
+            // ★ 最后一张卡自己也带一道下边距 —— 不把它减掉的话总高比框大 10px，
+            //   于是天气板块就【可以上下滑一点】(用户反馈)。把展开那张相应改矮一点就刚好装下。
+            return Math.Max(ExpandedCityMin, WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap) - CityGap);
         }
     }
 

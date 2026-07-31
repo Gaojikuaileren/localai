@@ -113,7 +113,7 @@ public sealed class WeekTimeline : UserControl
         //   "7月20日–7月26日"这个标签是多余的 —— 横轴上每一格都写着日期了,
         //   而为了一行文字单占一行高,在这个只有 300px 的板块里太奢侈。
         //   ‹ 今 › 三个键收进【刻度列正上方那一格】(星期几那一行的第 0 列),那里本来就是空的。
-        _navCell.Children.Add(NavKey("‹", "上一周", () => GoWeek(_weekStart.AddDays(-7))));
+        // ★ 「今」左右的 ‹ › 已按用户要求去掉 —— 换周走上面那张月历(点哪一天,下面就跟到哪一周)。
         _navCell.Children.Add(NavKey("今", "回到本周的此刻(保持当前缩放)", () =>
         {
             // ★ 【保持当前缩放】(用户裁定)—— 不再把 _hours 复位成默认值。
@@ -121,7 +121,6 @@ public sealed class WeekTimeline : UserControl
             _top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);
             GoWeek(StartOfWeek(DateTime.Today));
         }));
-        _navCell.Children.Add(NavKey("›", "下一周", () => GoWeek(_weekStart.AddDays(7))));
 
         // ★★ 全天条带也要【让开左侧刻度列】—— 否则它的七列比下面的表格向左偏 44px，
         //   一条周四到周六的全天日程会看起来像是周三到周五的。
@@ -152,50 +151,35 @@ public sealed class WeekTimeline : UserControl
         root.Children.Add(body);
         Content = root;
 
-        _gutter.ToolTip = "时间尺:滚轮缩放 · 按住上下拖也是缩放";
-        _canvas.ToolTip = "滚轮上下滑 · 按住空白处上下拖也是上下滑 · 双击空白处新建"
-                          + " · 拖日程上下边改起止、拖中间整体挪动(半小时一格)";
+        // ---------------- 手势(用户裁定 2026-07-31 第四版:两边【同一套】)----------------
+        //   · 滚轮   = 上下滑(刻度列上也一样)
+        //   · 左键拖 = 缩放(刻度列、表格空白处都一样)
+        //   · 双击空白处 = 新建;拖日程 = 改时间/挪动;单击日程 = 编辑
+        var tip = "滚轮 = 上下滑 · 按住拖 = 缩放 · 双击空白处 = 新建"
+                  + " · 单击日程 = 编辑 · 拖日程上下边 = 改起止、拖中间 = 整体挪动(半小时一格)";
+        _gutter.ToolTip = tip;
+        _canvas.ToolTip = tip;
 
-        // ---------------- 手势:按区域分工(用户裁定 2026-07-31)----------------
-        // ★ 左侧刻度列 = 时间尺 -> 滚轮缩放
-        _gutter.MouseWheel += (_, e) =>
-        {
-            var f = e.Delta > 0 ? 1 / 1.2 : 1.2;
-            var anchor = _gutter.ActualHeight > 0 ? e.GetPosition(_gutter).Y / _gutter.ActualHeight : 0.5;
-            // ★★ 只有真的缩放了才吞 —— 夹到边界还吞的话,光标停在这里整页就永远滚不动了。
-            e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1));
-        };
-        // ★ 左侧刻度列按住上下拖 = 连续缩放(往下拉 = 把时间尺拉长 = 放大)
+        _gutter.MouseWheel += (_, e) => e.Handled = WheelPan(e.Delta);
+        _canvas.MouseWheel += (_, e) => e.Handled = WheelPan(e.Delta);
+
         _gutter.MouseLeftButtonDown += (_, e) =>
         {
             if (_gutter.ActualHeight <= 0) return;
             e.Handled = true;
-            _scale = new ScaleDrag(e.GetPosition(_gutter).Y, _hours,
-                                   Math.Clamp(e.GetPosition(_gutter).Y / _gutter.ActualHeight, 0, 1),
-                                   _top + _hours * Math.Clamp(e.GetPosition(_gutter).Y / _gutter.ActualHeight, 0, 1));
-            _gutter.CaptureMouse();
+            BeginScale(e.GetPosition(_gutter).Y, _gutter.ActualHeight, _gutter);
         };
-
-        // ★ 右侧表格 = 内容 -> 滚轮上下滑
-        _canvas.MouseWheel += (_, e) =>
-        {
-            var step = Math.Max(0.5, _hours / 6.0);           // 一格滚轮约走可视范围的六分之一
-            e.Handled = PanTo(_top + (e.Delta > 0 ? -step : step));
-        };
-        // ★ 右侧表格空白处:单击拖 = 上下滑;双击 = 新建
         _canvas.MouseLeftButtonDown += (_, e) =>
         {
             e.Handled = true;
             if (e.ClickCount >= 2)
             {
-                EndPan();
+                EndScale();
                 if (AtPoint(e.GetPosition(_canvas)) is { } w) OnCreateAt?.Invoke(w);
                 return;
             }
             if (_canvas.ActualHeight <= 0) return;
-            _pan = new Pan(e.GetPosition(_canvas).Y, _top);
-            _canvas.CaptureMouse();
-            _canvas.Cursor = Cursors.ScrollNS;
+            BeginScale(e.GetPosition(_canvas).Y, _canvas.ActualHeight, _canvas);
         };
 
         SizeChanged += (_, _) => Rebuild();
@@ -211,7 +195,7 @@ public sealed class WeekTimeline : UserControl
         {
             CalendarData.Changed -= OnDataChanged;
             CalendarGroups.Changed -= OnDataChanged;
-            _tick.Stop(); EndPan(); EndScale(); EndEventDrag();
+            _tick.Stop(); EndScale(); EndEventDrag();
         };
         IsVisibleChanged += (_, _) => SyncTick();
         IsEnabledChanged += (_, _) => SyncTick();
@@ -255,9 +239,24 @@ public sealed class WeekTimeline : UserControl
 
     void SyncTick() { if (IsVisible && IsEnabled) _tick.Start(); else _tick.Stop(); }
 
+    /// <summary>滚轮 = 上下滑。到顶/到底就【不吞】,把事件还给整页去滚。</summary>
+    bool WheelPan(int delta)
+    {
+        var step = Math.Max(0.5, _hours / 6.0);      // 一格约走可视范围的六分之一
+        return PanTo(_top + (delta > 0 ? -step : step));
+    }
+
+    /// <summary>按住拖 = 缩放。锚点取按下那一点 —— 手底下的时刻在缩放中保持不动。</summary>
+    void BeginScale(double y, double height, UIElement src)
+    {
+        var anchor = height > 0 ? Math.Clamp(y / height, 0, 1) : 0.5;
+        _scale = new ScaleDrag(y, _hours, anchor, _top + _hours * anchor, src);
+        src.CaptureMouse();
+    }
+
     void OnTick(object? sender, EventArgs e)
     {
-        if (_evDrag is not null || _pan is not null || _scale is not null) return;
+        if (_evDrag is not null || _scale is not null) return;
         if (DateTime.Today != _tickDay) { _tickDay = DateTime.Today; Rebuild(); DayRolled?.Invoke(); return; }
         RebuildVertical();
     }
@@ -300,7 +299,7 @@ public sealed class WeekTimeline : UserControl
         var hit = new Border
         {
             Child = t,
-            Width = 13, Height = 16,
+            Width = 26, Height = 16,
             Margin = new Thickness(0, 0, 1, 0),
             BorderThickness = new Thickness(1),
             Background = Brushes.Transparent,
@@ -395,13 +394,13 @@ public sealed class WeekTimeline : UserControl
 
         var multi = spans.Where(x => x.Span > 1).ToList();
         var single = spans.Where(x => x.Span <= 1).ToList();
-        int hidden = 0;
+        var hiddenNames = new List<string>();
 
         // ---- 第一行:跨天的,整条连通 ----
         var rowEnd = -1;
         foreach (var sp in multi)
         {
-            if (sp.Col <= rowEnd) { hidden++; continue; }     // 这一行放不下了(重叠)
+            if (sp.Col <= rowEnd) { hiddenNames.Add(sp.Ev.Title); continue; }     // 这一行放不下了(重叠)
             rowEnd = sp.Col + sp.Span - 1;
             var x = sp.Col * colW + (sp.ClipStart ? 0 : 2);
             var bw = Math.Max(6, sp.Span * colW - (sp.ClipStart ? 0 : 2) - (sp.ClipEnd ? 0 : 2));
@@ -417,7 +416,7 @@ public sealed class WeekTimeline : UserControl
         {
             if (sp.Col is < 0 or > 6) continue;
             var lanes = Math.Clamp(perDay[sp.Col], 1, AllDayMaxLanes);
-            if (used[sp.Col] >= lanes) { hidden++; continue; }
+            if (used[sp.Col] >= lanes) { hiddenNames.Add(sp.Ev.Title); continue; }
             var slotW = colW / lanes;
             var x = sp.Col * colW + used[sp.Col] * slotW + 2;
             used[sp.Col]++;
@@ -425,9 +424,15 @@ public sealed class WeekTimeline : UserControl
         }
 
         // ★ 名字/条没能画出来的【如实说有几条】—— 悄悄少画会让人以为那几天真的没安排
-        if (hidden > 0)
+        if (hiddenNames.Count > 0)
         {
-            var more = new TextBlock { Text = $"+{hidden}", IsHitTestVisible = false, ToolTip = "还有全天日程没能画出来 —— 在上方月历那一格里能看到" };
+            // ★ 不只说"还有几条"，悬停就【把名字列出来】—— 否则你知道漏了东西却不知道漏了什么。
+            var more = new TextBlock
+            {
+                Text = $"+{hiddenNames.Count}",
+                Background = Brushes.Transparent,
+                ToolTip = "没画出来的全天日程：" + string.Join("、", hiddenNames),
+            };
             more.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             more.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             more.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
@@ -481,11 +486,14 @@ public sealed class WeekTimeline : UserControl
         var lb = new TextBlock
         {
             Text = ev.Title,
-            IsHitTestVisible = false,
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = Math.Max(24, (col + span) * colW - x),
             Foreground = new SolidColorBrush(back),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            ToolTip = chip.ToolTip,
         };
+        lb.MouseLeftButtonUp += (_, le) => { le.Handled = true; OnEditEvent?.Invoke(captured); };
         lb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         lb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Canvas.SetLeft(lb, x);
@@ -750,14 +758,20 @@ public sealed class WeekTimeline : UserControl
         if (!textInside)
         {
             // 外置标题:优先摆在条的正上方;被占了就往上让一行,最多让三行,再不行就不画(有 ToolTip 兜)
+            // ★ 外置标题本身也要【悬停出全名、点一下能编辑】(用户裁定)——
+            //   它往往比那条细细的色块好碰得多。
             var lb = new TextBlock
             {
                 Text = ev.Title,
-                IsHitTestVisible = false,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = Math.Max(30, colRight - x),
                 Foreground = new SolidColorBrush(back),
+                Background = Brushes.Transparent,      // 透明但可命中，否则 ToolTip 不会弹
+                Cursor = Cursors.Hand,
+                ToolTip = box.ToolTip,
             };
+            var capturedLb = ev;
+            lb.MouseLeftButtonUp += (_, le) => { le.Handled = true; OnEditEvent?.Invoke(capturedLb); };
             lb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             lb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             var lw = Math.Min(lb.DesiredSize.Width, lb.MaxWidth);
@@ -789,19 +803,21 @@ public sealed class WeekTimeline : UserControl
         box.PreviewMouseLeftButtonDown += (_, e) =>
         {
             e.Handled = true;
-            // ★ 续画的那一半不接受拖动 —— 它的主体在隔壁那天,在这里改会让人搞不清动的是哪一头。
-            if (isTail) return;
             var y = e.GetPosition(box).Y;
             var mode = y <= grab ? DragMode.Start : y >= box.Height - grab ? DragMode.End : DragMode.Move;
+            // ★★ 续画的那半截(跨零点之后落在隔壁那天的部分)【底边可以拖】——
+            //   它的底边就是这条日程真正的结束时刻,拖它拉长是最自然的做法
+            //   (用户反馈:跨天日程建不出来,就是因为这半截整个不接受拖动)。
+            //   但它的【顶边】不是开始时刻(那在隔壁那天),拖了会让人搞不清动的是哪一头 ——
+            //   顶边与中间一律当成"点了一下",交给编辑抽屉。
+            if (isTail && mode != DragMode.End) mode = DragMode.Move;
+            if (isTail && mode == DragMode.Move) { _evDrag = new EventDrag(ev, DragMode.Move, e.GetPosition(_canvas), box, false, ev.Start, ev.End); _canvas.CaptureMouse(); return; }
             _evDrag = new EventDrag(ev, mode, e.GetPosition(_canvas), box, false, ev.Start, ev.End);
             _canvas.CaptureMouse();
         };
-        box.MouseLeftButtonUp += (_, e) =>
-        {
-            e.Handled = true;
-            // 没真的拖动过 = 点了一下 -> 打开编辑
-            if (_evDrag is null || !_evDrag.Moved) { EndEventDrag(); OnEditEvent?.Invoke(ev); }
-        };
+        // ★ 这里【不挂】MouseLeftButtonUp:按下时鼠标已被 _canvas 捕获,
+        //   松手的事件走的是捕获目标那条路,根本到不了这个 Border。
+        //   点击开编辑统一在 EndEventDrag 里判(见那里的说明)。
 
         Canvas.SetLeft(box, x);
         Canvas.SetTop(box, yTop);
@@ -824,11 +840,9 @@ public sealed class WeekTimeline : UserControl
     /// <param name="Start">预览中的开始/结束(还没写进 CalendarData)。</param>
     sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,
                             bool Moved, DateTime Start, DateTime End);
-    sealed record Pan(double FromY, double Top0);
-    sealed record ScaleDrag(double FromY, double Hours0, double Anchor, double HourAtAnchor);
+    sealed record ScaleDrag(double FromY, double Hours0, double Anchor, double HourAtAnchor, UIElement Src);
 
     EventDrag? _evDrag;
-    Pan? _pan;
     ScaleDrag? _scale;
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -840,19 +854,13 @@ public sealed class WeekTimeline : UserControl
         // 左侧刻度列:上下拖 = 缩放(往下拉 = 把尺拉长 = 放大)
         if (_scale is { } sc)
         {
-            var dy = e.GetPosition(_gutter).Y - sc.FromY;
+            var dy = e.GetPosition(sc.Src).Y - sc.FromY;
             var factor = Math.Pow(2, -dy / 220.0);          // 拖 220px 约缩放一倍
             var next = Math.Clamp(sc.Hours0 * factor, MinHours, MaxHours);
             if (Math.Abs(next - _hours) < 0.001) return;
             _hours = next;
             _top = ClampTop(sc.HourAtAnchor - _hours * sc.Anchor);
             Rebuild();
-            return;
-        }
-
-        if (_pan is { } pan)
-        {
-            PanTo(pan.Top0 - (e.GetPosition(_canvas).Y - pan.FromY) / h * _hours);
             return;
         }
 
@@ -929,30 +937,25 @@ public sealed class WeekTimeline : UserControl
     protected override void OnMouseUp(MouseButtonEventArgs e)
     {
         base.OnMouseUp(e);
-        EndPan(); EndScale();
-        if (_evDrag is { Moved: true }) EndEventDrag();
+        EndScale();
+        // ★★ 【无条件】收尾。之前写的是"只有真的拖动过才收尾" ——
+        //   于是点一下日程块(没拖动)时 _evDrag 永远留着,方块从此死死跟着鼠标走,
+        //   而且编辑抽屉也打不开。这两件事是同一个漏洞的两面。
+        EndEventDrag();
     }
 
     // ★ 捕获丢失也要收尾(拖到窗口外松手 / Alt+Tab / 右键中断),否则拖拽状态永远挂着。
     protected override void OnLostMouseCapture(MouseEventArgs e)
     {
         base.OnLostMouseCapture(e);
-        EndPan(); EndScale(); EndEventDrag();
-    }
-
-    void EndPan()
-    {
-        if (_pan is null) return;
-        _pan = null;
-        _canvas.Cursor = null;
-        if (_canvas.IsMouseCaptured) _canvas.ReleaseMouseCapture();
+        EndScale(); EndEventDrag();
     }
 
     void EndScale()
     {
-        if (_scale is null) return;
+        if (_scale is not { } sc) return;
         _scale = null;
-        if (_gutter.IsMouseCaptured) _gutter.ReleaseMouseCapture();
+        if (sc.Src.IsMouseCaptured) sc.Src.ReleaseMouseCapture();
     }
 
     void EndEventDrag()
@@ -960,7 +963,8 @@ public sealed class WeekTimeline : UserControl
         if (_evDrag is not { } dg) return;
         _evDrag = null;
         if (_canvas.IsMouseCaptured) _canvas.ReleaseMouseCapture();
-        if (!dg.Moved) return;
+        // ★ 没拖动 = 【点了一下】-> 打开编辑抽屉(用户裁定)。
+        if (!dg.Moved) { OnEditEvent?.Invoke(dg.Ev0); return; }
 
         // ★ 数据在这里【提交一次】。拖动全程只是把方块挪给人看。
         var live = CalendarData.Events.FirstOrDefault(x => x.Id == dg.Ev0.Id);

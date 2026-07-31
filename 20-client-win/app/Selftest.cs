@@ -2337,12 +2337,13 @@ public static class Selftest
                        + "滚轮事件根本不从那里发出(用户反馈:只有可交互元素才能缩放)");
                 // ★★ 手势按【区域】分工(用户裁定 2026-07-31):
                 //   左侧刻度列 = 时间尺(滚轮缩放 / 拖也缩放);右侧表格 = 内容(滚轮上下滑 / 拖也上下滑)。
-                Assert(tl.Contains("_gutter.MouseWheel") && tl.Contains("e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1))")
-                       && tl.Contains("_gutter.MouseLeftButtonDown") && tl.Contains("_scale = new ScaleDrag("),
-                       "★★ 左侧刻度列:滚轮缩放 + 按住上下拖也是缩放");
-                Assert(tl.Contains("_canvas.MouseWheel") && tl.Contains("e.Handled = PanTo(")
-                       && tl.Contains("_pan = new Pan("),
-                       "★★ 右侧表格:滚轮上下滑 + 按住空白处上下拖也是上下滑");
+                // ★★ 第四版(用户裁定):不分区域，两边都是【左键拖 = 缩放、滚轮 = 上下滑】。
+                Assert(tl.Contains("_gutter.MouseWheel += (_, e) => e.Handled = WheelPan(e.Delta);")
+                       && tl.Contains("_canvas.MouseWheel += (_, e) => e.Handled = WheelPan(e.Delta);"),
+                       "★★ 两边滚轮都是上下滑");
+                Assert(tl.Contains("BeginScale(e.GetPosition(_gutter).Y, _gutter.ActualHeight, _gutter)")
+                       && tl.Contains("BeginScale(e.GetPosition(_canvas).Y, _canvas.ActualHeight, _canvas)"),
+                       "★★ 两边左键拖都是缩放");
                 Assert(tl.Contains("DragMode.Move") && tl.Contains("var dayShift = colW > 0"),
                        "★ 拖日程中间 = 整体位移(竖向改时刻、横向换一天)");
                 Assert(tl.Contains("static List<(int Index, int Col, int Total)> LayOut"),
@@ -2366,8 +2367,15 @@ public static class Selftest
                 //   而且一旦拖到与别的日程重叠、重叠簇列数就变,方块会当场横向缩一半、拖回来又弹回全宽。
                 Assert(tl.Contains("Canvas.SetTop(dg.Box, y0);") && tl.Contains("dg.Box.Height = Math.Max(3, y1 - y0);"),
                        "★★ 拖日程是【实时预览】——只挪这一个方块,不重建(用户反馈:拖顶部/底部会抖)");
-                Assert(tl.Contains("if (!dg.Moved) return;") && tl.Contains("CalendarData.Update(live with { Start = dg.Start, End = dg.End })"),
-                       "★★ 数据在【松手时提交一次】,拖动全程不写 CalendarData");
+                Assert(tl.Contains("if (!dg.Moved) { OnEditEvent?.Invoke(dg.Ev0); return; }")
+                       && tl.Contains("CalendarData.Update(live with { Start = dg.Start, End = dg.End })"),
+                       "★★ 数据在【松手时提交一次】;没拖动 = 点了一下 -> 打开编辑抽屉");
+                // ★★ 点一下日程块它就死死跟着鼠标走 —— 根因是松手时【只在真的拖动过才收尾】。
+                //   同一个漏洞的另一面：编辑抽屉也永远打不开。
+                Assert(tl.Contains("EndScale();") && tl.Contains("// ★★ 【无条件】收尾"),
+                       "★★ 松手时【无条件】收尾(不能只在拖动过才收)");
+                Assert(tl.Contains("if (isTail && mode != DragMode.End) mode = DragMode.Move;"),
+                       "★★ 跨天那半截的【底边可拖】 —— 它就是真正的结束时刻(之前整个不接受拖动,跨天日程因此建不出来)");
                 Assert(tl.Contains("protected override void OnLostMouseCapture"),
                        "★ 捕获丢失也收尾(拖到窗口外松手/Alt+Tab),否则拖拽状态永远挂着");
                 // ★★ 全天条带：拿掉月历左下角那份当日列表之后，
@@ -2386,12 +2394,14 @@ public static class Selftest
                        && tl.Contains("var multi = spans.Where(x => x.Span > 1).ToList();"),
                        "★★ 全天条带分两行:跨天的整条连通、只占一天的【共享那一天的宽度】"
                        + "(横向分道与跨天连通几何上不兼容 —— 一条跨三天的在每天只占 1/N,三段槽位并不相邻)");
-                Assert(tl.Contains("$\"+{hidden}\""),
-                       "★ 名字没能标出来的【如实说有几条】,不惄惄少画");
+                Assert(tl.Contains("$\"+{hiddenNames.Count}\"")
+                       && tl.Contains("string.Join(\"、\", hiddenNames)"),
+                       "★ 名字没能标出来的【如实说有几条、悬停还列出是哪几条】");
+                Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("ToolTip = chip.ToolTip,"),
+                       "★ 外置标题悬停出全名、点一下能编辑(它比那条细色块好碰得多)");
                 // ---- 对抗式审计(2026-07-31)确认的三条,钉住 ----
-                Assert(tl.Contains("e.Handled = Zoom(f, Math.Clamp(anchor, 0, 1))") && tl.Contains("bool Zoom("),
-                       "★★ 滚轮【只有真的缩放了才吞】—— _hours 起手就等于 MinHours,"
-                       + "无条件 Handled 会让开屏第一下向上滚就卡死(时间轴不动、整页也不动)");
+                Assert(tl.Contains("e.Handled = WheelPan(e.Delta)") && tl.Contains("bool WheelPan(int delta)") && tl.Contains("bool PanTo("),
+                       "★★ 滚轮【只有真的滑动了才吞】—— 到顶/到底还吞的话,光标停在这里整页就永远滑不动");
                 Assert(tl.Contains("sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,")
                        && tl.Contains("var moved = (cur.Y - dg.From.Y) / h * _hours;")
                        && tl.Contains("Math.Clamp(Snap(e0 + moved), SnapUp(s0 + SnapHours), DayMax)"),
@@ -2406,12 +2416,13 @@ public static class Selftest
                        && tl.Contains("void SyncTick()"),
                        "★ 「此刻」红线/昼夜带/今天高亮会随时间走,且不可见时停表");
 
-                Assert(tl.Contains("_gutter.ToolTip = \"时间尺") && tl.Contains("_canvas.ToolTip = \"滚轮上下滑"),
-                       "★ 手势都没有可见按钮 —— 左右两块各有一句提示,否则没人猜得到");
+                Assert(tl.Contains("_gutter.ToolTip = tip;") && tl.Contains("_canvas.ToolTip = tip;"),
+                       "★ 手势都没有可见按钮 —— 两边共用同一句提示(手势已经不分区域了)");
                 Assert(!tl.Contains("_weekStart:M月d日}"),
                        "★ 顶栏那行日期标签已去掉(横轴上每一格都写着日期了)");
-                Assert(tl.Contains("Grid.SetColumn(_navCell, 0);") && tl.Contains("FrameworkElement NavKey("),
-                       "★ ‹ 今 › 收进刻度列正上方那一格,且长得像按钮(有边框 + hover 底色)");
+                Assert(tl.Contains("Grid.SetColumn(_navCell, 0);") && tl.Contains("FrameworkElement NavKey(")
+                       && !tl.Contains("NavKey(\"‹\""),
+                       "★ 只留「今」一个键(左右两个已去掉),收在刻度列正上方那一格、长得像按钮");
                 Assert(tl.Contains("_top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);"),
                        "★ 按「今」【保持当前缩放】,只把此刻挪到视野中间");
                 Assert(tl.Contains("if (HoursFrom(prev, ev.End) <= 24) continue;"),
@@ -2800,7 +2811,7 @@ public static class Selftest
                     // ★★ 原来写死的是"减两张",只在正好 3 个地点时成立 ——
                     //   而地点数是会变的:Places.Load 会把与当前所在地重名的那个去重
                     //   (系统时区改成中国标准时间就只剩 2 张),用户也可以自己加城市。
-                    Assert(homeSrc.Contains("WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap)"),
+                    Assert(homeSrc.Contains("WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap) - CityGap"),
                            "★★ 展开高按【实际张数】倒推,不再假定正好 3 张");
                     Assert(homeSrc.Contains("Math.Max(ExpandedCityMin,"),
                            "★ 展开高有下限 —— 张数一多式子会算成负数,而 Height 拿到负值会【在构造期抛】(程序打不开)");
