@@ -2128,7 +2128,10 @@ public static class Selftest
             if (mwSrc2 is not null)
             {
                 Assert(mwSrc2.Contains("foreach (var w in Workspaces.Ordered"), "导航按统一清单、用户排定顺序渲染工作空间");
-                Assert(mwSrc2.Contains("IsWorkspaceVisible(w.Key)"), "被关掉的工作空间不进导航");
+                Assert(mwSrc2.Contains("visible: TheApp.Settings.IsWorkspaceVisible(def.Key)"),
+                       "被关掉的工作空间不进左栏");
+                Assert(mwSrc2.Contains("if (visible) target.Children.Add(b);") && mwSrc2.Contains("_nav.Add((item, b));"),
+                       "★ 但它【照样登记进 _nav】—— 登记漏了等于这个键从此失效:人正待在那个空间时把它藏起来,之后换语言 Navigate 会静默失效");
                 Assert(mwSrc2.Contains("NavSystemPanel"), "系统组放在贴底的独立面板");
                 Assert(mwSrc2.Contains("public void RefreshNavRail"), "扩展改动后能只刷新导航栏");
                 Assert(!mwSrc2.Contains("ShouldShowInvestment"), "移除旧的投资隐藏策略(改由用户勾选)");
@@ -2771,20 +2774,65 @@ public static class Selftest
                 Assert(Views.FocusPolicy.FindChatInput(hidden) is null, "折叠起来的分支里的输入框不被 Tab 到");
             }
             // ---- 系统页(设置/模型/扩展)是【覆盖式】的,不销毁底下正在工作的页面 ----
+            // ---- 模型页的「模型选择策略」先占位(用户裁定 2026-07-31) ----
+            {
+                var mv = TryReadSource(Path.Combine("Views", "ModelsView.cs"));
+                if (mv is not null)
+                {
+                    Assert(mv.Contains("StrategyPlaceholder()") && mv.Contains("model.strategy"),
+                           "模型页多了一块「模型选择策略」");
+                    var ph = Slice(mv, "static FrameworkElement StrategyPlaceholder()", "static FrameworkElement ModelToggle");
+                    Assert(ph is not null && !ph.Contains("ToggleSwitch") && !ph.Contains("new CheckBox") && !ph.Contains("new ComboBox"),
+                           "★ 占位符里【没有任何能拨却不生效的控件】—— 空着只是“还没做”,假开关是骗人");
+                    Assert(ph is not null && ph.Contains("StrokeDashArray"),
+                           "占位用虚线框 —— 实线会让人以为是个已完成的板块");
+                    Assert(Strings.Get("model.strategy_todo").Length > 0 && Strings.Get("model.strategy_note").Length > 0,
+                           "占位文案三语都齐(缺键时 Strings.Get 会退回键名)");
+                }
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
-                Assert(mwSys.Contains("static bool IsSystemPage(string key) => key is \"settings\" or \"models\" or \"extensions\";"),
-                       "设置/模型/扩展三页走覆盖式");
                 var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
                 Assert(nav is not null && nav.Contains("if (IsSystemPage(key))") && nav.Contains("OpenSystemPage(key);"),
                        "★ 进系统页 = 盖上来,不替换底下的工作页(否则回来时会话/滚动/草稿全没了)");
+                Assert(mwSys.Contains("static bool IsSystemPage(string key) => key is \"settings\" or \"model\" or \"extensions\";"),
+                       "★ 键名照抄导航注册处 —— 模型那页是 \"model\" 不是 \"models\"(写错就绕过覆盖层、照旧拆重建)");
+                Assert(mwSys.Contains("ContentHost.IsEnabled = false;") && mwSys.Contains("ContentHost.IsEnabled = true;"),
+                       "★ 盖上时停用底下那页 —— 否则 Tab 会聚焦到被盖住的输入框,打字打进看不见的地方");
+                Assert(mwSys.Contains("_systemKey is not null && !AnyDropDownOpen(SystemPageHost))"),
+                       "★ Esc 就是那个返回箭头(排在浮层/菜单之后,不一下退两层)");
                 Assert(mwSys.Contains("public void CloseSystemPage()") && mwSys.Contains("BackChevron("),
                        "★ 左上角有返回箭头,点它回到底下那一页 —— 那一页一直活着,不用重建");
+                // ---- 覆盖式导航的回归防线(2026-07-31 审计确认的几条) ----
+                Assert(mwSys.Contains("string ActiveKey => _systemKey ?? _currentKey;") && mwSys.Contains("HighlightNav(ActiveKey);"),
+                       "★ 左栏高亮认【眼前这一页】—— 否则在扩展页里勾一下,高亮就跳到底下那张看不见的页上去了");
+                var lang = Slice(mwSys, "void OnLanguageChanged()", "BuildChromeIcons();");
+                Assert(lang is not null && lang.Contains("var sys = _systemKey;") && lang.Contains("OpenSystemPage(sys);"),
+                       "★ 在设置里换语言不会把人踢回工作页 —— 换语言那一下正是在设置页里发生的");
+                Assert(mwSys.Contains("if (_systemKey is not null && key == _currentKey && ContentHost.Content is not null)"),
+                       "★ 覆盖层盖着时点左栏里底下那一页自己 = 收起回去,不是拆了重建(否则两条路两种结果)");
+                Assert(mwSys.Contains("static bool AnyDropDownOpen(DependencyObject? root)"),
+                       "下拉框开着时 Esc 只收下拉(实地查验,不靠标志位)");
+                Assert(mwSys.Contains("PreviewMouseUp += (_, me) => { if (_swallowUp)"),
+                       "★ “浮层开着时第一次点击只关浮层”连【松开】也吞 —— Chip/返回都挂在 MouseLeftButtonUp 上,只吞按下等于没拦");
+                Assert(mwSys.Contains("CalendarButton.Visibility = Visibility.Visible;"),
+                       "★ 系统页盖住主页时,顶栏日历按钮要露出来(不然日历彻底没入口)");
                 Assert(mwSys.Contains("SettingsInOverlay()?.RevealAudioDriver()"),
                        "从别处跳到某块设置时,也从覆盖层里取设置页");
                 Assert(!Body(mwSys).Contains("(ContentHost.Content as SettingsView)"),
                        "不再从工作页宿主里找设置页(它已经不在那儿了)");
+            }
+            var mwSysXaml = TryReadSource("MainWindow.xaml");
+            if (mwSysXaml is not null)
+            {
+                // ★ 覆盖层必须是 Border:ContentControl 的默认模板【不画 Background】,
+                //   写了也白写 —— 第一版就是这么写的,结果底下的工作页整个透出来、点击也穿透。
+                Assert(mwSysXaml.Contains("<Border x:Name=\"SystemPageLayer\"") && mwSysXaml.Contains("Background=\"{DynamicResource BgWindow}\""),
+                       "★ 覆盖层是【Border】而不是 ContentControl —— 后者根本不画底色,也拦不住点击");
+                Assert(!mwSysXaml.Contains("<ContentControl x:Name=\"SystemPageHost\" Visibility=\"Collapsed\""),
+                       "旧的透明覆盖层已撤掉");
             }
 
             var mwTab = TryReadSource("MainWindow.xaml.cs");

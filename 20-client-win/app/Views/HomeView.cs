@@ -207,6 +207,10 @@ public sealed class HomeView : UserControl
         _timer.Tick += (_, _) => UpdateClocks();
         Loaded += (_, _) => { _timer.Start(); RelayoutContinuous(); RelayoutDiscrete(); };
         Unloaded += (_, _) => _timer.Stop();
+        // ★ 被系统页(设置/模型/扩展)盖住时停表:那时主页整个不可见,
+        //   秒针再走也没人看得到 —— 和显存条"不可见就停表"是同一条规矩(省电远比调长间隔有效)。
+        //   盖住的做法是把宿主 IsEnabled 置 false(见 MainWindow.OpenSystemPage),所以认这个信号。
+        IsEnabledChanged += (_, e) => { if ((bool)e.NewValue) _timer.Start(); else _timer.Stop(); };
     }
 
     // ---------------------------------------------------------------- 随尺寸重排

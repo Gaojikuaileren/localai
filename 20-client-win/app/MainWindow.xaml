@@ -238,8 +238,15 @@
              正在打的字全没了。现在系统页盖在上面,底下那个实例一直活着,返回就是原样。 -->
         <Grid>
           <ContentControl x:Name="ContentHost"/>
-          <ContentControl x:Name="SystemPageHost" Visibility="Collapsed" Focusable="False"
-                          Background="{DynamicResource BgWindow}"/>
+          <!-- ★ 遮盖层必须是 Border 而不是 ContentControl:
+               ContentControl 的默认模板【只有一个 ContentPresenter】,根本不画 Background ——
+               写了 Background 也是个摆设,结果是底下的工作页整个透出来、连点击都穿透过去。
+               (这正是第一版覆盖式导航"界面很错乱"的原因。)
+               Border 既画底色也吃命中测试,两件事一次解决。 -->
+          <Border x:Name="SystemPageLayer" Visibility="Collapsed"
+                  Background="{DynamicResource BgWindow}">
+            <ContentControl x:Name="SystemPageHost" Focusable="False"/>
+          </Border>
         </Grid>
       </DockPanel>
     </Grid>

@@ -74,6 +74,13 @@ public partial class MainWindow : Window
             if (ke.Key != System.Windows.Input.Key.Escape) return;
             if (Overlay.IsOpen) { Overlay.CloseActive(); ke.Handled = true; }
             if (MenuHost.IsOpen) { MenuHost.CloseAll(); ke.Handled = true; }
+            // 系统页(设置/模型/扩展)盖着的时候,Esc 就是那个返回箭头 ——
+            // ★ 排在最后:浮层/菜单开在系统页之上,先关它们,别一下退两层。
+            // ★ 但下拉框开着时 Esc 归下拉 —— 用户按它是想"收起这个下拉",不是"整页退出"。
+            //   ComboBox 的下拉既不在 Overlay 也不在 MenuHost 的账上,只能【实地查验】(与 MenuHost 同一套哲学:
+            //   状态是查出来的,不是攒出来的)。这里不设 Handled、直接放行,让 ComboBox 自己去关。
+            else if (!ke.Handled && _systemKey is not null && !AnyDropDownOpen(SystemPageHost))
+            { CloseSystemPage(); ke.Handled = true; }
         };
 
         // ★ 全局拦截(用户裁定):浮层开着时,窗口里【任何】按钮的第一次点击都只负责关闭浮层,
@@ -86,12 +93,18 @@ public partial class MainWindow : Window
             // ★ 菜单(三个点/分类等)开着或刚被这一下关掉:同样只关菜单,吞掉这次点击。
             //   ContextMenu 是独立 Popup,WPF 在【按下】就把它关了,而按钮多挂在【松开】上,
             //   不吞的话一次点击会顺带按到背后的按钮(用户反馈)。统一在这里拦,不靠各按钮自己判。
-            if (MenuHost.SwallowClick) { me.Handled = true; return; }
+            if (MenuHost.SwallowClick) { me.Handled = true; _swallowUp = true; return; }
             if (!Overlay.IsOpen) return;
             if (me.OriginalSource is DependencyObject d && IsInsideDrawer(d)) return;   // 抽屉内部照常操作
             Overlay.CloseActive();
             me.Handled = true;   // 吞掉这一次点击,不让它落到按钮上
+            _swallowUp = true;
         };
+        // ★ 连【松开】也要一起吞:项目里大量小按钮(Chip/返回箭头)挂在 MouseLeftButtonUp 上,
+        //   而上面只吞了按下 —— 松开是另一个事件,照样会落到按钮身上。
+        //   于是"浮层开着时第一次点击只关浮层"这条规矩,对这类按钮从来没生效过:
+        //   一次点击既关了浮层又顺手把人退回了上一页。
+        PreviewMouseUp += (_, me) => { if (_swallowUp) { _swallowUp = false; me.Handled = true; } };
         StateChanged += (_, _) => SyncMaxButton();
         SyncMaxButton();
 
@@ -118,13 +131,36 @@ public partial class MainWindow : Window
 
     readonly VramBar _vram = new();
 
+    /// <summary>刚吞掉一次"只关浮层"的按下,配对的松开也要一起吞(见构造函数里的说明)。</summary>
+    bool _swallowUp;
+
+    /// <summary>
+    /// 这棵树里有没有【正开着的下拉框】—— 实地查验,不靠标志位。
+    /// ★ 走可视树而不是从 Keyboard.FocusedElement 往上爬:焦点可能落在 Popup 里的 ComboBoxItem 上,
+    ///   而可视树爬不过 Popup 边界 —— 从上往下找反而是稳的。只在按 Esc 时走一次,开销可忽略。
+    /// </summary>
+    static bool AnyDropDownOpen(DependencyObject? root)
+    {
+        if (root is null) return false;
+        if (root is ComboBox { IsDropDownOpen: true }) return true;
+        var n = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+            if (AnyDropDownOpen(System.Windows.Media.VisualTreeHelper.GetChild(root, i))) return true;
+        return false;
+    }
+
     void OnLanguageChanged()
     {
         var current = _currentKey;
+        // ★ 盖在上面的系统页也要记住:换语言那一下正是【在设置页里】发生的 ——
+        //   不记的话 Navigate(current) 会把覆盖层收掉、把底下那页拆了重建,
+        //   人当场被踢回工作页,而且会话/滚动/草稿全丢。覆盖式导航要防的就是这件事。
+        var sys = _systemKey;
         var wasCollapsed = _collapsed;
         Overlay.CloseActive();          // 抽屉里的文案也来自旧语言,先收起
         BuildNav();
         Navigate(current);      // 重新构建当前页 -> 新语言
+        if (sys is not null) OpenSystemPage(sys);   // 再把系统页按新语言盖回来
         if (wasCollapsed) { _collapsed = false; OnToggleNav(this, new RoutedEventArgs()); }   // 保持收起状态
         BuildChromeIcons();
         RefreshStatus();
@@ -377,10 +413,14 @@ public partial class MainWindow : Window
         AddGroupLabel(Strings.Get("nav.workspaces"), NavPanel);
         foreach (var w in Workspaces.Ordered(TheApp.Settings))   // 顺序由"扩展"里拖动决定
         {
-            if (!TheApp.Settings.IsWorkspaceVisible(w.Key)) continue;   // 用户在扩展里关掉的不显示
             var def = w;   // 闭包捕获
             // 所有工作空间共用同一套外壳(会话列表 + 项目抽屉);聊天有对话区,其余中间是占位。
-            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, () => new ChatView(def.Key)), NavPanel);
+            // ★ 在"扩展"里关掉的【照样登记】,只是不放进左栏 ——
+            //   _nav 是 Navigate 的查表,登记漏了就等于这个键从此失效:
+            //   人正待在某个工作空间时把它藏起来,之后换语言 Navigate(_currentKey) 会静默什么都不做。
+            //   "不在左栏显示"和"这一页不存在"是两件事,别混。
+            AddItem(new NavItem(def.Key, def.TitleKey, def.Icon, () => new ChatView(def.Key)), NavPanel,
+                    visible: TheApp.Settings.IsWorkspaceVisible(def.Key));
         }
 
         // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
@@ -394,7 +434,7 @@ public partial class MainWindow : Window
     public void RefreshNavRail()
     {
         BuildNav();
-        HighlightNav(_currentKey);
+        HighlightNav(ActiveKey);            // ★ 系统页盖着就高亮系统页,别指着底下那张看不见的页
         if (_collapsed) ApplyCollapsed();   // 保持收起态
     }
 
@@ -410,7 +450,7 @@ public partial class MainWindow : Window
         });
     }
 
-    void AddItem(NavItem item, StackPanel target)
+    void AddItem(NavItem item, StackPanel target, bool visible = true)
     {
         // 图标 + 文字。图标形状跟随皮肤(墨白线性 / 苹果线性 / 暖萌可爱),换肤自动重建。
         var row = new StackPanel { Orientation = Orientation.Horizontal };
@@ -435,20 +475,40 @@ public partial class MainWindow : Window
             Cursor = System.Windows.Input.Cursors.Hand,
         };
         b.Click += (_, _) => Navigate(item.Key);
-        target.Children.Add(b);
-        _nav.Add((item, b));
+        if (visible) target.Children.Add(b);
+        _nav.Add((item, b));   // ★ 不显示也登记 —— 见 BuildNav 里的说明
     }
 
-    /// <summary>系统组的三页 —— 它们是【覆盖式】的,不替换底下正在工作的页面。</summary>
-    static bool IsSystemPage(string key) => key is "settings" or "models" or "extensions";
+    /// <summary>
+    /// 系统组的三页 —— 它们是【覆盖式】的,不替换底下正在工作的页面。
+    /// ★ 键名照抄导航注册处(见 BuildNav):模型那页的键是 "model" 不是 "models" ——
+    ///   第一版写错成复数,结果模型页绕过覆盖层、照旧把工作页拆了重建。
+    /// </summary>
+    static bool IsSystemPage(string key) => key is "settings" or "model" or "extensions";
 
     /// <summary>当前盖在上面的系统页(null = 没盖)。返回箭头据此回到底下那一页。</summary>
     string? _systemKey;
+
+    /// <summary>
+    /// 用户【眼前】是哪一页 —— 导航栏高亮认这个。
+    /// ★ 不是 _currentKey:系统页盖着的时候,_currentKey 指的是底下那张看不见的页,
+    ///   拿它去高亮等于左栏说"你在聊天"而屏幕上摆着扩展页 —— 界面在说假话。
+    /// </summary>
+    string ActiveKey => _systemKey ?? _currentKey;
 
     public void Navigate(string key)
     {
         var hit = _nav.FirstOrDefault(n => n.item.Key == key);
         if (hit.item is null) return;
+
+        // ★ 系统页盖着时点左栏里【底下那一页自己】= 收起覆盖层回去,不是拆了重建。
+        //   否则"返回箭头能保住会话/滚动/草稿,点左栏同一项却全丢"——
+        //   同一个目的地两条路两种结果,那不是导航,是抽奖。
+        if (_systemKey is not null && key == _currentKey && ContentHost.Content is not null)
+        {
+            CloseSystemPage();
+            return;
+        }
 
         // ★★ 系统页盖在工作页上,不销毁它(用户裁定):
         //   此前从聊天切到设置再切回来,ChatView 是【重建】的 ——
@@ -497,7 +557,14 @@ public partial class MainWindow : Window
             dock.Children.Add(hit.item.Build());
             SystemPageHost.Content = dock;
         }
-        SystemPageHost.Visibility = Visibility.Visible;
+        SystemPageLayer.Visibility = Visibility.Visible;
+        // ★ 顶栏日历按钮:平时在主页藏着(主页自己有日历板块),但系统页把主页整个盖住了 ——
+        //   这时候再藏就等于没有任何入口。盖上就露出来。
+        CalendarButton.Visibility = Visibility.Visible;
+        // ★ 底下那页【停用】而不是隐藏:隐藏会让它重新走一遍布局/加载,滚动位置又没了 ——
+        //   而保留它可用则更糟:Tab 会聚焦到被盖住的聊天输入框,打字打进一个看不见的地方
+        //   (这类"不聚焦却能输入"的 bug 之前已经报过一次)。停用两件事一次挡掉。
+        ContentHost.IsEnabled = false;
         HighlightNav(key);
     }
 
@@ -506,8 +573,10 @@ public partial class MainWindow : Window
     {
         if (_systemKey is null) return;
         _systemKey = null;
-        SystemPageHost.Visibility = Visibility.Collapsed;
+        SystemPageLayer.Visibility = Visibility.Collapsed;
         SystemPageHost.Content = null;
+        ContentHost.IsEnabled = true;
+        CalendarButton.Visibility = _currentKey == "home" ? Visibility.Collapsed : Visibility.Visible;
         HighlightNav(_currentKey);
     }
 

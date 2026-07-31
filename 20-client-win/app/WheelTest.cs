@@ -233,6 +233,47 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 会话面板渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★ 系统页覆盖层(设置/模型/扩展):返回行 + 页面本体,盖在 BgWindow 上。
+        //   为什么必须画出来:第一版这里"很错乱" —— 覆盖层用 ContentControl 承载,
+        //   而它的默认模板根本不画 Background,于是底下的工作页整个透出来。
+        //   那种事无头断言一个字也验不出,只能看图。这里连带看返回行会不会撞上页面自己的标题,
+        //   以及窗口缩到最窄时排版垮不垮。
+        try
+        {
+            ThemeManager.Initialize(Skin.Breeze);
+            foreach (var (name, make) in new (string, Func<FrameworkElement>)[]
+                     { ("settings", () => new SettingsView()),
+                       ("model",    () => new ModelsView()),
+                       ("extensions", () => new ExtensionsView()) })
+            // ★ tall:页面自带 ScrollViewer,640 高只看得到顶部 ——
+            //   底下那几块(比如模型页的「模型选择策略」占位符)得拉高了才看得见。
+            foreach (var (w, h, tag) in new[] { (900, 640, "wide"), (620, 640, "narrow"), (900, 1500, "tall") })
+            {
+                var back = new Border
+                {
+                    Child = new TextBlock { Text = "‹ 返回", VerticalAlignment = VerticalAlignment.Center },
+                    Padding = new Thickness(10, 5, 12, 5), BorderThickness = new Thickness(1),
+                };
+                back.SetResourceReference(Border.BorderBrushProperty, "Border");
+                var head = new DockPanel { LastChildFill = false, Margin = new Thickness(20, 14, 20, 0) };
+                DockPanel.SetDock(back, Dock.Left);
+                head.Children.Add(back);
+
+                var dock = new DockPanel { LastChildFill = true };
+                DockPanel.SetDock(head, Dock.Top);
+                dock.Children.Add(head);
+                dock.Children.Add(make());
+
+                var layer = new Border { Child = dock, Width = w, Height = h };
+                layer.SetResourceReference(Border.BackgroundProperty, "BgWindow");
+                Save(Themed(layer), Path.Combine(outDir, $"syspage-{name}-{tag}.png"), w + 20, h + 20);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: 系统页覆盖层渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // 放大镜发送键:画的就是界面里那一个(SearchSendButton),不是复刻件
         var sendRow = new StackPanel { Orientation = Orientation.Horizontal };
         var sendOn = ChatView.SearchSendButton(() => { }); sendOn.Height = 40;
