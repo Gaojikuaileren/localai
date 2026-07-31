@@ -111,12 +111,17 @@ public sealed class WheelColumn : Border
         //   ★ 按【行高】换算格数,走的是【绝对口径】:每帧都从按下那一刻的
         //     起始格 + 总位移重算,不做增量累加 —— 增量口径会把四舍五入的余量吞掉,
         //     慢拖时误差同号累加(这个坑在时间轴上刚踩过,见 WPF-PITFALLS)。
-        MouseLeftButtonDown += (_, e) =>
+        // ★★ 按下时【不】捕获 —— 这是上一版把"点某一行"打死的原因。
+        //   CaptureMouse() 默认是 CaptureMode.Element:捕获之后 WPF 跳过命中测试,
+        //   把输入直接投给捕获元素本身 —— 连它自己视觉树里的子元素都不在路由上,
+        //   于是行 TextBlock 的 MouseLeftButtonUp 永远不会触发。而每行还带着 Cursors.Hand,
+        //   明摆着邀请你点 —— 看得见、点不动。
+        //   现在:按下只记起点,真的越过阈值才捕获。
+        PreviewMouseLeftButtonDown += (_, e) =>
         {
             _dragFrom = e.GetPosition(this).Y;
             _dragIndex0 = _index;
             _dragMoved = false;
-            CaptureMouse();
         };
         MouseMove += (_, e) =>
         {
@@ -126,6 +131,7 @@ public sealed class WheelColumn : Border
             {
                 if (Math.Abs(dy) < DragThreshold) return;   // 还没拖动 -> 仍然算"点某一行"
                 _dragMoved = true;
+                CaptureMouse();                             // ★ 确实在拖了,这才抢捕获
             }
             e.Handled = true;
             SetIndex(_dragIndex0 - (int)Math.Round(dy / RowHeight));   // 往下拖 = 往前翻

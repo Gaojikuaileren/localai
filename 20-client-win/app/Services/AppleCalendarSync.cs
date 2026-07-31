@@ -53,6 +53,15 @@ public static class AppleCalendarSync
             if (!dok) return new AppleSyncResult(false, 0, 0, 0, dmsg,
                 AuthFailed: dmsg.Contains("401") || dmsg.Contains("403"));
 
+            // ★★ 拉取时就把【分类表】一并刷新 —— 它才是权威。
+            //   之前只有设置页手点"刷新清单"才更新:在 iCloud 里改个日历名或换个颜色之后,
+            //   新拉回来的日程带的是新名字,颜色表却还是旧名字 —— 那批日程落到"认不出的分类",
+            //   拿的是按名字算的颜色,与 Apple 那边毫无关系,而且不手动刷新就永远不会自愈。
+            CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));
+            settings.AppleCalendarList = cals
+                .Select(c => c.Url + "|" + c.DisplayName + (c.ColorHex is null ? "" : "|" + c.ColorHex))
+                .ToList();
+
             var wanted = cals.Where(c => settings.AppleCalendarUrls.Contains(c.Url)).ToList();
             var wantedTodos = rems.Where(c => settings.AppleReminderUrls.Contains(c.Url)).ToList();
             if (wanted.Count == 0 && wantedTodos.Count == 0)

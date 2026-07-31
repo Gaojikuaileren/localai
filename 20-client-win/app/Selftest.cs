@@ -2416,8 +2416,9 @@ public static class Selftest
                        && tl.Contains("string.Join(\"、\", hiddenNames)"),
                        "★ 没画出来的【如实说一句白话、悬停列出是哪几条】"
                        + "—— 原来只写一个「+1」,用户直接问「这个 +1 是什么」,要人猜的标记等于没标");
-                Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("ToolTip = chip.ToolTip,"),
-                       "★ 外置标题悬停出全名、点一下能编辑(它比那条细色块好碰得多)");
+                Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("if (e.OriginalSource is not Canvas) return;"),
+                       "★★ 外置标题悬停出全名、点一下能编辑 —— 前提是画布【只在真的按在自己身上时】才抢捕获;"
+                       + "无条件捕获会把画布里任何可点元素的点击整个吃掉(CaptureMode.Element 下松手不经过子元素)");
                 // ---- 对抗式审计(2026-07-31)确认的三条,钉住 ----
                 Assert(tl.Contains("e.Handled = WheelPan(e.Delta)") && tl.Contains("bool WheelPan(int delta)") && tl.Contains("bool PanTo("),
                        "★★ 滚轮【只有真的滑动了才吞】—— 到顶/到底还吞的话,光标停在这里整页就永远滑不动");
@@ -2451,10 +2452,28 @@ public static class Selftest
                 // ★ 【点空白新建】已按用户要求取消：新建只走板块标题栏那个「+」。
                 Assert(!tl.Contains("_createAt") && !tl.Contains("OnCreateAt?.Invoke(when)"),
                        "★ 表格空白处不再新建 —— 那里只剩一件事:按住拖 = 缩放");
-                Assert(tl.Contains("for (int back = 0; back <= 7; back++)")
-                       && tl.Contains("if (back > 0 && LastDayOf(ev) < day.Date) continue;"),
-                       "★★ 往回找【整周】而不是只找前一天 —— 一条跨三天的定时日程,"
-                       + "中间那天既不是起始日也不是结束日,只看前一天会把它整段漏掉");
+                // ---- 对抗式审计第二轮(2026-07-31 深夜)确认的高危项 ----
+                Assert(tl.Contains("var t = Math.Clamp(Snap(s0 + moved), 0, 24 - SnapHours);"),
+                       "★★ 整体位移的上界只管【开始留在这一天】—— 原来用 DayMax-dur 当时长预算,"
+                       + "一条 22:00→次日 02:00 的一拖就被夹到 21:00,而且再也拖不回去,松手还会写进数据");
+                Assert(tl.Contains("var hiStart = SnapDown(e0 - SnapHours);")
+                       && tl.Contains("hiStart <= 0 ? 0 : Math.Clamp("),
+                       "★★ 先算上界再夹 —— 结束早于 00:30 的短日程会让 Math.Clamp 的 min>max 直接抛异常"
+                       + "(表现是鼠标一动就弹一次「出错了」)");
+                Assert(tl.Contains("var org = dg.Mode == DragMode.Move ? start.Date : dg.SegDay;"),
+                       "★★ 预览的纵向原点用【这一段所在那一列的日期】—— 跨天尾段用开始那天当原点会差 24×N 小时,"
+                       + "手一动方块就跳出可视区");
+                Assert(tl.Contains("if (_evDrag is not null) return true;"),
+                       "★ 拖日程时滚轮不平移 —— 平移会重画并把手底下那个方块换掉(滚一下就脱手)");
+                Assert(tl.Contains("IsHitTestVisible = false,") && tl.Contains("var slotRight = x + bw + slotGap;"),
+                       "★★ 全天的外置名字不抢点击也不越栏 —— 否则同一格两条时,"
+                       + "点右边那条弹出的是左边那条的抽屉");
+                Assert(!tl.Contains("双击空白处 = 新建"),
+                       "★ 提示语不再教一个已经取消的手势");
+
+                Assert(tl.Contains("if (ev.Start.Date > day.Date || LastDayOf(ev) < day.Date) continue;"),
+                       "★★ 【按区间筛】而不是往回找 N 天 —— 回看窗口一旦短于日程长度,"
+                       + "超出那几天就整段不画(看着像那天没有这条日程)");
                 var ce2 = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
                 if (ce2 is not null)
                 {
@@ -2522,7 +2541,8 @@ public static class Selftest
                        "★★ 末尾那张天气卡不留下边距 —— 否则它看得见的底边比框底高出 10px,"
                        + "而日历对的是框底,看起来就是对不齐");
                 Assert(homeTodo.Contains("Margin = new Thickness(0, 0, 0, PanelGap),")
-                       && homeTodo.Contains("_todoVisible ? 12 : 0, PanelGap);"),
+                       && homeTodo.Contains("(_todoVisible || _weatherVisible) ? 12 : 0, PanelGap);")
+                       && homeTodo.Contains("MinHeight = WeatherStackHeight + PanelGap"),
                        "★ 日历与天气取同一个下边距 -> 下沿齐平,且与「正在进行的项目」留出间隔");
                 Assert(homeTodo.Contains("var wantTop = cursorY - CollapsedCityHeight + 11;"),
                        "★★ 拖拽按【光标绝对位置】反推卡片该在哪 —— 手柄在展开卡的右下角,"
@@ -3380,6 +3400,44 @@ public static class Selftest
                 Services.CalendarGroups.SetFromApple(Array.Empty<(string, string?)>());
                 Assert(!Services.CalendarGroups.FromApple && Views.CalendarData.Groups.Contains("家庭"),
                        "★ 断开后回到本地占位分类");
+            }
+
+            // ---- 分类不会被静默改掉 / 同步会刷新分类表 ----
+            {
+                var ce3 = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
+                if (ce3 is not null)
+                {
+                    Assert(ce3.Contains("var gi = keepGroup is null ? 0 : Array.IndexOf(CalendarData.Groups, keepGroup);")
+                           && ce3.Contains("（不在当前日历清单里）"),
+                           "★★ 分类认不出来就【临时插一项原值】并选中 "
+                           + "—— 回落到第 0 项会让用户只改标题一保存就把分类永久改掉");
+                    Assert(ce3.Contains("(group.SelectedItem as ComboBoxItem)?.Tag as string"),
+                           "★ 保存按 Tag 取值,不按 index 反查");
+                }
+                var acs = TryReadSource(Path.Combine("Services", "AppleCalendarSync.cs"));
+                if (acs is not null)
+                    Assert(acs.Contains("CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));"),
+                           "★★ 每次拉取都刷新分类表 —— 否则 iCloud 改名/改色后颜色永远对不上且不会自愈");
+
+                // 跨天定时日程的"结束在哪天"必须只有一套口径
+                var ev9 = new Views.CalendarEvent(
+                    new DateTime(2026, 7, 31, 22, 0, 0), new DateTime(2026, 8, 1, 3, 0, 0),
+                    "通宵", "me", "private");
+                Assert(ev9.LastDay == new DateTime(2026, 8, 1) && ev9.Covers(new DateTime(2026, 8, 1)),
+                       "★★ 定时跨天日程在【结束那天】也算数 —— 否则月历没圆点、当日列表查无此条,"
+                       + "而下方时间轴却画着它(同一块板块上下两半各说各的)");
+                var ev10 = new Views.CalendarEvent(
+                    new DateTime(2026, 7, 31, 23, 0, 0), new DateTime(2026, 8, 1, 0, 0, 0),
+                    "到点就结束", "me", "private");
+                Assert(ev10.LastDay == new DateTime(2026, 7, 31),
+                       "★ 结束恰好是次日 00:00 的不多占一格");
+
+                var wp2 = TryReadSource(Path.Combine("Views", "WheelPicker.cs"));
+                if (wp2 is not null)
+                    Assert(wp2.Contains("PreviewMouseLeftButtonDown += (_, e) =>")
+                           && wp2.Contains("_dragMoved = true;") && wp2.Contains("CaptureMouse();"),
+                           "★★ 转盘按下【不】捕获,真的越过阈值才捕 —— CaptureMode.Element 下子元素不在路由上,"
+                           + "按下就捕会把「点某一行」打死");
             }
 
             // ---- 从 Apple 拉下来的日程要带【分类】----

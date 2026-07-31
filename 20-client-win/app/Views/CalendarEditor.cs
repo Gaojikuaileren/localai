@@ -189,7 +189,31 @@ public static class CalendarEditor
             row.Children.Add(new TextBlock { Text = Services.Vocab.Apply(g), VerticalAlignment = VerticalAlignment.Center });
             group.Items.Add(new ComboBoxItem { Content = row, Tag = g });
         }
-        group.SelectedIndex = Math.Max(0, Array.IndexOf(CalendarData.Groups, existing?.CalendarGroup ?? CalendarData.Groups[0]));
+        // ★★ 上面那段注释警告的正是这一行原来干的事:IndexOf 得 -1 -> Max(0,…) 回落到第 0 项。
+        //   命中场景很常见:老档案的"家庭"、接上 Apple 之后、断开之后、在 iCloud 里改过日历名之后——
+        //   用户只想改个标题点保存,分类就被永久改成另一个日历,颜色跟着变,而且没有任何提示。
+        //   现在:认不出来就【临时插一项原值】并选中它,如实标明它不在当前清单里。
+        var keepGroup = existing?.CalendarGroup;
+        var gi = keepGroup is null ? 0 : Array.IndexOf(CalendarData.Groups, keepGroup);
+        if (gi < 0)
+        {
+            var row2 = new StackPanel { Orientation = Orientation.Horizontal };
+            var dot2 = new System.Windows.Shapes.Ellipse
+            {
+                Width = 8, Height = 8, Margin = new Thickness(0, 0, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = new System.Windows.Media.SolidColorBrush(Services.CalendarGroups.ColorOf(keepGroup)),
+            };
+            row2.Children.Add(dot2);
+            row2.Children.Add(new TextBlock { Text = Services.Vocab.Apply(keepGroup!), VerticalAlignment = VerticalAlignment.Center });
+            var tail = new TextBlock { Text = "（不在当前日历清单里）", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+            tail.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            tail.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            row2.Children.Add(tail);
+            group.Items.Add(new ComboBoxItem { Content = row2, Tag = keepGroup });
+            gi = group.Items.Count - 1;
+        }
+        group.SelectedIndex = Math.Max(0, gi);
 
         var location = Field(existing?.Location ?? "");
         var url = Field(existing?.Url ?? "");
@@ -244,7 +268,8 @@ public static class CalendarEditor
                 owners[Math.Max(0, owner.SelectedIndex)],
                 scopes[Math.Max(0, scope.SelectedIndex)],
                 AllDay: isAllDay,
-                CalendarGroup: CalendarData.Groups[Math.Max(0, group.SelectedIndex)],
+                // ★ 按 Tag 取值而不是按 index 反查 Groups —— 列表里可能多了那一项"不在清单里"的原值。
+                CalendarGroup: (group.SelectedItem as ComboBoxItem)?.Tag as string,
                 Location: string.IsNullOrWhiteSpace(location.Text) ? null : location.Text,
                 Url: string.IsNullOrWhiteSpace(url.Text) ? null : url.Text,
                 Notes: string.IsNullOrWhiteSpace(notes.Text) ? null : notes.Text,

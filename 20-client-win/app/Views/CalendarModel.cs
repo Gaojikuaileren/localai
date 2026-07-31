@@ -31,7 +31,15 @@ public sealed record CalendarEvent(
 {
     /// <summary>跨天判定:全天日程按【日期区间】算,定时日程只属于起始那天。</summary>
     public DateTime FirstDay => Start.Date;
-    public DateTime LastDay => AllDay ? End.Date : Start.Date;
+    /// <summary>
+    /// 真正结束在哪一天。
+    /// ★★ 定时日程也可以跨天(编辑器里的「结束日」偏移)——
+    ///   原来这里写死 "定时的只属于起始那天",于是一条 7/31 22:00→8/1 03:00 的日程:
+    ///   下半的时间轴在 8/1 画着它(它有自己的算法),上半月历的 8/1 格里却既没圆点也没线,
+    ///   点 8/1 看当日列表也查无此条 —— 同一块板块的上下两半各说各的。
+    ///   用 AddTicks(-1):结束恰好是次日 00:00 的算结束在起始那天(不多占一格)。
+    /// </summary>
+    public DateTime LastDay => AllDay ? End.Date : (End > Start ? End.AddTicks(-1).Date : Start.Date);
     public int DayCount => (LastDay - FirstDay).Days + 1;
     public bool IsMultiDay => DayCount > 1;
 

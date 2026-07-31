@@ -146,8 +146,12 @@ public sealed class HomeView : UserControl
         _todoColumn.Width = new GridLength(1, GridUnitType.Star);                                             // 待办(启动后改为一卡宽 px)
         _root.ColumnDefinitions.Add(_todoColumn);
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 问候
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 日历 | 待办(固定高)
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                                   // 天气(固定高)
+        // ★★ 这两行的高度【不能只靠里面那一块擑着】——
+        //   日历是跨这两行的,而行高各自由待办/天气钉住。在"扩展 › 主页板块"里关掉其中一个,
+        //   那一行就只剩日历自己的一半在撞 —— 于是另一块被垂直居中、下沿不齐,
+        //   时间轴也塔到 MinHeight。给两行补上与块内容无关的下限。
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto, MinHeight = CalendarView.PanelHeight + 62 });   // 日历 | 待办
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto, MinHeight = WeatherStackHeight + PanelGap });   // 天气
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 130 }); // 项目(占满剩余)
 
         // ① 问候:大字号 + 上下更宽的留白 + 一句小助手问候;占约 1/3 宽(左侧)
@@ -211,7 +215,9 @@ public sealed class HomeView : UserControl
             //   既然天气栈总高恒定(WeatherStackHeight),两边留【同样的】下边距就自然对齐。
             // ★ 下边距不能是 0 —— 那样下面的「正在进行的项目」会贴上来,间隔就没了(用户反馈)。
             //   与天气宿主取同一个 PanelGap,两者下沿仍然齐平。
-            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, PanelGap);
+            // ★ 右边距要与【右列到底存不存在】同一个判据 —— 只关待办、留着天气时,
+            //   日历的右描边会直接贴到天气卡的左描边上。
+            calPanel.Margin = new Thickness(0, 0, (_todoVisible || _weatherVisible) ? 12 : 0, PanelGap);
             calPanel.VerticalAlignment = VerticalAlignment.Stretch;
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
             // ★ 只有右列【真的空了】(待办与天气都不显示)才让日历横跨两列;
