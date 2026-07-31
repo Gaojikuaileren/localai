@@ -1389,7 +1389,13 @@ public static class Selftest
                 Assert(sdSrc.Contains("正在检查 VB-Audio 官方最新版本") && sdSrc.Contains("ResolveLatest("),
                        "★ 检查【并入】更新流程:点更新先查最新版、显示出来,再下载安装(用户裁定 2026-07-31)");
                 Assert(sdSrc.Contains("CopyablePath(\"安装位置\"") && sdSrc.Contains("IsReadOnly = true"),
-                       "★ 已安装时显示一行【只读、可复制】的安装位置(位置由 VB-CABLE 决定,改不了 -> 只读)");
+                       "★ 显示一行【只读、可复制】的安装位置(位置由 VB-CABLE 决定,改不了 -> 只读)");
+                Assert(sdSrc.Contains("st.Installed ? st.InstallLocation : null,") && !sdSrc.Contains("if (st.Installed && st.InstallLocation"),
+                       "★ 安装位置【常态显示】做成固定槽位 —— 装好后不再突然多一行挤开排版(用户裁定 2026-07-31)");
+                Assert(sdSrc.Contains("\"重新下载\"") && !sdSrc.Contains("if (!st.Installed || pkg is not null)"),
+                       "★ 安装/更新按钮【常显】—— 删掉本地安装包后不蒸发,标「重新下载」(用户裁定 2026-07-31)");
+                Assert(sdSrc.Contains("w.Activated += OnActivatedRefreshDriver") && sdSrc.Contains("w.Activated -= OnActivatedRefreshDriver"),
+                       "★★ 事件驱动刷新:切回本应用(Window.Activated)时刷一次,不轮询 Detect(用户裁定:定时检测太不性能友好)");
                 Assert(sdSrc.Contains("第三方内核驱动"),
                        "★ 如实写明这是第三方驱动 ——\"察觉不到它的存在\"指的是不用你操作,不是不告诉你");
                 var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");

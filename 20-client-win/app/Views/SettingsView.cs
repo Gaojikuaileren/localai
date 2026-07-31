@@ -161,7 +161,25 @@ public sealed class SettingsView : UserControl
             Ui.Caption("「一键安装」从 VB-Audio 官方 https 下载,提权运行前会验证它由 VB-Audio 官方签名(证书链有效),验不过就拒绝。"),
             Ui.Caption("装好之后你不需要打开它、也不需要做任何设置;只需在会议软件里把麦克风选成 CABLE Output。"),
             _driverBody));
+
+        // ★★ 事件驱动刷新,不轮询(用户裁定 2026-07-31:跑检测不该定时,太不性能友好):
+        //   安装 / 卸载走的是【外部的官方安装器】(另一个提权进程),它跑完我们无从得知确切时刻。
+        //   但用户装完/卸完总会【切回本应用】—— 那一下 Window.Activated 触发,正好刷一次:
+        //   状态、安装位置、按钮标签(删了安装包 -> "重新下载")全都跟着更新。
+        //   只在这张卡活着时挂,卡卸载即摘,不留常驻表。Detect 只在此刻按需跑一次,不是每 N 秒扫一遍。
+        _driverCard.Loaded += (_, _) => { if (Application.Current.MainWindow is { } w) w.Activated += OnActivatedRefreshDriver; };
+        _driverCard.Unloaded += (_, _) => { if (Application.Current.MainWindow is { } w) w.Activated -= OnActivatedRefreshDriver; };
         return _driverCard;
+    }
+
+    long _lastDriverRefreshTick;
+    void OnActivatedRefreshDriver(object? sender, EventArgs e)
+    {
+        // 防抖:短时间内反复切焦点(在安装器/说明和本应用之间来回)不重复扫注册表/DriverStore。
+        var now = Environment.TickCount64;
+        if (now - _lastDriverRefreshTick < 800) return;
+        _lastDriverRefreshTick = now;
+        RefreshDriver();
     }
 
     void RefreshDriver()
@@ -176,13 +194,14 @@ public sealed class SettingsView : UserControl
         line.SetResourceReference(TextBlock.ForegroundProperty, st.Installed ? "FgPrimary" : "RiskWarning");
         _driverBody.Children.Add(line);
 
-        // ★ 已安装 -> 显示【安装位置】,一行可复制的只读路径(用户裁定 2026-07-31)。
-        //   安装位置由 VB-CABLE 自己的安装器固定,客户端改不了,所以这里【只读】——
-        //   给一个能编辑的框会让人以为改了它就能挪动 VB-CABLE,那是骗人。要复制走用旁边的按钮。
-        if (st.Installed && st.InstallLocation is { Length: > 0 } loc)
-            _driverBody.Children.Add(CopyablePath("安装位置", loc));
-        if (st.DriverPath is { Length: > 0 })
-            _driverBody.Children.Add(Ui.Caption("驱动文件:" + st.DriverPath));
+        // ★ 安装位置【常态显示】(用户裁定 2026-07-31):做成固定槽位 —— 装好后不再突然多出一行把排版挤开。
+        //   未安装时显示占位、复制按钮禁用。只读:位置由 VB-CABLE 自己的安装器固定,客户端改不了,
+        //   给个能编辑的框会让人以为改了就能挪动它,那是骗人。
+        //   (原来还有一行"驱动文件:<.sys 路径>"—— 已撤:那是深层技术细节,且它也会装好后才冒出来挤排版;
+        //    安装位置更有用、且来自注册表更快。)
+        _driverBody.Children.Add(CopyablePath("安装位置",
+            st.Installed ? st.InstallLocation : null,
+            st.Installed ? "(读不到安装位置)" : "未安装"));
 
         // ★ 「检查更新」不再单列,【并入「重装 / 更新」】(用户裁定 2026-07-31):
         //   点更新时先查官方最新版本、把查到的版本显示出来,再下载安装 —— 检查是更新的第一步,
@@ -190,13 +209,16 @@ public sealed class SettingsView : UserControl
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         row.Children.Add(Ui.Secondary("重新检测", (_, _) => { RefreshDriver(); }));
 
-        var pkg = AudioDriver.FindOfflinePackage();
-        if (!st.Installed || pkg is not null)
-        {
-            var install = Ui.Primary(st.Installed ? "重新安装 / 更新" : "一键安装", (_, _) => InstallDriver());
-            install.Margin = new Thickness(8, 0, 0, 0);
-            row.Children.Add(install);
-        }
+        // ★ 安装/更新按钮【常显】(用户裁定 2026-07-31):删掉本地安装包后按钮不该蒸发。
+        //   有本地包 -> 用本地包重装 / 更新;没有 -> 得下载,所以标「重新下载」——
+        //   InstallDriver 内部本就"有本地包用本地、没有就下载",这里只是把这层意思写到按钮上。
+        var hasPkg = AudioDriver.FindOfflinePackage() is not null;
+        var installLabel = !st.Installed ? "一键安装"
+                         : hasPkg        ? "重新安装 / 更新"
+                                         : "重新下载";
+        var install = Ui.Primary(installLabel, (_, _) => InstallDriver());
+        install.Margin = new Thickness(8, 0, 0, 0);
+        row.Children.Add(install);
         if (st.Installed)
         {
             // ★ 卸载走【官方卸载程序】,不自己删 .sys ——
@@ -250,22 +272,28 @@ public sealed class SettingsView : UserControl
     readonly TextBlock _driverStatus = new();
 
 
-    /// <summary>一行【只读、可复制】的路径:标签 + 只读输入框(可选中)+ 复制按钮。</summary>
-    FrameworkElement CopyablePath(string label, string path)
+    /// <summary>
+    /// 一行【只读、可复制】的路径:标签 + 只读输入框(可选中)+ 复制按钮。
+    /// path 为空时显示 <paramref name="placeholder"/> 占位、复制按钮禁用 —— 用于做固定槽位,排版不因有无而抖。
+    /// </summary>
+    FrameworkElement CopyablePath(string label, string? path, string placeholder)
     {
+        var has = !string.IsNullOrWhiteSpace(path);
+
         var lab = Ui.Caption(label + ":");
         lab.VerticalAlignment = VerticalAlignment.Center;
         lab.Margin = new Thickness(0, 0, 8, 0);
 
-        // 只读输入框:用户可选中复制;IsReadOnly 明示"这里改了也没用"(安装位置由 VB-CABLE 决定)。
+        // 只读输入框:有路径时可选中复制;IsReadOnly 明示"这里改了也没用"(安装位置由 VB-CABLE 决定)。
         var box = new TextBox
         {
-            Text = path,
+            Text = has ? path : placeholder,
             IsReadOnly = true,
             VerticalAlignment = VerticalAlignment.Center,
             Padding = new Thickness(8, 4, 8, 4),
             MinWidth = 220,
         };
+        if (!has) box.SetResourceReference(TextBox.ForegroundProperty, "FgMuted");
 
         var copy = Ui.Secondary("复制", (_, _) =>
         {
@@ -273,6 +301,7 @@ public sealed class SettingsView : UserControl
             catch { _driverStatus.Text = "复制失败(剪贴板被占用),请手动选中复制。"; }
         });
         copy.Margin = new Thickness(8, 0, 0, 0);
+        copy.IsEnabled = has;   // 没路径可复时禁用,不给个点了没反应的按钮
 
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
         row.Children.Add(lab);
