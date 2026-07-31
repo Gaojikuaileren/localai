@@ -106,12 +106,14 @@ public sealed class InterpretPanel : UserControl
         row.Children.Add(subs);
 
         var box = new StackPanel();
+        box.Children.Add(_driverHint);
         box.Children.Add(row);
         box.Children.Add(_passthrough);
         return box;
     }
 
     Button? _speakBtn, _subsBtn;
+    readonly StackPanel _driverHint = new() { Margin = new Thickness(0, 0, 0, 8) };
     readonly TextBlock _passthrough = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
 
     void Refresh()
@@ -139,6 +141,21 @@ public sealed class InterpretPanel : UserControl
                 c.TextAlignment = TextAlignment.Center;
                 _subtitles.Children.Add(c);
             }
+        }
+
+        // ★ 虚拟声卡没装 -> 就在【你需要它的地方】给入口,而不是让用户自己去设置里翻。
+        //   装了就自动接上,连提示都不出现 —— 用户裁定的"察觉不到它的存在"就是这个意思。
+        var drv = AudioDriver.Detect();
+        _driverHint.Children.Clear();
+        if (!drv.Installed)
+        {
+            var t = Ui.Caption($"要把译文语音送进会议软件,还差一个虚拟声卡({AudioDriver.ProductName})。");
+            t.HorizontalAlignment = HorizontalAlignment.Center;
+            var go = Ui.Primary("去安装", (_, _) => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
+            go.HorizontalAlignment = HorizontalAlignment.Center;
+            go.Margin = new Thickness(0, 6, 0, 0);
+            _driverHint.Children.Add(t);
+            _driverHint.Children.Add(go);
         }
 
         if (_speakBtn is not null) _speakBtn.Content = st.SpeakTranslation ? "实时翻译输出:开" : "实时翻译输出:关";

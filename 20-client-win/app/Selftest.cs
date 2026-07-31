@@ -1310,6 +1310,63 @@ public static class Selftest
                         if (string.IsNullOrWhiteSpace(Theme.Icons.PathFor(ic, skin))) noIcon.Add($"{ic}/{skin}");
                 Assert(noIcon.Count == 0, "★ 每个图标在三套皮肤里都有画" + (noIcon.Count > 0 ? " 缺:" + string.Join(",", noIcon) : ""));
             }
+            // ---- 虚拟声卡:自动下载的三条硬规则(用户确认:自动 ≠ 不透明)----
+            {
+                var tmpPkg = Path.Combine(tmp, "pkg.bin");
+                File.WriteAllText(tmpPkg, "hello");
+                var real = Services.AudioDriver.Sha256Of(tmpPkg);
+                Assert(real.Length == 64 && real == real.ToLowerInvariant(), "哈希是小写十六进制的 SHA-256");
+                Assert(Services.AudioDriver.Verify(tmpPkg, real), "哈希一致就通过");
+                Assert(Services.AudioDriver.Verify(tmpPkg, real.ToUpperInvariant()), "大小写不敏感");
+                Assert(!Services.AudioDriver.Verify(tmpPkg, new string('0', 64)), "★ 哈希不一致一律拒绝");
+                Assert(!Services.AudioDriver.Verify(tmpPkg, ""), "★ 没有哈希 = 不许放行(空哈希不是\"跳过校验\")");
+                Assert(!Services.AudioDriver.Verify(tmpPkg, "   "), "空白哈希同样拒绝");
+
+                // ★ 清单三要素缺一不可 —— 缺了就不许自动下载,退回离线安装
+                Assert(!Services.AudioDriverManifest.IsUsable(null), "没有清单 = 不可用");
+                Assert(!Services.AudioDriverManifest.IsUsable(
+                           new Services.AudioDriverPackage("1.0", "https://x/y", "", 1, DateTime.Now)),
+                       "★ 清单没有哈希 = 不许自动下载");
+                Assert(!Services.AudioDriverManifest.IsUsable(
+                           new Services.AudioDriverPackage("", "https://x/y", new string('a', 64), 1, DateTime.Now)),
+                       "清单没有版本 = 不可用");
+                Assert(Services.AudioDriverManifest.IsUsable(
+                           new Services.AudioDriverPackage("1.0", "https://x/y", new string('a', 64), 1, DateTime.Now)),
+                       "三要素齐全才可用");
+
+                // ★ 内置清单【故意留空哈希】—— 没在本机核对过官方安装包,
+                //   凭印象写一串十六进制不是默认值,是伪造证据。所以它现在就该是"不可用"。
+                Assert(Services.AudioDriverManifest.Current is null
+                       || !string.IsNullOrWhiteSpace(Services.AudioDriverManifest.Current.Sha256),
+                       "★ 生效的清单要么没有,要么带真哈希 —— 不存在\"有清单但没哈希\"这种状态");
+
+                // 清单太旧时必须说出来 —— 一份两年没动的清单说"已是最新"是在撒谎
+                var old = new Services.AudioDriverPackage("1.0", "https://x/y", new string('a', 64), 1,
+                                                          new DateTime(2020, 1, 1));
+                var msg = Services.AudioDriver.Compare(new Services.AudioDriverStatus(true, "1.0", null), old, new DateTime(2026, 7, 31));
+                Assert(msg.Contains("没更新过"), "★ 清单自己太旧时如实说明,不谎称\"已是最新\"");
+            }
+            var adSrc = TryReadSource(Path.Combine("Services", "AudioDriver.cs"));
+            if (adSrc is not null)
+            {
+                var dl = Slice(adSrc, "DownloadAsync(", "public static bool RunInstaller");
+                Assert(dl is not null && dl.Contains("File.Delete(target)") && dl.Contains("哈希校验失败"),
+                       "★ 校验不过的下载文件【当场销毁】,不留在盘上等人误点");
+                Assert(adSrc.Contains("Verb = \"runas\""), "安装时另起提权子进程(主程序按 D46 不提权)");
+                Assert(adSrc.Contains("OfflineDir"), "★ 支持自备安装包 —— 完全断网的机器也要能装上");
+            }
+            var sdSrc = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+            if (sdSrc is not null)
+            {
+                Assert(sdSrc.Contains("声音驱动(同声传译)") && sdSrc.Contains("检查更新"),
+                       "设置里有声音驱动板块,能看版本、能查更新");
+                Assert(sdSrc.Contains("第三方内核驱动"),
+                       "★ 如实写明这是第三方驱动 ——\"察觉不到它的存在\"指的是不用你操作,不是不告诉你");
+                var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");
+                Assert(inst is not null && inst.Contains("已拒绝运行"),
+                       "★ 自备的安装包同样要过校验");
+            }
+
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {

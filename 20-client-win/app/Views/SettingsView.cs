@@ -123,6 +123,8 @@ public sealed class SettingsView : UserControl
                 Ui.Caption("勾选后点窗口的 × 只是收起窗口,程序继续在托盘运行;要真正退出请用托盘图标右键 →「退出」。")
             )),
 
+            AudioDriverCard(),
+
             LanguagePoolCard(),
 
             AppleSyncCard(),
@@ -135,6 +137,119 @@ public sealed class SettingsView : UserControl
             new DevicesView(embedded: true)
         );
     }
+
+    // ---------------------------------------------------------------- 声音驱动(同传要用的虚拟声卡)
+    Border? _driverCard;
+    readonly StackPanel _driverBody = new();
+
+    /// <summary>
+    /// 同声传译要把译文语音送进会议软件,而 Windows 上【没有】不写内核驱动就能被别的软件
+    /// 选中的麦克风 —— 所以要装一个虚拟声卡。这里把它的状态、版本、更新集中管起来。
+    ///
+    /// ★★ 三条硬规则(用户确认:自动 ≠ 不透明):
+    ///   ① 安装包必须过 SHA-256 校验才允许运行,不过就删掉,【不给"仍然继续"】;
+    ///   ② 界面上如实写清来源、版本、它会做什么 —— "察觉不到它的存在"指的是不用你操作,不是不告诉你;
+    ///   ③ 允许自备安装包(离线也能装)。
+    /// </summary>
+    public Border AudioDriverCard()
+    {
+        RefreshDriver();
+        _driverCard = Ui.Card(Ui.Stack(
+            Ui.Subtitle("声音驱动(同声传译)"),
+            Ui.Caption($"同传要把译文语音送进会议软件,这需要一个虚拟声卡。我们用的是 {AudioDriver.Vendor} 的 " +
+                       $"{AudioDriver.ProductName} —— ★ 这是【第三方内核驱动】,不是我们写的,如实告知。"),
+            Ui.Caption("装好之后你不需要打开它、也不需要做任何设置;只需在会议软件里把麦克风选成 CABLE Output。"),
+            _driverBody));
+        return _driverCard;
+    }
+
+    void RefreshDriver()
+    {
+        _driverBody.Children.Clear();
+        var st = AudioDriver.Detect();
+
+        var line = Ui.Body(st.Installed
+            ? $"已安装 · 版本 {st.Version ?? "(读不到)"}"
+            : "未安装");
+        line.Margin = new Thickness(0, 8, 0, 0);
+        line.SetResourceReference(TextBlock.ForegroundProperty, st.Installed ? "FgPrimary" : "RiskWarning");
+        _driverBody.Children.Add(line);
+        if (st.DriverPath is { Length: > 0 })
+            _driverBody.Children.Add(Ui.Caption("驱动文件:" + st.DriverPath));
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+        row.Children.Add(Ui.Secondary("重新检测", (_, _) => { RefreshDriver(); }));
+        var check = Ui.Secondary("检查更新", (_, _) => CheckDriverUpdate());
+        check.Margin = new Thickness(8, 0, 0, 0);
+        row.Children.Add(check);
+
+        var pkg = AudioDriver.FindOfflinePackage();
+        if (!st.Installed || pkg is not null)
+        {
+            var install = Ui.Primary(st.Installed ? "重新安装 / 更新" : "一键安装", (_, _) => InstallDriver());
+            install.Margin = new Thickness(8, 0, 0, 0);
+            row.Children.Add(install);
+        }
+        _driverBody.Children.Add(row);
+
+        _driverStatus.TextWrapping = TextWrapping.Wrap;
+        _driverStatus.Margin = new Thickness(0, 8, 0, 0);
+        _driverStatus.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _driverStatus.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _driverBody.Children.Add(_driverStatus);
+
+        _driverBody.Children.Add(Ui.Caption(
+            $"离线安装:把官方安装包放到 {AudioDriver.OfflineDir} 再点安装 —— 完全断网的机器也能装上。"));
+        _driverBody.Children.Add(Ui.Caption(
+            "★ 安装那一步会弹一次系统的管理员提示 —— 装内核驱动必须管理员,这一步谁也绕不过;" +
+            "本程序自身【始终以普通权限运行】(见决议 D46),只在这一刻另起一个提权子进程。"));
+    }
+
+    readonly TextBlock _driverStatus = new();
+
+    void CheckDriverUpdate()
+    {
+        AudioDriverManifest.Reload();
+        var pkg = AudioDriverManifest.Current;
+        _driverStatus.Text = AudioDriver.Compare(AudioDriver.Detect(), pkg, DateTime.Now);
+    }
+
+    void InstallDriver()
+    {
+        var local = AudioDriver.FindOfflinePackage();
+        if (local is not null)
+        {
+            // 自备的包也要校验 —— 除非清单里没有这个版本的哈希,那就如实说"没法校验"
+            var pkg = AudioDriverManifest.Current;
+            if (pkg is not null && !AudioDriver.Verify(local, pkg.Sha256))
+            {
+                _driverStatus.Text = "本地安装包与清单里的哈希对不上 —— 已拒绝运行。" +
+                                     "请删掉它重新下载,或确认你放的是官方原包。";
+                return;
+            }
+            AudioDriver.RunInstaller(local, out var msg);
+            _driverStatus.Text = msg;
+            return;
+        }
+        DownloadThenInstall();
+    }
+
+    async void DownloadThenInstall()
+    {
+        var pkg = AudioDriverManifest.Current;
+        if (pkg is null) { _driverStatus.Text = "没有可用的版本清单,请自备安装包(见下方离线安装说明)。"; return; }
+
+        _driverStatus.Text = $"正在下载 {pkg.Version}({pkg.Bytes / 1024} KB)…";
+        var progress = new Progress<double>(p => _driverStatus.Text = $"正在下载 {pkg.Version} … {p:P0}");
+        var (ok, path, msg) = await AudioDriver.DownloadAsync(pkg, progress);
+        _driverStatus.Text = msg;
+        if (!ok) return;
+        AudioDriver.RunInstaller(path, out var m2);
+        _driverStatus.Text = msg + " " + m2;
+    }
+
+    /// <summary>从同传界面跳进来:滚到声音驱动这块并框出来。</summary>
+    public void RevealAudioDriver() => Reveal(_driverCard);
 
     Border? _langCard;
     readonly StackPanel _langBody = new();

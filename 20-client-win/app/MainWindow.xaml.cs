@@ -494,6 +494,14 @@ public partial class MainWindow : Window
         (ContentHost.Content as SettingsView)?.RevealLanguagePool();
     }
 
+    /// <summary>同传界面检测到没装虚拟声卡时点进来:跳到设置里的「声音驱动」并框出来。</summary>
+    public void OpenAudioDriverSettings()
+    {
+        Overlay.CloseActive();
+        Navigate("settings");
+        (ContentHost.Content as SettingsView)?.RevealAudioDriver();
+    }
+
     /// <summary>主页日历/待办的图标(hover 变齿轮)点进来:跳到设置里的「与 Apple 同步」并高亮那一块。</summary>
     public void OpenAppleSyncSettings()
     {
