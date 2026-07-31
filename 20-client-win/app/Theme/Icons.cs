@@ -21,7 +21,7 @@ public enum IconName
 {
     Home, Chat, Assets, Translation, Courses, Computer, Investment,
     Finance, Model, Folder, Ai, File, Pdf, Search, Extensions, Settings, Devices, Calendar, Tasks, Weather, Clock,
-    Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots,
+    Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots, Refresh,
 }
 
 public static class Icons
@@ -57,6 +57,7 @@ public static class Icons
         [IconName.Tasks] = "M4 7 H8 V11 H4 Z M4 14 H8 V18 H4 Z M11 9 H20 M11 16 H20",
         [IconName.Weather] = "M7.5 17 A4 4 0 0 1 7.8 9.1 A5.2 5.2 0 0 1 17.5 10 A3.5 3.5 0 0 1 17 17 Z",
         [IconName.Clock] = "M12 3.5 A8.5 8.5 0 1 0 12 20.5 A8.5 8.5 0 1 0 12 3.5 M12 7 V12 L15.5 14",
+        [IconName.Refresh] = "M20 12 A8 8 0 1 1 17.2 6 M17.2 6 V2.6 M17.2 6 H13.8",
         [IconName.Menu] = "M4 7 H20 M4 12 H20 M4 17 H20",
         [IconName.Close] = "M6 6 L18 18 M18 6 L6 18",
         [IconName.Minimize] = "M5 12 H19",
@@ -92,6 +93,7 @@ public static class Icons
         [IconName.Tasks] = "M4.4 7.6 L6.2 9.4 L9.4 6.2 M4.4 15.6 L6.2 17.4 L9.4 14.2 M12.4 8 H19.6 M12.4 16 H19.6",
         [IconName.Weather] = "M7.6 17.2 A3.9 3.9 0 0 1 8 9.3 A5.2 5.2 0 0 1 17.4 10.2 A3.5 3.5 0 0 1 16.9 17.2 Z",
         [IconName.Clock] = "M12 3.8 A8.2 8.2 0 1 0 12 20.2 A8.2 8.2 0 1 0 12 3.8 M12 7.4 V12.2 L15.4 14",
+        [IconName.Refresh] = "M19.8 12 A7.8 7.8 0 1 1 17.1 6.2 M17.1 6.2 V3 M17.1 6.2 H14",
         [IconName.Menu] = "M4.4 7.4 H19.6 M4.4 12 H19.6 M4.4 16.6 H19.6",
         [IconName.Close] = "M6.6 6.6 L17.4 17.4 M17.4 6.6 L6.6 17.4",
         [IconName.Minimize] = "M5.4 12 H18.6",
@@ -127,6 +129,7 @@ public static class Icons
         [IconName.Tasks] = "M5.4 6 H8.6 A1.4 1.4 0 0 1 10 7.4 V10.6 A1.4 1.4 0 0 1 8.6 12 H5.4 A1.4 1.4 0 0 1 4 10.6 V7.4 A1.4 1.4 0 0 1 5.4 6 Z M5.4 13.6 H8.6 A1.4 1.4 0 0 1 10 15 V18.2 A1.4 1.4 0 0 1 8.6 19.6 H5.4 A1.4 1.4 0 0 1 4 18.2 V15 A1.4 1.4 0 0 1 5.4 13.6 Z M13 8 H19 A1 1 0 0 1 19 10 H13 A1 1 0 0 1 13 8 Z M13 15.6 H19 A1 1 0 0 1 19 17.6 H13 A1 1 0 0 1 13 15.6 Z",
         [IconName.Weather] = "M8.2 18.4 A4.6 4.6 0 0 1 8.4 9.2 A5.6 5.6 0 0 1 18.4 10.2 A4.1 4.1 0 0 1 17.8 18.4 Z",
         [IconName.Clock] = "M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 Z M12 6.6 A1 1 0 0 1 13 7.6 V11.5 L15.9 13.2 A1 1 0 0 1 14.9 14.9 L11.5 13 A1 1 0 0 1 11 12.1 V7.6 A1 1 0 0 1 12 6.6 Z",
+        [IconName.Refresh] = "M20 12 A8 8 0 1 1 17.2 6 M17.2 6 V2.6 M17.2 6 H13.8",
         [IconName.Menu] = "M4.6 6.4 H19.4 A1.2 1.2 0 0 1 19.4 8.8 H4.6 A1.2 1.2 0 0 1 4.6 6.4 Z M4.6 10.8 H19.4 A1.2 1.2 0 0 1 19.4 13.2 H4.6 A1.2 1.2 0 0 1 4.6 10.8 Z M4.6 15.2 H19.4 A1.2 1.2 0 0 1 19.4 17.6 H4.6 A1.2 1.2 0 0 1 4.6 15.2 Z",
         [IconName.Close] = "M6.6 5 L12 10.4 L17.4 5 A1.1 1.1 0 0 1 19 6.6 L13.6 12 L19 17.4 A1.1 1.1 0 0 1 17.4 19 L12 13.6 L6.6 19 A1.1 1.1 0 0 1 5 17.4 L10.4 12 L5 6.6 A1.1 1.1 0 0 1 6.6 5 Z",
         [IconName.Minimize] = "M5.6 10.8 H18.4 A1.2 1.2 0 0 1 18.4 13.2 H5.6 A1.2 1.2 0 0 1 5.6 10.8 Z",

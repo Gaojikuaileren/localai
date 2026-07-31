@@ -99,8 +99,10 @@ public partial class App : Application
         var hadStore = ClientStore.HasAnyStore();
         var hadCalendar = File.Exists(ClientStore.CalendarPath);   // 日历单独落盘,独立判断是否首见
         var mergedOnLoad = LoadStores();      // 合并了重复项目就得补存(见下)
-        if (!hadStore) SeedDemoTasks();       // 聊天/项目/待办示例
-        if (!hadCalendar) SeedDemoEvents();   // 日历示例(独立:老用户有其它存档但还没日历档,也补一次)
+        // ★★ 示例数据【已停止播种】(用户要求 2026-07-31):真实的日历/待办已经能从 Apple 拉进来,
+        //   再摆一堆"(示例)"只会和真数据混在一起,分不清哪条是真的 —— 那本身就是一种误导。
+        //   下面这一次性清理会把此前播下的示例删掉;清过之后记档,不再重复扫。
+        PurgeDemoDataOnce();
         // 同传示例同样【独立判断】:这台机器上已经有存档的用户,也该看得到这条记录长什么样。
         // 判据是"一条同传会话都没有",而不是"是不是首次运行" —— 删掉之后不会再冒出来。
         // ★ 判据是【播没播过】而不是【列表里有没有】—— 删除是软删除,
@@ -126,6 +128,39 @@ public partial class App : Application
 
         // 启动即用已保存的档案连一次:配对过就自动连上,不再打扰用户(用户要求 3)。
         _ = Task.Run(async () => { await Hub.ProbeAsync(); Dispatcher.Invoke(UpdateTrayTooltip); });
+    }
+
+    /// <summary>
+    /// 一次性清掉此前播下的示例数据(标题带「(示例)」的那些)。
+    /// ★ 只删【明确标注示例】的:用户自己建的一律不碰。清过一次就记档,不再重复扫。
+    /// ★ 为什么不留着:日历与待办现在能从 Apple 拉到真数据,示例混在里面分不清真假。
+    /// </summary>
+    void PurgeDemoDataOnce()
+    {
+        if (Settings.DemoDataPurged) return;
+
+        const string Mark = "(示例)";
+        var n = 0;
+
+        foreach (var t in Tasks.Tasks.Where(x => x.Title.Contains(Mark)).ToList())
+        { Tasks.Remove(t.Id); n++; }
+
+        foreach (var pr in Projects.All().Where(x => x.Title.Contains(Mark)).ToList())
+        { Projects.PurgeProject(pr.ProjectId); n++; }
+
+        foreach (var td in Todos.Items.Where(x => x.Title.Contains(Mark)).ToList())
+        { Todos.Remove(td.Id); n++; }
+
+        // 会话:先软删再彻底清(PurgeDeleted 只认已软删的),连温层归档一起清掉
+        foreach (var se in Chat.Sessions.Where(x => x.Title.Contains(Mark)).ToList())
+        { Chat.Delete(se.SessionId); Chat.PurgeDeleted(se.SessionId); n++; }
+
+        foreach (var ev in Views.CalendarData.Events.Where(e => (e.Title ?? "").Contains(Mark)).ToList())
+        { Views.CalendarData.Remove(ev); n++; }
+
+        Settings.DemoDataPurged = true;
+        Settings.Save();
+        if (n > 0) SaveStores();
     }
 
     // 外壳评审期的示例任务。真实任务源要等各工作空间接入(P4/P6/P9),在那之前底部横条

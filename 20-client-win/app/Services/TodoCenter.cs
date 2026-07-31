@@ -34,7 +34,9 @@ public sealed record TodoItem(
     string Owner = "我",
     string Scope = "家庭",
     DateTime? CompletedAt = null,
-    bool CreatedByAi = false)   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
+    bool CreatedByAi = false,   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
+    string Source = "local",    // 来源:local(本机建) / apple(从提醒事项拉来)
+    string? ExternalId = null)  // Apple 那边的 UID —— 合并去重的首选判据(同日历口径)
 {
     /// <summary>已逾期:有截止、未完成、且截止在此刻之前。</summary>
     public bool IsOverdue => Due is { } d && !Done && d < DateTime.Now;
@@ -87,6 +89,46 @@ public sealed class TodoCenter
     public static string NewId() => Guid.NewGuid().ToString("N")[..8];
 
     // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
+    // ---------------------------------------------------------------- 与 Apple 提醒事项的【增量合并】
+    // ★ 规则照抄日历那套(CalendarData.MergeInto,D50 补充):
+    //   已有的不重复加、同一条不覆盖、空条目不并入。
+    //   两边用同一套口径,以后只需要记住一种行为。
+
+    /// <summary>空条目:没标题的不参与合并、也永不用来覆盖。</summary>
+    public static bool IsBlank(TodoItem t) => string.IsNullOrWhiteSpace(t.Title);
+
+    /// <summary>内容签名:没有 Apple UID 时,按"标题+截止"判断是否同一条。</summary>
+    public static string ContentKey(TodoItem t)
+        => $"{(t.Title ?? "").Trim()}|{t.Due:o}";
+
+    /// <summary>去重判据:有 Apple UID 用 UID,否则用内容签名。</summary>
+    public static string Identity(TodoItem t)
+        => !string.IsNullOrEmpty(t.ExternalId) ? "x:" + t.ExternalId : "c:" + ContentKey(t);
+
+    /// <summary>把 incoming 增量并入:只加【没有的】。纯函数,便于测试。返回新增条数。</summary>
+    public static int MergeInto(List<TodoItem> existing, IEnumerable<TodoItem> incoming)
+    {
+        var seen = new HashSet<string>();
+        foreach (var t in existing) seen.Add(Identity(t));
+        var added = 0;
+        foreach (var inc in incoming)
+        {
+            if (IsBlank(inc)) continue;
+            if (!seen.Add(Identity(inc))) continue;
+            existing.Add(string.IsNullOrEmpty(inc.Id) ? inc with { Id = NewId() } : inc);
+            added++;
+        }
+        return added;
+    }
+
+    /// <summary>接入后:把 Apple 拉来的待办合并进本机(不覆盖、不重复)。返回新增条数。</summary>
+    public int MergeIn(IEnumerable<TodoItem> incoming)
+    {
+        var n = MergeInto(_items, incoming);
+        if (n > 0) Changed?.Invoke();
+        return n;
+    }
+
     public List<TodoItem> Export() => _items.ToList();
 
     public void Import(List<TodoItem>? items)

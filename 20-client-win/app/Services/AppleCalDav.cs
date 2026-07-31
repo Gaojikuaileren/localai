@@ -105,10 +105,11 @@ public static class AppleCalDav
     /// 发现流程:入口 -> 当前用户主体(principal) -> 日历主目录(calendar-home-set) -> 列出日历。
     /// 返回可读的失败原因(已抹去敏感信息)。
     /// </summary>
-    public static async Task<(bool ok, string message, List<AppleCalendar> calendars)> DiscoverAsync(
+    public static async Task<(bool ok, string message, List<AppleCalendar> calendars, List<AppleCalendar> reminders)> DiscoverAsync(
         string appleId, string appPassword, CancellationToken ct = default)
     {
         var cals = new List<AppleCalendar>();
+        var todos = new List<AppleCalendar>();
         try
         {
             using var c = NewClient(appleId, appPassword);
@@ -128,25 +129,25 @@ public static class AppleCalDav
                                "\n① 专用密码填错了(请原样粘贴,连字符不要去掉);" +
                                "\n② 填成了 Apple ID 主密码 —— 必须用【专用密码】;" +
                                "\n③ 专用密码已失效 —— 改过/重置过 Apple ID 主密码的话,Apple 会把所有专用密码全部撤销,需要重新生成。" +
-                               "\n⚠ 别反复试 —— 多次失败会被 Apple 锁账号。", cals);
+                               "\n⚠ 别反复试 —— 多次失败会被 Apple 锁账号。", cals, todos);
             if (c1 == HttpStatusCode.Forbidden)
                 return (false, "Apple 暂时拒绝了这个账号的请求(403)。★ 这通常是前面失败次数太多被临时节流了。" +
                                "请【停下来】隔一段时间再试,并先确认专用密码是对的 —— " +
-                               "继续重试可能导致 Apple ID 被锁。", cals);
+                               "继续重试可能导致 Apple ID 被锁。", cals, todos);
             if ((int)c1 >= 400)
-                return (false, $"连接 iCloud 失败(HTTP {(int)c1})。", cals);
+                return (false, $"连接 iCloud 失败(HTTP {(int)c1})。", cals, todos);
 
             var principal = FirstHref(b1, "current-user-principal");
-            if (principal is null) return (false, "连上了,但没能从响应里找到账号主体(current-user-principal)。", cals);
+            if (principal is null) return (false, "连上了,但没能从响应里找到账号主体(current-user-principal)。", cals, todos);
             var principalUrl = Absolute(Root, principal);
 
             // ② 日历主目录
             var (c2, b2) = await PropfindAsync(c, principalUrl, 0,
                 $"<d:propfind xmlns:d=\"{DavNs}\" xmlns:c=\"{CalNs}\"><d:prop><c:calendar-home-set/></d:prop></d:propfind>", ct);
-            if ((int)c2 >= 400) return (false, $"取日历主目录失败(HTTP {(int)c2})。", cals);
+            if ((int)c2 >= 400) return (false, $"取日历主目录失败(HTTP {(int)c2})。", cals, todos);
 
             var home = FirstHref(b2, "calendar-home-set");
-            if (home is null) return (false, "没找到日历主目录(calendar-home-set)。", cals);
+            if (home is null) return (false, "没找到日历主目录(calendar-home-set)。", cals, todos);
             var homeUrl = Absolute(principalUrl, home);
 
             // ③ 列出日历集合
@@ -154,27 +155,33 @@ public static class AppleCalDav
                 $"<d:propfind xmlns:d=\"{DavNs}\" xmlns:c=\"{CalNs}\"><d:prop>" +
                 "<d:resourcetype/><d:displayname/><c:supported-calendar-component-set/>" +
                 "</d:prop></d:propfind>", ct);
-            if ((int)c3 >= 400) return (false, $"列出日历失败(HTTP {(int)c3})。", cals);
+            if ((int)c3 >= 400) return (false, $"列出日历失败(HTTP {(int)c3})。", cals, todos);
 
             foreach (var (href, name, isCal, comps) in ParseCollections(b3))
             {
                 if (!isCal) continue;
-                // ★ 只要装 VEVENT 的集合。提醒事项(VTODO)这一版不接 —— 与用户裁定一致,
-                //   把它们混进来会让"日历"里冒出一堆待办。
-                if (comps.Count > 0 && !comps.Contains("VEVENT")) continue;
-                cals.Add(new AppleCalendar(Absolute(homeUrl, href), string.IsNullOrWhiteSpace(name) ? "(未命名)" : name));
+                // ★ 日历(VEVENT)与提醒事项(VTODO)在 iCloud 里就是【两类集合】,
+                //   靠 supported-calendar-component-set 区分。分开带出去,让用户各自勾选 ——
+                //   混在一起的话"日历"里会冒出一堆待办。
+                var url = Absolute(homeUrl, href);
+                var disp = string.IsNullOrWhiteSpace(name) ? "(未命名)" : name;
+                if (comps.Contains("VTODO") && !comps.Contains("VEVENT"))
+                    todos.Add(new AppleCalendar(url, disp));
+                else if (comps.Count == 0 || comps.Contains("VEVENT"))
+                    cals.Add(new AppleCalendar(url, disp));
             }
-            if (cals.Count == 0) return (false, "连上了,但没有找到任何日历集合。", cals);
-            return (true, $"已连接,找到 {cals.Count} 个日历。", cals);
+            if (cals.Count == 0 && todos.Count == 0)
+                return (false, "连上了,但没有找到任何日历或提醒事项清单。", cals, todos);
+            return (true, $"已连接,找到 {cals.Count} 个日历、{todos.Count} 个提醒事项清单。", cals, todos);
         }
         catch (TaskCanceledException)
         {
-            return (false, "连接 iCloud 超时。", cals);
+            return (false, "连接 iCloud 超时。", cals, todos);
         }
         catch (Exception ex)
         {
             // ★ 抹掉可能夹带的认证头/密码再交出去 —— 异常消息会被显示,也可能落进 crash.log
-            return (false, "连接出错:" + AppleCredentials.Redact(ex.Message), cals);
+            return (false, "连接出错:" + AppleCredentials.Redact(ex.Message), cals, todos);
         }
     }
 
@@ -224,6 +231,48 @@ public static class AppleCalDav
         catch (Exception ex)
         {
             return (false, "拉取出错:" + AppleCredentials.Redact(ex.Message), evs, 0);
+        }
+    }
+
+    /// <summary>
+    /// 拉取某个提醒事项清单里的全部 VTODO。
+    /// ★ 不加 time-range:待办很多是【没有截止日期】的,按时间筛会把它们全滤掉。
+    ///   清单本身条数不大,全拉反而简单且不会漏。
+    /// </summary>
+    public static async Task<(bool ok, string message, List<TodoItem> todos, int skipped)> FetchTodosAsync(
+        string appleId, string appPassword, AppleCalendar list, TodoKind kind, CancellationToken ct = default)
+    {
+        var outp = new List<TodoItem>();
+        try
+        {
+            using var c = NewClient(appleId, appPassword);
+            var body =
+                $"<c:calendar-query xmlns:d=\"{DavNs}\" xmlns:c=\"{CalNs}\">" +
+                "<d:prop><d:getetag/><c:calendar-data/></d:prop>" +
+                "<c:filter><c:comp-filter name=\"VCALENDAR\">" +
+                "<c:comp-filter name=\"VTODO\"/>" +
+                "</c:comp-filter></c:filter></c:calendar-query>";
+
+            var (code, text) = await SendFollowingAsync(c, "REPORT", list.Url, body, 1, ct);
+            if ((int)code >= 400)
+                return (false, $"拉取提醒「{list.DisplayName}」失败(HTTP {(int)code})。", outp, 0);
+
+            var skipped = 0;
+            foreach (var ics in ParseCalendarData(text))
+            {
+                var (part, sk) = ICalParser.ParseTodos(ics, kind);
+                outp.AddRange(part);
+                skipped += sk;
+            }
+            return (true, $"「{list.DisplayName}」取到 {outp.Count} 条待办。", outp, skipped);
+        }
+        catch (TaskCanceledException)
+        {
+            return (false, $"拉取提醒「{list.DisplayName}」超时。", outp, 0);
+        }
+        catch (Exception ex)
+        {
+            return (false, "拉取提醒出错:" + AppleCredentials.Redact(ex.Message), outp, 0);
         }
     }
 

@@ -862,7 +862,8 @@ public static class Selftest
             var appSrc2 = TryReadSource("App.xaml.cs");
             if (appSrc2 is not null)
             {
-                Assert(appSrc2.Contains("if (!hadStore) SeedDemoTasks()"), "有存档就不再播种示例数据");
+                Assert(appSrc2.Contains("PurgeDemoDataOnce();") && !appSrc2.Contains("if (!hadStore) SeedDemoTasks()"),
+                       "★ 示例数据已停止播种并一次性清掉(用户要求 2026-07-31:真数据能从 Apple 拉来了,示例混在里面分不清真假)");
                 Assert(appSrc2.Contains("save-client-stores"), "退出前把未落盘的改动存下来");
                 Assert(appSrc2.Contains("_saveDebounce"), "变更防抖后落盘(一次操作不写多次)");
             }
@@ -2554,11 +2555,12 @@ public static class Selftest
                 Console.WriteLine("  SKIP  接线自检(发布环境无源码,开发/CI 下才跑)");
             else
             {
-                Assert(appSrc.Contains("SeedDemoTasks();"), "示例数据的播种函数【真的被调用】(曾出现整段成死代码)");
-                var seedIdx = appSrc.IndexOf("SeedDemoTasks();", StringComparison.Ordinal);
+                // ★ 示例数据已停止播种(用户要求 2026-07-31)—— 改成钉"清理发生在建窗口之前",
+                //   同样的理由:建窗口之后再改数据,界面已经按旧表画完了。
+                var purgeIdx = appSrc.IndexOf("PurgeDemoDataOnce();", StringComparison.Ordinal);
                 var winIdx = appSrc.IndexOf("_main = new MainWindow();", StringComparison.Ordinal);
-                Assert(seedIdx >= 0 && winIdx >= 0 && seedIdx < winIdx,
-                       "播种发生在建窗口【之前】(否则界面读到空表 = 开启时日程读不出来)");
+                Assert(purgeIdx >= 0 && winIdx >= 0 && purgeIdx < winIdx,
+                       "★ 示例清理发生在建窗口【之前】(否则界面先按旧表画完,示例会一闪而过)");
                 Assert(calSrc.Contains("OpenSideDrawer"), "日程编辑走【右侧抽屉】而不是浮窗(曾被后续重写覆盖回去)");
 
                 // 抽屉与输入控件要走主题,不能露出系统外观(用户反馈"太过于系统")
@@ -3241,6 +3243,58 @@ public static class Selftest
                     Assert(sv3.Contains("cb.Checked += (_, _) =>") && sv3.Contains("AppleCalendarUrls.Add(url)"),
                            "★ 可以逐个勾选要拉取哪些日历(用户要求)");
                 }
+            }
+
+            // ---- 这一批(用户 2026-07-31)----
+            {
+                // 待办的合并层:与日历同一套规则
+                var box = new List<TodoItem>();
+                var todo1 = new TodoItem("", "买菜", TodoKind.Chore, Source: "apple", ExternalId: "r-1");
+                Assert(TodoCenter.MergeInto(box, new[] { todo1 }) == 1, "待办首次合并加入");
+                Assert(TodoCenter.MergeInto(box, new[] { todo1 }) == 0, "★ 同 Apple UID 的待办不重复加");
+                Assert(TodoCenter.MergeInto(box, new[] { new TodoItem("", "  ", TodoKind.Chore) }) == 0,
+                       "空标题的待办不并入");
+
+                // VTODO 解析
+                static string V(params string[] ls) => string.Join(Environment.NewLine, ls);
+                var (tds, _) = Services.ICalParser.ParseTodos(V(
+                    "BEGIN:VTODO", "UID:t-1", "SUMMARY:交电费", "DUE;VALUE=DATE:20260805",
+                    "PRIORITY:1", "STATUS:COMPLETED", "END:VTODO"), TodoKind.Personal);
+                Assert(tds.Count == 1 && tds[0].Title == "交电费", "VTODO 能解析");
+                Assert(tds[0].Done && tds[0].Priority == TodoPriority.High, "★ 完成状态与优先级都读到(PRIORITY 1-4 = 高)");
+                Assert(tds[0].Source == "apple" && tds[0].ExternalId == "t-1", "回填来源与 UID");
+
+                // 自动拉取:三道闸
+                var au2 = TryReadSource(Path.Combine("Services", "AppleAutoSync.cs"));
+                if (au2 is not null)
+                {
+                    Assert(au2.Contains("NetworkInterface.GetIsNetworkAvailable()") && au2.Contains("没有网络"),
+                           "★★ 没网就【连试都不试】—— 断网时发注定失败的请求只是空转");
+                    Assert(au2.Contains("SuspendedReason") && au2.Contains("SuspendAfter"),
+                           "★ 连续连不上 -> 软暂停,不再按固定节奏空转");
+                    Assert(au2.Contains("NetworkChange.NetworkAvailabilityChanged"),
+                           "★ 网络恢复时【自然继续】,而不是靠定时重试去发现");
+                }
+                // 默认间隔 30 分钟
+                Assert(new Services.AppSettings().AppleAutoPullMinutes == 30, "自动拉取默认间隔 30 分钟(用户裁定)");
+                // 清单落盘
+                Assert(new Services.AppSettings().AppleCalendarList is not null
+                       && new Services.AppSettings().AppleReminderList is not null,
+                       "★ 日历/提醒清单落盘保存 —— 连上后一直在,不必每次先点刷新");
+
+                // 月视图点日期 = 查看当天(不再直接开新增抽屉)
+                var cv4 = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
+                if (cv4 is not null)
+                {
+                    var oc = Slice(cv4, "void OnDayClicked(DateTime day)", "}");
+                    Assert(oc is not null && !oc.Contains("OpenEditor(day, null)"),
+                           "★ 月视图点日期 = 【查看当天】,不再直接弹新增抽屉(用户报的 bug)");
+                }
+                // 主页刷新按钮:透明命中块 + 图标不吃命中
+                var hv4 = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                if (hv4 is not null)
+                    Assert(hv4.Contains("SyncNowButton") && hv4.Contains("glyph.IsHitTestVisible = false"),
+                           "★ 主页日历右上角刷新:图标不做按钮,外套透明命中块");
             }
 
             var mwSys = TryReadSource("MainWindow.xaml.cs");

@@ -41,22 +41,23 @@ public static class AppleCalendarSync
                 "读不出已保存的专用密码 —— 多半是换了 Windows 用户或把配置拷来的(密码按当前用户加密)。请重新填一次。",
                 AuthFailed: true);
 
-        if (settings.AppleCalendarUrls.Count == 0)
-            return new AppleSyncResult(false, 0, 0, 0, "还没有选择要同步的日历。");
+        if (settings.AppleCalendarUrls.Count == 0 && settings.AppleReminderUrls.Count == 0)
+            return new AppleSyncResult(false, 0, 0, 0, "还没有选择要同步的日历或提醒事项。");
 
         Busy = true;
         try
         {
             // 先发现一次 —— 拿到日历的当前名字与 URL(用户可能在 iCloud 那边改过名/删过)
-            var (dok, dmsg, cals) = await AppleCalDav.DiscoverAsync(acct.AppleId, pwd, ct);
+            var (dok, dmsg, cals, rems) = await AppleCalDav.DiscoverAsync(acct.AppleId, pwd, ct);
             // ★ 认证类失败要标出来 —— 自动拉取据此熔断,不能定时反复撞(会锁账号)。
             if (!dok) return new AppleSyncResult(false, 0, 0, 0, dmsg,
                 AuthFailed: dmsg.Contains("401") || dmsg.Contains("403"));
 
             var wanted = cals.Where(c => settings.AppleCalendarUrls.Contains(c.Url)).ToList();
-            if (wanted.Count == 0)
+            var wantedTodos = rems.Where(c => settings.AppleReminderUrls.Contains(c.Url)).ToList();
+            if (wanted.Count == 0 && wantedTodos.Count == 0)
                 return new AppleSyncResult(false, 0, 0, 0,
-                    "选中的日历在 Apple 那边找不到了(可能被改名或删除)。请重新选择。");
+                    "选中的日历/清单在 Apple 那边找不到了(可能被改名或删除)。请重新选择。");
 
             var from = DateTime.Today.AddDays(-Math.Abs(settings.AppleSyncPastDays));
             var to = DateTime.Today.AddDays(Math.Abs(settings.AppleSyncFutureDays));
@@ -76,20 +77,36 @@ public static class AppleCalendarSync
                 skipped += sk;
             }
 
+            // —— 提醒事项(VTODO)—— 与日历同一趟、同一套合并规则
+            var allTodos = new List<TodoItem>();
+            foreach (var lst in wantedTodos)
+            {
+                ct.ThrowIfCancellationRequested();
+                var (ok, msg, ts, sk) = await AppleCalDav.FetchTodosAsync(
+                    acct.AppleId, pwd, lst, TodoKind.Personal, ct);
+                if (!ok) { failures.Add(msg); continue; }
+                allTodos.AddRange(ts);
+                fetched += ts.Count;
+                skipped += sk;
+            }
+
             // ★ 一条都没成功 -> 如实说失败,不要因为"没报错"就显示成功
-            if (all.Count == 0 && failures.Count > 0)
+            if (all.Count == 0 && allTodos.Count == 0 && failures.Count > 0)
                 return new AppleSyncResult(false, 0, 0, skipped, string.Join(" ", failures));
 
-            // 交给已被钉死的合并层:不重复、不覆盖、不并入空日程
+            // 交给已被钉死的合并层:不重复、不覆盖、不并入空条目
             var added = Views.CalendarData.MergeIn(all);
+            var addedTodos = ((App)System.Windows.Application.Current).Todos.MergeIn(allTodos);
+            added += addedTodos;
 
             settings.AppleLastSync = DateTime.Now;
             settings.Save();
 
             var extra = failures.Count > 0 ? $" 有 {failures.Count} 个日历没取成功。" : "";
             var skipNote = skipped > 0 ? $" 跳过 {skipped} 条读不懂的。" : "";
-            return new AppleSyncResult(true, added, fetched,skipped,
-                $"取到 {fetched} 条,新增 {added} 条(其余是本机已有的,未重复添加)。{skipNote}{extra}");
+            return new AppleSyncResult(true, added, fetched, skipped,
+                $"取到 {fetched} 条(日程 {all.Count} + 待办 {allTodos.Count}),新增 {added} 条" +
+                $"(其余是本机已有的,未重复添加)。{skipNote}{extra}");
         }
         catch (OperationCanceledException)
         {

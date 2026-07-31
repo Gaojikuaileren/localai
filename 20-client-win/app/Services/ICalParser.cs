@@ -60,6 +60,78 @@ public static class ICalParser
         return (list, skipped);
     }
 
+    /// <summary>
+    /// 解析一段 .ics 里的所有 VTODO(Apple 提醒事项)。
+    /// ★ 与 VEVENT 共用折行/转义/时间那三套 —— 那几个坑两边一模一样。
+    /// 只取能对上号的字段:标题 / 截止 / 完成 / 优先级 / 备注 / UID。
+    /// </summary>
+    public static (List<TodoItem> todos, int skipped) ParseTodos(string ics, TodoKind kind)
+    {
+        var list = new List<TodoItem>();
+        var skipped = 0;
+        if (string.IsNullOrWhiteSpace(ics)) return (list, 0);
+
+        var lines = Unfold(ics);
+        List<(string name, Dictionary<string, string> parms, string value)>? cur = null;
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("BEGIN:VTODO", StringComparison.OrdinalIgnoreCase)) { cur = new(); continue; }
+            if (line.StartsWith("END:VTODO", StringComparison.OrdinalIgnoreCase))
+            {
+                if (cur is not null)
+                {
+                    var t = BuildTodo(cur, kind);
+                    if (t is not null) list.Add(t); else skipped++;
+                }
+                cur = null;
+                continue;
+            }
+            if (cur is null) continue;
+            if (TryParseLine(line, out var pr)) cur.Add(pr);
+        }
+        return (list, skipped);
+    }
+
+    static TodoItem? BuildTodo(
+        List<(string name, Dictionary<string, string> parms, string value)> props, TodoKind kind)
+    {
+        string? uid = null, summary = null, notes = null, status = null;
+        DateTime? due = null;
+        var dueHasTime = false;
+        var priority = TodoPriority.None;
+        var completed = false;
+
+        foreach (var (name, parms, value) in props)
+        {
+            switch (name.ToUpperInvariant())
+            {
+                case "UID": uid = value.Trim(); break;
+                case "SUMMARY": summary = Unescape(value); break;
+                case "DESCRIPTION": notes = Unescape(value); break;
+                case "STATUS": status = value.Trim().ToUpperInvariant(); break;
+                case "COMPLETED": completed = true; break;   // 有这个属性就是已完成
+                case "DUE":
+                    if (ParseDate(value, parms) is { } d) { due = d.when; dueHasTime = !d.allDay; }
+                    break;
+                case "PRIORITY":
+                    // RFC 5545:1-4 高 / 5 中 / 6-9 低;0 = 未定。Apple 提醒事项用的就是 1/5/9。
+                    if (int.TryParse(value.Trim(), out var pv) && pv > 0)
+                        priority = pv <= 4 ? TodoPriority.High : pv == 5 ? TodoPriority.Medium : TodoPriority.Low;
+                    break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(summary)) return null;   // 空条目不并入(同 TodoCenter.IsBlank)
+        if (status == "COMPLETED") completed = true;
+
+        return new TodoItem(
+            Id: "", Title: summary!.Trim(), Kind: kind, Done: completed,
+            Due: due, DueHasTime: dueHasTime, Priority: priority,
+            Notes: NullIfBlank(notes),
+            Source: "apple", ExternalId: NullIfBlank(uid));
+    }
+
     // ---------------------------------------------------------------- 折行合并
     /// <summary>
     /// 把折行接回去。续行 = 以空格或制表符开头的行(RFC 5545 §3.1)。

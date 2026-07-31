@@ -108,7 +108,8 @@ public sealed class HomeView : UserControl
             var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
             calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
                 iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
-                iconActionTip: "与 Apple 家庭共享日历同步的设置");
+                iconActionTip: "与 Apple 家庭共享日历同步的设置",
+                headerAction: SyncNowButton(calView));
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0);
             if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
             _root.Children.Add(calPanel);
@@ -582,6 +583,60 @@ public sealed class HomeView : UserControl
     }
 
     // ---------------------------------------------------------------- 待办与家务(仿提醒事项)
+    /// <summary>
+    /// 日历右上角的【立即拉取】按钮:一次把 Apple 的日历与提醒事项都拉下来(用户要求 2026-07-31)。
+    /// ★ 图标本身不是按钮 —— 外面套一个透明的命中块(项目一贯做法:图标才十几像素,只让它可点会经常按空)。
+    /// ★ 没连 Apple 时【不显示】:给一个点了只会说"还没连接"的按钮,不如不给。
+    /// </summary>
+    FrameworkElement? SyncNowButton(CalendarView calView)
+    {
+        if (Services.AppleCredentials.Load() is not { HasPassword: true }) return null;
+
+        var glyph = Icons.Make(IconName.Refresh, 15, "FgSecondary");
+        glyph.VerticalAlignment = VerticalAlignment.Center;
+        glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        glyph.IsHitTestVisible = false;                     // 命中交给外面那块
+
+        var hit = new Grid
+        {
+            Width = 26,
+            Height = 24,
+            Background = System.Windows.Media.Brushes.Transparent,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            ToolTip = "立即从 Apple 拉取日历与提醒事项",
+        };
+        hit.Children.Add(glyph);
+
+        var busy = false;
+        hit.MouseLeftButtonUp += async (_, e) =>
+        {
+            e.Handled = true;
+            if (busy) return;                               // 防连点:一次拉取跑完再说
+            busy = true;
+            var spin = new System.Windows.Media.Animation.DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(900))
+            { RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever };
+            var rot = new System.Windows.Media.RotateTransform();
+            glyph.RenderTransformOrigin = new Point(0.5, 0.5);
+            glyph.RenderTransform = rot;
+            rot.BeginAnimation(System.Windows.Media.RotateTransform.AngleProperty, spin);
+            try
+            {
+                var r = await Services.AppleCalendarSync.PullAsync(
+                    TheApp.Settings, Services.MemberContext.Current, "家庭");
+                if (r.Ok) Services.AppleAutoSync.NoteManualSuccess();
+                hit.ToolTip = r.Message;                    // 结果如实挂在提示上,不弹窗打断
+                calView.Rebuild();
+            }
+            finally
+            {
+                rot.BeginAnimation(System.Windows.Media.RotateTransform.AngleProperty, null);
+                glyph.RenderTransform = null;
+                busy = false;
+            }
+        };
+        return hit;
+    }
+
     void OpenTodoEditor(TodoItem? existing)
     {
         var body = TodoEditor.Build(existing);

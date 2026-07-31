@@ -24,6 +24,14 @@ public sealed class AppSettings
     /// <summary>要拉取的日历集合 URL。空 = 还没选。★ 不存密码(那在 AppleCredentials,DPAPI 加密)。</summary>
     public List<string> AppleCalendarUrls { get; set; } = new();
 
+    /// <summary>
+    /// 已发现的日历清单(URL|名字),【落盘保存】。
+    /// ★ 为什么要存:此前列表只活在内存里 —— 切走再回来/重启就没了,
+    ///   用户得再点一次"刷新日历列表"才能挑选。存下来才能【连上后一直在】。
+    /// 只存 URL 与显示名,不存任何日程内容。
+    /// </summary>
+    public List<string> AppleCalendarList { get; set; } = new();
+
     /// <summary>上次成功拉取的时间(本地时间)。null = 从没成功过 —— 界面据此如实说"从未同步"。</summary>
     public DateTime? AppleLastSync { get; set; }
 
@@ -33,8 +41,13 @@ public sealed class AppSettings
 
     /// <summary>自动拉取(默认关)。★ 认证失败会被【自动关掉】—— 见 AppleAutoSync 的熔断。</summary>
     public bool AppleAutoPull { get; set; }
+
+    /// <summary>待办(提醒事项)要拉取的清单 URL。与日历分开选 —— 它们在 iCloud 里就是两类集合。</summary>
+    public List<string> AppleReminderUrls { get; set; } = new();
+    /// <summary>已发现的提醒事项清单(URL|名字),落盘。</summary>
+    public List<string> AppleReminderList { get; set; } = new();
     /// <summary>自动拉取间隔(分钟)。下限 15 —— 日历不是秒级数据,拉太勤只会更容易撞上节流。</summary>
-    public int AppleAutoPullMinutes { get; set; } = 60;
+    public int AppleAutoPullMinutes { get; set; } = 30;   // 默认 30 分钟(用户裁定 2026-07-31)
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public Density Density { get; set; } = Density.Comfortable;
     public bool Autostart { get; set; }
@@ -161,6 +174,9 @@ public sealed class AppSettings
     ///   "有没有"和"播没播过"是两回事,只有后者才能当播种判据。
     /// </summary>
     public bool InterpretDemoSeeded { get; set; }
+
+    /// <summary>示例数据已清理过(一次性)。★ 停止播种后用它避免每次启动都重复扫一遍。</summary>
+    public bool DemoDataPurged { get; set; }
     /// <summary>被【停用】的模型 key(存停用项 -> 新模型默认启用)。</summary>
     public List<string> DisabledModels { get; set; } = new();
     /// <summary>空闲时自动卸载模型腾显存(接入后由 Broker 执行)。</summary>

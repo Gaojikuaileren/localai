@@ -474,7 +474,14 @@ public sealed class SettingsView : UserControl
     // ---------------------------------------------------------------- 与 Apple 同步(日历,只读拉取)
     readonly StackPanel _appleBody = new();
     readonly TextBlock _appleStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
-    List<AppleCalendar> _appleCals = new();
+    // ★ 不再只活在内存里:清单【落盘保存】(见 AppSettings.AppleCalendarList / AppleReminderList)——
+    //   此前切走再回来/重启就没了,用户得再点一次"刷新日历列表"才能勾选。
+    static List<AppleCalendar> Decode(List<string> raw)
+        => raw.Select(x => x.Split('|', 2))
+              .Where(a => a.Length == 2 && a[0].Length > 0)
+              .Select(a => new AppleCalendar(a[0], a[1])).ToList();
+    static List<string> Encode(List<AppleCalendar> cals)
+        => cals.Select(c => c.Url + "|" + c.DisplayName).ToList();
 
     /// <summary>
     /// 范围裁定(用户 2026-07-31):【只读拉取 + 只做日历】。
@@ -551,13 +558,15 @@ public sealed class SettingsView : UserControl
                 var p = pw.Password;
                 if (aid.Length == 0 || p.Length == 0) { _appleStatus.Text = "请先填写 Apple ID 与专用密码。"; return; }
                 _appleStatus.Text = "正在连接 iCloud…";
-                var (ok, msg, cals) = await AppleCalDav.DiscoverAsync(aid, p);
+                var (ok, msg, cals, rems) = await AppleCalDav.DiscoverAsync(aid, p);
                 _appleStatus.Text = msg;
                 if (!ok) return;
                 // ★ 先连通了再存 —— 连不通的凭据存下来,只会让下次启动又试一遍失败
                 AppleCredentials.Save(aid, p);
                 AppleAutoSync.ResetTrip();   // 新密码填过了 -> 允许自动拉取再跑
-                _appleCals = cals;
+                TheApp.Settings.AppleCalendarList = Encode(cals);
+                TheApp.Settings.AppleReminderList = Encode(rems);
+                TheApp.Settings.Save();
                 RefreshApple();
             });
             connect.Margin = new Thickness(0, 6, 0, 0);
@@ -572,31 +581,51 @@ public sealed class SettingsView : UserControl
             ? $"上次同步:{t:yyyy-MM-dd HH:mm}"
             : "还没同步过。"));
 
-        // ★ 日历列表要点一下才拉 —— 构造界面时【不静默联网】(用户没按按钮就发请求是不该有的行为)
-        if (_appleCals.Count > 0)
+        // ★ 清单来自【落盘保存】的那份 -> 连上之后一直都在,不必每次先点刷新。
+        //   ★ 构造界面时仍然【不静默联网】—— 要拿最新清单得按「刷新清单」,用户没按就发请求是不该有的行为。
+        var calList = Decode(s.AppleCalendarList);
+        var remList = Decode(s.AppleReminderList);
+
+        if (calList.Count == 0 && remList.Count == 0)
         {
-            _appleBody.Children.Add(Ui.Caption("勾选要拉取的日历:"));
-            foreach (var cal in _appleCals)
-            {
-                var url = cal.Url;
-                var cb = new CheckBox
-                {
-                    Content = cal.DisplayName,
-                    IsChecked = s.AppleCalendarUrls.Contains(url),
-                    Margin = new Thickness(0, 2, 0, 2),
-                };
-                cb.Checked += (_, _) => { if (!s.AppleCalendarUrls.Contains(url)) { s.AppleCalendarUrls.Add(url); s.Save(); } };
-                cb.Unchecked += (_, _) => { s.AppleCalendarUrls.Remove(url); s.Save(); };
-                _appleBody.Children.Add(cb);
-            }
-        }
-        else if (s.AppleCalendarUrls.Count > 0)
-        {
-            _appleBody.Children.Add(Ui.Caption($"已选 {s.AppleCalendarUrls.Count} 个日历。点「刷新日历列表」可重新挑选。"));
+            _appleBody.Children.Add(Ui.Caption("还没取过清单 —— 点下面的「刷新清单」把 iCloud 里的日历与提醒事项取过来。"));
         }
         else
         {
-            _appleBody.Children.Add(Ui.Caption("还没选日历 —— 点「刷新日历列表」把 iCloud 里的日历取过来。"));
+            if (calList.Count > 0)
+            {
+                _appleBody.Children.Add(Ui.Caption("勾选要拉取的【日历】:"));
+                foreach (var cal in calList)
+                {
+                    var url = cal.Url;
+                    var cb = new CheckBox
+                    {
+                        Content = cal.DisplayName,
+                        IsChecked = s.AppleCalendarUrls.Contains(url),
+                        Margin = new Thickness(0, 2, 0, 2),
+                    };
+                    cb.Checked += (_, _) => { if (!s.AppleCalendarUrls.Contains(url)) { s.AppleCalendarUrls.Add(url); s.Save(); } };
+                    cb.Unchecked += (_, _) => { s.AppleCalendarUrls.Remove(url); s.Save(); };
+                    _appleBody.Children.Add(cb);
+                }
+            }
+            if (remList.Count > 0)
+            {
+                _appleBody.Children.Add(Ui.Caption("勾选要拉取的【提醒事项】(拉进「待办与家务」):"));
+                foreach (var rem in remList)
+                {
+                    var url = rem.Url;
+                    var cb = new CheckBox
+                    {
+                        Content = rem.DisplayName,
+                        IsChecked = s.AppleReminderUrls.Contains(url),
+                        Margin = new Thickness(0, 2, 0, 2),
+                    };
+                    cb.Checked += (_, _) => { if (!s.AppleReminderUrls.Contains(url)) { s.AppleReminderUrls.Add(url); s.Save(); } };
+                    cb.Unchecked += (_, _) => { s.AppleReminderUrls.Remove(url); s.Save(); };
+                    _appleBody.Children.Add(cb);
+                }
+            }
         }
 
         // ---- 自动拉取(用户要求 2026-07-31)----
@@ -636,14 +665,18 @@ public sealed class SettingsView : UserControl
         if (AppleAutoSync.LastMessage is { } lm) _appleBody.Children.Add(Ui.Caption(lm));
 
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
-        row.Children.Add(Ui.Secondary("刷新日历列表", async (_, _) =>
+        row.Children.Add(Ui.Secondary("刷新清单", async (_, _) =>
         {
             var p = AppleCredentials.Reveal();
             if (p is null) { _appleStatus.Text = "读不出已保存的密码(多半是换了 Windows 用户)。请断开后重新连接。"; return; }
-            _appleStatus.Text = "正在取日历列表…";
-            var (ok, msg, cals) = await AppleCalDav.DiscoverAsync(acct.AppleId, p);
+            _appleStatus.Text = "正在取日历与提醒事项清单…";
+            var (ok, msg, cals, rems) = await AppleCalDav.DiscoverAsync(acct.AppleId, p);
             _appleStatus.Text = msg;
-            if (ok) { _appleCals = cals; RefreshApple(); }
+            if (!ok) return;
+            TheApp.Settings.AppleCalendarList = Encode(cals);
+            TheApp.Settings.AppleReminderList = Encode(rems);
+            TheApp.Settings.Save();
+            RefreshApple();
         }));
 
         var sync = Ui.Primary("立即同步", async (_, _) =>
@@ -651,6 +684,7 @@ public sealed class SettingsView : UserControl
             _appleStatus.Text = "正在同步…";
             var r = await AppleCalendarSync.PullAsync(TheApp.Settings, MemberContext.Current, "家庭");
             _appleStatus.Text = r.Message;
+            if (r.Ok) AppleAutoSync.NoteManualSuccess();   // 手动通了 -> 解除软暂停
             RefreshApple();
         });
         sync.Margin = new Thickness(8, 0, 0, 0);
@@ -665,9 +699,11 @@ public sealed class SettingsView : UserControl
             AppleCredentials.Clear();
             TheApp.Settings.AppleAutoPull = false;
             TheApp.Settings.AppleCalendarUrls.Clear();
+            TheApp.Settings.AppleReminderUrls.Clear();
+            TheApp.Settings.AppleCalendarList.Clear();
+            TheApp.Settings.AppleReminderList.Clear();
             TheApp.Settings.Save();
             AppleAutoSync.Stop();          // 停表 + 清熔断 —— 断开后不该还留着上次的报错
-            _appleCals = new List<AppleCalendar>();
             _appleStatus.Text = "已断开。本机已有的日程原样保留。";
             RefreshApple();
         });

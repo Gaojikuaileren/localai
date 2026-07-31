@@ -157,7 +157,7 @@ public sealed class CalendarView : UserControl
     }
 
     // ---------------------------------------------------------------- 构建
-    void Rebuild()
+    internal void Rebuild()
     {
         _label.Text = _mode == Mode.Month ? _anchor.ToString("yyyy年 M月", Zh) : WeekRangeLabel();
 
@@ -177,9 +177,12 @@ public sealed class CalendarView : UserControl
 
         _body.Content = _mode == Mode.Week ? WeekRows() : MonthGrid();
 
-        // ★ 只有周排布在下方列当日日程;月排布靠点日期弹浮窗(用户裁定)
-        _dayArea.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
-        if (_mode == Mode.Week) RebuildDayList();
+        // ★ 两种排布都在下方列当日日程(用户 2026-07-31 推翻前让):
+        //   月排布原来是"点日期直接开新增抽屉" —— 那是把【查看】当成了【新建】,
+        //   想看看那天有什么安排反而做不到。现在点日期 = 选中并列出当天,
+        //   新建走旁边那个「+」—— 两件事各走各的入口。
+        _dayArea.Visibility = Visibility.Visible;
+        RebuildDayList();
     }
 
     /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
@@ -266,11 +269,11 @@ public sealed class CalendarView : UserControl
         inT.BeginAnimation(TranslateTransform.YProperty, slideIn);
     }
 
-    /// <summary>翻页动画收尾:周排布要刷新下方当日日程区。</summary>
+    /// <summary>翻页动画收尾:两种排布都要刷新下方当日日程区。</summary>
     void AfterPage()
     {
-        _dayArea.Visibility = _mode == Mode.Week ? Visibility.Visible : Visibility.Collapsed;
-        if (_mode == Mode.Week) RebuildDayList();
+        _dayArea.Visibility = Visibility.Visible;
+        RebuildDayList();
     }
 
     static DateTime StartOfWeek(DateTime d) => d.Date.AddDays(-(((int)d.DayOfWeek + 6) % 7));   // 周一起始
@@ -543,12 +546,11 @@ public sealed class CalendarView : UserControl
     void OnDayClicked(DateTime day)
     {
         _selected = day;
-        var wasMonth = _mode == Mode.Month;
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
+        // ★★ 点日期 = 【查看当天日程】,不再直接开新增抽屉(用户 2026-07-31 报的 bug):
+        //   日历最常用的动作是"看看那天有什么",把它接成新建,查看反而无路可走。
+        //   新建仍在 —— 当日标题右边那个「+」。
         Rebuild();
-        // 月排布(= 顶栏日历下拉):选中某天 -> 直接弹出右侧【新增日程】抽屉(用户裁定,替代原来的当日浮窗)。
-        //   OpenEditor 会经 Overlay 顺带收起这个日历下拉,和主页新建日程走同一个抽屉。
-        if (wasMonth) OpenEditor(day, null);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出
