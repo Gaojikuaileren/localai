@@ -45,12 +45,17 @@ public static class Authenticode
             return false;
         }
 
-        // ② 出品方:签名者主体必须含 VB-Audio
+        // ② 出品方:签名者主体必须是【VB-Audio 的已知签名身份】。
+        //   ★ 实测(2026-07-31,下了官方 Pack45 验的):VB-CABLE 的安装程序由
+        //     「BUREL VINCENT Entrepreneur individuel」签发 —— 这是 VB-Audio 创始人 Vincent Burel
+        //     以法国个体户身份签的,证书主体【不含 "VB-Audio"】。所以只认 "VB-Audio" 会把【真安装包】拒之门外。
+        //   这几个已知身份放一起认;都不含则拒。将来他换成公司名重签,把新主体加进来即可。
         try
         {
             using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(path));
             signer = cert.Subject;
-            if (!cert.Subject.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase))
+            var ok = AcceptedSigners.Any(s => cert.Subject.Contains(s, StringComparison.OrdinalIgnoreCase));
+            if (!ok)
             {
                 signer = $"签名有效,但出品方不是 VB-Audio:{cert.Subject}";
                 return false;
@@ -63,6 +68,14 @@ public static class Authenticode
             return false;
         }
     }
+
+    /// <summary>VB-Audio 的已知代码签名身份(证书主体里含其一即认)。见 VerifySignedByVbAudio ②。</summary>
+    static readonly string[] AcceptedSigners =
+    {
+        "BUREL VINCENT",   // VB-Audio 创始人 Vincent Burel · 个体户 —— 当前实际签名主体
+        "Vincent Burel",
+        "VB-Audio",        // 兼容:某些产品/将来若以此名重签
+    };
 
     // ---------------------------------------------------------------- WinVerifyTrust 互操作
     static readonly Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 =

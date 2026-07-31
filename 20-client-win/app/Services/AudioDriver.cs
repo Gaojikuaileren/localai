@@ -119,6 +119,34 @@ public static class AudioDriver
     /// 一个下载下来的可执行文件如果哈希对不上,唯一正确的处理就是当场销毁它。
     /// 走用户点击触发,不在后台偷偷下载(这是个本地私有的项目,出网必须是显式动作)。
     /// </summary>
+    /// <summary>
+    /// 从 VB-Audio 官方产品页找出当前最新的 VBCABLE_Driver_PackNN.zip;找不到就用回退 URL。
+    /// ★ 为什么要动态解析:VB-Audio 的包名带版本号,没有稳定通用名(通用名 404,正是"下载失败"的成因);
+    ///   版本号一升,写死的 URL 就失效。解析出来的地址会再过一遍官方域白名单;Authenticode 闸在运行前把关,
+    ///   所以"抓到哪个版本"都安全。任何一步失败都退回 fallback,绝不因解析失败就装不了。
+    /// </summary>
+    static async Task<string> ResolveLatestUrl(HttpClient http, string fallback)
+    {
+        try
+        {
+            var html = await http.GetStringAsync("https://vb-audio.com/Cable/");
+            var best = -1; string? bestUrl = null;
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(html, @"VBCABLE_Driver_Pack(\d+)\.zip",
+                         System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            {
+                if (int.TryParse(m.Groups[1].Value, out var n) && n > best)
+                {
+                    best = n;
+                    bestUrl = "https://download.vb-audio.com/Download_CABLE/" + m.Value;
+                }
+            }
+            if (bestUrl is not null && AudioDriverManifest.IsHostAllowed(bestUrl)) return bestUrl;
+        }
+        catch { /* 解析失败 -> 用回退 URL */ }
+        return fallback;
+    }
+
     public static async Task<(bool Ok, string Path, string Message)> DownloadAsync(AudioDriverPackage pkg, IProgress<double>? progress = null)
     {
         Directory.CreateDirectory(OfflineDir);
@@ -128,7 +156,10 @@ public static class AudioDriver
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-            using var resp = await http.GetAsync(pkg.Url, HttpCompletionOption.ResponseHeadersRead);
+            // ★ 先解析出当前最新的包 URL(VB-Audio 包名带版本号,通用名 404 —— 用户反馈"下载失败"就是这个)。
+            //   抓不到就用清单里钉死的回退版本。Authenticode 闸保证抓到哪个版本都安全。
+            var url = await ResolveLatestUrl(http, pkg.Url);
+            using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
             resp.EnsureSuccessStatusCode();
 
             var total = resp.Content.Headers.ContentLength ?? pkg.Bytes;
@@ -158,7 +189,7 @@ public static class AudioDriver
 
             // ★ 落盘文件名跟随 URL 的真实扩展名(2026-07-31 审计):官方发的是 .zip,硬编码 .exe 会得到
             //   一个"伪装成 exe 的 zip",RunInstaller 起它必然失败,还会被 FindOfflinePackage 反复捡起。
-            var ext = Path.GetExtension(new Uri(pkg.Url).AbsolutePath);
+            var ext = Path.GetExtension(new Uri(url).AbsolutePath);
             if (string.IsNullOrWhiteSpace(ext)) ext = ".exe";
             var final = Path.Combine(OfflineDir, $"vbcable-{ver}{ext}");
             try { if (File.Exists(final)) File.Delete(final); } catch { }
@@ -277,9 +308,15 @@ public static class AudioDriver
                 }
                 catch (Exception zex) { message = "解压安装包失败:" + zex.Message; return false; }
                 // VB-CABLE 包里的安装程序名形如 VBCABLE_Setup_x64.exe / VBCABLE_Setup.exe
-                var setup = Directory.EnumerateFiles(outDir, "*.exe", SearchOption.AllDirectories)
-                    .FirstOrDefault(f => Path.GetFileName(f).Contains("Setup", StringComparison.OrdinalIgnoreCase)
-                                      || Path.GetFileName(f).Contains("VBCABLE", StringComparison.OrdinalIgnoreCase));
+                // ★ 只认名字含 "Setup" 的(实测包里有 VBCABLE_Setup.exe / _Setup_x64.exe / _ControlPanel.exe ——
+                //   原来的 "VBCABLE" 兜底会把【控制面板】也当安装程序挑中)。64 位系统优先 x64。
+                var setups = Directory.EnumerateFiles(outDir, "*.exe", SearchOption.AllDirectories)
+                    .Where(f => Path.GetFileName(f).Contains("Setup", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var setup = (Environment.Is64BitOperatingSystem
+                        ? setups.FirstOrDefault(f => Path.GetFileName(f).Contains("x64", StringComparison.OrdinalIgnoreCase))
+                        : setups.FirstOrDefault(f => !Path.GetFileName(f).Contains("x64", StringComparison.OrdinalIgnoreCase)))
+                    ?? setups.FirstOrDefault();
                 if (setup is null) { message = "压缩包里没找到安装程序(*Setup*.exe)。"; return false; }
                 packagePath = setup;
             }

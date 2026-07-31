@@ -48,12 +48,21 @@ public static class AudioDriverManifest
         //    下载来源仍锁死在官方 https 域(见 IsUsable),防清单被本地文件改成任意 URL。
         var builtin = new AudioDriverPackage(
             Version: "官方最新",
-            Url: "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack.zip",
+            // ★ 回退 URL:VB-Audio 的包名带版本号(Pack45.zip),没有稳定的通用名(通用名 404)。
+            //   下载时会先从官方产品页找出当前最新的 PackNN(见 AudioDriver.ResolveLatestUrl),
+            //   找不到才用这个钉死的版本;Authenticode 闸保证抓到哪个版本都安全。更新时把这里也顺手抬一下。
+            Url: "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip",
             Sha256: "",                       // 留空 = 不额外比对哈希;运行前的把关交给 Authenticode 签名
             Bytes: 0,
             ManifestDate: new DateTime(2026, 7, 31));
         return IsUsable(builtin) ? builtin : null;
     }
+
+    /// <summary>下载地址的 host 是否在 VB-Audio 官方白名单里(https + 官方域)。给动态解析复用。</summary>
+    public static bool IsHostAllowed(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var u)
+           && u.Scheme == Uri.UriSchemeHttps
+           && AllowedHosts.Contains(u.Host, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 清单可用 = 版本、地址、哈希三者齐全,【且下载地址落在编译进程序的白名单里】。

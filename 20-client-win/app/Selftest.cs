@@ -1416,8 +1416,8 @@ public static class Selftest
                 {
                     Assert(acSrc.Contains("WinVerifyTrust") && acSrc.Contains("WINTRUST_ACTION_GENERIC_VERIFY_V2"),
                            "★ 用 WinVerifyTrust 验签名有效 + 证书链通到受信任根");
-                    Assert(acSrc.Contains("Contains(\"VB-Audio\", StringComparison.OrdinalIgnoreCase)"),
-                           "★ 且签名者主体必须含 VB-Audio(是它,不是别的合法签名者)");
+                    Assert(acSrc.Contains("\"BUREL VINCENT\"") && acSrc.Contains("AcceptedSigners"),
+                           "★ 签名者主体须是 VB-Audio 已知签名身份 —— 实测真安装包由 BUREL VINCENT(Vincent Burel)签发,只认 \"VB-Audio\" 会把真包拒之门外");
                     Assert(acSrc.Contains("WTD_STATEACTION_CLOSE"),
                            "★ WinVerifyTrust 验完再 CLOSE 释放内部状态(不泄漏)");
                 }
