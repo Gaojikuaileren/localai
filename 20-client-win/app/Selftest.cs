@@ -1462,14 +1462,20 @@ public static class Selftest
                 Assert(!Body(barMode).Contains("ComboBox _myLang"), "下拉菜单已撤掉");
                 Assert(barMode.Contains("FrameworkElement InterpretSettingsCard()") && barMode.Contains("同传设置"),
                        "★ 同传模式右边那格是【同传设置】,不是翻译历史");
-                Assert(barMode.Contains("Card(_switchRow, \"同传设置\"") || barMode.Contains("\"同传设置\", action: _driverBadge, scroll: false"),
-                       "★ 同传设置不给滚动条 —— 要滚就说明版面没排好");
+                Assert(barMode.Contains("\"同传设置\", action: _latency, scroll: false, badge: _driverBadge"),
+                       "★ 同传设置不给滚动条;状态灯紧跟标题,最右边留给延迟读数");
+                Assert(barMode.Contains("实时翻译输出不可用"),
+                       "★ 没装虚拟声卡时,右上角直接说【为什么用不了】,而不是显示一个没意义的延迟");
+                Assert(barMode.Contains("new ToggleSwitch(\"实时翻译输出\"") && barMode.Contains("new ToggleSwitch(\"实时对方字幕\""),
+                       "两个开关名字等长(各六字),排在一起不长短不齐");
+                Assert(barMode.Contains("DevicePicker(\"我方麦克风\"") && barMode.Contains("DevicePicker(\"译文送到\""),
+                       "★ 开关右边那半边放输入/输出设备选择(原来是空的)");
                 var badge = Slice(barMode, "_driverBadge.Children.Clear();", "_switchRow.Children.Clear();");
                 Assert(badge is not null && badge.Contains("RiskDanger") && badge.Contains("RiskWarning") && badge.Contains("RiskSafe"),
                        "★ 声卡状态是红/黄/绿三态灯");
                 Assert(badge is not null && badge.Contains("去设置") && badge.Contains("一键开启"),
                        "红=去设置、黄=一键开启;绿的时候直接显示版本号,没有按钮");
-                Assert(barMode.Contains("new ToggleSwitch(\"实时语音翻译输出\"") && barMode.Contains("enabled: drv.Installed"),
+                Assert(barMode.Contains("new ToggleSwitch(\"实时翻译输出\"") && barMode.Contains("enabled: drv.Installed"),
                        "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
                 Assert(barMode.Contains("_notesCardHost.Visibility"), "翻译历史只在文字模式出现");
                 Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),

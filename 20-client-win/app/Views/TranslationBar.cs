@@ -210,12 +210,55 @@ public sealed class TranslationBar : UserControl
     /// 版面:标题右边一个【状态灯 + 相应动作】;下方一排上下拨的开关,名字在开关下面,
     /// 从左往右排,右侧【故意留空】给以后加的开关或滑条。
     /// </summary>
+    readonly StackPanel _deviceCol = new() { VerticalAlignment = VerticalAlignment.Top, MinWidth = 190 };
+    readonly TextBlock _latency = new() { VerticalAlignment = VerticalAlignment.Center };
+
     FrameworkElement InterpretSettingsCard()
     {
+        // 一行:左边是开关(从左往右排),右边是设备选择 —— 原来空着的那半边现在有活干了
+        var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 6, 0, 0) };
+        _switchRow.VerticalAlignment = VerticalAlignment.Top;
+        DockPanel.SetDock(_switchRow, Dock.Left);
+        row.Children.Add(_switchRow);
+        DockPanel.SetDock(_deviceCol, Dock.Right);
+        row.Children.Add(_deviceCol);
+
         var body = new StackPanel();
-        _switchRow.Margin = new Thickness(0, 6, 0, 0);
-        body.Children.Add(_switchRow);
-        return Card(body, "同传设置", action: _driverBadge, scroll: false);
+        body.Children.Add(row);
+
+        // 标题右上角:延迟读数 + 声卡状态灯
+        _latency.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _latency.Margin = new Thickness(0, 0, 10, 0);
+        // 状态灯紧跟标题;最右边是延迟读数
+        return Card(body, "同传设置", action: _latency, scroll: false, badge: _driverBadge);
+    }
+
+    /// <summary>一个设备下拉(输入/输出)。第一项永远是"跟随系统默认"。</summary>
+    FrameworkElement DevicePicker(string label, List<Services.AudioDeviceInfo> devices, string? currentId, Action<string?> pick)
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+        box.Children.Add(Ui.Caption(label));
+
+        if (devices.Count == 0)
+        {
+            // ★ 读不到就如实说,不摆一个空下拉让人以为机器上没设备
+            var t = Ui.Caption("读不到设备列表");
+            t.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+            box.Children.Add(t);
+            return box;
+        }
+
+        var cb = new ComboBox { Margin = new Thickness(0, 2, 0, 0) };
+        cb.Items.Add(new ComboBoxItem { Content = "跟随系统默认", Tag = "" });
+        foreach (var d in devices) cb.Items.Add(new ComboBoxItem { Content = d.Name, Tag = d.Id });
+        var idx = string.IsNullOrEmpty(currentId) ? 0 : devices.FindIndex(d => d.Id == currentId) + 1;
+        cb.SelectedIndex = Math.Max(0, idx);
+        cb.SelectionChanged += (_, _) =>
+        {
+            if (cb.SelectedItem is ComboBoxItem { Tag: string id }) pick(string.IsNullOrEmpty(id) ? null : id);
+        };
+        box.Children.Add(cb);
+        return box;
     }
 
     void RefreshInterpretSettings()
@@ -262,11 +305,32 @@ public sealed class TranslationBar : UserControl
         // ★ 没装虚拟声卡时,「实时语音翻译输出」【灰掉禁用】(用户裁定):
         //   译文语音根本送不进会议软件,给一个能拨的开关就是骗人。
         //   去安装的入口只在上面那个状态栏里 —— 同一件事不给两个入口。
-        _switchRow.Children.Add(new ToggleSwitch("实时语音翻译输出", st.SpeakTranslation,
+        _switchRow.Children.Add(new ToggleSwitch("实时翻译输出", st.SpeakTranslation,
             on => TheApp.Interpret.SetSpeakTranslation(on), enabled: drv.Installed));
         _switchRow.Children.Add(new ToggleSwitch("实时对方字幕", st.Subtitles,
             on => TheApp.Interpret.SetSubtitles(on)));
-        // ★ 右侧【故意空着】—— 以后加开关或滑条往这排后面接,不用再动版面。
+        // —— 右侧:设备选择(原来空着的那半边)
+        _deviceCol.Children.Clear();
+        _deviceCol.Children.Add(DevicePicker("我方麦克风", Services.AudioDevices.Inputs(),
+            st.InputDeviceId, id => TheApp.Interpret.SetInputDevice(id)));
+        _deviceCol.Children.Add(DevicePicker("译文送到", Services.AudioDevices.Outputs(),
+            st.OutputDeviceId, id => TheApp.Interpret.SetOutputDevice(id)));
+
+        // —— 右上角:实时延迟。★ 没在跑就显示"—",不显示 0.0s ——
+        //    一个写着 0.0 的读数会让人以为"零延迟",那是这套系统里最不可能的事。
+        // ★ 没装虚拟声卡时,这里不显示"延迟 —"而是直接说【实时翻译输出不可用】——
+        //   延迟读数在那种情况下没有意义,而"为什么用不了"才是用户此刻要知道的。
+        if (!drv.Installed)
+        {
+            _latency.Text = "实时翻译输出不可用";
+            _latency.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+        }
+        else
+        {
+            _latency.Text = st.LatencySeconds is { } sec ? $"延迟 {sec:0.0}s" : "延迟 —";
+            _latency.SetResourceReference(TextBlock.ForegroundProperty,
+                st.LatencySeconds is { } v ? (v > 6 ? "RiskWarning" : "FgSecondary") : "FgMuted");
+        }
     }
 
     // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡
@@ -876,7 +940,8 @@ public sealed class TranslationBar : UserControl
     }
 
     // ---------------------------------------------------------------- 小工具
-    static Border Card(UIElement body, string title, Action? gear = null, FrameworkElement? action = null, bool scroll = true)
+    static Border Card(UIElement body, string title, Action? gear = null, FrameworkElement? action = null, bool scroll = true,
+                       FrameworkElement? badge = null)
     {
         var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
         var t = new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center };
@@ -884,6 +949,15 @@ public sealed class TranslationBar : UserControl
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         DockPanel.SetDock(t, Dock.Left);
         head.Children.Add(t);
+        // ★ badge 紧跟标题(用户裁定):状态灯属于"这个板块现在什么情况",
+        //   贴着标题读才连贯;最右边留给别的东西(同传那格留给延迟读数)。
+        if (badge is not null)
+        {
+            badge.Margin = new Thickness(8, 0, 0, 0);
+            badge.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(badge, Dock.Left);
+            head.Children.Add(badge);
+        }
         if (gear is not null)
         {
             var g = Icons.Make(IconName.Settings, 14, "FgMuted");

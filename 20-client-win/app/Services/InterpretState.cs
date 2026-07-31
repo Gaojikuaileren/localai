@@ -58,6 +58,21 @@ public sealed class InterpretState
     /// <summary>用哪个声音说话。null = 通用音色;将来可指向"我的声音"(设置里注册)。</summary>
     public string? VoiceId { get; private set; }
 
+    /// <summary>我方麦克风(端点 ID)。空 = 跟随系统默认。</summary>
+    public string? InputDeviceId { get; private set; }
+    /// <summary>译文语音送到哪(端点 ID)。同传要送进虚拟声卡;空 = 跟随系统默认。</summary>
+    public string? OutputDeviceId { get; private set; }
+
+    /// <summary>
+    /// 当前同传的实时延迟(秒)。★ null = 还没在跑 —— 界面显示"—"而不是 0:
+    /// 一个写着 0.0s 的读数会让人以为"零延迟",那是这套系统里最不可能的事。
+    /// </summary>
+    public double? LatencySeconds { get; private set; }
+
+    public void SetInputDevice(string? id) { if (InputDeviceId != id) { InputDeviceId = id; Changed?.Invoke(); } }
+    public void SetOutputDevice(string? id) { if (OutputDeviceId != id) { OutputDeviceId = id; Changed?.Invoke(); } }
+    public void ReportLatency(double? seconds) { LatencySeconds = seconds; Changed?.Invoke(); }
+
     public void SetMode(TranslationMode m) { if (Mode != m) { Mode = m; Changed?.Invoke(); } }
 
     public void SetMyLang(string code) { if (MyLang != code && Languages.Find(code) is not null) { MyLang = code; Changed?.Invoke(); } }
@@ -91,9 +106,10 @@ public sealed class InterpretState
     public static readonly string[] RequiredModels = { "asr-streaming", "translate", "tts-voice" };
 
     // ---------------------------------------------------------------- 存档(本机偏好)
-    public sealed record Snapshot(string MyLang, string TheirLang, bool SpeakTranslation, bool Subtitles, string? VoiceId);
+    public sealed record Snapshot(string MyLang, string TheirLang, bool SpeakTranslation, bool Subtitles, string? VoiceId,
+                                 string? InputDeviceId = null, string? OutputDeviceId = null);
 
-    public Snapshot Export() => new(MyLang, TheirLang, SpeakTranslation, Subtitles, VoiceId);
+    public Snapshot Export() => new(MyLang, TheirLang, SpeakTranslation, Subtitles, VoiceId, InputDeviceId, OutputDeviceId);
 
     public void Import(Snapshot? s)
     {
@@ -103,6 +119,8 @@ public sealed class InterpretState
         if (Languages.Find(s.TheirLang) is not null) TheirLang = s.TheirLang;
         Subtitles = s.Subtitles;
         VoiceId = s.VoiceId;
+        InputDeviceId = s.InputDeviceId;
+        OutputDeviceId = s.OutputDeviceId;
         // ★ 【不】恢复 SpeakTranslation:"用合成语音取代我的麦克风"这种事,
         //   每次开会都该由用户当场确认一次,不能因为上次开着就自动接管。
         SpeakTranslation = false;
