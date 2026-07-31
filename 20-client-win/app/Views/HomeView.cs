@@ -303,9 +303,11 @@ public sealed class HomeView : UserControl
                 //   光标停在缝里 220ms 就被当成"离开了天气板块",展开的卡啪地跳回第 0 张。
                 //   人明明还在板块上 —— 这正是用户之前报过的那种"乱跳"的同一个形状。
                 Background = System.Windows.Media.Brushes.Transparent,
-                // ★ 数据来源署名收在这里。Open-Meteo 的免费接口是 CC BY 4.0 ——
-                //   署名是许可要求,可以不占一整行,但不能直接拿掉。
-                ToolTip = Strings.Get("weather.source_credit"),
+                // ★★ 数据来源署名【已按用户裁定去掉】(2026-08-01,连悬停提示也不要)。
+                //   依据:Open-Meteo 免费接口是 CC BY 4.0,而 CC BY 的署名义务是在【对外分发/公开】
+                //   时才触发的 —— 这个客户端是自家自用、不对外分发的,纯私人使用不构成 Share。
+                //   ★ 一旦这个客户端要分发给家庭以外的人(或公开发布),这一行【必须加回来】。
+                //   署名字串故意保留在 I18n 词表里(键:weather · source_credit),到时直接接回来就行。
             };
             // ★ 鼠标真的离开整块才恢复默认 —— 【延迟一拍再确认】:
             //   卡片变高变矮时,光标底下的元素会短暂易主,WPF 会瞬时抛一次 MouseLeave;
@@ -955,7 +957,8 @@ public sealed class HomeView : UserControl
         // ★★ 这一行是【诚实口径】的落点:读数是什么时候取的、是不是已经过期。
         //   设计 §8 第 6 条:断网 -> 缓存 + updated_at + stale,【无假实时】。
         //   平时它写来源署名(Open-Meteo 要求署名),过期时改写"显示上次 HH:mm"。
-        _cityStamp[i] = new TextBlock { Text = Strings.Get("weather.source_credit"), TextTrimming = TextTrimming.CharacterEllipsis };
+        // 初始为空并收起 —— 它只在【读数过期】时出现(见 RefreshWeatherUi)
+        _cityStamp[i] = new TextBlock { Text = "", TextTrimming = TextTrimming.CharacterEllipsis, Visibility = Visibility.Collapsed };
         _cityStamp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _cityStamp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 

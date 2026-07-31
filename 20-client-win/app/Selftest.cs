@@ -3456,9 +3456,14 @@ public static class Selftest
                 {
                     Assert(hvw.Contains("暂时取不到 · 显示上次"),
                            "★★ 过期的读数【如实标出它是什么时候的】—— 无假实时(状态矩阵 §8 第 6 条)");
-                    Assert(hvw.Contains("ToolTip = Strings.Get(\"weather.source_credit\")"),
-                           "★★ 数据来源仍然在(收进悬停提示) —— Open-Meteo 的免费接口是 CC BY 4.0,"
-                           + "署名是许可要求:可以不占一整行,不能直接拿掉");
+                    // ★★ 数据来源署名已按用户裁定去掉(2026-08-01)。
+                    //   CC BY 的署名义务在【对外分发】时才触发,这个客户端自家自用不分发。
+                    //   ★ 这条断言钉的是【字串还在词表里】—— 将来要分发给家庭以外的人时,
+                    //   直接把它接回界面就行,不用重新去查许可。
+                    Assert(!hvw.Contains("weather.source_credit"),
+                           "★ 界面上不再显示数据来源(用户裁定;不对外分发时 CC BY 的署名义务未触发)");
+                    Assert(!string.IsNullOrWhiteSpace(I18n.Strings.Get("weather.source_credit")),
+                           "★★ 但署名字串【保留在词表里】—— 一旦要分发给家庭以外的人,必须把它接回界面");
                     Assert(hvw.Contains("if (Services.Places.CoordOf(p) is not { } c) continue;"),
                            "★ 认不出坐标的城市直接跳过 —— 不拿别处的坐标顶替");
                     var appw = TryReadSource("App.xaml.cs");
