@@ -93,6 +93,10 @@ public sealed class HomeView : UserControl
     readonly StackPanel _greetingBox = new() { HorizontalAlignment = HorizontalAlignment.Left };
     TextBlock[] _cityTime = Array.Empty<TextBlock>();
     TextBlock[] _cityMeta = Array.Empty<TextBlock>();
+    TextBlock[] _cityTemp = Array.Empty<TextBlock>();      // 展开卡里的大温度
+    TextBlock[] _citySky = Array.Empty<TextBlock>();       // 展开卡里的天气状况
+    TextBlock[] _cityHiLo = Array.Empty<TextBlock>();      // 最高/最低/降水
+    TextBlock[] _cityStamp = Array.Empty<TextBlock>();     // ★ 这份读数是什么时候的(过期要如实说)
     UniformGrid[] _cityHourly = Array.Empty<UniformGrid>();
 
     // ★ 天气改为【一张展开 + 其余折叠】(用户裁定 2026-07-31):
@@ -346,8 +350,21 @@ public sealed class HomeView : UserControl
 
         UpdateClocks();
         _timer.Tick += (_, _) => UpdateClocks();
-        Loaded += (_, _) => { RelayoutContinuous(); RelayoutDiscrete(); HookWindowVisibility(); SyncClockTimer(); };
-        Unloaded += (_, _) => { _timer.Stop(); UnhookWindowVisibility(); };
+        Loaded += (_, _) =>
+        {
+            RelayoutContinuous(); RelayoutDiscrete(); HookWindowVisibility(); SyncClockTimer();
+            Services.Weather.Changed += RefreshWeatherUi;
+            RefreshWeatherUi();          // 先把缓存里那份画出来(带它自己的时间戳)
+            PullWeather();               // 再去取新的;取不到就维持上面那份
+            _weatherTimer.Start();
+        };
+        Unloaded += (_, _) =>
+        {
+            _timer.Stop(); UnhookWindowVisibility();
+            Services.Weather.Changed -= RefreshWeatherUi;
+            _weatherTimer.Stop();
+        };
+        _weatherTimer.Tick += (_, _) => PullWeather();
         // ★ 被系统页(设置/模型/扩展)盖住时停表:那时主页整个不可见,
         //   秒针再走也没人看得到 —— 和显存条"不可见就停表"是同一条规矩(省电远比调长间隔有效)。
         //   盖住的做法是把宿主 IsEnabled 置 false(见 MainWindow.OpenSystemPage),所以认这个信号。
@@ -461,6 +478,10 @@ public sealed class HomeView : UserControl
         var n = _places.Count;
         _cityTime = new TextBlock[n];
         _cityMeta = new TextBlock[n];
+        _cityTemp = new TextBlock[n];
+        _citySky = new TextBlock[n];
+        _cityHiLo = new TextBlock[n];
+        _cityStamp = new TextBlock[n];
         _cityHourly = new UniformGrid[n];
         _cityCards = new Border[n];
         _shifts = new TranslateTransform[n];
@@ -880,17 +901,27 @@ public sealed class HomeView : UserControl
         //   卡片高度是固定的,所以将来换成大号数字也不会顶动版面。
         var temp = new TextBlock { Text = "暂无读数", FontSize = 19, FontWeight = FontWeights.Light, VerticalAlignment = VerticalAlignment.Center };
         temp.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _cityTemp[i] = temp;
 
         var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 2) };
         topRow.Children.Add(timeCol);
         topRow.Children.Add(temp);
 
-        var st = new TextBlock { Text = "天气未接入", TextTrimming = TextTrimming.CharacterEllipsis };
+        var st = new TextBlock { Text = "还没取到天气", TextTrimming = TextTrimming.CharacterEllipsis };
         st.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         st.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _citySky[i] = st;
         var hl = new TextBlock { Text = "最高 —  最低 —  降水 —", TextTrimming = TextTrimming.CharacterEllipsis };
         hl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         hl.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _cityHiLo[i] = hl;
+
+        // ★★ 这一行是【诚实口径】的落点:读数是什么时候取的、是不是已经过期。
+        //   设计 §8 第 6 条:断网 -> 缓存 + updated_at + stale,【无假实时】。
+        //   平时它写来源署名(Open-Meteo 要求署名),过期时改写"显示上次 HH:mm"。
+        _cityStamp[i] = new TextBlock { Text = Strings.Get("weather.source_credit"), TextTrimming = TextTrimming.CharacterEllipsis };
+        _cityStamp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _cityStamp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
         // 气温曲线:天气板块固定高,曲线也固定高(不再随窗口伸缩 -> 不会显示不全)
         var curve = new Grid { Height = 40, Margin = new Thickness(0, 6, 0, 0), ClipToBounds = true };
@@ -916,6 +947,7 @@ public sealed class HomeView : UserControl
         DockPanel.SetDock(topRow, Dock.Top); inner.Children.Add(topRow);
         DockPanel.SetDock(st, Dock.Top); inner.Children.Add(st);
         DockPanel.SetDock(hl, Dock.Top); inner.Children.Add(hl);
+        DockPanel.SetDock(_cityStamp[i], Dock.Bottom); inner.Children.Add(_cityStamp[i]);
         DockPanel.SetDock(_cityHourly[i], Dock.Bottom); inner.Children.Add(_cityHourly[i]);
         inner.Children.Add(curve);
 
@@ -954,6 +986,86 @@ public sealed class HomeView : UserControl
             tp.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             tp.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             grid.Children.Add(Ui.Stack(hr, ic, tp));
+        }
+    }
+
+    // ---------------------------------------------------------------- 天气读数
+    readonly DispatcherTimer _weatherTimer = new() { Interval = Services.Weather.RefreshEvery };
+
+    /// <summary>
+    /// 把缓存里的读数刷到界面上。
+    /// ★★ 诚实口径(设计 §8 第 6 条):
+    ///   · 从来没取到过 -> "暂无读数",一个数字也不编;
+    ///   · 取到过但已过期 -> 照旧显示,但底下那行【改写成"显示上次 HH:mm"】,绝不当成实时;
+    ///   · 认不出的天气代码 -> 如实写"未知天气(代码 N)",不硬塞成"晴"。
+    /// </summary>
+    void RefreshWeatherUi()
+    {
+        if (!_weatherVisible || _cityTemp.Length != _places.Count) return;
+        for (int i = 0; i < _places.Count; i++)
+        {
+            var w = Services.Weather.For(_places[i].City);
+            var known = Services.Places.CoordOf(_places[i]) is not null;
+
+            if (_citySky[i] is { } sky)
+                sky.Text = w?.WeatherCode is not null ? (Services.Weather.Describe(w.WeatherCode) ?? "—")
+                         : known ? "还没取到天气" : "这个城市还没有坐标 —— 取不了天气";
+            if (_miniSky[i] is { } msky)
+                msky.Text = w?.WeatherCode is not null ? (Services.Weather.Describe(w.WeatherCode) ?? "—") : "—";
+
+            if (_cityTemp[i] is { } tp)
+            {
+                var hasTemp = w?.TempC is not null;
+                tp.Text = hasTemp ? $"{w!.TempC:0}°" : "暂无读数";
+                tp.FontSize = hasTemp ? 30 : 19;
+            }
+            if (_cityHiLo[i] is { } hl)
+                hl.Text = $"最高 {Num(w?.HighC)}  最低 {Num(w?.LowC)}  降水 {Rain(w?.PrecipMm)}";
+
+            if (_cityStamp[i] is { } stamp)
+            {
+                // ★ 过期就把"上次是什么时候"摆到台面上
+                stamp.Text = w?.UpdatedAt is { } at && w.IsStale
+                    ? $"暂时取不到 · 显示上次 {at:HH:mm}"
+                    : Strings.Get("weather.source_credit");
+            }
+            if (i < _cityHourly.Length && _cityHourly[i] is { } grid) FillHourly(grid, w);
+        }
+    }
+
+    static string Num(double? v) => v is null ? "—" : $"{v:0}°";
+    static string Rain(double? v) => v is null ? "—" : v.Value <= 0.05 ? "无" : $"{v:0.#}mm";
+
+    /// <summary>把逐小时那一排填上真实读数;没有就保持"—"。</summary>
+    static void FillHourly(UniformGrid grid, Services.WeatherNow? w)
+    {
+        var step = Layout.HourlyStepHours(grid.Columns);
+        var now = DateTime.Now;
+        for (int k = 0; k < grid.Children.Count; k++)
+        {
+            if (grid.Children[k] is not Panel cell || cell.Children.Count < 3) continue;
+            var want = now.AddHours(k * step);
+            var hit = w?.Hours?.FirstOrDefault(x => Math.Abs((x.At - want).TotalMinutes) <= 30);
+            if (cell.Children[0] is TextBlock hr) hr.Text = want.ToString("HH");
+            if (cell.Children[1] is TextBlock ic)
+                ic.Text = hit?.Code is not null ? (Services.Weather.Describe(hit.Code)?[..1] ?? "—") : "—";
+            if (cell.Children[2] is TextBlock tp)
+                tp.Text = hit?.TempC is not null ? $"{hit.TempC:0}°" : "—°";
+        }
+    }
+
+    /// <summary>
+    /// 拉一遍所有地点。★ 只在【有网】时拉;认不出坐标的直接跳过(不拿别处的坐标顶替)。
+    /// ★ 失败不动缓存 —— 界面会继续显示上一次那份并标出它的时间。
+    /// </summary>
+    async void PullWeather()
+    {
+        if (!_weatherVisible) return;
+        if (!System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable()) return;
+        foreach (var p in _places.ToList())
+        {
+            if (Services.Places.CoordOf(p) is not { } c) continue;
+            await Services.Weather.PullAsync(p.City, c.Lat, c.Lon);
         }
     }
 

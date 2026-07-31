@@ -27,6 +27,8 @@ public static class ClientStore
     public static string ProjectsPath => Path.Combine(AppPaths.StateDir, "projects.json");
     public static string TodosPath => Path.Combine(AppPaths.StateDir, "todos.json");
     public static string CalendarPath => Path.Combine(AppPaths.StateDir, "calendar.json");
+    /// <summary>天气缓存(只存读数与它的时间戳,不存坐标)。</summary>
+    public static string WeatherPath => Path.Combine(AppPaths.StateDir, "weather.json");
     public static string MemoryPath => Path.Combine(AppPaths.StateDir, "memory.json");
     public static string NotesPath => Path.Combine(AppPaths.StateDir, "notes.json");
     /// <summary>翻译历史的【收藏】。★ 只存收藏的键,原文一直在会话里(不留两份真相)。</summary>

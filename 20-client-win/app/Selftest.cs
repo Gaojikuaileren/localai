@@ -3402,6 +3402,58 @@ public static class Selftest
                        "★ 断开后回到本地占位分类");
             }
 
+            // ---- 天气接入(设计 §4.1 / 状态矩阵 §8 第 6 条)----
+            {
+                // ★★ 这份样本是【真的从 api.open-meteo.com 取回来的】(2026-08-01,科隆坐标)。
+                //   解析器必须对着真实应答钉,而不是对着我自己想象的形状钉 ——
+                //   VB-CABLE 那次就是对着想象的签名人写校验,差点把正版安装包拒了。
+                const string omSample = "{\"current\":{\"time\":\"2026-08-01T00:00\",\"interval\":900,\"temperature_2m\":23.0,\"precipitation\":0.0,\"weather_code\":0},\"daily\":{\"time\":[\"2026-08-01\"],\"temperature_2m_max\":[27.8],\"temperature_2m_min\":[19.3]},\"hourly\":{\"time\":[\"2026-08-01T00:00\",\"2026-08-01T01:00\"],\"temperature_2m\":[23.0,22.4],\"weather_code\":[0,1]}}";
+                var w = Services.Weather.Parse(omSample);
+                Assert(w is not null, "能解析 Open-Meteo 的真实应答");
+                Assert(w!.TempC == 23.0 && w.PrecipMm == 0.0 && w.WeatherCode == 0, "当前温度/降水/天气代码都取对");
+                Assert(w.HighC == 27.8 && w.LowC == 19.3, "今日最高/最低取对");
+                Assert(w.Hours is { Count: 2 } && w.Hours[1].TempC == 22.4 && w.Hours[1].Code == 1, "逐小时取对");
+
+                // ★ 缺段只让那一项为 null,不整份丢掉
+                var w2 = Services.Weather.Parse("{\"current\":{\"temperature_2m\":5.0}}");
+                Assert(w2 is not null && w2.TempC == 5.0 && w2.HighC is null && w2.Hours is null,
+                       "★ 缺段只让那一项为 null —— 有多少说多少,比「要么全有要么全无」有用");
+                Assert(Services.Weather.Parse("不是 json") is null, "垃圾进去 -> null,不抛不编");
+
+                // ★★ 诚实:没有 UpdatedAt 就是 stale;认不出的代码要如实说"未知"
+                Assert(w.IsStale, "刚解析出来、还没盖时间戳的读数算 stale");
+                Assert(Services.Weather.Describe(0) == "晴" && Services.Weather.Describe(95) == "雷阵雨",
+                       "WMO 代码转中文");
+                Assert(Services.Weather.Describe(null) is null, "没代码 -> null(不说晴)");
+                Assert(Services.Weather.Describe(12345)!.Contains("未知"),
+                       "★ 认不出的代码【如实说未知】,不硬塞成晴");
+
+                // ★★ 出境纪律:固定白名单端点 + 只发坐标
+                var wsrc = TryReadSource(Path.Combine("Services", "Weather.cs"));
+                if (wsrc is not null)
+                {
+                    Assert(wsrc.Contains("public const string Host = \"api.open-meteo.com\""),
+                           "★★ 天气只走【固定白名单端点】(设计 §4.1 / D39)");
+                    Assert(wsrc.Contains("Math.Round(lat, 1)") && wsrc.Contains("Math.Round(lon, 1)"),
+                           "★★ 坐标就地取整到 0.1°(约 11km) —— 够天气用,不足以指到街区");
+                    Assert(!wsrc.Contains("city") || !wsrc.Contains("&name="),
+                           "★ 请求里没有城市名/文字地址");
+                    Assert(wsrc.Contains("UseProxy = false"), "不走系统代理(与 CalDAV 同一纪律)");
+                }
+                var hvw = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                if (hvw is not null)
+                {
+                    Assert(hvw.Contains("暂时取不到 · 显示上次"),
+                           "★★ 过期的读数【如实标出它是什么时候的】—— 无假实时(状态矩阵 §8 第 6 条)");
+                    Assert(hvw.Contains("Strings.Get(\"weather.source_credit\")"),
+                           "★ 标出数据来源(Open-Meteo 要求署名)");
+                    Assert(hvw.Contains("if (Services.Places.CoordOf(p) is not { } c) continue;"),
+                           "★ 认不出坐标的城市直接跳过 —— 不拿别处的坐标顶替");
+                    Assert(hvw.Contains("NetworkInterface.GetIsNetworkAvailable()"),
+                           "★ 没网就不试(与 Apple 自动拉取同一条规矩)");
+                }
+            }
+
             // ---- 分类不会被静默改掉 / 同步会刷新分类表 ----
             {
                 var ce3 = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));

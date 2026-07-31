@@ -299,6 +299,8 @@ public partial class App : Application
         Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
         Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
         Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
+        // ★ 天气缓存恢复 —— 重启后仍然如实标着它是什么时候取的(断网也能看到上次那份)
+        Services.Weather.Import(ClientStore.Load<Dictionary<string, Services.WeatherNow>>(ClientStore.WeatherPath));
         // ★ 日程分类表(= Apple 那边的日历清单 + 颜色)从存档恢复 ——
         //   否则开机后到"去设置里刷新一次清单"之前，新建日程的归类会先退回本地占位，
         //   颜色也跟着变一次 —— 看起来就像断连了。
@@ -350,6 +352,7 @@ public partial class App : Application
         ClientStore.Save(ClientStore.TodosPath, Todos.Export());
         ClientStore.Save(ClientStore.ChatPath, Chat.Export());
         ClientStore.Save(ClientStore.CalendarPath, Views.CalendarData.Export());
+        ClientStore.Save(ClientStore.WeatherPath, Services.Weather.Export());
         ClientStore.Save(ClientStore.MemoryPath, Memory.Export());
         ClientStore.Save(ClientStore.NotesPath, Notes.Export());
         ClientStore.Save(ClientStore.HistoryFavPath, History.Export());
