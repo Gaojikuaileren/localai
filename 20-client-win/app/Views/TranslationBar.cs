@@ -72,31 +72,45 @@ public sealed class TranslationBar : UserControl
         //   文字翻译:程度【竖排】| 目标池 1×3 | 语言池 2×3(两倍宽,并排才看得出语言从哪搬到哪);
         //   同声传译:换成一对固定方向(我说的语言 -> 对方的语言),程度不适用(同传就是直译)。
         //   三个板块之间间距一律相同:每列比卡片宽出一个 Gap,间隔全落在卡片右侧。
-        var textGrid = new Grid();
-        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth + Gap) });
-        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + Gap) });
-        textGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
-
+        // ★★ 版面按【谁在两种模式下都要】来分层,而不是按模式各建一套:
+        //   [ 左:随模式切换 ][ 语言池:两种模式共用 ][ 右:随模式切换 ]
+        //   文字翻译 = 程度 + 目标池 | 语言池 | 翻译历史
+        //   同声传译 = 语言方向     | 语言池 | 同传设置
+        //   语言池共用不只是省代码 —— 两种模式都要【从它往外拖】,建两份就会撞上
+        //   "一个元素两个父节点"(今天栽过三次,最后一次让整个翻译界面打不开)。
+        var textLeft = new Grid();
+        textLeft.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LevelWidth + Gap) });
+        textLeft.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TargetPoolWidth + Gap) });
         var lvl = LevelCard(); Grid.SetColumn(lvl, 0);
         var target = TargetCard(); Grid.SetColumn(target, 1);
-        var pool = PoolCard(); Grid.SetColumn(pool, 2);
-        textGrid.Children.Add(lvl); textGrid.Children.Add(target); textGrid.Children.Add(pool);
+        textLeft.Children.Add(lvl); textLeft.Children.Add(target);
 
-        _textLayout = textGrid;
-        _interpretLayout = InterpretLayout();
+        _textLayout = textLeft;
+        _interpretLayout = DirectionCard();
         var leftStack = new Grid();
         leftStack.Children.Add(_textLayout);
         leftStack.Children.Add(_interpretLayout);
         Grid.SetColumn(leftStack, 0);
 
+        var pool = PoolCard();            // ★ 只此一处:两种模式共用
+        pool.Margin = new Thickness(0, 0, Gap, 0);
+        Grid.SetColumn(pool, 1);
+
         var notes = NotesCard();          // ★ 只此一处
-        Grid.SetColumn(notes, 1);
+        _notesCardHost = notes;
+        _interpretSettings = InterpretSettingsCard();
+        var rightStack = new Grid();
+        rightStack.Children.Add(notes);
+        rightStack.Children.Add(_interpretSettings);
+        Grid.SetColumn(rightStack, 2);
 
         var stack = new Grid();
-        stack.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });               // 随模式变宽窄
+        stack.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        stack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
         stack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         stack.Children.Add(leftStack);
-        stack.Children.Add(notes);
+        stack.Children.Add(pool);
+        stack.Children.Add(rightStack);
 
         var root = new Grid();
         root.Children.Add(stack);
@@ -130,56 +144,120 @@ public sealed class TranslationBar : UserControl
         _textLayout.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
         _interpretLayout.Visibility = interpreting ? Visibility.Visible : Visibility.Collapsed;
 
-        if (interpreting) { RefreshInterpret(); return; }
-        RefreshPools(); RefreshLevel(); RefreshNotes();
+        _notesCardHost.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
+        _interpretSettings.Visibility = interpreting ? Visibility.Visible : Visibility.Collapsed;
+
+        RefreshPools();                       // 语言池两种模式都要刷(池里显示什么随模式变)
+        if (interpreting) { RefreshDirection(); RefreshInterpretSettings(); return; }
+        RefreshLevel(); RefreshNotes();
     }
 
-    // ---------------------------------------------------------------- 同传:输入语言 / 输出语言
-    readonly ComboBox _myLang = new();
-    readonly ComboBox _theirLang = new();
-    bool _syncingLangs;
+    FrameworkElement _interpretSettings = null!;
+    FrameworkElement _notesCardHost = null!;
+
+    // ---------------------------------------------------------------- 同传:语言方向(两个坑)
+    Border _mySlot = null!, _theirSlot = null!;
 
     /// <summary>
-    /// 同传的下半条:【上=我说的语言,下=对方的语言】,中间一个对调键。
-    /// ★ 固定方向不是偷懒,是设计判断(用户提出,理由成立):
-    ///   省掉热路径上的语种检测,既降延迟,也避免半句话被判错语种后整句翻歪。
+    /// 语言方向:【我说】与【对方说】两个坑,语言从语言池【拖进来】(用户裁定,不再用下拉)——
+    /// 与目标池同一套手势,学一次就够;下拉要先点开、再在一长串里找,是另一种交互。
+    /// ★ 方向固定不是偷懒:省掉热路径上的语种检测,既降延迟,也避免半句话被判错语种后整句翻歪。
     /// </summary>
-    FrameworkElement InterpretLayout()
+    FrameworkElement DirectionCard()
     {
-        foreach (var cb in new[] { _myLang, _theirLang })
-        {
-            cb.Margin = new Thickness(0, 3, 0, 0);
-            foreach (var l in Languages.Catalog) cb.Items.Add(new ComboBoxItem { Content = l.Name, Tag = l.Code });
-        }
-        _myLang.SelectionChanged += (_, _) => { if (!_syncingLangs && _myLang.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.Interpret.SetMyLang(c); };
-        _theirLang.SelectionChanged += (_, _) => { if (!_syncingLangs && _theirLang.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.Interpret.SetTheirLang(c); };
+        _mySlot = new Border { Height = SlotHeight + 4, Margin = new Thickness(0, 3, 0, 0), Background = Brushes.Transparent };
+        _theirSlot = new Border { Height = SlotHeight + 4, Margin = new Thickness(0, 3, 0, 0), Background = Brushes.Transparent };
 
         var swap = Chip("⇅ 对调", () => TheApp.Interpret.SwapLangs());
         swap.HorizontalAlignment = HorizontalAlignment.Left;
-        swap.Margin = new Thickness(0, 6, 0, 6);
+        swap.Margin = new Thickness(0, 5, 0, 5);
 
         var body = new StackPanel();
         body.Children.Add(Ui.Caption("我说"));
-        body.Children.Add(_myLang);
+        body.Children.Add(_mySlot);
         body.Children.Add(swap);
-        body.Children.Add(Ui.Caption("对方听 / 对方说"));
-        body.Children.Add(_theirLang);
+        body.Children.Add(Ui.Caption("对方说"));
+        body.Children.Add(_theirSlot);
 
         var card = Card(body, "语言方向", scroll: false);
-        card.Width = LangPoolWidth;
+        card.Width = TargetPoolWidth + 22;
         card.HorizontalAlignment = HorizontalAlignment.Left;
-        card.Margin = new Thickness(0, 0, Gap, 0);   // 与文字版面同一个间距
+        card.Margin = new Thickness(0, 0, Gap, 0);
         return card;
     }
 
-    void RefreshInterpret()
+    void RefreshDirection()
+    {
+        _mySlot.Child = SlotContent(TheApp.Interpret.MyLang);
+        _theirSlot.Child = SlotContent(TheApp.Interpret.TheirLang);
+    }
+
+    UIElement SlotContent(string code)
+    {
+        if (Languages.Find(code) is not { } l) return EmptySlot("拖入");
+        var card = Bubble(l, selected: true);
+        card.Margin = new Thickness(0);
+        return card;
+    }
+
+    // ---------------------------------------------------------------- 同传设置(取代翻译历史那一格)
+    readonly StackPanel _settingsBody = new();
+
+    /// <summary>
+    /// 同传模式下右边那一格不是翻译历史,而是【这一场的全部开关】:
+    /// 虚拟声卡连接情况、实时翻译输出、字幕、我方设备。
+    /// 放这里而不是设置页:开会当下要改的东西,不该让人切走界面去找。
+    /// </summary>
+    FrameworkElement InterpretSettingsCard() => Card(_settingsBody, "同传设置");
+
+    void RefreshInterpretSettings()
     {
         var st = TheApp.Interpret;
-        _syncingLangs = true;
-        _myLang.SelectedIndex = Array.FindIndex(Languages.Catalog, x => x.Code == st.MyLang);
-        _theirLang.SelectedIndex = Array.FindIndex(Languages.Catalog, x => x.Code == st.TheirLang);
-        _syncingLangs = false;
-        RefreshNotes();
+        _settingsBody.Children.Clear();
+
+        // —— 虚拟声卡:装了就自动认出来,没装才出现入口
+        var drv = Services.AudioDriver.Detect();
+        var drvLine = Ui.Caption(drv.Installed
+            ? $"虚拟声卡:已连接 · {drv.Version ?? "版本未知"}"
+            : "虚拟声卡:未安装 —— 译文语音送不进会议软件");
+        drvLine.SetResourceReference(TextBlock.ForegroundProperty, drv.Installed ? "FgSecondary" : "RiskWarning");
+        _settingsBody.Children.Add(drvLine);
+        if (!drv.Installed)
+        {
+            var go = Chip("去安装", () => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
+            go.HorizontalAlignment = HorizontalAlignment.Left;
+            go.Margin = new Thickness(0, 4, 0, 0);
+            _settingsBody.Children.Add(go);
+        }
+
+        _settingsBody.Children.Add(new Border { Height = 8 });
+        _settingsBody.Children.Add(Toggle("实时翻译输出", st.SpeakTranslation,
+            () => TheApp.Interpret.SetSpeakTranslation(!st.SpeakTranslation)));
+        _settingsBody.Children.Add(Toggle("对方字幕", st.Subtitles,
+            () => TheApp.Interpret.SetSubtitles(!st.Subtitles)));
+
+        _settingsBody.Children.Add(new Border { Height = 8 });
+        _settingsBody.Children.Add(Ui.Caption("我方设备"));
+        _settingsBody.Children.Add(Ui.Caption("· 输入:系统默认麦克风"));
+        _settingsBody.Children.Add(Ui.Caption(drv.Installed
+            ? "· 输出:虚拟声卡(会议软件里把麦克风选成 CABLE Output)"
+            : "· 输出:尚无 —— 需要先装虚拟声卡"));
+        // ★ 诚实:设备可选列表要等语音链路接入才有意义,在那之前不摆能点却不生效的下拉。
+        _settingsBody.Children.Add(Ui.Caption("★ 可选设备列表等语音链路接入后开放。"));
+    }
+
+    /// <summary>一行开关:左边名字、右边状态。开着用着重色实心,一眼看得出。</summary>
+    FrameworkElement Toggle(string label, bool on, Action onClick)
+    {
+        var chip = Chip(on ? "开" : "关", onClick, on);
+        chip.VerticalAlignment = VerticalAlignment.Center;
+        var t = Ui.Caption(label);
+        t.VerticalAlignment = VerticalAlignment.Center;
+        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 5) };
+        DockPanel.SetDock(chip, Dock.Right);
+        row.Children.Add(chip);
+        row.Children.Add(t);
+        return row;
     }
 
     // ---------------------------------------------------------------- 程度:竖排滑条 + 每档解释气泡
@@ -416,8 +494,13 @@ public sealed class TranslationBar : UserControl
         // 语言池:6 个坑。已在目标池的不在这边重复出现;剩下的坑空着(不写提示,用户裁定),
         // 第一个空坑放「+」当作进设置的入口。
         _poolWrap.Children.Clear();
+        // 同传模式下,池里排掉已经放进"我说/对方说"的那两个;文字模式下排掉目标池里的
+        var interpreting = TheApp.Interpret.Mode == TranslationMode.Interpret;
+        var used = interpreting
+            ? new[] { TheApp.Interpret.MyLang, TheApp.Interpret.TheirLang }
+            : st.Targets.ToArray();
         var avail = TheApp.Settings.TranslationPool
-            .Where(c => !st.Contains(c) && c != _liftedFromPool && Languages.Find(c) is not null)
+            .Where(c => !used.Contains(c) && c != _liftedFromPool && Languages.Find(c) is not null)
             .Take(PoolSlots)
             .ToList();
         for (int i = 0; i < PoolSlots; i++)
@@ -632,9 +715,18 @@ public sealed class TranslationBar : UserControl
         //   · 落在语言池,或者落空 -> 回到语言池(= 不在目标池里,自然就在语言池里)。
         // 语言池是"目标池之外的全部",不需要显式塞回去 —— 清掉暂借标记就恢复了。
         var landed = false;
-        var toTarget = Hit(_targetBox, e);
-        if (toTarget) landed = TheApp.Translation.AddTarget(lang.Code);
-        else if (fromTarget && Hit(_poolBox, e)) landed = true;   // 目标池 -> 语言池:摘掉即完成
+        if (TheApp.Interpret.Mode == TranslationMode.Interpret)
+        {
+            // 同传:落进哪个坑就设哪个方向。被顶替的那个语言自动回到语言池(池 = 池减去已选的两个)。
+            if (Hit(_mySlot, e)) { TheApp.Interpret.SetMyLang(lang.Code); landed = true; }
+            else if (Hit(_theirSlot, e)) { TheApp.Interpret.SetTheirLang(lang.Code); landed = true; }
+        }
+        else
+        {
+            var toTarget = Hit(_targetBox, e);
+            if (toTarget) landed = TheApp.Translation.AddTarget(lang.Code);
+            else if (fromTarget && Hit(_poolBox, e)) landed = true;   // 目标池 -> 语言池:摘掉即完成
+        }
 
         _liftedFromPool = null;                                   // 暂借结束,语言池恢复完整
         RefreshPools();

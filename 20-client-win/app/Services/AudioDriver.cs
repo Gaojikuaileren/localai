@@ -162,6 +162,78 @@ public static class AudioDriver
     }
 
     /// <summary>
+    /// 找到已安装的卸载入口(注册表里的卸载项)。★ 找不到就如实返回 null ——
+    /// 不去猜路径、更不去手动删驱动文件:那是把系统搞坏的经典方式。
+    /// </summary>
+    public static string? FindUninstaller()
+    {
+        var branches = new[]
+        {
+            @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        };
+        foreach (var root in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+            foreach (var branch in branches)
+            {
+                try
+                {
+                    using var key = root.OpenSubKey(branch);
+                    if (key is null) continue;
+                    foreach (var name in key.GetSubKeyNames())
+                    {
+                        using var sub = key.OpenSubKey(name);
+                        var display = sub?.GetValue("DisplayName") as string ?? "";
+                        if (!display.Contains("VB-CABLE", StringComparison.OrdinalIgnoreCase)
+                            && !display.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (sub?.GetValue("UninstallString") is string cmd && !string.IsNullOrWhiteSpace(cmd)) return cmd;
+                    }
+                }
+                catch { /* 读不到就继续找下一处 */ }
+            }
+        return null;
+    }
+
+    /// <summary>
+    /// 一键卸载。★ 只走【官方的卸载程序】,绝不自己去删 .sys 或改注册表 ——
+    /// 手动拆内核驱动留下的残留会让下次安装也装不上,严重时整机没声音。
+    /// 与安装同理:另起一个提权子进程,会弹一次 UAC。
+    /// </summary>
+    public static bool RunUninstaller(out string message)
+    {
+        message = "";
+        var cmd = FindUninstaller();
+        if (cmd is null)
+        {
+            message = "找不到官方卸载入口 —— 请在「设置 › 应用」里卸载。"
+                    + "我们不会自己去删驱动文件:手动拆内核驱动的残留会让下次装不上。";
+            return false;
+        }
+        try
+        {
+            // UninstallString 可能是带引号的 exe + 参数,拆开再走 ShellExecute
+            string exe = cmd, args = "";
+            if (cmd.StartsWith("\""))
+            {
+                var close = cmd.IndexOf('"', 1);
+                if (close > 0) { exe = cmd[1..close]; args = cmd[(close + 1)..].Trim(); }
+            }
+            else
+            {
+                var sp = cmd.IndexOf(".exe ", StringComparison.OrdinalIgnoreCase);
+                if (sp > 0) { exe = cmd[..(sp + 4)]; args = cmd[(sp + 5)..].Trim(); }
+            }
+            Process.Start(new ProcessStartInfo { FileName = exe, Arguments = args, UseShellExecute = true, Verb = "runas" });
+            message = "卸载程序已启动。卸完回到这里点「重新检测」。";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            message = "没能启动卸载程序:" + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 以管理员身份运行安装包。★ 主程序【不提权】(D46),这里另起一个提权子进程,装完即退。
     /// 用户会看到一次系统的 UAC 提示 —— 装内核驱动必然要管理员,这一步谁也绕不过,
     /// 但除此之外全程不需要他做任何事(不用打开 VB-CABLE、不用调设置)。

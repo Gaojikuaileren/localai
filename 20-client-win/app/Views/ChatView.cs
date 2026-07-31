@@ -293,6 +293,15 @@ public sealed class ChatView : UserControl
             pinDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, selected ? "FgOnSelected" : "Accent");
             titleRow.Children.Add(pinDot);
         }
+        // ★ 同传记录和普通会话排在同一个列表里(用户裁定),所以要有个标记告诉用户"这条不一样" ——
+        //   用麦克风图标而不是加一行字:列表本来就窄,一个图标就够分辨,也不挤掉标题。
+        if (s.Interpret)
+        {
+            var mic = Icons.Make(IconName.Mic, 12, selected ? "FgOnSelected" : "Accent");
+            mic.Margin = new Thickness(0, 0, 5, 0);
+            mic.VerticalAlignment = VerticalAlignment.Center;
+            titleRow.Children.Add(mic);
+        }
         var title = new TextBlock { Text = s.Title, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         // ★ 选中态字色跟着底色走(墨白的 BgSelected 近黑,用 FgOnSelected 才不会黑底黑字)
         title.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : "FgPrimary");
@@ -319,7 +328,16 @@ public sealed class ChatView : UserControl
         host.Background = selected ? (Brush)FindResource("BgSelected") : Brushes.Transparent;
         host.MouseEnter += (_, _) => { if (!selected) host.SetResourceReference(Border.BackgroundProperty, "BgHover"); dots.Opacity = 1; };
         host.MouseLeave += (_, _) => { if (!selected) host.Background = Brushes.Transparent; if (!selected) dots.Opacity = 0; };
-        host.MouseLeftButtonUp += (_, _) => { _sessionId = s.SessionId; TheApp.Chat.PurgeGhosts(); BuildSessions(); BuildConversation(); };
+        host.MouseLeftButtonUp += (_, _) =>
+        {
+            _sessionId = s.SessionId;
+            TheApp.Chat.PurgeGhosts();
+            // ★ 同传记录只有在同传界面里才讲得通 —— 在文字翻译界面点开它就自动切过去,
+            //   而不是把两方对话塞进一个"翻成目标池"的界面里(那看着就是坏的)。
+            if (s.Interpret) TheApp.Interpret.SetMode(TranslationMode.Interpret);
+            BuildSessions();
+            BuildConversation();
+        };
         return host;
     }
 
@@ -342,6 +360,10 @@ public sealed class ChatView : UserControl
     {
         var m = new ContextMenu();
 
+        // ★ 同传记录不能搬去项目、也不能送到别的工作空间 —— 它只有在同传界面里才讲得通。
+        //   做法是【菜单里根本不出现】,而不是点了再报错:没有的选项比灰着的选项更省事。
+        var movable = ChatCenter.CanMove(s);
+
         var move = new MenuItem { Header = "移动到项目" };
         foreach (var p in TheApp.Projects.Ongoing(_wsKey))   // 只列本工作空间的项目
         {
@@ -360,7 +382,7 @@ public sealed class ChatView : UserControl
             det.Click += (_, _) => TheApp.Chat.MoveToProject(s.SessionId, null);
             move.Items.Add(det);
         }
-        m.Items.Add(move);
+        if (movable) m.Items.Add(move);
 
         // 发送到其它工作空间(不含当前)
         var toWs = new MenuItem { Header = "发送到工作空间" };
@@ -372,7 +394,7 @@ public sealed class ChatView : UserControl
             mi.Click += (_, _) => { if (_sessionId == s.SessionId) _sessionId = null; TheApp.Chat.MoveSessionToWorkspace(s.SessionId, key); };
             toWs.Items.Add(mi);
         }
-        m.Items.Add(toWs);
+        if (movable) m.Items.Add(toWs);
 
         var rename = new MenuItem { Header = "重命名会话…" };
         rename.Click += (_, _) => RenameSession(s, anchor);
@@ -797,23 +819,22 @@ public sealed class ChatView : UserControl
         {
             var on = TheApp.Interpret.Mode == mode;
 
-            // ★ 图标按钮的老问题:没有文字就没人知道它是什么。本项目的全局悬停提示是【关掉】的
-            //   (用户裁定),所以不能靠 ToolTip 兜底 —— 改成【选中的那个把名字显出来】:
-            //   平时是一排干净的图标,当前在哪个场景一眼可读,也不用把三个名字都摊开占地方。
-            var inner = new StackPanel { Orientation = Orientation.Horizontal };
-            inner.Children.Add(Icons.Make(icon, 16, on ? "FgOnAccent" : "FgSecondary"));
-            if (on)
-            {
-                var t = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
-                t.SetResourceReference(TextBlock.ForegroundProperty, "FgOnAccent");
-                t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-                inner.Children.Add(t);
-            }
+            // ★ 只放图标,不放文字(用户裁定)。
+            // ★★ 命中区是一个【透明的方块】,图标只是画在里面的东西 ——
+            //   拿图标本身当按钮的话,点在笔画之间的空隙上就点不中(自绘图标是描边路径,
+            //   中间是空的)。透明块把整个方形都变成可点区域,手感才对。
+            var glyph = Icons.Make(icon, 17, on ? "FgOnAccent" : "FgSecondary");
+            glyph.HorizontalAlignment = HorizontalAlignment.Center;
+            glyph.VerticalAlignment = VerticalAlignment.Center;
+            glyph.IsHitTestVisible = false;                 // 命中交给外面那层透明块
+            var hit = new Grid { Width = 30, Height = 26, Background = Brushes.Transparent };
+            hit.Children.Add(glyph);
 
             var b = new Border
             {
-                Child = inner, Padding = new Thickness(on ? 10 : 8, 5, on ? 11 : 8, 5), Margin = new Thickness(0, 0, 6, 0),
+                Child = hit, Margin = new Thickness(0, 0, 6, 0),
                 Cursor = Cursors.Hand, BorderThickness = new Thickness(1),
+                ToolTip = name,
             };
             b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
             if (on)

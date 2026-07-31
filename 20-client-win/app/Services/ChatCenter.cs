@@ -59,7 +59,14 @@ public sealed record ChatSession(
     bool Ghost = false,              // 幽灵会话:不保留记录、不纳入记忆,不进任何列表
     DateTime? DeletedAt = null,      // 软删除:进"已删除",保留 30 天,过期自动清除
     string? OwnerMemberId = null,    // D45 所有者(空 = 未知 -> 非家庭范围一律不可见)
-    bool Shared = false);            // ★ 是否已【提升为共享】(送主机、全设备可见)。默认只在本机;单向,不可收回
+    bool Shared = false,             // ★ 是否已【提升为共享】(送主机、全设备可见)。默认只在本机;单向,不可收回
+    /// <summary>
+    /// 这是一场【同声传译】的记录。★ 它和普通会话一起排在列表里(用户裁定),但有两条硬约束:
+    ///   · 不能搬到项目或别的工作空间 —— 它的内容只有在同传界面里才讲得通(两方对话、语言方向);
+    ///   · 在文字翻译界面点开它,自动切到同传界面。
+    /// 位置记录末尾追加可选参数:老档案没有这个字段 -> 读成 false,照常读得动。
+    /// </summary>
+    bool Interpret = false);
 
 public sealed class ChatCenter
 {
@@ -74,10 +81,11 @@ public sealed class ChatCenter
     /// <summary>消息的稳定标识。前缀区别于会话 id,方便肉眼分辨。</summary>
     public static string NewMsgId() => "m-" + Guid.NewGuid().ToString("N")[..10];
 
-    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null)
+    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null, bool interpret = false)
     {
-        var s = new ChatSession(NewId(), title ?? "新会话", projectId, scope, DateTime.Now,
-            WorkspaceKey: workspaceKey, OwnerMemberId: MemberContext.Current);   // D45:建的时候就定所有者
+        var s = new ChatSession(NewId(), title ?? (interpret ? "同传记录" : "新会话"), interpret ? null : projectId, scope, DateTime.Now,
+            WorkspaceKey: workspaceKey, OwnerMemberId: MemberContext.Current,   // D45:建的时候就定所有者
+            Interpret: interpret);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -472,6 +480,13 @@ public sealed class ChatCenter
         => _messages.LastOrDefault(m => m.SessionId == sessionId
                                         && m.ChoiceOptions is { Count: > 0 }
                                         && m.ChoiceAnswer is null);
+
+    /// <summary>
+    /// 这条会话能不能被搬到项目 / 别的工作空间。★ 同传记录【不能】——
+    /// 它的内容(两方对话、固定的语言方向)只有在同传界面里才讲得通,
+    /// 搬到聊天空间就成了一堆没有上下文的碎句。与其搬完让人困惑,不如一开始就不许。
+    /// </summary>
+    public static bool CanMove(ChatSession s) => !s.Interpret;
 
     static string Trim(string t) => t.Length <= 18 ? t : t[..18] + "…";
 }

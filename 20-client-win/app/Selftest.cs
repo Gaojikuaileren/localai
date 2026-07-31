@@ -1367,6 +1367,37 @@ public static class Selftest
                        "★ 自备的安装包同样要过校验");
             }
 
+            // ---- 同传会话:进普通会话列表、带标记、不可搬走、点开自动切界面 ----
+            {
+                var idir = Path.Combine(tmp, "interp-sess");
+                Directory.CreateDirectory(idir);
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, idir);
+                var ic = new Services.ChatCenter();
+                var plain = ic.NewSession(null, "translation");
+                var simul = ic.NewSession(null, "translation", interpret: true);
+                Assert(!plain.Interpret && simul.Interpret, "同传会话有自己的标记");
+                Assert(ic.NormalSessions("translation").Any(x => x.SessionId == simul.SessionId),
+                       "★ 同传记录和普通会话排在【同一个列表】里(用户裁定)");
+                Assert(Services.ChatCenter.CanMove(plain) && !Services.ChatCenter.CanMove(simul),
+                       "★ 同传记录不能搬到项目/别的工作空间 —— 它只有在同传界面里才讲得通");
+                Assert(simul.ProjectId is null, "同传记录不挂项目");
+                Environment.SetEnvironmentVariable(AppPaths.StateEnvVar, tmp);
+            }
+            var cvIS = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvIS is not null)
+            {
+                Assert(cvIS.Contains("if (s.Interpret) TheApp.Interpret.SetMode(TranslationMode.Interpret);"),
+                       "★ 在文字翻译界面点开同传记录会自动切到同传界面");
+                Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
+                       "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
+                Assert(cvIS.Contains("Icons.Make(IconName.Mic, 12"),
+                       "同传记录在列表里用麦克风图标区分(列表窄,一个图标够用)");
+                // 顶部场景切换只要图标 + 透明命中块
+                var modeSw = Slice(cvIS, "FrameworkElement ModeSwitcher()", "return row;");
+                Assert(modeSw is not null && modeSw.Contains("Background = Brushes.Transparent") && modeSw.Contains("IsHitTestVisible = false"),
+                       "★ 命中区是透明方块,图标本身不接事件(自绘图标是描边,点笔画空隙会点不中)");
+            }
+
             var ipSrc = TryReadSource(Path.Combine("Views", "InterpretPanel.cs"));
             if (ipSrc is not null)
             {
@@ -1387,8 +1418,14 @@ public static class Selftest
             var barMode = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
             if (barMode is not null)
             {
-                Assert(barMode.Contains("FrameworkElement InterpretLayout()") && barMode.Contains("语言方向"),
-                       "★ 同传模式下,下半条换成【输入/输出语言】而不是目标池");
+                Assert(barMode.Contains("FrameworkElement DirectionCard()") && barMode.Contains("语言方向"),
+                       "★ 同传模式下,下半条换成【语言方向】而不是目标池");
+                Assert(barMode.Contains("Hit(_mySlot, e)") && barMode.Contains("Hit(_theirSlot, e)"),
+                       "★ 方向是从语言池【拖进坑里】的,不是下拉菜单选");
+                Assert(!Body(barMode).Contains("ComboBox _myLang"), "下拉菜单已撤掉");
+                Assert(barMode.Contains("FrameworkElement InterpretSettingsCard()") && barMode.Contains("同传设置"),
+                       "★ 同传模式右边那格是【同传设置】(声卡状态/开关/设备),不是翻译历史");
+                Assert(barMode.Contains("_notesCardHost.Visibility"), "翻译历史只在文字模式出现");
                 Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),
                        "两套版面按模式切换,不是各建一份");
             }
@@ -1441,8 +1478,10 @@ public static class Selftest
                        "★ 目标池满 3 个 -> 语言池灰掉禁用");
                 Assert(tbSrc.Contains("_targetBox.Width = TargetPoolWidth") && tbSrc.Contains("_poolBox.Width = LangPoolWidth"),
                        "两个池子各自用自己的宽度");
-                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.Contains("Grid.SetColumn(notes, 1)"),
-                       "★ 翻译历史占剩余空间");
+                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.Contains("Grid.SetColumn(rightStack, 2)"),
+                       "★ 右侧那一格占剩余空间");
+                Assert(tbSrc.Contains("var pool = PoolCard();            // ★ 只此一处:两种模式共用"),
+                       "★ 语言池两种模式共用、只建一次(两边都要从它往外拖)");
                 // ★★ 两种模式都要显示的东西【只能建一次】,且要建在切换范围之外 ——
                 //   同一天里三次栽在"一个元素两个父节点"上,最后一次让整个翻译界面打不开。
                 //   (三处 = 定义 + 构造时那一次 + RebuildNotesCard 里那一次;
@@ -1470,7 +1509,7 @@ public static class Selftest
                        "★ 滚轮调档,且收下事件(否则会顺带把外面的会话区滚了)");
                 Assert(wheel is not null && wheel.Contains("e.Delta > 0 ? 1 : -1"),
                        "往上滚 = 更详细(与竖排的下简上详一致)");
-                Assert(tbSrc.Contains("Grid.SetColumn(target, 1)") && tbSrc.Contains("Grid.SetColumn(pool, 2)"),
+                Assert(tbSrc.Contains("Grid.SetColumn(target, 1)") && tbSrc.Contains("Grid.SetColumn(pool, 1)"),
                        "★ 目标池与语言池左右并列(不再一上一下)");
                 Assert(tbSrc.Contains("const double LangPoolWidth = TargetPoolWidth * 2;"),
                        "★ 语言池宽度正好是目标池的两倍(用户裁定)");

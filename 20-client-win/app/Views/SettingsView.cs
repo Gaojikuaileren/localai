@@ -190,6 +190,22 @@ public sealed class SettingsView : UserControl
             install.Margin = new Thickness(8, 0, 0, 0);
             row.Children.Add(install);
         }
+        if (st.Installed)
+        {
+            // ★ 卸载走【官方卸载程序】,不自己删 .sys ——
+            //   手动拆内核驱动的残留会让下次安装也装不上,严重时整机没声音。
+            var uninstall = Ui.Danger("一键卸载", (_, _) =>
+            {
+                if (!ConfirmDialog.Show("卸载虚拟声卡",
+                        $"将卸载 {AudioDriver.ProductName}。卸载后同传的译文语音无法送进会议软件,"
+                        + "但文字翻译与对方字幕不受影响。走官方卸载程序,会弹一次系统管理员提示。",
+                        confirmText: "卸载", danger: true)) return;
+                AudioDriver.RunUninstaller(out var msg);
+                _driverStatus.Text = msg;
+            });
+            uninstall.Margin = new Thickness(8, 0, 0, 0);
+            row.Children.Add(uninstall);
+        }
         _driverBody.Children.Add(row);
 
         _driverStatus.TextWrapping = TextWrapping.Wrap;
