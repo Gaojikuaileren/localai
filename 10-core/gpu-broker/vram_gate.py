@@ -99,7 +99,8 @@ class Verdict:
 def evaluate(component_ids: List[str],
              cfg: Optional[Config] = None,
              free: Optional[float] = None,
-             skip_dynamic: bool = False) -> Verdict:
+             skip_dynamic: bool = False,
+             resident: Optional[List[str]] = None) -> Verdict:
     """对【申请后的完整 AI 驻留集合】跑三层检查。
 
     component_ids 是「这次操作之后应当驻留的全部组件」,不是增量 ——
@@ -145,23 +146,47 @@ def evaluate(component_ids: List[str],
                          "  → 拒绝执行。宁可不装,不做「不知道装不装得下就先装」——"
                          "那正是 §12.3 禁止的静默降级。"),
             )
-        margin_after = round(free - total, 4)
+        # ★★ 动态闸只算【本次要新占】的部分(2026-07-31 审计):
+        #   已驻留组件的显存【已经被 NVML free 扣掉了】,再把它们算进 incoming 等于重复计一遍,
+        #   会误拒本来装得下的申请,还错误归因到"物理墙、改桌面预留没用"。
+        #   cold-start(resident 为空)时 incoming == total,行为逐字节不变(38 条现有测试全过)。
+        resident = resident or []
+        pending = [c for c in component_ids if c not in resident]
+        incoming = round(sum(cfg.peak(c) for c in pending), 4)
+        margin_after = round(free - incoming, 4)
         if margin_after < cfg.budget.safety_margin:
+            if resident:
+                ai_now = round(sum(cfg.peak(c) for c in resident if c in cfg.components), 2)
+                desktop_now = round(cfg.budget.total_vram - free - ai_now, 2)
+                return Verdict(
+                    ok=False, gate="dynamic", requested=component_ids,
+                    total_peak=total, vram_budget=budget, free=free,
+                    message=(f"动态闸:此刻只有 {free:.2f} GiB 可用。"
+                             f"桌面等正占约 {desktop_now:.2f}(推算),中枢已驻留 {ai_now}"
+                             f"({'、'.join(resident)}),本次要新增 {incoming:.2f}，"
+                             f"装完只剩 {margin_after:.2f} < 安全余量 {cfg.budget.safety_margin:.2f}。\n"
+                             f"  → 卸掉某个已驻留组件,**或**关掉占显存的程序(浏览器/游戏/UE5)。"),
+                )
             desktop_now = round(cfg.budget.total_vram - free, 2)
             return Verdict(
                 ok=False, gate="dynamic", requested=component_ids,
                 total_peak=total, vram_budget=budget, free=free,
                 message=(f"动态闸:此刻只有 {free:.2f} GiB 可用(桌面等正占 {desktop_now:.2f})，"
-                         f"这组要 {total:.2f}，装完只剩 {margin_after:.2f} < 安全余量 {cfg.budget.safety_margin:.2f}。\n"
+                         f"这组要 {incoming:.2f}，装完只剩 {margin_after:.2f} < 安全余量 {cfg.budget.safety_margin:.2f}。\n"
                          f"  → **改桌面预留没用** —— 撞的是物理墙。关掉占显存的程序(浏览器/游戏/UE5)再试。"),
             )
 
+    # ★ 成功文案的"装完剩"要按【本次新占】算,不按 total —— 否则复用场景下已驻留部分被重复减,
+    #   会显示一个吓人的负数(明明装得下)。cold-start 时 incoming == total,数字不变。
+    _resident = resident or []
+    _incoming = round(sum(cfg.peak(c) for c in component_ids if c not in _resident), 4)
     return Verdict(
         ok=True, requested=component_ids, total_peak=total, vram_budget=budget,
         free=free, headroom=(round(budget - total, 4)),
         message=(f"通过:Σpeak {total:.2f} ≤ vram_budget {budget:.2f}"
                  f"(余 {budget - total:.2f})"
-                 + (f"；实测可用 {free:.2f}，装完剩 {free - total:.2f}" if free is not None else "")),
+                 + (f"；实测可用 {free:.2f}，本次新占 {_incoming:.2f}，装完剩 {round(free - _incoming, 2):.2f}"
+                    if free is not None else "")),
     )
 
 

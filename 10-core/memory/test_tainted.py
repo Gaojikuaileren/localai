@@ -204,5 +204,16 @@ check("与 str 比较不相等也不崩",
 check("可安全放进 set/dict(hash 基于句柄,不基于明文)",
       len({c1, c2}) == 2 and len({c1, c1}) == 1)
 
+print("=== 13. 保险库随对象释放(2026-07-31 审计:_VAULT 曾只增不减)===")
+import gc  # noqa: E402
+from tainted import _VAULT  # noqa: E402
+_base = len(_VAULT)
+def _leak_once():
+    _t = seal("会随对象一起消失的正文", sensitivity="S0", source="x")
+    check("seal 后保险库 +1", len(_VAULT) == _base + 1)
+_leak_once()
+gc.collect()
+check("★ 对象 GC 后保险库回到基线(正文不再滞留进程内)", len(_VAULT) == _base)
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

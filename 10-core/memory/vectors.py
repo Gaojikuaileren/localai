@@ -118,7 +118,7 @@ def verify_fingerprint(conn) -> EncodingFingerprint:
 
 # ── 编码(唯一实现)────────────────────────────────────────────────
 def _post(url: str, payload: dict, timeout: float = 120.0) -> dict:
-    with httpx.Client(timeout=timeout) as cl:
+    with httpx.Client(timeout=timeout, trust_env=False) as cl:   # ★ trust_env=False:记忆正文不走代理(审计 2026-07-31)
         r = cl.post(url, json=payload)
         r.raise_for_status()
         return r.json()
@@ -208,7 +208,7 @@ def upsert_point(tgt: QdrantTarget, point_id: int, vector: List[float],
     """写一个向量点。★ 载荷【只有指针】,绝无正文。"""
     payload = {"kind": kind, "row_id": row_id, "write_seq": write_seq,
                "sensitivity_domain": sensitivity}
-    with httpx.Client(timeout=60.0) as cl:
+    with httpx.Client(timeout=60.0, trust_env=False) as cl:
         r = cl.put(f"{tgt.base}/collections/{tgt.collection}/points?wait=true",
                    headers={"api-key": tgt.api_key},
                    json={"points": [{"id": point_id, "vector": vector, "payload": payload}]})
@@ -217,7 +217,7 @@ def upsert_point(tgt: QdrantTarget, point_id: int, vector: List[float],
 
 def search(tgt: QdrantTarget, vector: List[float], top_k: int = 50) -> List[Dict[str, Any]]:
     """ANN 检索。返回 [{id, score, payload}]。"""
-    with httpx.Client(timeout=60.0) as cl:
+    with httpx.Client(timeout=60.0, trust_env=False) as cl:
         r = cl.post(f"{tgt.base}/collections/{tgt.collection}/points/search",
                     headers={"api-key": tgt.api_key},
                     json={"vector": vector, "limit": top_k, "with_payload": True})
@@ -227,7 +227,7 @@ def search(tgt: QdrantTarget, vector: List[float], top_k: int = 50) -> List[Dict
 
 def delete_point(tgt: QdrantTarget, point_id: int) -> None:
     """D33② tombstone 删除时必须同步删向量 —— 否则删了正文,向量还在,检索仍会命中。"""
-    with httpx.Client(timeout=60.0) as cl:
+    with httpx.Client(timeout=60.0, trust_env=False) as cl:
         r = cl.post(f"{tgt.base}/collections/{tgt.collection}/points/delete?wait=true",
                     headers={"api-key": tgt.api_key}, json={"points": [point_id]})
         r.raise_for_status()

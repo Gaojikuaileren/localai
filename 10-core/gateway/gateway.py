@@ -179,7 +179,10 @@ CHAT_KINDS = {"chat", "chat_multimodal"}
 #   同时使路由集合收敛为显式三条,ROUTE_TIERS 元测试可穷举。
 app = FastAPI(title="LocalAI Hub Gateway", version="0.1.0-p3b",
               docs_url=None, redoc_url=None, openapi_url=None)
-_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0))
+# ★ trust_env=False(2026-07-31 审计,高危):不让 HTTP_PROXY / HTTPS_PROXY / 系统代理
+#   把本应走回环的转发改道到外网 —— 那会把整包 system + 全部历史(含解封后的记忆正文)
+#   明文送到一个你不控制的端点。回环不需要代理,关掉它零损失。
+_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), trust_env=False)
 
 
 # ────────────────────────────────────────────────────────────

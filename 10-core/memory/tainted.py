@@ -32,6 +32,8 @@
 from __future__ import annotations
 
 import secrets
+import weakref
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -71,11 +73,21 @@ class UnsealLedger:
 
     ★ 它是**审计**,不是**防护** —— 防护靠「解封必须显式调用具名函数」。
     """
+    # ★ 封顶(审计 2026-07-31):_LEDGER 是模块级单例、只增不减 ——
+    #   存的是句柄+用途字符串(不是正文),但常驻进程里仍会慢慢隆起。
+    #   用 deque 封顶:它是审计轨,只需最近足够多条供渲染/出境闸判断,不需全史。
+    #   (本该是"每请求一个",说明已如此;封顶是不改架构的步进。)
+    _CAP = 4096
+
     def __init__(self) -> None:
-        self.records: List[UnsealRecord] = []
+        self.records: deque = deque(maxlen=self._CAP)
 
     def note(self, handle: str, purpose: str, sink: str) -> None:
         self.records.append(UnsealRecord(handle, purpose, sink))
+
+    def reset(self) -> None:
+        """新一轮请求开始时可显式清空(现为单例,尚未接请求上下文)。"""
+        self.records.clear()
 
     @property
     def purposes(self) -> set:
@@ -101,7 +113,8 @@ class TaintedText:
 
     ★ 没有 `.value` / `._value` / `.text` 属性。取值只能经四个具名解封函数之一。
     """
-    __slots__ = ("_handle", "sensitivity", "source")
+    # ★ __weakref__:让对象可被弱引用(seal 用 weakref.finalize 绑定正文寿命)。
+    __slots__ = ("_handle", "sensitivity", "source", "__weakref__")
 
     def __init__(self, handle: str, sensitivity: str, source: str) -> None:
         object.__setattr__(self, "_handle", handle)
@@ -184,7 +197,14 @@ def seal(text: str, *, sensitivity: str, source: str) -> TaintedText:
         raise TypeError(f"seal() 只接受 str,收到 {type(text).__name__}")
     handle = secrets.token_urlsafe(16)
     _VAULT[handle] = text
-    return TaintedText(handle, sensitivity, source)
+    t = TaintedText(handle, sensitivity, source)
+    # ★★ 把保险库条目的寿命绑到 TaintedText 对象的寿命上(审计 2026-07-31):
+    #   以前 _VAULT 只增不减 —— 每次 seal 都新生一个句柄,而 repo 每次查询拿到的都是新 str 对象,
+    #   于是同一条事实读 N 次就在进程内攒 N 份明文,永不释放。
+    #   对象一走(GC),它那份正文也跟着从 _VAULT 里消失。
+    #   ★ 不违反“正文不在对象上”:finalize 不给对象设任何属性,正文仍在模块级 _VAULT 里。
+    weakref.finalize(t, _VAULT.pop, handle, None)
+    return t
 
 
 # ── 调用方档位与后端契约:两个都不能是裸字符串 ────────────────────
