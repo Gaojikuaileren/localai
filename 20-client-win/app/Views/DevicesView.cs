@@ -213,8 +213,12 @@ public sealed class DevicesView : UserControl
                 list.Children.Clear();
                 if (status == 404)
                 {
-                    list.Children.Add(Ui.Body("主机还没有开放设备管理接口。", muted: true));
-                    list.Children.Add(Ui.Caption("需要主机端升级到带管理 API 的版本(P3c S2)。在那之前,解除设备请在主机上操作。"));
+                    // ★ 这里的 404 【不是】"主机还没升级"(那是原来写的,是个假原因,审计 2026-07-31 确认)——
+                    //   按 D37/D48,/admin/* 只挂在主机本地的回环口上,局域网 mTLS 口对它一律 404,
+                    //   连存在性都不暴露。也就是说:从别的机器走这条路【永远】拿不到,升级也没用。
+                    //   把结构性的"走不通"说成"暂时还没有",会让人一直等一个不会来的版本。
+                    list.Children.Add(Ui.Body("设备管理只能在主机那台电脑上操作。", muted: true));
+                    list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口,局域网这条路结构上就到不了 —— 不是版本问题。要解除设备,请到主机上操作。"));
                     return;
                 }
                 if (status == 403)

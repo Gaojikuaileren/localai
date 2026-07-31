@@ -256,7 +256,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 | ~~活数据库的备份方式~~ | ~~P3a~~ | ✅ **2026-07-28 已解除**:逻辑转储落地 + 每次备份自证可恢复 + 金丝雀演练 PASS + 真机备份跑通(G:) |
 | ~~上行带宽未测~~ | ~~P3b 手机端体验~~ | ✅ **2026-07-28 作废**:手机不再有全功能路径(D34),外联通道是文本,带宽无关 |
 | ~~**★ LAN 命名 + 证书方案未定**~~ | ~~P3b 全部内容~~ | ✅ **2026-07-29 落定(D43 + S1/S2.1 实证)**:命名 `localai-<hub-id-short>.local`;应用自有 mTLS,CA 私钥落 TPM 不可导出;TLS 栈 = Kestrel + .NET/CNG。回环 spike + 签发核心已在真机验通 |
-| **★ 出境闸:方向 A 已做,方向 B 待做** | **P3d 外联通道** | **2026-07-30 进展**:E4 请求出境闸已落地(`10-core/gateway/e4_egress.py` 方向无关核心 + gateway 挂点在 kind 检查前;egress=true 且命中凭证 → fail-closed 且**不认 E1 override**;test 13 + gateway 套件 71 全绿)。**仍缺方向 B**(响应回程闸:上游返回 / P3d Signal 出口的扫描点),接口已在 e4_egress 预留。**接外联通道之前必须补方向 B** |
+| **★ 出境闸:方向 A 已做,方向 B 待做** | **P3d 外联通道** | **★ 2026-07-31 更正**:07-30 这格原本写「已落地 … test 13 + gateway 套件 71 全绿」——**那是假的**。`e4_egress.py` 从未入库(git 全历史无此文件),而 `gateway.py:28` 的 `import e4_egress` 是真的,于是**整个网关一天都起不来**(`import gateway` → ModuleNotFoundError,6 个测试文件里 4 个连收集都过不去,`start-stack.ps1` 必失败)。根因:07-30 的 commit 4f49a63 把 gateway 挂点夹带进一个客户端提交,模块本体没 stage。<br>**07-31 已补齐并实测**:`e4_egress.py`(E1 检测器的薄封装,**签名里没有 override 参数** —— 出境的放行能力在结构上不存在)+ `test_e4_egress.py` 18 条。gateway 全套现在 **151 PASS / 0 FAIL**(caller_identity 10 · caller_policy 15 · e1 50 · e4_egress 18 · egress_registry 12 · gateway_e1 36 · lan_edge_policy 10)。**仍缺方向 B**(响应回程闸:上游返回 / P3d Signal 出口的扫描点)。**接外联通道之前必须补方向 B** |
 
 > P1 阶段的全部阻塞(语音栈选型 · C4 语料 · llama.cpp · 桌面基线)**均已解除**。
 
@@ -297,7 +297,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 | **P3b** | **LAN TLS 与绑 LAN 捆绑交付** | 🔵 **进行中**:S0 决议已落(D43,精简优先)。**做不出 TLS 之前继续只绑回环**;S1–S4 回环门禁全过前禁止非回环监听 |
 | **P3c** | P3b 完成(客户端要能配对)+ P3a S1 | 🔵 S1 已完成;P3b 回环栈已全绿(待真机验收) |
 | **P3c** | **★ 身份层「设备 × 成员」**(D45) | ❌ **未做,硬前置**。P3b 只认证设备;「仅本人」与成员二次确认需要「人」这一层。设计已定稿(`CLIENT_UX_DESIGN_v1.md`) |
-| **P3d** | **响应侧出境闸** | 🔵 方向 A(请求出境 E4)✅ 2026-07-30;方向 B(响应回程)❌ 仍是硬前置 |
+| **P3d** | **响应侧出境闸** | 🔵 方向 A(请求出境 E4)✅ **2026-07-31 真正落地**(07-30 标 ✅ 系误记 —— 模块当时并不存在,详见上方阻塞表);方向 B(响应回程)❌ 仍是硬前置 |
 | **P8** | P6 权限区域 + **A7-pet 实测** | ❌ |
 
 ---

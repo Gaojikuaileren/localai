@@ -261,6 +261,26 @@ if ($secretsRoot) {
     throw "paths.toml 缺 state.secrets —— 拒绝在不知道密钥落点的情况下产出备份。"
 }
 
+# ★★ {state}\identity 同样永不进备份(D43 S0.8)—— 2026-07-31 审计发现这条【从来没落地】。
+#
+# paths.toml 第 48-53 行白纸黑字写着「identity 的两条性质(同 secrets,缺一不可)」
+# 以及「恢复语义:identity 不在备份里」,但这个脚本此前只排除了 secrets。
+# 也就是说:成员表、证书公共材料、identity_generation 一直被逐字复制到
+# G:(USB · exFAT · 不加密)上。
+#
+# 为什么这比"被读"更糟:旧成员表 + 存活的 TPM CA 一起恢复,会让 identity_generation
+# 回滚,【已吊销的设备随之复活】—— 吊销这个动作从此不可信。
+# 与 secrets 同理,不能沿用 D22「丢盘 = 可读全部记忆」那笔账,那笔账只算了记忆。
+#
+# 同样必须放在 if 之外用 += 追加:排除清单只有在记忆库目录存在时才被初始化。
+$identityRoot = $P['state.identity']
+if ($identityRoot) {
+    $excludeAbs += $identityRoot
+    $report.Add('- **identity**: ★ 已排除出备份(成员表/证书公共材料/identity_generation)。缺失或损坏 → 新 hub_id + 新 CA + 全量重新配对')
+} else {
+    throw "paths.toml 缺 state.identity —— 拒绝在不知道成员表落点的情况下产出备份。"
+}
+
 # 1. STATE — 全量,唯一不可重建的数据
 #    排除 quarantine:隔离区装的是你**打算删掉**的东西。把它备份进来,
 #    等于让已经决定丢弃的数据在 12 个备份代里继续存活,并且会把

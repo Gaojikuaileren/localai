@@ -235,9 +235,22 @@ public sealed class SettingsView : UserControl
         var local = AudioDriver.FindOfflinePackage();
         if (local is not null)
         {
-            // 自备的包也要校验 —— 除非清单里没有这个版本的哈希,那就如实说"没法校验"
+            // ★★ 自备的包【必须】校验通过才运行 —— 校验不了就不运行,没有"没法校验就放行"这一档。
+            //   为什么写死成这样(审计 2026-07-31 确认的高危):
+            //   原先是 `pkg is not null && !Verify(...)` —— 清单拿不到时整条校验被短路。
+            //   而内置清单【故意留空 Sha256】(等真哈希核实之后再填),IsUsable() 因此为 false,
+            //   Current 在出厂默认状态下恒为 null。于是默认状态下这里等于:
+            //   把 %LOCALAPPDATA% 下那个路径上的任意 exe 直接以【管理员】身份跑起来
+            //   (RunInstaller 用 Verb="runas")。那个目录普通程序就能写。
+            //   —— 装驱动是不可逆且提权的操作,"不确定"必须等于"不做",不能等于"照做"。
             var pkg = AudioDriverManifest.Current;
-            if (pkg is not null && !AudioDriver.Verify(local, pkg.Sha256))
+            if (pkg is null)
+            {
+                _driverStatus.Text = "没有可用的版本清单,校验不了这个安装包 —— 已拒绝运行。" +
+                                     "装驱动要提权且不可逆,校验不过就不能装。";
+                return;
+            }
+            if (!AudioDriver.Verify(local, pkg.Sha256))
             {
                 _driverStatus.Text = "本地安装包与清单里的哈希对不上 —— 已拒绝运行。" +
                                      "请删掉它重新下载,或确认你放的是官方原包。";

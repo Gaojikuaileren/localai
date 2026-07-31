@@ -18,7 +18,7 @@
   "nav.extensions":       { "zh-CN": "扩展",                "en-US": "Extensions",              "ja-JP": "拡張機能" },
   "model.not_connected":  { "zh-CN": "尚未接入 GPU Broker(P4):下面的设置是【偏好】,接入后由中枢按显存预算实际装载模型;现在不会真的加载任何模型。", "en-US": "GPU Broker (P4) not connected yet: the settings below are preferences. Once connected, the hub loads models within the VRAM budget. Nothing is actually loaded now.", "ja-JP": "GPU Broker(P4)未接続:以下は設定の希望値です。接続後、ハブが VRAM 予算内でモデルを読み込みます。今は実際には読み込まれません。" },
   "model.store_path":     { "zh-CN": "模型存放路径",         "en-US": "Model storage path",      "ja-JP": "モデルの保存先" },
-  "model.store_path_hint":{ "zh-CN": "各模型权重的统一存放目录。接入后中枢按此路径查找/加载模型。", "en-US": "A single folder holding all model weights. The hub looks up and loads models from here once connected.", "ja-JP": "全モデルの重みを置く統一フォルダ。接続後、ハブはここから読み込みます。" },
+  "model.store_path_hint":{ "zh-CN": "★ 这里填的路径现在【没有任何代码在读】—— 模型根的唯一来源是主机上的 config/paths.toml。它只是个备忘,改了不会改变中枢从哪里加载。", "en-US": "★ Nothing reads this path today — the single source of truth for the model root is config/paths.toml on the hub. This box is a memo; changing it does not change where the hub loads from.", "ja-JP": "★ このパスは現在どのコードからも読まれていません —— モデルルートの唯一の情報源はハブの config/paths.toml です。ここはメモであり、変えても読み込み先は変わりません。" },
   "model.enabled":        { "zh-CN": "启用的模型",           "en-US": "Enabled models",          "ja-JP": "有効なモデル" },
   "model.enabled_hint":   { "zh-CN": "勾选允许使用的模型。接入后以中枢下发的可用模型清单为准。", "en-US": "Choose which models may be used. The hub's available-model list takes precedence once connected.", "ja-JP": "使用を許可するモデルを選びます。接続後はハブの利用可能モデル一覧が優先されます。" },
   "model.auto_rules":     { "zh-CN": "自动启用规则",         "en-US": "Auto-enable rules",       "ja-JP": "自動起動ルール" },
