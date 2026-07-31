@@ -2349,9 +2349,11 @@ public static class Selftest
                 Assert(tl.Contains("static List<(int Index, int Col, int Total)> LayOut"),
                        "★ 重叠的日程【平分当天宽度】(按重叠簇分列)");
                 Assert(tl.Contains("var wrapInside = !wideEnough && height >= WrapInsideAbove;")
-                       && tl.Contains("placedLabels.Any(o => o.IntersectsWith(rect))")
+                       && tl.Contains("var lyMid = yTop + (yBottom - yTop) / 2 - LabelLine / 2;")
+                       && tl.Contains("var lx = roomRight >= 16 ? right : x + 2;")
                        && tl.Contains("placedLabels.Add(new Rect(x, yTop, w, height));"),
-                       "★★ 太矮【或太窄】的条都把标题挪到条外，且外置标题要避开【其它标题与日程色块】"
+                       "★★ 外置标题【永远画、且永远与条同高】—— 同一个 y 是最硬的归属提示。"
+                       + "前后错过两次:往上让会飘得认不出主、被占就不画会直接消失"
                        + "(用户反馈:多个共享宽度时名字被省略成'…',什么都看不见)");
                 Assert(tl.Contains("BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),")
                        && tl.Contains("var edgeThick = height >= EdgeLinesAbove ? 2.0 : 1.0;"),

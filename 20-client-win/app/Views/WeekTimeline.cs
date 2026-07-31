@@ -837,21 +837,24 @@ public sealed class WeekTimeline : UserControl
             lb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             lb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             var lw = Math.Min(lb.DesiredSize.Width, lb.MaxWidth);
-            double ly = yTop - LabelLine - 1;
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                var r = new Rect(x, ly, lw, LabelLine);
-                if (!placedLabels.Any(o => o.IntersectsWith(r))) break;
-                ly -= LabelLine;
-            }
-            var rect = new Rect(x, ly, lw, LabelLine);
-            if (!placedLabels.Any(o => o.IntersectsWith(rect)) && ly > -LabelLine && ly < h)
-            {
-                placedLabels.Add(rect);
-                Canvas.SetLeft(lb, x);
-                Canvas.SetTop(lb, Math.Max(0, ly));
-                _canvas.Children.Add(lb);
-            }
+
+            // ★★ 这里前后错了两次,结论写清楚以免再绕:
+            //   ① "撞上了就往上让一行" -> 一堆窄条挨着时,标题被顶到离自己两三行远,
+            //      中间还夹着别人的标题,认不出主(用户:"离自己原本块越来越远");
+            //   ② "位置被占就不画" -> 名字直接没了(用户:"这种情况就直接消失了")。
+            //   所以现在:【永远画,且永远与条同高】—— 同一个 y 是最硬的归属提示。
+            //   优先摆在条的右边;右边挤不下就盖在条自己头上向右溢出。
+            //   宁可两个名字在横向上碰一点,也不让它飘走或者消失。
+            var right = x + w + 3;
+            var roomRight = colRight - right;
+            var lx = roomRight >= 16 ? right : x + 2;
+            var lyMid = yTop + (yBottom - yTop) / 2 - LabelLine / 2;   // 与条垂直居中
+            lb.MaxWidth = Math.Max(16, colRight - lx);
+            Canvas.SetLeft(lb, lx);
+            Canvas.SetTop(lb, Math.Clamp(lyMid, 0, Math.Max(0, h - LabelLine)));
+            Panel.SetZIndex(lb, 5);      // 标题浮在所有色块之上
+            _canvas.Children.Add(lb);
+            placedLabels.Add(new Rect(lx, lyMid, lb.MaxWidth, LabelLine));
         }
 
         var grab = Math.Min(6, Math.Max(2, height / 3));
