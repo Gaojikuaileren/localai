@@ -2479,9 +2479,14 @@ public static class Selftest
                 {
                     Assert(ce2.Contains("var endOffset = existing is not null") && ce2.Contains("d0.AddDays(endOffset) + endAt"),
                            "★★ 非全天日程也能跨天:结束 = 开始那天 + 【结束日偏移】+ 结束时刻");
-                    Assert(ce2.Contains("endOffset = 1;") && ce2.Contains("if (endAt > startAt || endOffset > 0) return;"),
+                    Assert(ce2.Contains("endOffset = 1; endOffsetAuto = true;") && ce2.Contains("if (endOffset > 0) return;"),
                            "★★ 把结束拨到早于开始 = 【跨到次日】,而不是把开始一起往前拖"
                            + "(旧做法等于替用户改了他刚刚没动的那一头,而且让跨天永远表达不出来)");
+                    Assert(ce2.Contains("var endOffsetAuto = false;") && ce2.Contains("endOffsetAuto = false;      // ★ 手动设过就不再自动收回"),
+                           "★★ 区分【自动推出去的跨天】与【手动按 + 设的】—— 不分的话,"
+                           + "拖转盘扫过一下就把日程永久掰成跨天(用户从头到尾没打算跨天)");
+                    Assert(ce2.Contains("warn?.Invoke(\"结束日期不能早于开始"),
+                           "★ 全天结束日被夹住时【当场说一声】—— 不能界面写 7/28、存进去却是 7/31(所见非所得)");
                     Assert(ce2.Contains("if (next < 0 || (next == 0 && endAt <= startAt)) return;"),
                            "★ 退回「当日」时若起止会颠倒,就不许退 —— 不靠保存时偷偷夹一下");
                 }
@@ -2630,8 +2635,14 @@ public static class Selftest
             var min2K = Views.Layout.MinWindowFor(2560, 1440);
             Assert(min2K.W == 1280 && min2K.H == 720, $"2K 屏最小窗口 = 1280×720  实得 {min2K.W}×{min2K.H}");
             // 首屏建议尺寸:必须不小于最小窗口,且在常见屏幕上放得下(否则打开就出滚动条)
-            Assert(Views.Layout.PreferredWindowHeight >= 872,
-                   $"建议高度够放下主页内容(标题栏+页边距+四行 ≈ 872,实得 {Views.Layout.PreferredWindowHeight})");
+            // ★ 按【常量算】而不是写死一个 872 —— 行高改了断言要跟着变,
+            //   否则它会一直绿着而窗口已经装不下了(审计实测过:1000 下有 1 个项目方块就溢出 47px)。
+            var needH = 38 + 32 + 107
+                      + (Views.CalendarView.PanelHeight + 62) + 12
+                      + Views.HomeView.WeatherStackHeight + 12
+                      + 130;
+            Assert(Views.Layout.PreferredWindowHeight >= needH,
+                   $"建议高度够放下主页内容(需 {needH},实得 {Views.Layout.PreferredWindowHeight})");
             var min2Kw = Views.Layout.MinWindowFor(2560, 1440);
             Assert(Views.Layout.PreferredWindowHeight >= min2Kw.H && Views.Layout.PreferredWindowWidth >= min2Kw.W,
                    "建议尺寸不小于 2K 屏的最小窗口(否则会被夹回去,建议值形同虚设)");
@@ -3455,6 +3466,14 @@ public static class Selftest
                                && appw.Contains("ClientStore.Save(ClientStore.WeatherPath"),
                                "★★ 天气缓存【真的会落盘】—— 不接变更通知的话它只活在内存里,"
                                + "重启/断网时「显示上次那份」无从谈起");
+                    Assert(hvw.Contains("CultureInfo.InvariantCulture) + \"mm\""),
+                           "★ 降水量的小数点强制用点 —— 系统区域是德国时会得到 \"0,2mm\"");
+                    Assert(hvw.Contains("RefreshWeatherUi();"),
+                           "★ 卡片刚建好就刷一次读数 —— 只靠 Loaded 的话,拖拽排序后与离屏渲染里都是空态");
+                    var ico = TryReadSource(Path.Combine("Theme", "Icons.cs"));
+                    if (ico is not null)
+                        Assert(ico.Contains("public static IconName? ForWeather(int? code)") && ico.Contains("_ => null,"),
+                               "★★ 认不出的天气代码【不画图标】—— 随便给个太阳等于替天气编了个说法");
                     Assert(hvw.Contains("NetworkInterface.GetIsNetworkAvailable()"),
                            "★ 没网就不试(与 Apple 自动拉取同一条规矩)");
                 }
@@ -3471,11 +3490,31 @@ public static class Selftest
                            + "—— 回落到第 0 项会让用户只改标题一保存就把分类永久改掉");
                     Assert(ce3.Contains("(group.SelectedItem as ComboBoxItem)?.Tag as string"),
                            "★ 保存按 Tag 取值,不按 index 反查");
+                    Assert(ce3.Contains("Ui.Caption(Services.CalendarGroups.SourceNote)"),
+                           "★ 分类下拉旁边如实说明这张表从哪来(本机占位 / 来自 iCloud)");
                 }
                 var acs = TryReadSource(Path.Combine("Services", "AppleCalendarSync.cs"));
                 if (acs is not null)
-                    Assert(acs.Contains("CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));"),
-                           "★★ 每次拉取都刷新分类表 —— 否则 iCloud 改名/改色后颜色永远对不上且不会自愈");
+                    Assert(acs.Contains("CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex, (string?)c.Url)));"),
+                           "★★ 每次拉取都刷新分类表(并带上 Url 供重名去重) —— 否则 iCloud 改名/改色后永远对不上且不会自愈");
+
+                // 重名日历要能分得开(iCloud 里非常常见:自己的"家庭"与别人共享给你的"家庭")
+                Services.CalendarGroups.SetFromApple(new[]
+                {
+                    ("家庭", (string?)"#111111", (string?)"https://p1.icloud.com/a/"),
+                    ("家庭", (string?)"#222222", (string?)"https://p1.icloud.com/b/"),
+                });
+                var nm = Services.CalendarGroups.Names;
+                Assert(nm.Length == 2 && nm[0] != nm[1],
+                       "★★ 重名日历【去重成两个不同的存储值】—— 否则两个日历共用第一个的颜色,"
+                       + "下拉里也出现两行一模一样的项,选哪个都一样");
+                Assert(Services.CalendarGroups.ColorOf(nm[0]) != Services.CalendarGroups.ColorOf(nm[1]),
+                       "★ 重名日历各用自己的颜色");
+                Assert(Services.CalendarGroups.ShortTag("https://p1.icloud.com/a/") == Services.CalendarGroups.ShortTag("https://p1.icloud.com/a/"),
+                       "★ 区分用的短码是【稳定】的(不用序号 —— 序号会随 iCloud 返回顺序变)");
+                Assert(Services.CalendarGroups.SourceNote.Contains("iCloud"),
+                       "★ FromApple 不只是个属性 —— 有一句可直接给界面用的如实说明");
+                Services.CalendarGroups.SetFromApple(Array.Empty<(string, string?)>());
 
                 // 跨天定时日程的"结束在哪天"必须只有一套口径
                 var ev9 = new Views.CalendarEvent(

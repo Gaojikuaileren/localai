@@ -56,6 +56,14 @@ public static class CalendarEditor
         var endOffset = existing is not null
             ? Math.Max(0, (existing.End.Date - existing.Start.Date).Days)
             : 0;
+        // ★★ 区分【自动推出去的跨天】与【用户按 + 手动设的】。
+        //   不分的话:拖转盘会连续经过中间值 —— 10:10 往下拖扫过 23 点再拖回 22 点,
+        //   那一下"扫过"就把 endOffset 置成了 1,而它只增不减 ->
+        //   松手变成「22:00 → 次日 00:10」,用户从头到尾没打算跨天。
+        //   自动置的那个 1,在起止重新回到同一天时要能【自动退回 0】。
+        var endOffsetAuto = false;
+        // 提示句柄 —— status/Warn 建在后面,这里先留个口(与 setStartTime 同一套写法)
+        Action<string>? warn = null;
         TextBlock? endDayLabel = null;
         void SyncEndDay()
         {
@@ -78,8 +86,10 @@ public static class CalendarEditor
             //   人嘴里说的"22:00 到 03:00"本来就是跨天的意思。
             //   旧做法是把开始一起往前拖 —— 那等于替用户改了他刚刚没动的那一头,
             //   而且让"跨天"这件事永远表达不出来。
-            if (endAt > startAt || endOffset > 0) return;
-            endOffset = 1;
+            // 自动推出去的可以自动收回来
+            if (endAt > startAt) { if (endOffsetAuto && endOffset == 1) { endOffset = 0; endOffsetAuto = false; SyncEndDay(); } return; }
+            if (endOffset > 0) return;
+            endOffset = 1; endOffsetAuto = true;
             SyncEndDay();
         });
         setEnd = setEndTime;
@@ -90,12 +100,14 @@ public static class CalendarEditor
             // 改开始 -> 结束自动跟到 +1 小时(夹在当天内)。
             // ★ 即使用户已经手动改过结束,只要开始越过了它,也必须把结束推开 ——
             //   "尊重用户改过的结束"不能凌驾于"起止不许颠倒"。
+            // 自动推出去的跨天,在开始重新早于结束时收回
+            if (endOffsetAuto && endOffset == 1 && startAt < endAt) { endOffset = 0; endOffsetAuto = false; SyncEndDay(); }
             if (endOffset > 0) return;              // 已经跨天了,起止不可能颠倒
             if (endEdited && startAt < endAt) return;
             var next = startAt + DefaultDuration;
             // ★ 开始推到很晚时,不再把结束贴到 23:30 —— 直接【跨到次日】,这才是它本来的意思
             if (next < TimeSpan.FromDays(1)) endAt = next;
-            else { endAt = next - TimeSpan.FromDays(1); endOffset = 1; SyncEndDay(); }
+            else { endAt = next - TimeSpan.FromDays(1); endOffset = 1; endOffsetAuto = true; SyncEndDay(); }
             setEnd?.Invoke(endAt);   // 内部改值不回调,不会被误判成"用户手动改过"
         });
         setStartTime = setStart;
@@ -128,6 +140,7 @@ public static class CalendarEditor
                 // ★ 回到"当日"时,结束时刻若还早于开始,那就不是一条合法日程 —— 不许退回去。
                 if (next < 0 || (next == 0 && endAt <= startAt)) return;
                 endOffset = next;
+                endOffsetAuto = false;      // ★ 手动设过就不再自动收回
                 SyncEndDay();
             };
             return hit;
@@ -154,7 +167,11 @@ public static class CalendarEditor
                               }),
                               "结束日期", WheelPicker.Date(endDay, d =>
                               {
-                                  endDay = d < startDay ? startDay : d;
+                                  // ★★ 原来这里只【就地夹住】变量,转盘照旧显示用户拨到的日期 ——
+                                  //   界面上写着 7/28,存进去的却是 7/31,所见非所得,
+                                  //   而这份数据是要同步给 Apple 的。现在夹住之后当场说一声。
+                                  if (d < startDay) { endDay = startDay; warn?.Invoke("结束日期不能早于开始 —— 已按开始那天计。"); }
+                                  else endDay = d;
                               }));
 
         // ★ 互斥显示。上一轮我在重写时把这段连带删掉了,导致两组转盘一直同时显示。
@@ -244,6 +261,7 @@ public static class CalendarEditor
             status.Text = msg;
             status.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
         }
+        warn = Warn;
 
         // 从各控件收出一条日程(保留 existing 的 Id / 来源 / Apple UID / AI 标记,编辑不抹掉出处)。
         CalendarEvent Collect()
@@ -299,7 +317,10 @@ public static class CalendarEditor
                 Theme.IconName.Calendar, new Thickness(0, 0, 0, 8), compact: true),
 
             Ui.Panel("归类",
-                Ui.Stack(Ui.Caption("日历组"), group,
+                // ★ 如实说明这张分类表到底从哪来(FromApple 光有属性没人用等于没做)——
+                //   没接 Apple 时那四个词看起来跟真日历一模一样,接上之后颜色会一起换,
+                //   不说一声的话用户只会觉得"颜色自己变了"。
+                Ui.Stack(Ui.Caption("日历组"), group, Ui.Caption(Services.CalendarGroups.SourceNote),
                          Ui.Caption("归属成员"), owner,
                          Ui.Caption("可见范围"), scope),
                 Theme.IconName.Member, new Thickness(0, 0, 0, 8), compact: true),

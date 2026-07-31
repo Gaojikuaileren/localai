@@ -57,7 +57,7 @@ public static class AppleCalendarSync
             //   之前只有设置页手点"刷新清单"才更新:在 iCloud 里改个日历名或换个颜色之后,
             //   新拉回来的日程带的是新名字,颜色表却还是旧名字 —— 那批日程落到"认不出的分类",
             //   拿的是按名字算的颜色,与 Apple 那边毫无关系,而且不手动刷新就永远不会自愈。
-            CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));
+            CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex, (string?)c.Url)));
             settings.AppleCalendarList = cals
                 .Select(c => c.Url + "|" + c.DisplayName + (c.ColorHex is null ? "" : "|" + c.ColorHex))
                 .ToList();
@@ -104,7 +104,7 @@ public static class AppleCalendarSync
                 return new AppleSyncResult(false, 0, 0, skipped, string.Join(" ", failures));
 
             // 交给已被钉死的合并层:不重复、不覆盖、不并入空条目
-            var added = Views.CalendarData.MergeIn(all);
+            var added = Views.CalendarData.MergeIn(all, out var refreshedCount);
             var addedTodos = ((App)System.Windows.Application.Current).Todos.MergeIn(allTodos);
             added += addedTodos;
 
@@ -114,7 +114,8 @@ public static class AppleCalendarSync
             var extra = failures.Count > 0 ? $" 有 {failures.Count} 个日历没取成功。" : "";
             var skipNote = skipped > 0 ? $" 跳过 {skipped} 条读不懂的。" : "";
             return new AppleSyncResult(true, added, fetched, skipped,
-                $"取到 {fetched} 条(日程 {all.Count} + 待办 {allTodos.Count}),新增 {added} 条" +
+                $"取到 {fetched} 条(日程 {all.Count} + 待办 {allTodos.Count}),新增 {added} 条"
+                + (refreshedCount > 0 ? $"、更新 {refreshedCount} 条" : "") +
                 $"(其余是本机已有的,未重复添加)。{skipNote}{extra}");
         }
         catch (OperationCanceledException)

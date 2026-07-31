@@ -21,6 +21,8 @@ public enum IconName
 {
     Home, Chat, Assets, Translation, Courses, Computer, Investment,
     Finance, Model, Folder, Ai, File, Pdf, Search, Extensions, Settings, Devices, Calendar, Tasks, Weather, Clock,
+    // 天气实况(按 WMO 代码选,见 Icons.ForWeather)
+    WxSun, WxPartly, WxCloud, WxFog, WxDrizzle, WxRain, WxSnow, WxShower, WxThunder,
     Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots, Refresh,
 }
 
@@ -142,6 +144,65 @@ public static class Icons
     /// <summary>暖萌用实心(圆滚滚更萌),墨白与微风用描边(线性)。</summary>
     static bool IsFilled(Skin s) => s == Skin.Warm;
 
+    /// <summary>
+    /// 天气实况字形 —— ★ 三套皮肤【共用】。理由见文件里这一段:
+    ///   它们是象形图,不是界面装饰。皮肤照旧决定线宽/填充/圆角(见 Fill),
+    ///   但"这是太阳还是云"不该因为换肤而变。
+    /// 全部画在 24×24 的格子里,且尽量【以 (12,12) 为心】—— 与 Refresh 那次同一条教训:
+    ///   包围盒不对称会让旋转/居中都歪掉。
+    /// </summary>
+    static readonly Dictionary<IconName, string> Weather3 = new()
+    {
+        // 太阳:圆 + 八条光芒
+        [IconName.WxSun] = "M12 7.4 A4.6 4.6 0 1 1 11.99 7.4 Z M12 2.6 V4.8 M12 19.2 V21.4 "
+                         + "M2.6 12 H4.8 M19.2 12 H21.4 M5.4 5.4 L6.9 6.9 M17.1 17.1 L18.6 18.6 "
+                         + "M18.6 5.4 L17.1 6.9 M6.9 17.1 L5.4 18.6",
+        // 局部多云:小太阳 + 一朵云
+        [IconName.WxPartly] = "M9.2 6.6 A3.2 3.2 0 0 1 15.4 7.8 M9.2 3.2 V4.6 M4.9 5.4 L5.9 6.4 "
+                            + "M14.6 4.2 L13.6 5.2 M8 20 A3.6 3.6 0 0 1 8.3 12.9 A4.8 4.8 0 0 1 17.4 13.8 "
+                            + "A3.1 3.1 0 0 1 16.9 20 Z",
+        // 阴:两朵云
+        [IconName.WxCloud] = "M7.5 17 A4 4 0 0 1 7.8 9.1 A5.2 5.2 0 0 1 17.5 10 A3.5 3.5 0 0 1 17 17 Z",
+        // 雾:云 + 三条横线
+        [IconName.WxFog] = "M7.6 13.4 A3.6 3.6 0 0 1 7.9 6.2 A4.8 4.8 0 0 1 17 7 A3.1 3.1 0 0 1 16.5 13.4 Z "
+                         + "M5 16.6 H19 M6.6 19.4 H17.4",
+        // 毛毛雨:云 + 两小点
+        [IconName.WxDrizzle] = "M7.6 13.8 A3.6 3.6 0 0 1 7.9 6.6 A4.8 4.8 0 0 1 17 7.4 A3.1 3.1 0 0 1 16.5 13.8 Z "
+                             + "M9.6 16.8 V18.2 M14.4 16.8 V18.2",
+        // 雨:云 + 三条斜雨
+        [IconName.WxRain] = "M7.6 13.4 A3.6 3.6 0 0 1 7.9 6.2 A4.8 4.8 0 0 1 17 7 A3.1 3.1 0 0 1 16.5 13.4 Z "
+                          + "M8.8 16.4 L7.8 19.4 M12.4 16.4 L11.4 19.4 M16 16.4 L15 19.4",
+        // 雪:云 + 三片雪花(十字)
+        [IconName.WxSnow] = "M7.6 13.2 A3.6 3.6 0 0 1 7.9 6 A4.8 4.8 0 0 1 17 6.8 A3.1 3.1 0 0 1 16.5 13.2 Z "
+                          + "M8.6 16.4 H10.2 M9.4 15.6 V17.2 M13.8 16.4 H15.4 M14.6 15.6 V17.2 "
+                          + "M11.2 19 H12.8 M12 18.2 V19.8",
+        // 阵雨:云 + 两条斜雨(比"雨"少一条,表示间歇)
+        [IconName.WxShower] = "M7.6 13.4 A3.6 3.6 0 0 1 7.9 6.2 A4.8 4.8 0 0 1 17 7 A3.1 3.1 0 0 1 16.5 13.4 Z "
+                            + "M10 16.4 L9 19.4 M15 16.4 L14 19.4",
+        // 雷阵雨:云 + 闪电
+        [IconName.WxThunder] = "M7.6 13.2 A3.6 3.6 0 0 1 7.9 6 A4.8 4.8 0 0 1 17 6.8 A3.1 3.1 0 0 1 16.5 13.2 Z "
+                             + "M12.8 15.4 L10.4 18.6 H13 L11.4 21.4",
+    };
+
+    /// <summary>
+    /// WMO 天气代码 -> 图标。★ 认不出的代码返回 null —— 界面据此【不画图标】,
+    /// 而不是随便给一个太阳(那等于替天气编了个说法)。与 Weather.Describe 的口径一致。
+    /// </summary>
+    public static IconName? ForWeather(int? code) => code switch
+    {
+        null => null,
+        0 => IconName.WxSun,
+        1 or 2 => IconName.WxPartly,
+        3 => IconName.WxCloud,
+        45 or 48 => IconName.WxFog,
+        51 or 53 or 55 or 56 or 57 => IconName.WxDrizzle,
+        61 or 63 or 65 or 66 or 67 => IconName.WxRain,
+        71 or 73 or 75 or 77 or 85 or 86 => IconName.WxSnow,
+        80 or 81 or 82 => IconName.WxShower,
+        95 or 96 or 99 => IconName.WxThunder,
+        _ => null,
+    };
+
     static Dictionary<IconName, string> SetFor(Skin s) => s switch
     {
         Skin.Ink => Line,
@@ -223,14 +284,19 @@ public static class Icons
 
     /// <summary>指定皮肤下的路径。★ 不碰 ThemeManager,自检可以直接查而不换肤(换肤要 Application 在场)。</summary>
     public static string? PathFor(IconName name, Skin skin)
-        => SetFor(skin).TryGetValue(name, out var d) ? d : null;
+        // ★ 与 Fill 同一条查找路径:皮肤表里没有就去【天气共用表】再找一次。
+        //   两边路径不一致的话,自检会报"这个皮肤缺图标"而界面上其实好好的。
+        => SetFor(skin).TryGetValue(name, out var d) ? d
+         : Weather3.TryGetValue(name, out var w) ? w : null;
 
     static void Fill(ContentControl host)
     {
         var (name, fgKey) = ((IconName, string))host.Tag;
         var skin = ThemeManager.Current;
         var set = SetFor(skin);
-        if (!set.TryGetValue(name, out var data)) { host.Content = null; return; }
+        // ★ 皮肤表里没有就去【天气共用表】再找一次(天气字形三套共用,见 Weather3 的说明)
+        if (!set.TryGetValue(name, out var data) && !Weather3.TryGetValue(name, out data))
+        { host.Content = null; return; }
 
         var path = new System.Windows.Shapes.Path
         {

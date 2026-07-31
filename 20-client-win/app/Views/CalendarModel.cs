@@ -119,15 +119,49 @@ public static class CalendarData
     /// 返回实际新增的条数。纯函数(直接改 existing 列表),便于测试与复用。
     /// </summary>
     public static int MergeInto(List<CalendarEvent> existing, IEnumerable<CalendarEvent> incoming)
+        => MergeInto(existing, incoming, out _);
+
+    /// <param name="refreshed">
+    /// 【已存在但被刷新过的】条数 —— 与 added 分开报,界面才能如实说"新增 N 条、更新 M 条"。
+    /// </param>
+    public static int MergeInto(List<CalendarEvent> existing, IEnumerable<CalendarEvent> incoming, out int refreshed)
     {
-        var seen = new HashSet<string>();
-        foreach (var e in existing) seen.Add(Identity(e));
+        // Identity -> 在 existing 里的下标(要就地更新,不能只记"见过")
+        var at = new Dictionary<string, int>();
+        for (int i = 0; i < existing.Count; i++) at[Identity(existing[i])] = i;
+
         var added = 0;
+        refreshed = 0;
         foreach (var inc in incoming)
         {
             if (IsBlank(inc)) continue;              // ★ 空日程不并入(不覆盖已有)
-            if (!seen.Add(Identity(inc))) continue;  // ★ 已存在 -> 跳过(不重复、不覆盖)
-            existing.Add(string.IsNullOrEmpty(inc.Id) ? inc with { Id = NewId() } : inc);
+            var key = Identity(inc);
+            if (at.TryGetValue(key, out var idx))
+            {
+                // ★★ 已存在的【不再一律跳过】。原来"已存在 -> 跳过"把 Apple 那边的后续改动整个冻住了:
+                //   在 iCloud 里把一条日程挪到别的日历(或给日历改名/改色),再同步 ——
+                //   本机这条永远停在旧分类、旧颜色,用户在界面上【没有任何办法】修好它。
+                //   现在只对【确实来自 Apple、且靠 UID 命中】的条目,把 Apple 才是权威的那几个字段刷新一遍;
+                //   本机的 Id / CreatedByAi / 可见范围一律保留,本机自建的日程(没有 UID)完全不碰。
+                var cur = existing[idx];
+                if (cur.Source != "apple" || string.IsNullOrEmpty(cur.ExternalId)) continue;
+                var next = cur with
+                {
+                    Start = inc.Start,
+                    End = inc.End,
+                    Title = inc.Title,
+                    AllDay = inc.AllDay,
+                    CalendarGroup = inc.CalendarGroup,
+                    Location = inc.Location,
+                    Url = inc.Url,
+                    Notes = inc.Notes,
+                };
+                if (next != cur) { existing[idx] = next; refreshed++; }
+                continue;
+            }
+            var withId = string.IsNullOrEmpty(inc.Id) ? inc with { Id = NewId() } : inc;
+            at[key] = existing.Count;
+            existing.Add(withId);
             added++;
         }
         return added;
@@ -141,10 +175,12 @@ public static class CalendarData
     }
 
     /// <summary>接入后:把 Apple 拉来的日程合并进本机(不覆盖、不重复)。返回新增条数。</summary>
-    public static int MergeIn(IEnumerable<CalendarEvent> incoming)
+    public static int MergeIn(IEnumerable<CalendarEvent> incoming) => MergeIn(incoming, out _);
+
+    public static int MergeIn(IEnumerable<CalendarEvent> incoming, out int refreshed)
     {
-        var n = MergeInto(Events, incoming);
-        if (n > 0) NotifyChanged();
+        var n = MergeInto(Events, incoming, out refreshed);
+        if (n > 0 || refreshed > 0) NotifyChanged();
         return n;
     }
 

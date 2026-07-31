@@ -439,7 +439,7 @@ public sealed class WeekTimeline : UserControl
         //   (一条跨三天的若也横向分道,三段槽位并不相邻,连不成一根)。
         var ordered = spans.OrderByDescending(x => x.Span).ThenBy(x => x.Col).ToList();
         var blocked = new bool[AllDayRows, 7];     // 被跨天条占死的格
-        var singles = new List<(CalendarEvent Ev, int Col, int Row)>();
+        var singles = new List<(CalendarEvent Ev, int Col, int Row, bool ClipStart, bool ClipEnd)>();
         var placedMulti = new List<(CalendarEvent Ev, int Col, int Span, bool ClipStart, bool ClipEnd, int Row)>();
         var hiddenNames = new List<string>();
 
@@ -467,7 +467,7 @@ public sealed class WeekTimeline : UserControl
                     if (sp.Col + k is >= 0 and <= 6) blocked[row, sp.Col + k] = true;
                 placedMulti.Add((sp.Ev, sp.Col, sp.Span, sp.ClipStart, sp.ClipEnd, row));
             }
-            else singles.Add((sp.Ev, sp.Col, row));
+            else singles.Add((sp.Ev, sp.Col, row, sp.ClipStart, sp.ClipEnd));
         }
 
         foreach (var (ev, col, span, clipStart, clipEnd, row) in placedMulti)
@@ -475,7 +475,8 @@ public sealed class WeekTimeline : UserControl
             var x = col * colW + (clipStart ? 0 : 2);
             var bw = Math.Max(6, span * colW - (clipStart ? 0 : 2) - (clipEnd ? 0 : 2));
             // ★ 只有【贴着表头那一行】才在表头上铺横幅 —— 第二行离表头隔着一条,铺了反而对不上。
-            AddAllDayChip(ev, x, AllDayRowTop + row * AllDayBarHeight, bw, 4, coverHeader: row == 0);
+            AddAllDayChip(ev, x, AllDayRowTop + row * AllDayBarHeight, bw, 4, coverHeader: row == 0,
+                          clipStart: clipStart, clipEnd: clipEnd);
         }
 
         // 同一(行, 格)里的单日条共享那一格的宽度
@@ -486,7 +487,7 @@ public sealed class WeekTimeline : UserControl
             perCell[(it.Row, it.Col)] = n + 1;
         }
         var used = new Dictionary<(int Row, int Col), int>();
-        foreach (var (ev, col, row) in singles)
+        foreach (var (ev, col, row, cs, ce) in singles)
         {
             var lanes = Math.Clamp(perCell[(row, col)], 1, AllDayMaxLanes);
             used.TryGetValue((row, col), out var k);
@@ -494,7 +495,8 @@ public sealed class WeekTimeline : UserControl
             used[(row, col)] = k + 1;
             var slotW = colW / lanes;
             AddAllDayChip(ev, col * colW + k * slotW + 2, AllDayRowTop + row * AllDayBarHeight,
-                          Math.Max(6, slotW - 4), 4, coverHeader: row == 0);
+                          Math.Max(6, slotW - 4), 4, coverHeader: row == 0,
+                          clipStart: cs, clipEnd: ce);
         }
 
         // ★ 真的没画出来的【如实说】。★★ 原来只写一个「+1」—— 用户直接问"这个 +1 是什么",
@@ -523,7 +525,9 @@ public sealed class WeekTimeline : UserControl
     /// 一条全天日程的横条。塞不下名字就把名字放到条【上方那一行】——
     /// 与定时日程的窄条同一套规矩(用户裁定:省略成一个"…"等于什么都没显示)。
     /// </summary>
-    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, double slotGap, bool coverHeader)
+    /// <param name="clipStart">这一端是被【周界】裁断的(日程从上周延续过来)—— 那一端不收圆角。</param>
+    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, double slotGap, bool coverHeader,
+                       bool clipStart = false, bool clipEnd = false)
     {
         var back = CalendarGroups.ColorOf(ev.CalendarGroup);
 
@@ -555,7 +559,11 @@ public sealed class WeekTimeline : UserControl
             ToolTip = ev.Title + (ev.IsMultiDay ? $" · {ev.DayCount} 天" : " · 全天")
                       + (string.IsNullOrWhiteSpace(ev.CalendarGroup) ? "" : $"  [{ev.CalendarGroup}]"),
         };
-        chip.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        // ★ 与定时日程、与上方月历那条全天线同一套视觉语言:
+        //   平口 = "还没完,隔壁那周/那天接着";圆角 = "就到这儿"。
+        //   不传这两个标志的话,一条从上周延续过来的会画成四角全圆的小方块 ——
+        //   看起来就是"周一新起的一件事",而月历里同一条是平口的,上下两块给出相反的读法。
+        chip.CornerRadius = new CornerRadius(clipStart ? 0 : 5, clipEnd ? 0 : 5, clipEnd ? 0 : 5, clipStart ? 0 : 5);
         if (fits)
         {
             var t = new TextBlock
@@ -592,7 +600,7 @@ public sealed class WeekTimeline : UserControl
         {
             Text = ev.Title,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Foreground = new SolidColorBrush(back),
+            Foreground = new SolidColorBrush(CalendarGroups.OnSurface(back)),
             IsHitTestVisible = false,
             MaxWidth = Math.Max(16, slotRight - lx),
         };
@@ -835,7 +843,10 @@ public sealed class WeekTimeline : UserControl
             var t = new TextBlock
             {
                 Text = ev.Title,
-                Margin = new Thickness(4, 3, 3, 3),
+                // ★ 块的顶部被裁到可视区之上时,标题要跟着下来 ——
+                //   否则跨天的那几段(顶在 -2 点、甚至更早)字直接被裁掉,
+                //   第二天那一截只剩一个光秃的描边框,不悬停就不知道是什么。
+                Margin = new Thickness(4, Math.Max(3, -yTop + 3), 3, 3),
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 TextWrapping = wrapInside ? TextWrapping.Wrap : TextWrapping.NoWrap,
                 IsHitTestVisible = false,
@@ -855,7 +866,7 @@ public sealed class WeekTimeline : UserControl
             Width = w,
             Height = height,
             Background = new SolidColorBrush(fill),
-            BorderBrush = new SolidColorBrush(back),
+            BorderBrush = new SolidColorBrush(CalendarGroups.OnSurface(back)),
             BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),
             Opacity = isTail ? 0.75 : 1,          // 续画的那一半淡一点 —— 它的"主体"在隔壁那天
             Cursor = Cursors.SizeAll,
@@ -879,7 +890,7 @@ public sealed class WeekTimeline : UserControl
                 Text = ev.Title,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = Math.Max(30, colRight - x),
-                Foreground = new SolidColorBrush(back),
+                Foreground = new SolidColorBrush(CalendarGroups.OnSurface(back)),
                 Background = Brushes.Transparent,      // 透明但可命中，否则 ToolTip 不会弹
                 Cursor = Cursors.Hand,
                 ToolTip = box.ToolTip,

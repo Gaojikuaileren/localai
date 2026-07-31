@@ -51,14 +51,45 @@ public static class CalendarGroups
     /// 用 Apple 那边的日历清单替换分类表。传空集合 = 回到本地占位(比如用户断开了连接)。
     /// </summary>
     public static void SetFromApple(IEnumerable<(string Name, string? ColorHex)> calendars)
+        => SetFromApple(calendars.Select(c => (c.Name, c.ColorHex, (string?)null)));
+
+    /// <param name="calendars">(显示名, 颜色, 该日历的 URL —— 只用来给重名的做区分,不落进日程)。</param>
+    public static void SetFromApple(IEnumerable<(string Name, string? ColorHex, string? Url)> calendars)
     {
-        var list = calendars
-            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
-            .Select(c => new CalGroup(c.Name.Trim(), Normalize(c.ColorHex), GroupSource.Apple))
-            .ToList();
+        var raw = calendars.Where(c => !string.IsNullOrWhiteSpace(c.Name))
+                           .Select(c => (Name: c.Name.Trim(), c.ColorHex, c.Url)).ToList();
+
+        // ★★ iCloud 里【重名日历很常见】:自己的"家庭"与别人共享给你的"家庭",
+        //   或者两个都没起名的都叫「(未命名)」。存储值是名字,重名就意味着:
+        //   两个日历的日程共用第一个的颜色、下拉里出现两行一模一样的项、选哪个都一样。
+        //   所以重名的要【去重成一个稳定且唯一的名字】—— 用该日历 URL 的稳定短码,
+        //   不用序号:序号会随 iCloud 返回顺序变,今天的"家庭 (2)"明天可能变成另一个日历。
+        var dupes = raw.GroupBy(x => x.Name, StringComparer.Ordinal)
+                       .Where(g => g.Count() > 1)
+                       .Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+
+        var list = raw.Select(c => new CalGroup(
+                          dupes.Contains(c.Name) ? c.Name + " · " + ShortTag(c.Url ?? c.Name) : c.Name,
+                          Normalize(c.ColorHex), GroupSource.Apple))
+                      .ToList();
         _current = list.Count > 0 ? list : LocalDefaults.ToList();
         Changed?.Invoke();
     }
+
+    /// <summary>由 URL 算一个稳定的四位短码 —— 同一个日历每次都得到同一个,换台机器也一样。</summary>
+    public static string ShortTag(string s)
+    {
+        int h = 17;
+        foreach (var ch in s) h = unchecked(h * 31 + ch);
+        return ((uint)h % 0x10000).ToString("x4");
+    }
+
+    /// <summary>
+    /// 界面上该怎么如实介绍当前这张分类表 —— ★ FromApple 光有属性没人用等于没做。
+    /// </summary>
+    public static string SourceNote => FromApple
+        ? "分类与颜色来自你的 iCloud 日历。"
+        : "这些是本机分类;接上 Apple 之后会换成你真实的日历(颜色也一并跟过来)。";
 
     /// <summary>某个分类的颜色。认不出的分类(比如老档案里的词)也给一个【稳定】色,不留空。</summary>
     public static Color ColorOf(string? group)
@@ -120,11 +151,53 @@ public static class CalendarGroups
     }
 
     /// <summary>
-    /// 一个颜色上面该用黑字还是白字 —— 按感知亮度选,免得深蓝底上写黑字。
+    /// 一个颜色上面该用黑字还是白字。
+    /// ★ 按 WCAG 相对亮度分别算两者的对比度、取大的那个 ——
+    ///   原来那个 0.62 的粗亮度阈值偏高:Apple 的绿色日历(#34C759)会得到白字(约 2.2:1),
+    ///   而给深字本可以到 7:1。
     /// </summary>
     public static Color TextOn(Color bg)
     {
-        var lum = (0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B) / 255.0;
-        return lum > 0.62 ? Color.FromRgb(0x1A, 0x1D, 0x21) : Colors.White;
+        var dark = Color.FromRgb(0x1A, 0x1D, 0x21);
+        return Contrast(bg, Colors.White) >= Contrast(bg, dark) ? Colors.White : dark;
+    }
+
+    /// <summary>WCAG 相对亮度(含 sRGB 逆伽马)。</summary>
+    public static double Luminance(Color c)
+    {
+        static double Ch(byte v)
+        {
+            var s = v / 255.0;
+            return s <= 0.03928 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Ch(c.R) + 0.7152 * Ch(c.G) + 0.0722 * Ch(c.B);
+    }
+
+    /// <summary>两色的对比度(1..21)。</summary>
+    public static double Contrast(Color a, Color b)
+    {
+        var la = Luminance(a); var lb = Luminance(b);
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    /// <summary>
+    /// 把分类色压到【在普通底色上读得出来】—— 保持色相,只降亮度。
+    /// ★ 为什么需要它:定时日程是描边框,框里的标题就是分类色本色 ——
+    ///   Apple 黄(#FFCC00)写在几乎等于白的淡黄底上约 1.5:1,基本读不出来,
+    ///   1px 的黄描边同样几乎看不见,整块日程像消失了。
+    /// </summary>
+    public static Color OnSurface(Color c, bool darkTheme = false)
+    {
+        var bg = darkTheme ? Color.FromRgb(0x1A, 0x1D, 0x21) : Colors.White;
+        var cur = c;
+        // 每次向深(或向浅)走一小步,直到够 3:1 为止;最多走 24 步防死循环。
+        for (int i = 0; i < 24 && Contrast(cur, bg) < 3.0; i++)
+            cur = darkTheme
+                ? Color.FromRgb(Up(cur.R), Up(cur.G), Up(cur.B))
+                : Color.FromRgb(Down(cur.R), Down(cur.G), Down(cur.B));
+        return cur;
+
+        static byte Down(byte v) => (byte)Math.Max(0, v - 10);
+        static byte Up(byte v) => (byte)Math.Min(255, v + 10);
     }
 }

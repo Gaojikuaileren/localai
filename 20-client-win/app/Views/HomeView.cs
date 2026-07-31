@@ -97,6 +97,9 @@ public sealed class HomeView : UserControl
     TextBlock[] _citySky = Array.Empty<TextBlock>();       // 展开卡里的天气状况
     TextBlock[] _cityHiLo = Array.Empty<TextBlock>();      // 最高/最低/降水
     TextBlock[] _cityStamp = Array.Empty<TextBlock>();     // ★ 这份读数是什么时候的(过期要如实说)
+    ContentControl[] _cityIcon = Array.Empty<ContentControl>();   // 展开卡里的天气图标
+    ContentControl[] _miniIcon = Array.Empty<ContentControl>();   // 摘要行左侧那个图标
+    Grid[] _cityCurve = Array.Empty<Grid>();               // 今日气温曲线
     UniformGrid[] _cityHourly = Array.Empty<UniformGrid>();
 
     // ★ 天气改为【一张展开 + 其余折叠】(用户裁定 2026-07-31):
@@ -306,6 +309,9 @@ public sealed class HomeView : UserControl
             weatherHost.MouseLeave += (_, _) => ScheduleWeatherReset(weatherHost);
             weatherHost.MouseEnter += (_, _) => _weatherReset.Stop();
             Grid.SetRow(weatherHost, 2); Grid.SetColumn(weatherHost, 1);
+            // ★ 日历隐藏时天气挪到左列 —— 否则它孤悬在右下角,
+            //   第二行左侧三分之二是一整片空白(待办那行已经横跨整宽了)。
+            if (!_calVisible) Grid.SetColumn(weatherHost, 0);
             _root.Children.Add(weatherHost);
         }
 
@@ -482,6 +488,9 @@ public sealed class HomeView : UserControl
         _citySky = new TextBlock[n];
         _cityHiLo = new TextBlock[n];
         _cityStamp = new TextBlock[n];
+        _cityIcon = new ContentControl[n];
+        _miniIcon = new ContentControl[n];
+        _cityCurve = new Grid[n];
         _cityHourly = new UniformGrid[n];
         _cityCards = new Border[n];
         _shifts = new TranslateTransform[n];
@@ -507,6 +516,10 @@ public sealed class HomeView : UserControl
         }
         SetWeatherFocus(_weatherFocus < n ? _weatherFocus : 0, animate: false);
         UpdateClocks();
+        // ★ 刚建好就把读数刷上去 —— 不能只靠 Loaded:
+        //   拖拽排序后会重建这一批卡片(那时 Loaded 不会再来),
+        //   离屏渲染诊断里 Loaded 也根本不触发 —— 那就变成"图上永远是空态,等于没验"。
+        RefreshWeatherUi();
         RelayoutDiscrete();
     }
 
@@ -791,7 +804,10 @@ public sealed class HomeView : UserControl
         _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        left.Children.Add(Icons.Make(IconName.Weather, 13, "FgSecondary"));
+        // ★ 图标随实况变(晴/多云/雨/雪…);还没取到就用通用那朵云 —— 不拿太阳冒充
+        _miniIcon[i] = new ContentControl { Width = 13, Height = 13, VerticalAlignment = VerticalAlignment.Center, Focusable = false };
+        _miniIcon[i].Content = Icons.Make(IconName.Weather, 13, "FgSecondary");
+        left.Children.Add(_miniIcon[i]);
         left.Children.Add(new Border { Width = 6 });
         left.Children.Add(name);
         left.Children.Add(_miniSky[i]);
@@ -903,8 +919,11 @@ public sealed class HomeView : UserControl
         temp.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _cityTemp[i] = temp;
 
+        _cityIcon[i] = new ContentControl { Width = 26, Height = 26, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center, Focusable = false };
+
         var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 2) };
         topRow.Children.Add(timeCol);
+        DockPanel.SetDock(_cityIcon[i], Dock.Left); topRow.Children.Add(_cityIcon[i]);
         topRow.Children.Add(temp);
 
         var st = new TextBlock { Text = "还没取到天气", TextTrimming = TextTrimming.CharacterEllipsis };
@@ -939,6 +958,10 @@ public sealed class HomeView : UserControl
         noData.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         noData.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         curve.Children.Add(noData);
+        _cityCurve[i] = curve;
+        // ★ 尺寸变了重画 —— 只在这里挂一次(每座城各自一份,互不影响)
+        var curveCity = place.City;
+        curve.SizeChanged += (_, _) => DrawCurve(curve, Services.Weather.For(curveCity));
 
         _cityHourly[i] = new UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 0) };
         SetHourly(_cityHourly[i], 6);
@@ -980,8 +1003,7 @@ public sealed class HomeView : UserControl
             var hr = new TextBlock { Text = $"{(h0 + k * step) % 24:00}", HorizontalAlignment = HorizontalAlignment.Center };
             hr.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             hr.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            var ic = new TextBlock { Text = "—", HorizontalAlignment = HorizontalAlignment.Center };
-            ic.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            var ic = new ContentControl { Width = 13, Height = 13, HorizontalAlignment = HorizontalAlignment.Center, Focusable = false };
             var tp = new TextBlock { Text = "—°", HorizontalAlignment = HorizontalAlignment.Center };
             tp.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             tp.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -1029,12 +1051,88 @@ public sealed class HomeView : UserControl
                     ? $"暂时取不到 · 显示上次 {at:HH:mm}"
                     : Strings.Get("weather.source_credit");
             }
+            // 图标随实况;认不出的代码【不画图标】(与 Describe 同一口径,不拿太阳冒充)
+            var wx = Icons.ForWeather(w?.WeatherCode);
+            if (_cityIcon[i] is { } bigIcon)
+                bigIcon.Content = wx is { } n1 ? Icons.Make(n1, 26, "FgSecondary") : null;
+            if (_miniIcon[i] is { } smIcon)
+                smIcon.Content = Icons.Make(wx ?? IconName.Weather, 13, "FgSecondary");
+
             if (i < _cityHourly.Length && _cityHourly[i] is { } grid) FillHourly(grid, w);
+            if (i < _cityCurve.Length && _cityCurve[i] is { } cv) DrawCurve(cv, w);
+        }
+    }
+
+    /// <summary>
+    /// 今日气温曲线。★ 点【不够】就不画线,并如实写"数据不足" ——
+    ///   两三个点连出来的折线看着像模像样,却什么也说明不了。
+    /// ★ 纵向自适应到这一段的真实最高/最低,并把两端标出来 —— 否则一条没有刻度的线读不出量级。
+    /// </summary>
+    static void DrawCurve(Grid host, Services.WeatherNow? w)
+    {
+        // 只留那条虚线基线与"待接入"文字,其余(上一次画的线)清掉
+        for (int k = host.Children.Count - 1; k >= 2; k--) host.Children.RemoveAt(k);
+        var hint = host.Children.Count > 1 ? host.Children[1] as TextBlock : null;
+
+        var pts = w?.Hours?.Where(x => x.TempC is not null && x.At >= DateTime.Now.AddHours(-1))
+                          .Take(24).ToList();
+        if (pts is null || pts.Count < 4)
+        {
+            if (hint is not null) { hint.Text = "今日气温曲线数据不足"; hint.Visibility = Visibility.Visible; }
+            return;
+        }
+        if (hint is not null) hint.Visibility = Visibility.Collapsed;
+
+        var lo = pts.Min(x => x.TempC!.Value);
+        var hi = pts.Max(x => x.TempC!.Value);
+        var span = Math.Max(0.5, hi - lo);            // 全平的一段也不能除以 0
+
+        var poly = new System.Windows.Shapes.Polyline
+        {
+            StrokeThickness = 1.6,
+            StrokeLineJoin = PenLineJoin.Round,
+            IsHitTestVisible = false,
+            Stretch = Stretch.None,
+        };
+        poly.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Accent");
+
+        void Rebuild(object? _, SizeChangedEventArgs? __)
+        {
+            var wpx = host.ActualWidth; var hpx = host.ActualHeight;
+            if (wpx <= 0 || hpx <= 0) return;
+            const double pad = 3;
+            var pc = new PointCollection();
+            for (int k = 0; k < pts.Count; k++)
+            {
+                var x = pts.Count == 1 ? wpx / 2 : k * (wpx - 1) / (pts.Count - 1);
+                var y = hpx - pad - (pts[k].TempC!.Value - lo) / span * (hpx - 2 * pad);
+                pc.Add(new Point(x, y));
+            }
+            poly.Points = pc;
+        }
+        // ★★ 这里【不】挂 SizeChanged。
+        //   DrawCurve 每次刷新都会被调一次,在里面挂事件就是"挂一次多一个";
+        //   而方法组每次都是新的委托实例, -= 根本摸不到上一个——
+        //   只加不减(WPF-PITFALLS 第 10 条同一形状)。尺寸变了重画的句柄在【构造时】挂一次(见 CityDetail)。
+        Rebuild(null, null);
+        host.Children.Add(poly);
+
+        // 两端的量级标注 —— 没有刻度的曲线读不出高低
+        var loT = new TextBlock { Text = $"{lo:0}°", VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
+        var hiT = new TextBlock { Text = $"{hi:0}°", VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
+        foreach (var t in new[] { loT, hiT })
+        {
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            host.Children.Add(t);
         }
     }
 
     static string Num(double? v) => v is null ? "—" : $"{v:0}°";
-    static string Rain(double? v) => v is null ? "—" : v.Value <= 0.05 ? "无" : $"{v:0.#}mm";
+    // ★ 小数点强制用【点】—— 系统区域是德国时 CurrentCulture 会给出 "0,2mm",
+    //   在中文界面里看着像错字(渲染诊断的图上当场看到的)。
+    static string Rain(double? v) => v is null ? "—" : v.Value <= 0.05 ? "无"
+        : v.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "mm";
 
     /// <summary>把逐小时那一排填上真实读数;没有就保持"—"。</summary>
     static void FillHourly(UniformGrid grid, Services.WeatherNow? w)
@@ -1047,8 +1145,11 @@ public sealed class HomeView : UserControl
             var want = now.AddHours(k * step);
             var hit = w?.Hours?.FirstOrDefault(x => Math.Abs((x.At - want).TotalMinutes) <= 30);
             if (cell.Children[0] is TextBlock hr) hr.Text = want.ToString("HH");
-            if (cell.Children[1] is TextBlock ic)
-                ic.Text = hit?.Code is not null ? (Services.Weather.Describe(hit.Code)?[..1] ?? "—") : "—";
+            // ★ 中间那格换成真的天气图形;认不出/没数据就留一条短横,不拿太阳冒充
+            if (cell.Children[1] is ContentControl ic)
+                ic.Content = Icons.ForWeather(hit?.Code) is { } nm
+                    ? Icons.Make(nm, 13, "FgSecondary")
+                    : null;
             if (cell.Children[2] is TextBlock tp)
                 tp.Text = hit?.TempC is not null ? $"{hit.TempC:0}°" : "—°";
         }
