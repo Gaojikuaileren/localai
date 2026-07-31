@@ -574,7 +574,10 @@ public static class Selftest
             var setSync = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (setSync is not null)
             {
-                Assert(setSync.Contains("与 Apple 同步") && setSync.Contains("尚未接入"), "设置里有【与 Apple 同步】预留板块且如实标注未接入");
+                Assert(setSync.Contains("与 Apple 日历同步") && setSync.Contains("只往本机拉"),
+                       "★ 设置里的 Apple 日历同步已接入,且明说是【只读拉取】(不向 Apple 写入)");
+                Assert(!setSync.Contains("PUT") && !setSync.Contains("推送给 Apple"),
+                       "★★ 这一版没有任何写回 Apple 的路径(写回不可逆,等拉取验证过再开)");
                 Assert(setSync.Contains("RevealAppleSync"), "可从主页齿轮跳转并高亮该板块");
             }
 

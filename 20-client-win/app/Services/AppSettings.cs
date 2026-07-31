@@ -19,6 +19,17 @@ public sealed class AppSettings
     /// ★ 只影响界面文案,不影响任何存储值(见 Services/Vocab)。与皮肤/语言同类:每台设备各自的选择。
     /// </summary>
     public OrgVocab OrgVocab { get; set; } = OrgVocab.Family;
+
+    // ---- Apple 日历(只读拉取)----
+    /// <summary>要拉取的日历集合 URL。空 = 还没选。★ 不存密码(那在 AppleCredentials,DPAPI 加密)。</summary>
+    public List<string> AppleCalendarUrls { get; set; } = new();
+
+    /// <summary>上次成功拉取的时间(本地时间)。null = 从没成功过 —— 界面据此如实说"从未同步"。</summary>
+    public DateTime? AppleLastSync { get; set; }
+
+    /// <summary>拉取区间:往前多少天 / 往后多少天。默认过去 90 天 + 未来一年。</summary>
+    public int AppleSyncPastDays { get; set; } = 90;
+    public int AppleSyncFutureDays { get; set; } = 365;
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public Density Density { get; set; } = Density.Comfortable;
     public bool Autostart { get; set; }
