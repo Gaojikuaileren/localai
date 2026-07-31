@@ -2282,8 +2282,18 @@ public static class Selftest
 
                 // ★ 横向拖拽换位已停用(2026-07-31 改成竖排折叠):只剩一张展开卡 + 两行折叠,
                 //   按 dx 算的横拖无处可去,而且会与悬停展开打架。
-                Assert(!homeTodo.Contains("void BeginDrag(") && !homeTodo.Contains("AnimateShift"),
-                       "★ 拖拽换位整段已删干净 —— 卡片没把手了,留着只会让下一个人以为它还在工作");
+                // ★ 拖拽排序【改成纵向】回来了(用户裁定 2026-07-31):只从右下角手柄起手,
+                //   其余卡片带挤开动画;首格(当前所在地)仍锁定。
+                Assert(homeTodo.Contains("gripZone.PreviewMouseLeftButtonDown") && homeTodo.Contains("BeginCityDrag"),
+                       "★ 只有右下角手柄能起手拖拽(不是整张卡)");
+                Assert(homeTodo.Contains("AnimateShift") && homeTodo.Contains("TranslateTransform.YProperty"),
+                       "★ 其余卡片【带动画】挤开/归位");
+                Assert(homeTodo.Contains("SetWeatherFocus(-1, animate: true)"),
+                       "★★ 拖起来先把三张全收起 —— 高度一致后“挪到第几位”才是一道简单的整数题");
+                Assert(homeTodo.Contains("if (index <= 0 || index >= _cityCards.Length) return;"),
+                       "★ 首格(当前所在地)不可拖动");
+                Assert(homeTodo.Contains("if (_draggingCity) return;"),
+                       "★ 拖拽期间不响应悬停展开(否则卡片一边被拖一边变高)");
             }
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
             if (todoEd is not null)

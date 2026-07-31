@@ -72,8 +72,11 @@ public sealed class HomeView : UserControl
     //   悬停到折叠行 -> 它展开、其余收起;鼠标离开整块 -> 恢复默认(第 0 个 = 当前所在地)。
     readonly StackPanel _weatherStack = new();
     Border[] _cityCards = Array.Empty<Border>();          // 每座城一张卡,高度在折叠/展开之间【动画】
+    TranslateTransform[] _shifts = Array.Empty<TranslateTransform>();   // 拖拽期的位移(挤开/跟手)
     TextBlock[] _miniTime = Array.Empty<TextBlock>();
-    TextBlock[] _miniTemp = Array.Empty<TextBlock>();
+    TextBlock[] _miniSky = Array.Empty<TextBlock>();     // 当前气候(晴/多云/阴…)
+    TextBlock[] _miniPart = Array.Empty<TextBlock>();    // 时段词(早上/下午/晚上…)
+    FrameworkElement[] _miniBar = Array.Empty<FrameworkElement>();   // 温度滑条
     int _weatherFocus;                       // 当前展开的是第几个
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
 
@@ -128,14 +131,34 @@ public sealed class HomeView : UserControl
         Border? calPanel = null;
         if (_calVisible)
         {
-            // 与顶栏日历浮窗【同一个组件、同一套交互】(MiniCal 逻辑),这里用周排布、固定高
-            var calView = new CalendarView(CalendarView.Mode.Week) { Height = CalendarView.PanelHeight };
-            calPanel = Ui.Panel("日历", calView, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
+            // ★★ 日历(月排布)+ 周时间轴【合并成一个大板块】(用户裁定 2026-07-31):
+            //   上半 = 月历,左右切【月】;下半 = 那一周的时间轴,左右切【周】。
+            //   于是"哪一天"由上面选,"那天几点干什么"由下面看 —— 两件事各有各的横轴,不再挤在一起。
+            //   周排布因此从主页取消(月历 + 时间轴已经把它要表达的都表达了)。
+            var calView = new CalendarView(CalendarView.Mode.Month) { Height = CalendarView.PanelHeight, HideModeSwitch = true };
+            var timeline = new WeekTimeline { MinHeight = 150 };
+            // ★ 点时间轴里的日程 -> 走【日历自己的那个编辑抽屉】,不另造一套(用户裁定)
+            timeline.OnEditEvent = ev => calView.OpenEditorFor(ev);
+            // 上面选中哪天 -> 下面聚焦那一周(两块说的是同一周)
+            calView.SelectionChanged = d => timeline.FocusWeekOf(d);
+
+            var calStack = new DockPanel { LastChildFill = true };
+            DockPanel.SetDock(calView, Dock.Top);
+            calStack.Children.Add(calView);
+            calStack.Children.Add(timeline);
+            calPanel = Ui.Panel("日历", calStack, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
                 iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
                 iconActionTip: "与 Apple 家庭共享日历同步的设置",
                 headerAction: SyncNowButton(calView));
             // ★ 日历【跨行 1-2】(用户裁定 2026-07-31):天气改成一展开+两折叠后挪到了右列,
             //   左侧因此空出一整块 —— 日历往下延伸与它对齐,时间轴才有地方放。
+            // ★ 底部与【武汉】那一行持平(用户裁定)—— 而不是一直拉到末尾的札幌。
+            //   做法:跨两行,但下边距留出【最后一条折叠行 + 间隔】的高度。
+            //   下方"正在进行的项目"与上方的间隔因此不变(它跟的是行 2 的底,不是日历的底)。
+            //   天气栈内:札幌占最后 34,它上面还有 10 的间隔 -> 武汉下沿距栈底 44。
+            //   日历下边距取同一个 44,两者下沿就持平。
+            calPanel.Margin = new Thickness(0, 0, _todoVisible ? 12 : 0, CollapsedCityHeight + CityGap);
+            calPanel.VerticalAlignment = VerticalAlignment.Stretch;
             Grid.SetRow(calPanel, 1); Grid.SetColumn(calPanel, 0); Grid.SetRowSpan(calPanel, 2);
             if (!_todoVisible) Grid.SetColumnSpan(calPanel, 2);   // 待办隐藏 -> 日历占满整行
             _root.Children.Add(calPanel);
@@ -342,8 +365,11 @@ public sealed class HomeView : UserControl
         _cityMeta = new TextBlock[n];
         _cityHourly = new UniformGrid[n];
         _cityCards = new Border[n];
+        _shifts = new TranslateTransform[n];
         _miniTime = new TextBlock[n];
-        _miniTemp = new TextBlock[n];
+        _miniSky = new TextBlock[n];
+        _miniPart = new TextBlock[n];
+        _miniBar = new FrameworkElement[n];
 
         for (int i = 0; i < n; i++)
         {
@@ -351,7 +377,12 @@ public sealed class HomeView : UserControl
             _cityCards[i] = WeatherCard(i);
             // 悬停这张卡 -> 展开它。★ 挂在【整张卡】上而不是只挂摘要行:
             //   卡片长高之后鼠标多半落在卡身上,只挂摘要行的话一移动就失去焦点。
-            _cityCards[i].MouseEnter += (_, _) => { _weatherReset.Stop(); SetWeatherFocus(idx, animate: true); };
+            _cityCards[i].MouseEnter += (_, _) =>
+            {
+                if (_draggingCity) return;      // ★ 拖拽期间别抢焦点 —— 否则卡片一边被拖一边变高
+                _weatherReset.Stop();
+                SetWeatherFocus(idx, animate: true);
+            };
             _weatherStack.Children.Add(_cityCards[i]);
         }
         SetWeatherFocus(_weatherFocus < n ? _weatherFocus : 0, animate: false);
@@ -384,6 +415,49 @@ public sealed class HomeView : UserControl
         card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+
+        // 拖拽用的位移(挤开/跟手都靠它,不动真实布局 -> 动画干净、不触发重排)
+        var shift = new TranslateTransform();
+        card.RenderTransform = shift;
+        _shifts[i] = shift;
+
+        // ★ 只有【右下角这块手柄】起手拖动 —— 不是整张卡(用户裁定,与旧版同一条规矩)。
+        //   第 0 张 =「当前所在地」固定不动,不给手柄。
+        if (i > 0)
+        {
+            var grip = new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse("M2 8 H10 M2 5 H10 M2 11 H10"),
+                StrokeThickness = 1.2,
+                Width = 12, Height = 14,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false,
+                Opacity = 0,                                   // 平时隐身,hover 卡片才浮出来
+            };
+            grip.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgMuted");
+
+            var gripZone = new Grid
+            {
+                Width = 22, Height = 22,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = System.Windows.Media.Brushes.Transparent,   // 透明但可命中
+                Cursor = System.Windows.Input.Cursors.SizeNS,
+            };
+            gripZone.Children.Add(grip);
+            card.MouseEnter += (_, _) => grip.Opacity = 1;
+            card.MouseLeave += (_, _) => grip.Opacity = 0;
+
+            var index = i;
+            gripZone.PreviewMouseLeftButtonDown += (_, e) => { e.Handled = true; BeginCityDrag(index, e); };
+
+            // 手柄要浮在卡片内容之上 -> 卡片内容与手柄叠在一个 Grid 里
+            var stackHost = new Grid();
+            stackHost.Children.Add(body);
+            stackHost.Children.Add(gripZone);
+            card.Child = stackHost;
+        }
         return card;
     }
 
@@ -394,16 +468,19 @@ public sealed class HomeView : UserControl
     void SetWeatherFocus(int i, bool animate)
     {
         if (_cityCards.Length == 0) return;
-        if (i < 0 || i >= _cityCards.Length) i = 0;
+        // ★ 允许 i = -1 表示【谁都不展开】—— 拖拽期先把三张都收起来,
+        //   高度一致后"挪到第几位"才是一道简单的整数题。只有越界才归 0。
+        if (i >= _cityCards.Length) i = 0;
+        if (i < -1) i = 0;
         if (_weatherFocus == i && animate) return;      // 已经是它了,别重复起动画
         _weatherFocus = i;
 
         for (int k = 0; k < _cityCards.Length; k++)
         {
-            // ★ 展开那张把摘要行右侧的最高/最低隐掉 —— 细节里已经有一行,
-            //   两处同时显示同一个东西看着像排版出了错。
-            if (k < _miniTemp.Length && _miniTemp[k] is { } mtp)
-                mtp.Visibility = k == i ? Visibility.Collapsed : Visibility.Visible;
+            // ★ 展开那张把摘要行的温度滑条隐掉 —— 细节里已有完整的最高/最低/降水一行,
+            //   同一个东西在一张卡里出现两次看着像排版出了错。时间与气候照旧留着。
+            if (k < _miniBar.Length && _miniBar[k] is { } mbar)
+                mbar.Visibility = k == i ? Visibility.Hidden : Visibility.Visible;
             var to = k == i ? ExpandedCityHeight : CollapsedCityHeight;
             if (!animate)
             {
@@ -411,12 +488,103 @@ public sealed class HomeView : UserControl
                 _cityCards[k].Height = to;
                 continue;
             }
-            var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(220))
+            // ★ 缓入缓出(用户裁定):只有 EaseOut 的话起手是满速的,看着很呆。
+            //   EaseInOut 两头都慢 —— 像一扇门被推开而不是被弹开。时长也稍拉长一点。
+            var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(260))
             {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
             };
             _cityCards[k].BeginAnimation(FrameworkElement.HeightProperty, anim);
         }
+    }
+
+    // ---------------------------------------------------------------- 城市排序:右下角手柄纵向拖拽
+    // ★★ 拖起来的那一刻把三张【全部收起】—— 高度一致之后,"挪到第几位"才是一道简单的整数题,
+    //   挤开动画也才干净。高矮不一时拖拽的落点算法会变得又难写又难猜。
+    // ★ 只动 TranslateTransform,不动真实布局 —— 动画期间不触发重排,松手才提交顺序。
+
+    int? _dragIndex;
+    int _dragTarget;
+    double _dragFromY;
+    bool _draggingCity;
+
+    double CityRowStride => CollapsedCityHeight + CityGap;
+
+    void BeginCityDrag(int index, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (index <= 0 || index >= _cityCards.Length) return;   // 首格锁定
+        _dragIndex = index;
+        _dragTarget = index;
+        _draggingCity = true;
+        _weatherReset.Stop();
+        SetWeatherFocus(-1, animate: true);                     // 全部收起(-1 = 谁都不展开)
+        _dragFromY = e.GetPosition(this).Y;
+
+        Panel.SetZIndex(_cityCards[index], 10);                 // 被拖的那张浮在最上
+        _cityCards[index].Opacity = 0.94;
+
+        _weatherStack.CaptureMouse();
+        _weatherStack.MouseMove += OnCityDragMove;
+        _weatherStack.MouseLeftButtonUp += OnCityDragEnd;
+        _weatherStack.LostMouseCapture += OnCityDragLost;
+    }
+
+    void OnCityDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_dragIndex is not int from) return;
+        var dy = e.GetPosition(this).Y - _dragFromY;
+        _shifts[from].Y = dy;                                   // 被拖的跟手(不用动画,要贴着鼠标)
+
+        // 落点 = 位移换算成"挪过几行"。首格锁定,所以下限是 1。
+        var target = Math.Clamp(from + (int)Math.Round(dy / CityRowStride), 1, _cityCards.Length - 1);
+        if (target == _dragTarget) return;
+        _dragTarget = target;
+
+        // 其余卡片让位:被跨过的往回挪一格,其它归位 —— 都走动画(用户要"挤开重新排列"的动画)
+        for (int k = 1; k < _cityCards.Length; k++)
+        {
+            if (k == from) continue;
+            double to = 0;
+            if (from < target && k > from && k <= target) to = -CityRowStride;
+            else if (from > target && k >= target && k < from) to = CityRowStride;
+            AnimateShift(k, to);
+        }
+    }
+
+    void OnCityDragEnd(object? sender, System.Windows.Input.MouseButtonEventArgs e) => FinishCityDrag(commit: true);
+    void OnCityDragLost(object? sender, System.Windows.Input.MouseEventArgs e) => FinishCityDrag(commit: false);
+
+    void FinishCityDrag(bool commit)
+    {
+        if (_dragIndex is not int from) return;
+        _weatherStack.MouseMove -= OnCityDragMove;
+        _weatherStack.MouseLeftButtonUp -= OnCityDragEnd;
+        _weatherStack.LostMouseCapture -= OnCityDragLost;
+        _weatherStack.ReleaseMouseCapture();
+
+        Panel.SetZIndex(_cityCards[from], 0);
+        _cityCards[from].Opacity = 1;
+        _dragIndex = null;
+        _draggingCity = false;
+
+        var to = _dragTarget;
+        // 位移清零 —— 真实顺序由下面的 MovePlace 重建,位移只是拖拽期的假象
+        for (int k = 0; k < _shifts.Length; k++)
+        {
+            _shifts[k].BeginAnimation(TranslateTransform.YProperty, null);
+            _shifts[k].Y = 0;
+        }
+
+        if (commit && to != from) MovePlace(from, to);          // 落盘顺序 + 重建
+        else SetWeatherFocus(0, animate: true);
+    }
+
+    void AnimateShift(int index, double toY)
+    {
+        if (index < 0 || index >= _shifts.Length) return;
+        var anim = new DoubleAnimation(toY, TimeSpan.FromMilliseconds(180))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut } };
+        _shifts[index].BeginAnimation(TranslateTransform.YProperty, anim);
     }
 
     /// <summary>鼠标离开整块之后延迟恢复默认 —— 见 weatherHost.MouseLeave 处的说明。</summary>
@@ -435,7 +603,12 @@ public sealed class HomeView : UserControl
         _weatherReset.Start();
     }
 
-    /// <summary>摘要行:地名 · 时间 ······ 最高/最低。折叠时露出的就是它。</summary>
+    /// <summary>
+    /// 摘要行:城市 · 当前 | 气候 | 温度滑条(左=今日最低,右=最高,滑块=此刻) ······ 时间(最右)。
+    /// ★ 折叠时露出的就是它;展开时它是卡片顶行 —— 所以"时间在右上角"与"折叠时在最右"是同一件事。
+    /// ★★ 天气【尚未接入】:低/高/此刻都没有真实数字,所以滑条画成【无数据态】(空槽、无滑块)、
+    ///   温度与气候显示「—」。绝不给一个位置随便的滑块 —— 那会让人以为读数是真的。
+    /// </summary>
     FrameworkElement MiniRow(int i)
     {
         var place = _places[i];
@@ -448,25 +621,85 @@ public sealed class HomeView : UserControl
         name.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
         name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        _miniTime[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        // 当前气候(晴 / 多云 / 阴 …)—— 未接入时是「—」
+        _miniSky[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
+        _miniSky[i].SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        _miniSky[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        // 时段词(早上/上午/中午/下午/晚上/夜晚)—— 用户裁定:放在时间左边,
+        // 比原来的"昼/夜"具体得多。与问候语共用同一套划分(见 Greetings.PartOfDay)。
+        _miniPart[i] = new TextBlock { Text = "", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+        _miniPart[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _miniPart[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        // 时间 —— 放在最右(展开时它就是卡片的右上角)
+        _miniTime[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center };
         _miniTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        _miniTemp[i] = new TextBlock { Text = "最高 —  最低 —", VerticalAlignment = VerticalAlignment.Center };
-        _miniTemp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        _miniTemp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _miniBar[i] = TempBar(i, low: null, high: null, now: null);
 
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         left.Children.Add(Icons.Make(IconName.Weather, 13, "FgSecondary"));
         left.Children.Add(new Border { Width = 6 });
         left.Children.Add(name);
-        left.Children.Add(_miniTime[i]);
+        left.Children.Add(_miniSky[i]);
 
-        var row = new DockPanel { LastChildFill = false, Height = CollapsedCityHeight, Margin = new Thickness(12, 0, 12, 0) };
+        var row = new DockPanel { LastChildFill = true, Height = CollapsedCityHeight, Margin = new Thickness(12, 0, 12, 0) };
         DockPanel.SetDock(left, Dock.Left); row.Children.Add(left);
-        DockPanel.SetDock(_miniTemp[i], Dock.Right); row.Children.Add(_miniTemp[i]);
+        DockPanel.SetDock(_miniTime[i], Dock.Right); row.Children.Add(_miniTime[i]);
+        DockPanel.SetDock(_miniPart[i], Dock.Right); row.Children.Add(_miniPart[i]);
+        row.Children.Add(_miniBar[i]);        // 中间那段吃掉剩余宽度
         return row;
     }
+
+    /// <summary>
+    /// 温度滑条:左端 = 今日最低,右端 = 最高,滑块 = 此刻。
+    /// ★ 三个值任缺其一 -> 画【无数据态】:空槽 + 两端显示「—」+ 不画滑块。
+    ///   给一个位置是猜的滑块,比不画更糟 —— 那是在伪造一个读数。
+    /// </summary>
+    FrameworkElement TempBar(int i, double? low, double? high, double? now)
+    {
+        var has = low is { } lo && high is { } hi && now is { } nw && hi > lo;
+
+        var loText = new TextBlock { Text = low is { } l ? $"{l:0}°" : "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 6, 0) };
+        loText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        loText.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var hiText = new TextBlock { Text = high is { } h2 ? $"{h2:0}°" : "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 10, 0) };
+        hiText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        hiText.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var track = new Border { Height = 4, VerticalAlignment = VerticalAlignment.Center, MinWidth = 40 };
+        track.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        track.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+
+        var lane = new Grid();
+        lane.Children.Add(track);
+
+        if (has)
+        {
+            var frac = Math.Clamp((now!.Value - low!.Value) / (high!.Value - low.Value), 0, 1);
+            var knob = new System.Windows.Shapes.Ellipse
+            {
+                Width = 9, Height = 9,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            knob.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "Accent");
+            // 按比例定位:等布局出来后再摆(宽度这时还不知道)
+            lane.SizeChanged += (_, _) =>
+                knob.Margin = new Thickness(Math.Max(0, (lane.ActualWidth - 9) * frac), 0, 0, 0);
+            lane.Children.Add(knob);
+        }
+
+        var bar = new DockPanel { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(loText, Dock.Left); bar.Children.Add(loText);
+        DockPanel.SetDock(hiText, Dock.Right); bar.Children.Add(hiText);
+        bar.Children.Add(lane);
+        bar.ToolTip = has ? null : "天气尚未接入 —— 最低/此刻/最高都还没有真实数据";
+        return bar;
+    }
+
 
     /// <summary>
     /// 拖拽换位。★ 第 0 格是"当前所在地",既不能被拖走也不能被插到它前面(用户裁定)。
@@ -1004,7 +1237,9 @@ public sealed class HomeView : UserControl
                 _cityTime[i].Text = t.ToString("HH:mm");
                 var diff = (z.GetUtcOffset(DateTime.UtcNow) - localOffset).TotalHours;
                 var diffText = Math.Abs(diff) < 0.01 ? "本地" : diff > 0 ? $"+{diff:0.#}h" : $"{diff:0.#}h";
-                _cityMeta[i].Text = $"{(t.Hour is >= 6 and < 18 ? "昼" : "夜")} · {diffText}";
+                // ★ 主显示也改用时段词(用户裁定)—— "昼/夜"太粗,说不清是早是晚。
+                _cityMeta[i].Text = $"{Greetings.PartOfDay(t.Hour)} · {diffText}";
+                if (i < _miniPart.Length && _miniPart[i] is { } mp) mp.Text = Greetings.PartOfDay(t.Hour);
                 // 折叠行也要跑铟 —— 它虽然只显示摘要,但时间必须是真的
                 if (i < _miniTime.Length && _miniTime[i] is { } mt) mt.Text = t.ToString("HH:mm");
                 // ★ 最高/最低仍是 "—":天气未接入,不编数字(与展开态同一口径)

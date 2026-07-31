@@ -157,6 +157,12 @@ public sealed class CalendarView : UserControl
     }
 
     // ---------------------------------------------------------------- 构建
+    /// <summary>选中的日期变了 —— 宿主据此把下方时间轴聚焦到同一周。</summary>
+    public Action<DateTime>? SelectionChanged;
+
+    /// <summary>用【日历自己的那个编辑抽屉】打开某条 —— 时间轴点击时调它,保证两边共用一套。</summary>
+    public void OpenEditorFor(CalendarEvent ev) => OpenEditor(ev.Start.Date, ev);
+
     internal void Rebuild()
     {
         _label.Text = _mode == Mode.Month ? _anchor.ToString("yyyy年 M月", Zh) : WeekRangeLabel();
@@ -167,12 +173,14 @@ public sealed class CalendarView : UserControl
         _rightActions.Children.Clear();
         _rightActions.Children.Add(Btn("‹", () => Page(-1)));
         _rightActions.Children.Add(Btn("›", () => Page(1)));
-        _rightActions.Children.Add(Btn(_mode == Mode.Month ? "周" : "月", () =>
+        var modeBtn = Btn(_mode == Mode.Month ? "周" : "月", () =>
         {
             _mode = _mode == Mode.Month ? Mode.Week : Mode.Month;
             _anchor = _mode == Mode.Week ? StartOfWeek(_selected) : _selected;
             Rebuild();
-        }));
+        });
+        if (HideModeSwitch) modeBtn.Visibility = Visibility.Collapsed;
+        _rightActions.Children.Add(modeBtn);
         // ★ 右上角【不放】新增按钮(用户裁定):月排布的新增在当日浮窗里,周排布的在日程列表下方。
 
         _body.Content = _mode == Mode.Week ? WeekRows() : MonthGrid();
@@ -181,9 +189,13 @@ public sealed class CalendarView : UserControl
         //   月排布原来是"点日期直接开新增抽屉" —— 那是把【查看】当成了【新建】,
         //   想看看那天有什么安排反而做不到。现在点日期 = 选中并列出当天,
         //   新建走旁边那个「+」—— 两件事各走各的入口。
+        // ★ 主页已取消周排布(月历 + 时间轴已经把它要表达的都表达了)—— 模式切换键不再显示。
         _dayArea.Visibility = Visibility.Visible;
         RebuildDayList();
     }
+
+    /// <summary>宿主可以藏掉【月/周】切换键(主页合并板块里只要月排布)。</summary>
+    public bool HideModeSwitch { get; set; }
 
     /// <summary>「回到今日」紧跟月份标签,仅当视野里看不到今天时出现。</summary>
     void RefreshTodayButton()
@@ -546,6 +558,7 @@ public sealed class CalendarView : UserControl
     void OnDayClicked(DateTime day)
     {
         _selected = day;
+        SelectionChanged?.Invoke(day);   // 下方时间轴跟着聚焦到这一周
         // ★ 点到上/下月的灰日【不跳月】(用户裁定):视图不在手底下突然换月。
         // ★★ 点日期 = 【查看当天日程】,不再直接开新增抽屉(用户 2026-07-31 报的 bug):
         //   日历最常用的动作是"看看那天有什么",把它接成新建,查看反而无路可走。
@@ -563,6 +576,11 @@ public sealed class CalendarView : UserControl
         _addButton.Visibility = Visibility.Visible;
 
         _dayTitle.Text = _selected.ToString("M月d日 dddd", Zh);
+
+        // ★ 月排布下【不再列文字版当日日程】(2026-07-31 合并时间轴之后):
+        //   同一批日程下面的时间轴已经画出来了,再列一遍既重复、又把高度吃掉。
+        //   标题与「+ 新增日程」保留 —— 它们是入口,不是重复内容。
+        if (_mode == Mode.Month) return;
 
         var evts = CalendarData.On(_selected).ToList();
         if (evts.Count == 0)

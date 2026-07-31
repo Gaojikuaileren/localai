@@ -25,6 +25,22 @@ public static class Greetings
     public static string ChatOpener(DateTime now) => ChatOpeners[(now.DayOfYear * 24 + now.Hour) % ChatOpeners.Length];
 
     /// <summary>按小时给时段主句。</summary>
+    /// <summary>
+    /// 时段称呼(早上/上午/中午/下午/晚上/夜晚)—— 天气那儿显示在时间左边。
+    /// ★ 与问候语用【同一套时段划分】—— 同一个钟点在两处说法不一致是真会让人疑惑的。
+    ///   (原来天气只写"昼/夜",太粗 —— 用户裁定改成这套。)
+    /// </summary>
+    public static string PartOfDay(int hour) => hour switch
+    {
+        < 5 => "夜晚",
+        < 8 => "早上",
+        < 11 => "上午",
+        < 14 => "中午",
+        < 18 => "下午",
+        < 23 => "晚上",
+        _ => "夜晚",
+    };
+
     public static string TitleFor(int hour) => hour switch
     {
         < 5 => "夜深了",
