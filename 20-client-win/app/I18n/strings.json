@@ -59,6 +59,8 @@
   "status.offline":       { "zh-CN": "未连接",              "en-US": "Offline",                 "ja-JP": "未接続" },
   "status.not_paired":    { "zh-CN": "尚未配对",            "en-US": "Not paired",              "ja-JP": "未ペアリング" },
   "status.revoked":       { "zh-CN": "本设备已被解除",      "en-US": "This device was removed",  "ja-JP": "このデバイスは解除されました" },
+  "status.cert_expired":  { "zh-CN": "主机证书已过期",      "en-US": "Hub certificate expired",  "ja-JP": "ハブ証明書の期限切れ" },
+  "status.unauthorized":  { "zh-CN": "中枢拒绝了请求",      "en-US": "Hub refused the request",  "ja-JP": "ハブがリクエストを拒否しました" },
 
   "pairing.title":        { "zh-CN": "与中枢配对",          "en-US": "Pair with the hub",       "ja-JP": "ハブとペアリング" },
   "pairing.start":        { "zh-CN": "开始配对",            "en-US": "Start pairing",           "ja-JP": "ペアリングを開始" },

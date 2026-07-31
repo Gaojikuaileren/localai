@@ -59,7 +59,7 @@ public sealed class HistoryBoardView : UserControl
         var items = TheApp.History.Latest(500, _favoritesOnly);
         if (items.Count == 0)
         {
-            _list.Children.Add(Ui.Caption(_favoritesOnly ? "还没有收藏。" : "还没有翻译记录。"));
+            _list.Children.Add(Ui.Caption(_favoritesOnly ? "还没有收藏。" : "还没有发去翻译的内容。"));
             return;
         }
         foreach (var e in items) _list.Children.Add(HistoryRow(e, showTime: true));

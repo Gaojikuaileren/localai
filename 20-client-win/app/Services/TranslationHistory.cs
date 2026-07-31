@@ -35,7 +35,7 @@ public sealed class TranslationHistory
     /// </summary>
     public IEnumerable<HistoryEntry> All(bool favoritesOnly = false)
     {
-        foreach (var s in _chat.AllTranslationSessions())
+        foreach (var s in _chat.AllTranslationSessions().Where(s => !s.Interpret))   // ★ 同传记录不属于文字翻译历史(审计 2026-07-31)
             foreach (var m in _chat.MessagesOf(s.SessionId))
             {
                 if (m.Role != ChatRole.User) continue;

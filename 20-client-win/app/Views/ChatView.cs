@@ -640,12 +640,17 @@ public sealed class ChatView : UserControl
             area.Children.Add(big);
         }
 
-        // ★ 主机没开时如实说明(用户提问):本机会话照常可读可写,只是【AI 算不了】——
-        //   AI 在主机上跑。发出去的消息会先记在本机,主机上线后才可能有回答。
-        //   只在【已配对但连不上】时提示;没配对的情况左下角状态块已经常驻显示,不重复唠叨。
+        // ★★ AI 不回答的【真实原因】是模型尚未接入(P4),这与主机在不在线【无关】——
+        //   审计 2026-07-31:原来只在"已配对但离线"时提示,把"AI 不回答"归因到主机离线,
+        //   于是在线/未配对的用户看不到任何说明,还会误以为"开了主机就能用"。
+        //   现在把无条件的事实单说一句,主机离线只是【额外】一层。
+        var noAi = Ui.Caption("AI 模型尚未接入(P4)—— 消息会记在本机,现在还不会有回答。");
+        noAi.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        noAi.Margin = new Thickness(2, 0, 2, 6);
+        area.Children.Add(noAi);
         if (TheApp.Hub.IsPaired && TheApp.Hub.State != HubState.Online)
         {
-            var off = Ui.Caption("主机未开启 —— 消息会先记在本机;AI 在主机上运行,要等它上线才能回答。");
+            var off = Ui.Caption("另外,主机未开启 —— AI 在主机上运行,接入之后还需要它在线。");
             off.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
             off.Margin = new Thickness(2, 0, 2, 6);
             area.Children.Add(off);
@@ -1674,8 +1679,14 @@ public sealed class ChatView : UserControl
             // ★ 剪贴板截图的 alpha 常常整条是 0(DIB 没有真 alpha)—— 直接存 png 会得到一张
             //   【完全透明】的图:附件挂上了、预览却是空白(用户反馈)。这里先把它修成不透明。
             var img = ClipboardImageFix.Normalize(raw);
-            // 落一份预览 png 到本机临时目录(仅供显示 + 给 AI 一个可读路径;不通过网络发送内容)
-            var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "localai-clip-" + Guid.NewGuid().ToString("N")[..8] + ".png");
+            // ★★ 粘贴的截图落到【应用状态目录】而不是 %TEMP%(2026-07-31 审计,数据丢失):
+            //   这张 png 是消息内容的【唯一副本】—— 路径写进 chat.json(D50)、历史气泡只从它渲染。
+            //   放 %TEMP% 会同时落进两个删除范围:我们自己的「一键清爽·清理缓存」(通配 localai-clip-*.png,
+            //   默认勾选、标称"安全")和 Windows 存储感知。任一清理一跑,已发消息里的截图就没了。
+            //   放进 client\clips\ 与 chat.json 同处,既不在缓存通配范围,也不归 Windows 清理管。
+            var clipDir = System.IO.Path.Combine(AppPaths.StateDir, "clips");
+            System.IO.Directory.CreateDirectory(clipDir);
+            var tmp = System.IO.Path.Combine(clipDir, "clip-" + Guid.NewGuid().ToString("N")[..8] + ".png");
             using (var fs = System.IO.File.Create(tmp))
             {
                 var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();

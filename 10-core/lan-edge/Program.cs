@@ -800,10 +800,24 @@ static class Edge
         // everything else = business: requires an ACTIVE member cert, proxied to the gateway.
         app.MapFallback(async (HttpContext ctx) =>
         {
+            // ★ 401 带上语义(2026-07-31 审计):此前是空体 401,客户端无法区分"被解除"和"连不上",
+            //   于是统一显示成"主机未开启"(HubState.Revoked 成了死代码)。客户端已经在认
+            //   "lan_device_unknown" 这个词,给出它即可让"被解除"如实到达界面。
+            //   ★ 别把"没带证书"写成含 revoked 的词,否则客户端会把它误判成已解除。
             var cert = ctx.Connection.ClientCertificate;
-            if (cert is null) { ctx.Response.StatusCode = 401; return; }
+            if (cert is null)
+            {
+                ctx.Response.StatusCode = 401;
+                await ctx.Response.WriteAsJsonAsync(new { error = new { type = "client_cert_required" } });
+                return;
+            }
             var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
-            if (!Store.LoadOrEmpty(idDir).IsActive(fp)) { ctx.Response.StatusCode = 401; return; }  // revoked/candidate -> 401
+            if (!Store.LoadOrEmpty(idDir).IsActive(fp))   // revoked/candidate -> 401
+            {
+                ctx.Response.StatusCode = 401;
+                await ctx.Response.WriteAsJsonAsync(new { error = new { type = "lan_device_unknown" } });
+                return;
+            }
             await Proxy(ctx, http, cfg.UpstreamBase, fp);
         });
 

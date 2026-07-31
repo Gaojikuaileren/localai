@@ -176,6 +176,8 @@ public sealed class DevicesView : UserControl
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",
                 HubState.Revoked => "status.revoked",
+                HubState.CertExpired => "status.cert_expired",   // ★ 就在“解除本机配对”红按钮上方:说清“是证书过期、别解除”最要紧
+                HubState.Unauthorized => "status.unauthorized",
                 _ => "status.offline" })}"),
             new Border { Height = 12 },
             Ui.Caption("已记住这次配对 —— 以后启动会自动连接,不会再要求配对。"),

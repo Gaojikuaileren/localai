@@ -2862,6 +2862,38 @@ public static class Selftest
                            "★ 设备管理的 404 要说真原因(结构性到不了),不是“主机没升级”");
             }
 
+            // ---- 客户端诚实性与数据(审计 2026-07-31 批次一) ----
+            {
+                var cv3 = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                var su3 = TryReadSource(Path.Combine("Services", "StorageUsage.cs"));
+                var ccHon = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                var th3 = TryReadSource(Path.Combine("Services", "TranslationHistory.cs"));
+                var pu3 = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+                if (cv3 is not null)
+                {
+                    Assert(cv3.Contains("AppPaths.StateDir, \"clips\"") && !cv3.Contains("GetTempPath(), \"localai-clip-"),
+                           "★ 粘贴截图落到 client/clips 而不是 %TEMP% —— 否则“清理缓存”会删掉已发消息里截图的唯一副本");
+                    Assert(cv3.Contains("AI 模型尚未接入(P4)—— 消息会记在本机"),
+                           "★ AI 不回答的真因(P4 未接)无条件单说,不再归因到主机离线");
+                }
+                if (su3 is not null)
+                {
+                    Assert(su3.Contains("ReferencedAttachmentPaths()") && su3.Contains("fail-closed"),
+                           "★ 清理缓存排除仍被消息引用的旧截图(fail-closed)");
+                    Assert(!su3.Contains("分层存储待接入"),
+                           "分层存储早已实装 —— 不再写“待接入”");
+                }
+                if (ccHon is not null)
+                    Assert(ccHon.Contains("StorageUsage.DeleteClipFile(a.Path)") && ccHon.Contains("ReferencedAttachmentPaths"),
+                           "★ 幽灵会话清除时连粘贴截图一起删(不留痕)");
+                if (th3 is not null)
+                    Assert(th3.Contains("AllTranslationSessions().Where(s => !s.Interpret)"),
+                           "翻译历史排除同传会话");
+                if (pu3 is not null)
+                    Assert(pu3.Contains("AiNotConnected") && pu3.Contains("接入后:"),
+                           "★ 项目 AI 权限标明“尚未接入、这是偏好”且解释用未来时");
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {

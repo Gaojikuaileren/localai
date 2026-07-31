@@ -1008,7 +1008,7 @@ public sealed class TranslationBar : UserControl
         {
             _notesPreview.Children.Add(Ui.Caption(_favoritesOnly
                 ? "还没有收藏 —— 在「全部历史」里点每条后面的星。"
-                : "翻过的内容会直接出现在这里,点一条跳回它在会话里的位置。"));
+                : "你发去翻译的原文会出现在这里,点一条跳回它在会话里的位置。"));
             return;
         }
         foreach (var e in latest) _notesPreview.Children.Add(HistoryBoardView.HistoryRow(e, showTime: false));

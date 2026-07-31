@@ -43,12 +43,16 @@ public static class ProjectUi
         _ => "需批准",
     };
 
-    /// <summary>AI 权限的一行解释(编辑时展示,让人清楚给了什么)。</summary>
+    /// <summary>AI 权限的"这是偏好、尚未生效"横幅(编辑器 + 菜单共用)。★ 现在没有任何 AI 会读或改。</summary>
+    public const string AiNotConnected =
+        "AI 尚未接入(P4):下面是【偏好】—— 现在没有任何 AI 会读或改你的文件;接入后按此设置放行。";
+
+    /// <summary>AI 权限的一行解释。★ 一律用【未来时】:现在这三档谁都不生效(见 AiNotConnected)。</summary>
     public static string AiHint(AiPermission a) => a switch
     {
-        AiPermission.ReadOnly => "AI 只能读取项目内容,不改动任何文件。",
-        AiPermission.Edit => "AI 可直接改项目文件夹里的文件(接入后须配操作历史,可回滚)。",
-        _ => "AI 可提议修改,但每次改动都要你批准后才生效。",
+        AiPermission.ReadOnly => "接入后:AI 只能读取项目内容,不改动任何文件。",
+        AiPermission.Edit => "接入后:AI 可直接改项目文件夹里的文件(须配操作历史,可回滚)。",
+        _ => "接入后:AI 可提议修改,但每次改动都要你批准后才生效。",
     };
 
     /// <summary>让用户选一个文件夹(项目实际目录 / 附件目录)。取消返回 null。</summary>

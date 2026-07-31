@@ -145,7 +145,7 @@ public static class ProjectEditor
             new Border { Height = 6 },
             Ui.Caption("附件文件夹(可选,可多个)"), attachHost, addAttach,
             new Border { Height = 6 },
-            Ui.Caption("AI 权限"), aiPerm, aiHint,
+            Ui.Caption("AI 权限"), FieldLabel(ProjectUi.AiNotConnected), aiPerm, aiHint,
             buttons,
             new Border { Height = 4 },
             Ui.Caption(existing is null

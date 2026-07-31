@@ -726,6 +726,8 @@ public partial class MainWindow : Window
             HubState.Connecting => ("status.connecting", "FgMuted"),
             HubState.NotPaired => ("status.not_paired", "RiskWarning"),
             HubState.Revoked => ("status.revoked", "RiskDanger"),
+            HubState.CertExpired => ("status.cert_expired", "RiskDanger"),   // ★ 证书过期≠连不上(处置不同)
+            HubState.Unauthorized => ("status.unauthorized", "RiskWarning"),
             _ => ("status.offline", "FgMuted"),
         };
         StatusText.Text = Strings.Get(key);

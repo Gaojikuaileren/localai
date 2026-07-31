@@ -10,6 +10,7 @@
 //     (对应决议:永不删原文,除非用户在设置里显式点)
 
 using System.IO;
+using System.Windows;
 
 namespace LocalAI.Client.Services;
 
@@ -46,17 +47,52 @@ public static class StorageUsage
         catch { return 0; }
     }
 
-    /// <summary>归档原文的存放目录(会话原文分层存储的"温"层)。接入分层存储前可能不存在。</summary>
+    /// <summary>归档原文的存放目录(会话原文分层存储的"温"层)。还没有任何会话超过热层上限时不存在。</summary>
     public static string ArchiveDir => Path.Combine(AppPaths.StateDir, "archive");
 
-    /// <summary>缓存文件:我们自己落到临时目录的剪贴板预览图 + 坏档留证。</summary>
+    /// <summary>
+    /// 缓存文件:坏档留证 + 临时文件 + 【不再被任何消息引用的】旧剪贴板截图。
+    /// ★ 2026-07-31 审计:新截图已改落到 client\clips\(不在此通配范围);但历史消息里还有指向
+    ///   %TEMP%\localai-clip-*.png 的旧引用 —— 那是消息内容的唯一副本,删了就丢。所以这里
+    ///   【排除仍被引用的路径】,fail-closed:拿不到引用集合(App 还没起来)就一个 clip 都不列。
+    /// </summary>
     public static IEnumerable<string> CacheFiles()
     {
         var list = new List<string>();
-        try { list.AddRange(Directory.EnumerateFiles(Path.GetTempPath(), "localai-clip-*.png")); } catch { }
         try { list.AddRange(Directory.EnumerateFiles(AppPaths.StateDir, "*.corrupt")); } catch { }
         try { list.AddRange(Directory.EnumerateFiles(AppPaths.StateDir, "*.tmp")); } catch { }
+
+        HashSet<string>? referenced = null;
+        try { referenced = (Application.Current as App)?.Chat.ReferencedAttachmentPaths(); } catch { }
+        if (referenced is not null)   // fail-closed:引用集合拿不到就跳过 clip,绝不误删消息内容
+        {
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(Path.GetTempPath(), "localai-clip-*.png"))
+                    if (!referenced.Contains(f)) list.Add(f);
+            }
+            catch { }
+        }
         return list;
+    }
+
+    /// <summary>
+    /// 只删【我们自己落的】剪贴板截图,绝不碰用户的原文件。给幽灵会话清理用(见 ChatCenter.PurgeGhosts)。
+    /// </summary>
+    public static void DeleteClipFile(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            var name = Path.GetFileName(path);
+            var inClips = path.StartsWith(Path.Combine(AppPaths.StateDir, "clips"), StringComparison.OrdinalIgnoreCase);
+            var inTemp = path.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase)
+                         && name.StartsWith("localai-clip-", StringComparison.OrdinalIgnoreCase);
+            if (!inClips && !inTemp) return;      // 只认这两种来路,别的一律不碰
+            if (inClips && !name.StartsWith("clip-", StringComparison.OrdinalIgnoreCase)) return;
+            File.Delete(path);
+        }
+        catch { }
     }
 
     public static long CacheBytes()
@@ -94,9 +130,9 @@ public static class StorageUsage
         {
             new("会话原文", FileBytes(ClientStore.ChatPath), "所有会话与消息(永不自动删)"),
             new("归档原文", Directory.Exists(ArchiveDir) ? archive : -1,
-                Directory.Exists(ArchiveDir) ? "已归档的早期消息(可手动删除)" : "尚无归档(分层存储待接入)"),
+                Directory.Exists(ArchiveDir) ? "已归档的早期消息(可手动删除)" : $"尚无归档 —— 每会话超过 {ChatCenter.HotMessages} 条后,更早的原文会自动移到这里"),
             new("记忆库", memoryBytes, "AI 生成的摘要与事实"),
-            new("缓存", CacheBytes(), "剪贴板预览图、临时与损坏文件(随时可清)"),
+            new("缓存", CacheBytes(), "临时与损坏文件、以及不再被任何消息引用的旧截图(随时可清)"),
         };
     }
 }

@@ -154,10 +154,28 @@ public sealed class ChatCenter
     {
         var ids = _sessions.Where(s => s.Ghost).Select(s => s.SessionId).ToHashSet();
         if (ids.Count == 0) return;
+        // ★ 幽灵会话里粘贴的截图也要删(2026-07-31 审计):它落成了一个真实文件,
+        //   "不留痕"就得把这个文件也收掉 —— 否则幽灵消息没了、截图还躺在 clips\ 里。
+        foreach (var m in _messages.Where(m => ids.Contains(m.SessionId)))
+            foreach (var a in m.Attachments ?? (IReadOnlyList<ChatAttachment>)Array.Empty<ChatAttachment>())
+                if (a.Kind == AttachKind.Clipboard) StorageUsage.DeleteClipFile(a.Path);
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
         PurgeArchives(ids);   // ★ 幽灵会话的承诺是【不留痕】,温层当然也不能留
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 当前所有【非幽灵】消息引用到的附件路径 —— 供「清理缓存」判断哪些 clip 文件还被消息用着,
+    /// 不能删(fail-closed:拿不到就不删 clip)。
+    /// </summary>
+    public HashSet<string> ReferencedAttachmentPaths()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in _messages)
+            foreach (var a in m.Attachments ?? (IReadOnlyList<ChatAttachment>)Array.Empty<ChatAttachment>())
+                if (!string.IsNullOrEmpty(a.Path)) set.Add(a.Path);
+        return set;
     }
 
     /// <summary>把会话【发送到另一个工作空间】。跨空间就离开原项目(项目不跨空间);随后可在新空间继续。</summary>
