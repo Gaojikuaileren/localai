@@ -3089,7 +3089,55 @@ public static class Selftest
                 Services.AppleCredentials.Clear();
             }
 
-            var mwSys = TryReadSource("MainWindow.xaml.cs");
+            // ---- iCalendar 解析(Apple 日历拉取用)----
+            {
+                // 用 Environment.NewLine 拼,避开转义;解析器对 CRLF/LF 都兼容
+                static string Ics(params string[] ls) => string.Join(Environment.NewLine, ls);
+
+                // ★★ 全天日程的 DTEND 是【不含】那一天 —— 不减一天每条都会多出一天
+                var (evs, _) = Services.ICalParser.ParseEvents(Ics(
+                    "BEGIN:VEVENT", "UID:ad-1", "SUMMARY:出差",
+                    "DTSTART;VALUE=DATE:20260731", "DTEND;VALUE=DATE:20260802", "END:VEVENT"), "我", "家庭");
+                Assert(evs.Count == 1 && evs[0].AllDay, "全天日程能解析");
+                Assert(evs[0].Start.Date == new DateTime(2026, 7, 31) && evs[0].End.Date == new DateTime(2026, 8, 1),
+                       "★★ DTEND 不含末日 -> 减一天(7/31~8/2 实为 7/31 与 8/1 两天)");
+                Assert(evs[0].DayCount == 2, "天数算对(两天,不是三天)");
+
+                // ★ 折行:续行以空白开头,不合并会把长标题截断
+                var (fe, _) = Services.ICalParser.ParseEvents(Ics(
+                    "BEGIN:VEVENT", "UID:f-1", "SUMMARY:这是一个很长的", " 标题被折了行",
+                    "DTSTART:20260731T090000Z", "DTEND:20260731T100000Z", "END:VEVENT"), "我", "家庭");
+                Assert(fe.Count == 1 && fe[0].Title == "这是一个很长的标题被折了行",
+                       "★ 折行先合并再解析(否则长标题从中间断掉)");
+
+                // ★ 转义还原
+                Assert(Services.ICalParser.Unescape(@"a\,b") == "a,b", "转义逗号还原");
+                Assert(Services.ICalParser.Unescape(@"a\nb") == "a" + (char)10 + "b", "★ 转义 n 还原成真换行(否则备注里显示字面的 反斜杠n)");
+                Assert(Services.ICalParser.Unescape(@"a\;b") == "a;b", "转义分号还原");
+                Assert(Services.ICalParser.Unescape(@"a\\b") == @"a\b", "转义反斜杠还原");
+
+                // UTC 带 Z -> 转本地时间;并回填 Source/UID
+                var (uz, _) = Services.ICalParser.ParseEvents(Ics(
+                    "BEGIN:VEVENT", "UID:z-1", "SUMMARY:会", "DTSTART:20260731T090000Z", "END:VEVENT"), "我", "家庭");
+                Assert(uz.Count == 1 && uz[0].Start == new DateTime(2026, 7, 31, 9, 0, 0, DateTimeKind.Utc).ToLocalTime(),
+                       "带 Z 的时间按 UTC 读并转本地");
+                Assert(uz[0].Source == "apple" && uz[0].ExternalId == "z-1",
+                       "★ 回填 Source=apple 与 Apple UID(合并去重的首选判据)");
+
+                // 坏条目跳过而不抛
+                var (icsOk, icsSkip) = Services.ICalParser.ParseEvents(Ics(
+                    "BEGIN:VEVENT", "UID:bad", "DTSTART:20260731T090000Z", "END:VEVENT",
+                    "BEGIN:VEVENT", "UID:good", "SUMMARY:好的", "DTSTART:20260731T090000Z", "END:VEVENT"), "我", "家庭");
+                Assert(icsOk.Count == 1 && icsSkip == 1,
+                       "★ 无标题的跳过并计数,不抛异常(一条坏的不能坑掉整次同步)");
+
+                // ★ 拉回来的能直接进合并层:同 UID 不重复加
+                var box = new List<Views.CalendarEvent>();
+                Assert(Views.CalendarData.MergeInto(box, uz) == 1, "首次合并加入 1 条");
+                Assert(Views.CalendarData.MergeInto(box, uz) == 0, "★ 再拉一次不重复加(同 Apple UID)");
+            }
+
+                        var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
                 var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
