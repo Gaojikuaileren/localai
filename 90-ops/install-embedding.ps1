@@ -145,6 +145,18 @@ foreach ($s in (Get-WmiObject Win32_Service | Where-Object { $_.StartName -eq '.
   Restart-Service $s.Name -Force -EA SilentlyContinue
 }
 
+
+# ★ 重注册 localai-memory-dump 计划任务的凭据(2026-07-31 审计):
+#   Task Scheduler 把密码【存在自己这里】,不像服务那样跟着 SetPassword 走 ——
+#   上面的服务同步循环碰不到它。ai-mem 密码一换,这个备份任务下次登录就 0x8007052E 失败。
+#   保留原 Action,只换密码;任务不存在(还没跑过 setup-backup-task)就跳过。
+$__dumpTask = 'localai-memory-dump'
+if ($__t = Get-ScheduledTask -TaskName $__dumpTask -ErrorAction SilentlyContinue) {
+  Register-ScheduledTask -TaskName $__dumpTask -Action $__t.Actions -TaskPath $__t.TaskPath `
+    -User "$env:COMPUTERNAME\ai-mem" -Password $pw -RunLevel Limited -Force | Out-Null
+  Write-Host "      (已刷新计划任务 $__dumpTask 的 ai-mem 凭据)"
+}
+
 Say "[7] 注册 Embedding 服务(NSSM · ai-mem · :$httpPort)…"
 # ★ 上一次失败可能把服务留在 Paused/StartPending 等状态,Stop-Service 对这些状态无效 →
 #   remove 也会失败 → 新配置写不进去。先无条件 nssm stop 再 remove。

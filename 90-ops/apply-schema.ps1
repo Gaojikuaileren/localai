@@ -98,6 +98,18 @@ foreach ($s in $svcs) {
 }
 Write-Host ("      (已同步服务凭据: {0})" -f (($svcs.Name) -join ', '))
 
+# ★ 重注册 localai-memory-dump 计划任务的凭据(2026-07-31 审计):
+#   Task Scheduler 把密码【存在自己这里】,不像服务那样跟着 SetPassword 走 ——
+#   上面的服务同步循环碰不到它。ai-mem 密码一换,这个备份任务下次登录就 0x8007052E 失败。
+#   保留原 Action,只换密码;任务不存在(还没跑过 setup-backup-task)就跳过。
+$__dumpTask = 'localai-memory-dump'
+if ($__t = Get-ScheduledTask -TaskName $__dumpTask -ErrorAction SilentlyContinue) {
+  Register-ScheduledTask -TaskName $__dumpTask -Action $__t.Actions -TaskPath $__t.TaskPath `
+    -User "$env:COMPUTERNAME\ai-mem" -Password $pw -RunLevel Limited -Force | Out-Null
+  Write-Host "      (已刷新计划任务 $__dumpTask 的 ai-mem 凭据)"
+}
+
+
 # ---- 2/3/4. 应用 SQL ----
 function Run-Sql([string]$Role,[string]$File,[string]$LogName,[string]$Extra='-v ON_ERROR_STOP=1') {
   $log = Join-Path $PgRoot $LogName
@@ -138,6 +150,10 @@ if (-not $SkipVerify) {
   $fails = ([regex]::Matches($txt,'FAIL')).Count
   if ($fails -gt 0) {
     Write-Host ("  XX 有 {0} 处 FAIL —— 隔离/约束未达标,不要继续。" -f $fails) -ForegroundColor Red
+    # ★ 隔离验证 FAIL 必须【失败退出】(2026-07-31 审计):原来只打红字就落到末尾绿字「完成」+ exit 0,
+    #   任何读退出码的包装脚本都会把"隔离没达标"当成功。用标志位而不是就地 exit —— 否则会跳过下面的
+    #   $pw 擦除(115/124 两处已有的 exit 1 就犯了这个毛病,此处不再重蹈)。
+    $script:schemaFailed = $true
   } else {
     Write-Host "  ✓ 无 FAIL。请人工确认标注『期望: ERROR』的用例确实报错了(报错=隔离生效)。" -ForegroundColor Green
   }
@@ -145,5 +161,10 @@ if (-not $SkipVerify) {
 
 $pw = $null; [System.GC]::Collect()
 Write-Host ""
+if ($script:schemaFailed) {
+    Write-Host "=== 未通过 ===" -ForegroundColor Red
+    Write-Host "  隔离/约束验证有 FAIL —— 见上面红字。修好再重跑。"
+    exit 1
+}
 Write-Host "=== 完成 ===" -ForegroundColor Green
 Write-Host "  把上面输出贴回给 Claude 核验。"

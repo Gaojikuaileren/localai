@@ -111,6 +111,9 @@ if ($pgBin -and (Test-Path (Join-Path $pgBin 'psql.exe'))) {
 } elseif ($env:PGBIN -and (Test-Path (Join-Path $env:PGBIN 'psql.exe'))) {
     $psql = Join-Path $env:PGBIN 'psql.exe'
 }
+# ★ 端口从 paths.toml 读,不写死(2026-07-31 审计):全仓其它 psql 调用都读 memory.pg_port,
+#   唯独这里破例写死 5432。端口一改,这道 DB 隔离检查会连不上 —— 而它是安全检查,静默失效最危险。
+$pgPort = $P['memory.pg_port']; if (-not $pgPort) { $pgPort = '5432' }
 if (-not $psql) { Skip-It 'DB 角色分离' "找不到 psql.exe(paths.toml 的 memory.pg_bin 未指向有效目录)" }
 else {
     $q = @'
@@ -122,7 +125,7 @@ SELECT
      WHERE grantee='ai_mem_remote' AND table_schema='mem'
        AND table_name IN ('l3_fact','secret_ref','pending_review','write_ticket')) AS remote_basetable_grants;
 '@
-    $out = $q | & $psql -h 127.0.0.1 -p 5432 -U ai_mem_local -d memory -t -A -F ',' 2>&1 | Out-String
+    $out = $q | & $psql -h 127.0.0.1 -p $pgPort -U ai_mem_local -d memory -t -A -F ',' 2>&1 | Out-String
     if ($out -match 'SSPI authentication failed|could not connect') {
         Skip-It 'DB 角色分离' '连不上 —— 需以 ai-mem 身份运行(生产即如此)'
     } else {

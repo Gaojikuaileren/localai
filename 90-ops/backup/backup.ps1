@@ -71,8 +71,18 @@ function Read-PathsToml {
         $l = $line.Trim()
         if ($l -eq '' -or $l.StartsWith('#')) { continue }
         if ($l -match '^\[([^\]]+)\]') { $section = $Matches[1]; continue }
+        # ★ 三种取值都要认(2026-07-31 审计):此前只认单引号,于是 paths.toml 的
+        #   [backup] 段(status = "manual" 双引号 · keep_last = 12 裸整数 · require_encryption = true)
+        #   一个都读不到 —— require_encryption 这个安全开关设成 true 也【不生效】(死代码)。
+        #   单引号分支保持第一顺位不动,零回归;后两条只在它不匹配时才轮到。
         if ($l -match "^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*'([^']*)'") {
-            $map["$section.$($Matches[1])"] = $Matches[2]
+            $map["$section.$($Matches[1])"] = $Matches[2]                       # 'single'
+        }
+        elseif ($l -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"') {
+            $map["$section.$($Matches[1])"] = $Matches[2]                       # "double"
+        }
+        elseif ($l -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^#''"]+?)\s*(#.*)?$') {
+            $map["$section.$($Matches[1])"] = $Matches[2].Trim()               # bare: 12 / true / false
         }
     }
     return $map
@@ -182,11 +192,20 @@ function Copy-Root {
     # ExcludeAbs  : 按【绝对路径】排除 —— 用于活数据库目录。
     #   ★ 为什么必须分开:活库目录叫 data / storage / logs 这类通名,用名字排会误伤
     #     (/XD logs 会连 state\logs 一起排掉)。robocopy /XD 接受绝对路径,精确排除。
-    param([string]$Name, [string]$Source, [string[]]$ExcludeDir = @(), [string[]]$ExcludeAbs = @())
+    # $Optional=$true 才允许"源不存在=跳过";关键根(state)缺失必须 fail-closed。
+    param([string]$Name, [string]$Source, [string[]]$ExcludeDir = @(), [string[]]$ExcludeAbs = @(),
+          [switch]$Optional)
     if (-not (Test-Path $Source)) {
-        Write-Host ("  {0,-16} 源不存在,跳过" -f $Name) -ForegroundColor DarkGray
-        $script:report.Add("- **$Name**: 源不存在,跳过")
-        return
+        # ★★ 关键根缺失【不能静默成功】(2026-07-31 审计):
+        #   原写法对 state 缺失也只打一行灰字就 return,脚本继续走到结尾无条件绿字「完成」+ exit 0,
+        #   还占掉一个保留代 —— 一个【空备份】被当成成功,而这正是最该炸的场景
+        #   (盘没挂上、路径写错、迁移中途)。可选源(assets-adopted)才允许跳过。
+        if ($Optional) {
+            Write-Host ("  {0,-16} 源不存在,跳过(可选)" -f $Name) -ForegroundColor DarkGray
+            $script:report.Add("- **$Name**: 源不存在,跳过(可选)")
+            return
+        }
+        throw "拒绝执行:关键源 '$Name' 不存在($Source)。不产出一个不含它的『成功』备份。"
     }
     $files = Get-ChildItem $Source -Recurse -File -Force -ErrorAction SilentlyContinue |
              Where-Object { $p = $_.FullName
@@ -288,7 +307,7 @@ if ($identityRoot) {
 Copy-Root -Name 'state' -Source $rootState -ExcludeDir @('quarantine') -ExcludeAbs $excludeAbs
 
 # 2. ASSETS/adopted — 你标记为要用的
-Copy-Root -Name 'assets-adopted' -Source $adopted
+Copy-Root -Name 'assets-adopted' -Source $adopted -Optional
 
 # 3. CODE — git bundle(完整历史,单文件,自带校验)
 if (Test-Path (Join-Path $rootCode '.git')) {

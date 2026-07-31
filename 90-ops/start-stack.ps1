@@ -51,10 +51,19 @@ function Stop-All {
 # ============================================================================
 if (-not $NoBackend) {
   # ctx → 组件 id(peak 随上下文长度变,必须用对应那一档的实测值)
+  # ★★ fail-closed:只承认 vram-budget.toml 里【实测过】的档位(2026-07-31 审计)。
+  #   原写法 default 兜底到 32k —— 于是 -Ctx 1000000 也被当成 32k 放行,
+  #   而 32k 的 Σpeak 恰好卡在预算内,显存闸完全被绕过。超大 ctx 直接爆显存 OOM。
+  #   32k 是当前实测过的最大档;要更大先在 toml 里加实测条目,而不是让脚本替你猜。
   $comp = switch ($Ctx) {
     { $_ -le 8192  } { 'llm.assistant.8b@8k';  break }
     { $_ -le 16384 } { 'llm.assistant.8b@16k'; break }
-    default          { 'llm.assistant.8b@32k' }
+    { $_ -le 32768 } { 'llm.assistant.8b@32k'; break }
+    default {
+      Write-Host ("XX -Ctx {0} 超过实测过的最大档 32768。" -f $Ctx) -ForegroundColor Red
+      Write-Host "   没有对应的实测显存条目,拒绝启动(要更大 ctx 请先在 config/vram-budget.toml 里加实测档位)。" -ForegroundColor Red
+      exit 1
+    }
   }
   $wanted = @($comp)
   if ($WithSpeech) { $wanted += 'speech.lite' }

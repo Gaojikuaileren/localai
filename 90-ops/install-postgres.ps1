@@ -141,6 +141,18 @@ foreach ($s in (Get-WmiObject Win32_Service)) {
 }
 Write-Host "  [3] ai-mem 密码重置 + SeServiceLogonRight/SeBatchLogonRight + 同步既有服务 OK"
 
+# ★ 重注册 localai-memory-dump 计划任务的凭据(2026-07-31 审计):
+#   Task Scheduler 把密码【存在自己这里】,不像服务那样跟着 SetPassword 走 ——
+#   上面的服务同步循环碰不到它。ai-mem 密码一换,这个备份任务下次登录就 0x8007052E 失败。
+#   保留原 Action,只换密码;任务不存在(还没跑过 setup-backup-task)就跳过。
+$__dumpTask = 'localai-memory-dump'
+if ($__t = Get-ScheduledTask -TaskName $__dumpTask -ErrorAction SilentlyContinue) {
+  Register-ScheduledTask -TaskName $__dumpTask -Action $__t.Actions -TaskPath $__t.TaskPath `
+    -User "$env:COMPUTERNAME\ai-mem" -Password $pw -RunLevel Limited -Force | Out-Null
+  Write-Host "      (已刷新计划任务 $__dumpTask 的 ai-mem 凭据)"
+}
+
+
 # ============================ 4 · initdb(以 ai-mem)============================
 if (Test-Path (Join-Path $PgData 'PG_VERSION')) {
   Write-Host "  [4] 集群已存在,跳过 initdb OK"

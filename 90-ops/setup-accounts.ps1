@@ -77,10 +77,16 @@ if (-not (Test-Path $memDir)) {
 
 # 关闭继承(把继承的 ACE 复制为显式,随后清理),然后只留 ai-mem + 管理员 + SYSTEM
 Write-Host "  设 ACL(关继承 · 只留 ai-mem/Administrators/SYSTEM · 显式拒绝 ai-asset/ai-exec)..."
+# ★ 每条 icacls 都查退出码(2026-07-31 审计):原来三条都不查,失败照样绿字「✓ ACL 已设」——
+#   而 ACL 没设成 = 记忆库对 ai-asset/ai-exec 敞开,正是这个脚本唯一要防的事。
+#   照抄 setup-secrets-dir.ps1 已有的写法。
 & icacls $memDir /inheritance:r | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls 关闭继承失败: $memDir" }
 & icacls $memDir /grant:r "ai-mem:(OI)(CI)F" "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls 授权失败: $memDir" }
 # 显式拒绝资产侧(即使不授予,拒绝 ACE 是 §6.8 明写的 belt-and-suspenders)
 & icacls $memDir /deny "ai-asset:(OI)(CI)F" "ai-exec:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls 拒绝失败: $memDir" }
 Write-Host "  ✓ ACL 已设" -ForegroundColor Green
 
 Write-Host ""

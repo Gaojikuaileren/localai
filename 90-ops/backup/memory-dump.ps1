@@ -139,21 +139,44 @@ INSTANCES=mem_main(6333) / mem_s2(6335,S2 机密,独立 api_key)
 "@ | Set-Content (Join-Path $Stage 'QDRANT_VERSION.txt') -Encoding UTF8
 
 # ---------- 3. 复制进备份集 ----------
+# ★★ 复制与验收【分开逐件核对】(2026-07-31 审计):
+#   本脚本作用域是 $ErrorActionPreference='Continue',所以 Copy-Item 写满/掉盘/exFAT 偶发写错
+#   都是【非终止】错误 —— 原来只记一条红字就继续,末尾用「文件数 ≥ 3」当验收。
+#   而 pg_dump + globals + 两个 VERSION.txt + 演练报告本就 ≥ 3,
+#   于是【最大的那个 .dump 没进备份集也照样判成功】。
+#   现在:每复制一件,立刻核对目标存在且【字节数与源一致】,任何一件对不上就 Fail。
 if ($DestDir) {
   $pgOut = Join-Path $DestDir 'memory-db\pg'
   $qdOut = Join-Path $DestDir 'memory-db\qdrant'
   New-Item -ItemType Directory -Force $pgOut, $qdOut | Out-Null
-  foreach ($f in $pgFiles) { Copy-Item $f.FullName $pgOut -Force }
-  Copy-Item (Join-Path $Stage 'QDRANT_VERSION.txt') $qdOut -Force
+
+  function Copy-Verified($srcPath, $dstDir) {
+    $leaf = Split-Path $srcPath -Leaf
+    $dst  = Join-Path $dstDir $leaf
+    Copy-Item $srcPath $dst -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $dst)) { return "缺件:$leaf 没进备份集" }
+    $srcLen = (Get-Item -LiteralPath $srcPath).Length
+    $dstLen = (Get-Item -LiteralPath $dst).Length
+    if ($srcLen -ne $dstLen) { return "字节不符:$leaf 源 $srcLen ≠ 备份 $dstLen(写盘中断)" }
+    return $null
+  }
+
+  foreach ($f in $pgFiles) {
+    $err = Copy-Verified $f.FullName $pgOut
+    if ($err) { return (Fail $err) }
+  }
+  $err = Copy-Verified (Join-Path $Stage 'QDRANT_VERSION.txt') $qdOut
+  if ($err) { return (Fail $err) }
   # ★ 只复制【本次产出】的快照 —— 按 *.snapshot 通配会把历史快照一并复制,
   #   实测导致同一 collection 的 3 个 386MB 快照进了同一个备份集(每备份一次多 ~750MB)。
   foreach ($m in $madeSnaps) {
     $sub = Join-Path $qdOut $m.Inst
     New-Item -ItemType Directory -Force $sub | Out-Null
-    Copy-Item $m.File (Join-Path $sub (Split-Path $m.File -Leaf)) -Force
+    $err = Copy-Verified $m.File $sub
+    if ($err) { return (Fail $err) }
   }
   $n = (Get-ChildItem (Join-Path $DestDir 'memory-db') -Recurse -File).Count
-  Write-Host ("  已写入备份集: memory-db\ ({0} 个文件)" -f $n)
+  Write-Host ("  已写入备份集: memory-db\ ({0} 个文件,逐件字节核对通过)" -f $n)
   if ($n -lt 3) { return (Fail "memory-db 里文件太少($n),不合理") }
 }
 
