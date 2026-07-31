@@ -3193,6 +3193,28 @@ public static class Selftest
                        "★ CalDAV 响应 -> ics -> CalendarEvent 整条链路贯通");
             }
 
+            // ---- CalDAV 接入的几条要害(研究查证后钉死,2026-07-31)----
+            {
+                var cd = TryReadSource(Path.Combine("Services", "AppleCalDav.cs"));
+                if (cd is not null)
+                {
+                    Assert(cd.Contains("AllowAutoRedirect = false"),
+                           "★★ 必须关自动重定向:HttpClient 跨主机时会丢 Authorization,而 iCloud 认证后正要转分区主机 -> 401 死循环");
+                    Assert(cd.Contains("SendFollowingAsync") && cd.Contains("IsIcloudHost"),
+                           "★ 自己逐跳跟重定向并重新挂凭据;且只往 icloud.com 下的主机送");
+                    Assert(cd.Contains("HttpStatusCode.Forbidden") && cd.Contains("可能导致 Apple ID 被锁"),
+                           "★★ 401/403 分开:403 = 已被节流,必须停下来(继续重试会锁用户真实的 Apple ID)");
+                    Assert(cd.Contains("UseProxy = false"),
+                           "★ 关环境代理 —— 一个环境变量不能把请求改道到别处");
+                    Assert(!cd.Contains("new HttpMethod(\"PUT\")") && !cd.Contains("new HttpMethod(\"DELETE\")"),
+                           "★★ 只读:没有 PUT/DELETE —— 写回 Apple 不可逆,这一版不开");
+                    // 自动重试会把用户账号打进锁定 —— 整条链路不得有
+                    var syncSrc = TryReadSource(Path.Combine("Services", "AppleCalendarSync.cs"));
+                    Assert(syncSrc is not null && !syncSrc.Contains("for (var retry") && !syncSrc.Contains("while (retry"),
+                           "★★ 认证路径上没有自动重试(反复失败会锁掉真实 Apple ID)");
+                }
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {

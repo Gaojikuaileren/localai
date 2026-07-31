@@ -34,14 +34,18 @@ public static class AppleCalDav
 
     static HttpClient NewClient(string appleId, string appPassword)
     {
-        // ★ 不跟随自动重定向的话 iCloud 的 3xx 会让发现流程断在第一步;
-        //   同时【关掉环境代理】—— 这套系统的底线是数据不出家门,
+        // ★★ 【必须关掉自动重定向】—— 这是 .NET 的一个会让人找半天的行为:
+        //   HttpClient 在【跨主机重定向时会按设计丢弃 Authorization 头】(防凭据泄露给第三方主机)。
+        //   而 iCloud 认证后正是要把你转到分区主机 pNN-caldav.icloud.com ——
+        //   头一丢就变成裸奔请求 -> 401,而且看起来像"密码错",极难归因。
+        //   做法:关自动重定向,自己逐跳重新挂凭据(见 SendFollowingAsync)。
+        //
+        //   ★ 同时【关掉环境代理】—— 这套系统的底线是数据不出家门,
         //   一个环境变量就能把请求改道到别处是不可接受的(与中枢侧 trust_env 同一条纪律)。
         var h = new HttpClientHandler
         {
-            AllowAutoRedirect = true,
+            AllowAutoRedirect = false,
             UseProxy = false,
-            PreAuthenticate = true,
         };
         var c = new HttpClient(h) { Timeout = TimeSpan.FromSeconds(45) };
         var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{appleId}:{appPassword}"));
@@ -51,16 +55,50 @@ public static class AppleCalDav
         return c;
     }
 
+    /// <summary>
+    /// 发请求并【自己跟随重定向】,每一跳都重新挂上凭据与请求体。
+    /// ★ 不能靠 HttpClient 自动重定向:它跨主机时会丢掉 Authorization(见 NewClient 的说明)。
+    /// ★ 只跟随到 icloud.com 下的主机 —— 凭据绝不往别家域名上送。
+    /// </summary>
+    static async Task<(HttpStatusCode code, string body)> SendFollowingAsync(
+        HttpClient c, string method, string url, string? xmlBody, int? depth, CancellationToken ct, int maxHops = 5)
+    {
+        for (var hop = 0; ; hop++)
+        {
+            using var req = new HttpRequestMessage(new HttpMethod(method), url);
+            if (xmlBody is not null)
+                req.Content = new StringContent(xmlBody, Encoding.UTF8, "text/xml");   // Apple 自己用的就是 text/xml
+            if (depth is { } d) req.Headers.Add("Depth", d.ToString());
+
+            var resp = await c.SendAsync(req, ct);
+            var code = resp.StatusCode;
+
+            // 3xx:自己跟 —— 下一跳会重建请求,凭据与 body 都在
+            if ((int)code is >= 300 and < 400 && resp.Headers.Location is { } loc && hop < maxHops)
+            {
+                var next = loc.IsAbsoluteUri ? loc : new Uri(new Uri(url), loc);
+                resp.Dispose();
+                if (!IsIcloudHost(next.Host))
+                    return (HttpStatusCode.BadGateway, "");   // 不往非 iCloud 主机送凭据
+                url = next.ToString();
+                continue;
+            }
+
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            resp.Dispose();
+            return (code, body);
+        }
+    }
+
+    /// <summary>只允许把凭据送往 icloud.com 下的主机(含分区主机 pNN-caldav.icloud.com)。</summary>
+    static bool IsIcloudHost(string host)
+        => host.Equals("icloud.com", StringComparison.OrdinalIgnoreCase)
+           || host.EndsWith(".icloud.com", StringComparison.OrdinalIgnoreCase);
+
     static async Task<(HttpStatusCode code, string body)> PropfindAsync(
         HttpClient c, string url, int depth, string xmlBody, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), url)
-        {
-            Content = new StringContent(xmlBody, Encoding.UTF8, "application/xml"),
-        };
-        req.Headers.Add("Depth", depth.ToString());
-        using var resp = await c.SendAsync(req, ct);
-        return (resp.StatusCode, await resp.Content.ReadAsStringAsync(ct));
+        return await SendFollowingAsync(c, "PROPFIND", url, xmlBody, depth, ct);
     }
 
     /// <summary>
@@ -78,9 +116,19 @@ public static class AppleCalDav
             // ① 当前用户主体
             var (c1, b1) = await PropfindAsync(c, Root, 0,
                 $"<d:propfind xmlns:d=\"{DavNs}\"><d:prop><d:current-user-principal/></d:prop></d:propfind>", ct);
+            // ★★ 401 与 403 必须分开 —— 这不是文案讲究,是安全问题:
+            //   iCloud 按【用户名】节流,反复认证失败会从 401 升级成 403,
+            //   再继续会把用户【真实的 Apple ID 锁掉】(得去 iforgot.apple.com 重置)。
+            //   所以:401 = 凭据错,停下来让人改;403 = 已被节流,必须硬性停。
+            //   ★ 这条链路上【没有任何自动重试/定时重试】,全部由用户按钮驱动 —— 存心如此。
             if (c1 == HttpStatusCode.Unauthorized)
-                return (false, "Apple 拒绝了这组账号密码(401)。★ 开了两步验证时必须用【专用密码】,不是账号密码;" +
-                               "请到 appleid.apple.com 生成一个再填。", cals);
+                return (false, "Apple 拒绝了这组账号密码(401)。★ 必须用【专用密码】而不是 Apple ID 密码 —— " +
+                               "开了两步验证后 Apple 只认它。到 appleid.apple.com 生成后【原样】粘进来(连字符不要去掉)。" +
+                               "⚠ 别反复试 —— 多次失败会被 Apple 锁账号。", cals);
+            if (c1 == HttpStatusCode.Forbidden)
+                return (false, "Apple 暂时拒绝了这个账号的请求(403)。★ 这通常是前面失败次数太多被临时节流了。" +
+                               "请【停下来】隔一段时间再试,并先确认专用密码是对的 —— " +
+                               "继续重试可能导致 Apple ID 被锁。", cals);
             if ((int)c1 >= 400)
                 return (false, $"连接 iCloud 失败(HTTP {(int)c1})。", cals);
 
