@@ -983,7 +983,9 @@ public sealed class HomeView : UserControl
         var curveCity = place.City;
         curve.SizeChanged += (_, _) => DrawCurve(curve, Services.Weather.For(curveCity));
 
-        _cityHourly[i] = new UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 0) };
+        // ★ 底部留白:来源那一行收起之后,逐小时这排就成了卡里最下面的东西,
+        //   只靠 inner 那 10px 底边距显得贴底(用户反馈"太贴边了")。
+        _cityHourly[i] = new UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 8) };
         SetHourly(_cityHourly[i], 6);
 
         var inner = new DockPanel { LastChildFill = true };
