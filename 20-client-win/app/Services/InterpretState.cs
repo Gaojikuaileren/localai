@@ -104,7 +104,11 @@ public sealed class InterpretState
     public string TryStart()
     {
         if (!DirectionReady) return "先把语言方向的两个坑填上 —— 从语言池拖进来。";
-        if (!PipelineReady) return "语音链路尚未接入(P4)—— 采集、识别、合成三段都还没就位。";
+        if (!PipelineReady)
+            return "还差【翻译引擎】,不是差声卡。\n\n"
+                 + "VB-CABLE 只是把译文语音送进会议软件的“管子”,已经装好了;\n"
+                 + "但中间那套「麦克风采集 → 语音识别 → 翻译 → 语音合成」还没接 —— "
+                 + "这三步都要 AI 模型,得等 GPU Broker(P4)接入。接上之后这里就能一键开启。";
         return "";
     }
 
