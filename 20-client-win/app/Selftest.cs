@@ -1384,8 +1384,17 @@ public static class Selftest
                        "★ 目标池满 3 个 -> 语言池灰掉禁用");
                 Assert(tbSrc.Contains("_targetBox.Width = TargetPoolWidth") && tbSrc.Contains("_poolBox.Width = LangPoolWidth"),
                        "两个池子各自用自己的宽度");
-                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.IndexOf("Grid.SetColumn(notes, 3)", StringComparison.Ordinal) > 0,
-                       "★ 学习笔记占剩余空间(比两个池子宽)");
+                Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.Contains("Grid.SetColumn(notes, 1)"),
+                       "★ 翻译历史占剩余空间");
+                // ★★ 两种模式都要显示的东西【只能建一次】,且要建在切换范围之外 ——
+                //   同一天里三次栽在"一个元素两个父节点"上,最后一次让整个翻译界面打不开。
+                //   (三处 = 定义 + 构造时那一次 + RebuildNotesCard 里那一次;
+                //    后者是合法的,因为它【先把预览面板从旧卡上摘下来】再重建。)
+                Assert(System.Text.RegularExpressions.Regex.Matches(Body(tbSrc), @"(?<![A-Za-z])NotesCard\(\)").Count == 3,
+                       "★ 历史卡的建立点屈指可数 —— 多建一次就会挂上两个父节点,界面直接打不开");
+                var rebuild = Slice(tbSrc, "void RebuildNotesCard()", "NotesCard();");
+                Assert(rebuild is not null && rebuild.Contains("Children.Remove(_notesPreview)"),
+                       "★ 重建之前必须先把预览面板从旧卡上摘下来");
                 // ★ 学习笔记板块换成【翻译历史】(用户裁定):翻过的直接出现在这,点一条跳回原位
                 Assert(tbSrc.Contains("翻译历史") && tbSrc.Contains("TheApp.History.Latest"),
                        "右下角是翻译历史预览");
