@@ -46,23 +46,87 @@ public static class AudioDriver
     {
         try
         {
-            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers");
-            if (!Directory.Exists(dir)) return new AudioDriverStatus(false, null, null);
+            // ★★ 主判据 = 卸载注册表项(与「设置 › 应用」/Add-Remove Programs 一致,权威)。
+            //   2026-07-31 实测教训:装好后 .sys 落在 System32\DriverStore\FileRepository\...,
+            //   【不一定】在 System32\drivers,而且可能要重启才拷进 drivers —— 靠 .sys 文件位置判断会漏报
+            //   (用户反馈"装好了还显示未安装"就是这个)。而注册表项一装上就有。
+            foreach (var e in FindUninstallers())   // 已经是"Publisher=VB-Audio 且名字含 CABLE"的集合
+            {
+                var sysPath = FindDriverSys();   // 有就显示真 .sys 路径;没有(还没拷进磁盘/待重启)就不显示文件行
+                // 版本:先取注册表 DisplayVersion;没有就退回 .sys 的文件版本
+                var ver = ReadDisplayVersion(e.Command);
+                if (string.IsNullOrWhiteSpace(ver) && sysPath is not null)
+                {
+                    var fv = FileVersionInfo.GetVersionInfo(sysPath).FileVersion;
+                    ver = string.IsNullOrWhiteSpace(fv) ? null : fv;
+                }
+                return new AudioDriverStatus(true, ver, sysPath);
+            }
 
-            // 文件名带版本/系统代号(vbaudio_cable64_win10.sys 之类),各版本不完全一致,
-            // 所以用通配匹配而不是写死某一个名字 —— 写死的那天供应商改个名就检测不到了。
-            var hit = Directory.EnumerateFiles(dir, "vbaudio*.sys", SearchOption.TopDirectoryOnly)
-                               .FirstOrDefault(f => Path.GetFileName(f).Contains("cable", StringComparison.OrdinalIgnoreCase));
-            if (hit is null) return new AudioDriverStatus(false, null, null);
-
-            var ver = FileVersionInfo.GetVersionInfo(hit).FileVersion;
-            return new AudioDriverStatus(true, string.IsNullOrWhiteSpace(ver) ? null : ver, hit);
+            // 兜底:注册表读不到时,再去磁盘找 .sys —— DriverStore 与 drivers 都找(递归),
+            //   别再只盯 drivers 顶层。找到也算装了。
+            var hit = FindDriverSys();
+            if (hit is not null)
+            {
+                var ver = FileVersionInfo.GetVersionInfo(hit).FileVersion;
+                return new AudioDriverStatus(true, string.IsNullOrWhiteSpace(ver) ? null : ver, hit);
+            }
+            return new AudioDriverStatus(false, null, null);
         }
         catch
         {
             // 读不到就如实说"检测不到",不猜
             return new AudioDriverStatus(false, null, null);
         }
+    }
+
+    /// <summary>从注册表卸载项读 DisplayVersion(和 DisplayName 同一条项)。读不到返回 null。</summary>
+    static string? ReadDisplayVersion(string uninstallCommand)
+    {
+        try
+        {
+            var branches = new[]
+            {
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            };
+            foreach (var root in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+                foreach (var branch in branches)
+                {
+                    using var key = root.OpenSubKey(branch);
+                    if (key is null) continue;
+                    foreach (var name in key.GetSubKeyNames())
+                    {
+                        using var sub = key.OpenSubKey(name);
+                        if (sub?.GetValue("UninstallString") as string == uninstallCommand)
+                        {
+                            var v = sub.GetValue("DisplayVersion") as string;
+                            return string.IsNullOrWhiteSpace(v) ? null : v;
+                        }
+                    }
+                }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>在 DriverStore\FileRepository 与 System32\drivers 里找 VB-CABLE 的 .sys(递归)。</summary>
+    static string? FindDriverSys()
+    {
+        try
+        {
+            var sys32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            foreach (var dir in new[] { Path.Combine(sys32, "DriverStore", "FileRepository"),
+                                        Path.Combine(sys32, "drivers") })
+            {
+                if (!Directory.Exists(dir)) continue;
+                var hit = Directory.EnumerateFiles(dir, "vbaudio*.sys", SearchOption.AllDirectories)
+                                   .FirstOrDefault(f => Path.GetFileName(f).Contains("cable", StringComparison.OrdinalIgnoreCase));
+                if (hit is not null) return hit;
+            }
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>用户自备安装包的位置:{state}\audio-driver\ 下任意 exe/zip。离线场景走这里。</summary>
