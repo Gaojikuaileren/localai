@@ -1369,11 +1369,6 @@ public static class Selftest
                        && Services.AudioDriverManifest.Current.Url.StartsWith("https://download.vb-audio.com"),
                        "★ 内置清单可用且下载来源锁死在 VB-Audio 官方域");
 
-                // 清单太旧时必须说出来 —— 一份两年没动的清单说"已是最新"是在撒谎
-                var old = new Services.AudioDriverPackage("1.0", "https://x/y", new string('a', 64), 1,
-                                                          new DateTime(2020, 1, 1));
-                var msg = Services.AudioDriver.Compare(new Services.AudioDriverStatus(true, "1.0", null), old, new DateTime(2026, 7, 31));
-                Assert(msg.Contains("没更新过"), "★ 清单自己太旧时如实说明,不谎称\"已是最新\"");
             }
             var adSrc = TryReadSource(Path.Combine("Services", "AudioDriver.cs"));
             if (adSrc is not null)
@@ -1387,8 +1382,12 @@ public static class Selftest
             var sdSrc = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
             if (sdSrc is not null)
             {
-                Assert(sdSrc.Contains("声音驱动(同声传译)") && sdSrc.Contains("检查更新"),
-                       "设置里有声音驱动板块,能看版本、能查更新");
+                Assert(sdSrc.Contains("声音驱动(同声传译)"),
+                       "设置里有声音驱动板块");
+                Assert(!sdSrc.Contains("CheckDriverUpdate") && !sdSrc.Contains("Ui.Secondary(\"检查更新\""),
+                       "★「检查更新」不再是单独按钮");
+                Assert(sdSrc.Contains("正在检查 VB-Audio 官方最新版本") && sdSrc.Contains("ResolveLatest("),
+                       "★ 检查【并入】更新流程:点更新先查最新版、显示出来,再下载安装(用户裁定 2026-07-31)");
                 Assert(sdSrc.Contains("第三方内核驱动"),
                        "★ 如实写明这是第三方驱动 ——\"察觉不到它的存在\"指的是不用你操作,不是不告诉你");
                 var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");

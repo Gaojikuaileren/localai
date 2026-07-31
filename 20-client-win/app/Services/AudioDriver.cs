@@ -158,21 +158,6 @@ public static class AudioDriver
         => !string.IsNullOrWhiteSpace(expectedSha256)
            && string.Equals(Sha256Of(path), expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// 与清单比对:装没装、要不要更新。
-    /// ★ 同时把【清单自己有多旧】算出来 —— 一份两年没动的清单说"已是最新"是在撒谎。
-    /// </summary>
-    public static string Compare(AudioDriverStatus st, AudioDriverPackage? pkg, DateTime now)
-    {
-        if (pkg is null) return "没有可用的版本清单 —— 无法判断是否有更新。";
-        var age = (int)(now - pkg.ManifestDate).TotalDays;
-        var stale = age > 180 ? $"(★ 这份清单已经 {age} 天没更新过,不能据此断定就是最新)" : "";
-        if (!st.Installed) return $"未安装。清单里的版本:{pkg.Version} {stale}";
-        if (st.Version is null) return $"已安装,但读不到版本号。清单里的版本:{pkg.Version} {stale}";
-        return string.Equals(st.Version, pkg.Version, StringComparison.OrdinalIgnoreCase)
-            ? $"已是清单里的版本({pkg.Version}){stale}"
-            : $"已安装 {st.Version},清单里是 {pkg.Version} —— 可以更新 {stale}";
-    }
 
     /// <summary>
     /// 下载安装包并【校验哈希】。★ 校验不过一律删掉下载的文件并拒绝 ——
@@ -185,6 +170,22 @@ public static class AudioDriver
     ///   版本号一升,写死的 URL 就失效。解析出来的地址会再过一遍官方域白名单;Authenticode 闸在运行前把关,
     ///   所以"抓到哪个版本"都安全。任何一步失败都退回 fallback,绝不因解析失败就装不了。
     /// </summary>
+    /// <summary>
+    /// 解析官方当前最新的下载地址与版本名 —— 「重装 / 更新」里合并进来的【检查】那一步用它:
+    /// 先查到最新版、显示出来,再下载。查不到就退回清单里钉死的回退版本(仍能更新)。
+    /// </summary>
+    public static async Task<(string Url, string Label)> ResolveLatest(string fallbackUrl, string fallbackLabel)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var url = await ResolveLatestUrl(http, fallbackUrl);
+            var label = Path.GetFileNameWithoutExtension(new Uri(url).AbsolutePath);   // VBCABLE_Driver_Pack45
+            return (url, string.IsNullOrWhiteSpace(label) ? fallbackLabel : label);
+        }
+        catch { return (fallbackUrl, fallbackLabel); }
+    }
+
     static async Task<string> ResolveLatestUrl(HttpClient http, string fallback)
     {
         try
@@ -207,7 +208,11 @@ public static class AudioDriver
         return fallback;
     }
 
-    public static async Task<(bool Ok, string Path, string Message)> DownloadAsync(AudioDriverPackage pkg, IProgress<double>? progress = null)
+    /// <param name="resolvedUrl">
+    /// 调用方(合并了检查步骤的更新流程)已经解析好的最新地址;传了就直接用,不再重复解析一次。
+    /// 为空则内部自己解析。
+    /// </param>
+    public static async Task<(bool Ok, string Path, string Message)> DownloadAsync(AudioDriverPackage pkg, IProgress<double>? progress = null, string? resolvedUrl = null)
     {
         Directory.CreateDirectory(OfflineDir);
         var ver = SafeVer(pkg.Version);
@@ -216,9 +221,9 @@ public static class AudioDriver
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-            // ★ 先解析出当前最新的包 URL(VB-Audio 包名带版本号,通用名 404 —— 用户反馈"下载失败"就是这个)。
-            //   抓不到就用清单里钉死的回退版本。Authenticode 闸保证抓到哪个版本都安全。
-            var url = await ResolveLatestUrl(http, pkg.Url);
+            // ★ 解析出当前最新的包 URL(VB-Audio 包名带版本号,通用名 404 —— 用户反馈"下载失败"就是这个)。
+            //   调用方(更新流程)通常已经解析并显示过了,直接沿用;没传才自己解析。抓不到就用回退版本。
+            var url = resolvedUrl ?? await ResolveLatestUrl(http, pkg.Url);
             using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
             resp.EnsureSuccessStatusCode();
 

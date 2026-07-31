@@ -178,11 +178,11 @@ public sealed class SettingsView : UserControl
         if (st.DriverPath is { Length: > 0 })
             _driverBody.Children.Add(Ui.Caption("驱动文件:" + st.DriverPath));
 
+        // ★ 「检查更新」不再单列,【并入「重装 / 更新」】(用户裁定 2026-07-31):
+        //   点更新时先查官方最新版本、把查到的版本显示出来,再下载安装 —— 检查是更新的第一步,
+        //   不是并排的第二个按钮。(旧的独立"检查"还拿占位版本"官方最新"去比对,永远显示"可更新",是误导。)
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         row.Children.Add(Ui.Secondary("重新检测", (_, _) => { RefreshDriver(); }));
-        var check = Ui.Secondary("检查更新", (_, _) => CheckDriverUpdate());
-        check.Margin = new Thickness(8, 0, 0, 0);
-        row.Children.Add(check);
 
         var pkg = AudioDriver.FindOfflinePackage();
         if (!st.Installed || pkg is not null)
@@ -243,12 +243,6 @@ public sealed class SettingsView : UserControl
 
     readonly TextBlock _driverStatus = new();
 
-    void CheckDriverUpdate()
-    {
-        AudioDriverManifest.Reload();
-        var pkg = AudioDriverManifest.Current;
-        _driverStatus.Text = AudioDriver.Compare(AudioDriver.Detect(), pkg, DateTime.Now);
-    }
 
     void InstallDriver()
     {
@@ -277,11 +271,18 @@ public sealed class SettingsView : UserControl
         var pkg = AudioDriverManifest.Current;
         if (pkg is null) { _driverStatus.Text = "没有可用的版本清单,请自备安装包(见下方离线安装说明)。"; return; }
 
-        _driverStatus.Text = $"正在从 VB-Audio 官方下载 {pkg.Version}…";
-        var progress = new Progress<double>(p => _driverStatus.Text = $"正在下载 {pkg.Version} … {p:P0}");
-        var (ok, path, msg) = await AudioDriver.DownloadAsync(pkg, progress);
+        // ★ 第一步 = 检查(已并入更新,不再是单独按钮):查官方当前最新版本,并把查到的显示出来。
+        _driverStatus.Text = "正在检查 VB-Audio 官方最新版本…";
+        var (url, label) = await AudioDriver.ResolveLatest(pkg.Url, pkg.Version);
+
+        // 第二步 = 下载查到的那一版
+        _driverStatus.Text = $"官方最新:{label} —— 正在下载…";
+        var progress = new Progress<double>(p => _driverStatus.Text = $"正在下载 {label} … {p:P0}");
+        var (ok, path, msg) = await AudioDriver.DownloadAsync(pkg, progress, url);
         _driverStatus.Text = msg;
         if (!ok) return;
+
+        // 第三步 = 验签并安装(Authenticode 在 RunInstaller 里把关)
         AudioDriver.RunInstaller(path, out var m2);
         _driverStatus.Text = msg + " " + m2;
     }
