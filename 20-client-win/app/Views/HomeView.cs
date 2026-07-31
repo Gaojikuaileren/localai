@@ -44,8 +44,20 @@ public sealed class HomeView : UserControl
     /// </summary>
     const double WeatherGap = 12;
 
-    /// <summary>折叠城市那一行的高度。★ 两行折叠 + 间隔 = 让左侧日历板块往下延伸的那段空间。</summary>
+    /// <summary>折叠城市那一行的高度(= 摘要行的高度;卡片收起时正好只露出它)。</summary>
     public const double CollapsedCityHeight = 34;
+
+    /// <summary>
+    /// 天气整块的【固定总高】。★ 用户裁定:不管展开的是哪一个,三者始终在同一个固定高度的框内 ——
+    /// 高度会变的话下方板块会跟着上下跳,而且鼠标底下的东西一直在挪。
+    /// </summary>
+    public const double WeatherStackHeight = 300;
+
+    /// <summary>卡片间距(比原来的 12 略紧,好把展开高留够)。</summary>
+    const double CityGap = 10;
+
+    /// <summary>展开态的卡片高度 = 总高 - 两条折叠行 - 两道间隔(倒推,保证总和恒定)。</summary>
+    const double ExpandedCityHeight = WeatherStackHeight - 2 * CollapsedCityHeight - 2 * CityGap;
 
     readonly TextBlock _greeting = new() { FontWeight = FontWeights.SemiBold, FontSize = 30, TextWrapping = TextWrapping.Wrap };
     readonly TextBlock _greetingSub = new() { FontSize = 14, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
@@ -59,8 +71,7 @@ public sealed class HomeView : UserControl
     //   地名/时间/最高最低 —— 折叠是"收起细节",不是"藏起来"。
     //   悬停到折叠行 -> 它展开、其余收起;鼠标离开整块 -> 恢复默认(第 0 个 = 当前所在地)。
     readonly StackPanel _weatherStack = new();
-    FrameworkElement[] _cityExpanded = Array.Empty<FrameworkElement>();
-    FrameworkElement[] _cityCollapsed = Array.Empty<FrameworkElement>();
+    Border[] _cityCards = Array.Empty<Border>();          // 每座城一张卡,高度在折叠/展开之间【动画】
     TextBlock[] _miniTime = Array.Empty<TextBlock>();
     TextBlock[] _miniTemp = Array.Empty<TextBlock>();
     int _weatherFocus;                       // 当前展开的是第几个
@@ -174,11 +185,21 @@ public sealed class HomeView : UserControl
         if (_weatherVisible)
         {
             BuildWeather();
-            // ★ 鼠标离开整块 -> 恢复默认展开项(用户裁定)。挂在栈上而不是每张卡上,
-            //   否则在卡与卡之间移动会反复触发"离开"。
-            _weatherStack.MouseLeave += (_, _) => SetWeatherFocus(0);
-            Grid.SetRow(_weatherStack, 2); Grid.SetColumn(_weatherStack, 1);
-            _root.Children.Add(_weatherStack);
+            // ★★ 固定总高的宿主:不管展开谁,整块高度恒定(用户裁定)。ClipToBounds 让收起的细节被裁掉,
+            //   于是"折叠"就是卡片变矮、摘要行留在原处 —— 而不是换掉一个元素。
+            var weatherHost = new Border
+            {
+                Child = _weatherStack,
+                Height = WeatherStackHeight,
+                ClipToBounds = true,
+            };
+            // ★ 鼠标真的离开整块才恢复默认 —— 【延迟一拍再确认】:
+            //   卡片变高变矮时,光标底下的元素会短暂易主,WPF 会瞬时抛一次 MouseLeave;
+            //   立刻响应的话就会"在武汉上面动一下,啪地跳回科隆"(用户反馈的那个跳)。
+            weatherHost.MouseLeave += (_, _) => ScheduleWeatherReset(weatherHost);
+            weatherHost.MouseEnter += (_, _) => _weatherReset.Stop();
+            Grid.SetRow(weatherHost, 2); Grid.SetColumn(weatherHost, 1);
+            _root.Children.Add(weatherHost);
         }
 
         // ④ 项目方块:占满剩余,平分整宽,可滚动。隐藏则让该行不再占用剩余空间。
@@ -316,92 +337,135 @@ public sealed class HomeView : UserControl
     void BuildWeather()
     {
         _weatherStack.Children.Clear();
-        _shifts.Clear();
-        _hosts.Clear();
         var n = _places.Count;
         _cityTime = new TextBlock[n];
         _cityMeta = new TextBlock[n];
         _cityHourly = new UniformGrid[n];
-        _cityExpanded = new FrameworkElement[n];
-        _cityCollapsed = new FrameworkElement[n];
+        _cityCards = new Border[n];
         _miniTime = new TextBlock[n];
         _miniTemp = new TextBlock[n];
 
         for (int i = 0; i < n; i++)
         {
             var idx = i;
-            _cityExpanded[i] = CityCard(i);
-            _cityExpanded[i].Height = WeatherHeight;
-            _cityCollapsed[i] = CollapsedCity(i);
-            // 悬停折叠行 -> 换成展开它(用户裁定)
-            _cityCollapsed[i].MouseEnter += (_, _) => SetWeatherFocus(idx);
-            _weatherStack.Children.Add(_cityExpanded[i]);
-            _weatherStack.Children.Add(_cityCollapsed[i]);
+            _cityCards[i] = WeatherCard(i);
+            // 悬停这张卡 -> 展开它。★ 挂在【整张卡】上而不是只挂摘要行:
+            //   卡片长高之后鼠标多半落在卡身上,只挂摘要行的话一移动就失去焦点。
+            _cityCards[i].MouseEnter += (_, _) => { _weatherReset.Stop(); SetWeatherFocus(idx, animate: true); };
+            _weatherStack.Children.Add(_cityCards[i]);
         }
-        SetWeatherFocus(_weatherFocus < n ? _weatherFocus : 0);
+        SetWeatherFocus(_weatherFocus < n ? _weatherFocus : 0, animate: false);
         UpdateClocks();
         RelayoutDiscrete();
     }
 
-    /// <summary>切换展开哪一个:被选中的展开、其余折叠成窄行。靠可见性切换,不重建。</summary>
-    void SetWeatherFocus(int i)
-    {
-        if (_cityExpanded.Length == 0) return;
-        if (i < 0 || i >= _cityExpanded.Length) i = 0;
-        _weatherFocus = i;
-        for (int k = 0; k < _cityExpanded.Length; k++)
-        {
-            _cityExpanded[k].Visibility = k == i ? Visibility.Visible : Visibility.Collapsed;
-            _cityCollapsed[k].Visibility = k == i ? Visibility.Collapsed : Visibility.Visible;
-        }
-    }
-
     /// <summary>
-    /// 折叠态的一行:地名 · 时间 · 最高/最低。
-    /// ★ 折叠 = 收起细节,不是藏起来 —— 一眼仍能看到是哪座城、几点、冷热大概。
+    /// 一张城市卡:上面是【始终可见】的摘要行,下面是细节。
+    /// ★ 折叠 = 把卡片高度动画到摘要行的高度,细节被 ClipToBounds 裁掉 ——
+    ///   不是换掉一个元素。这样摘要行【始终待在原处】,鼠标不会因为元素易主而乱跳。
     /// </summary>
-    FrameworkElement CollapsedCity(int i)
+    Border WeatherCard(int i)
     {
-        var place = _places[i];
-        var name = new TextBlock
-        {
-            Text = place.IsCurrent ? place.City + " · 当前" : place.City,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        name.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-        name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        _miniTime[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
-        _miniTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        _miniTemp[i] = new TextBlock { Text = "最高 —  最低 —", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
-        _miniTemp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        _miniTemp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        left.Children.Add(Icons.Make(IconName.Weather, 13, "FgMuted"));
-        var pad = new Border { Width = 6 };
-        left.Children.Add(pad);
-        left.Children.Add(name);
-        left.Children.Add(_miniTime[i]);
-
-        var row = new DockPanel { LastChildFill = false, Margin = new Thickness(12, 0, 12, 0) };
-        DockPanel.SetDock(left, Dock.Left); row.Children.Add(left);
-        DockPanel.SetDock(_miniTemp[i], Dock.Right); row.Children.Add(_miniTemp[i]);
+        var body = new StackPanel();
+        body.Children.Add(MiniRow(i));
+        var detail = CityDetail(i);
+        detail.Height = ExpandedCityHeight - CollapsedCityHeight;
+        body.Children.Add(detail);
 
         var card = new Border
         {
-            Child = row,
+            Child = body,
             Height = CollapsedCityHeight,
-            Margin = new Thickness(0, 0, 0, WeatherGap),
+            Margin = new Thickness(0, 0, 0, CityGap),
             BorderThickness = new Thickness(1),
+            ClipToBounds = true,
             Cursor = System.Windows.Input.Cursors.Hand,
         };
         card.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         card.SetResourceReference(Border.BorderBrushProperty, "Border");
         card.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
         return card;
+    }
+
+    /// <summary>
+    /// 切换展开哪一个。animate=true 时走高度动画(用户要"丝滑切换")。
+    /// ★ 三张卡高度之和恒等于 WeatherStackHeight —— 展开一张、其余收起,总高不变。
+    /// </summary>
+    void SetWeatherFocus(int i, bool animate)
+    {
+        if (_cityCards.Length == 0) return;
+        if (i < 0 || i >= _cityCards.Length) i = 0;
+        if (_weatherFocus == i && animate) return;      // 已经是它了,别重复起动画
+        _weatherFocus = i;
+
+        for (int k = 0; k < _cityCards.Length; k++)
+        {
+            // ★ 展开那张把摘要行右侧的最高/最低隐掉 —— 细节里已经有一行,
+            //   两处同时显示同一个东西看着像排版出了错。
+            if (k < _miniTemp.Length && _miniTemp[k] is { } mtp)
+                mtp.Visibility = k == i ? Visibility.Collapsed : Visibility.Visible;
+            var to = k == i ? ExpandedCityHeight : CollapsedCityHeight;
+            if (!animate)
+            {
+                _cityCards[k].BeginAnimation(FrameworkElement.HeightProperty, null);
+                _cityCards[k].Height = to;
+                continue;
+            }
+            var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(220))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            };
+            _cityCards[k].BeginAnimation(FrameworkElement.HeightProperty, anim);
+        }
+    }
+
+    /// <summary>鼠标离开整块之后延迟恢复默认 —— 见 weatherHost.MouseLeave 处的说明。</summary>
+    readonly DispatcherTimer _weatherReset = new() { Interval = TimeSpan.FromMilliseconds(220) };
+    void ScheduleWeatherReset(FrameworkElement host)
+    {
+        _weatherReset.Stop();
+        void Tick(object? _, EventArgs __)
+        {
+            _weatherReset.Tick -= Tick;
+            _weatherReset.Stop();
+            // ★ 到点再【实地确认】鼠标是不是真的还在外面 —— 只信一次瞬时事件会误判
+            if (!host.IsMouseOver) SetWeatherFocus(0, animate: true);
+        }
+        _weatherReset.Tick += Tick;
+        _weatherReset.Start();
+    }
+
+    /// <summary>摘要行:地名 · 时间 ······ 最高/最低。折叠时露出的就是它。</summary>
+    FrameworkElement MiniRow(int i)
+    {
+        var place = _places[i];
+        var name = new TextBlock
+        {
+            Text = place.IsCurrent ? place.City + " · 当前" : place.City,
+            VerticalAlignment = VerticalAlignment.Center,
+            FontWeight = FontWeights.SemiBold,
+        };
+        name.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        name.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        _miniTime[i] = new TextBlock { Text = "—", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        _miniTime[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _miniTime[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        _miniTemp[i] = new TextBlock { Text = "最高 —  最低 —", VerticalAlignment = VerticalAlignment.Center };
+        _miniTemp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _miniTemp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        left.Children.Add(Icons.Make(IconName.Weather, 13, "FgSecondary"));
+        left.Children.Add(new Border { Width = 6 });
+        left.Children.Add(name);
+        left.Children.Add(_miniTime[i]);
+
+        var row = new DockPanel { LastChildFill = false, Height = CollapsedCityHeight, Margin = new Thickness(12, 0, 12, 0) };
+        DockPanel.SetDock(left, Dock.Left); row.Children.Add(left);
+        DockPanel.SetDock(_miniTemp[i], Dock.Right); row.Children.Add(_miniTemp[i]);
+        return row;
     }
 
     /// <summary>
@@ -419,7 +483,12 @@ public sealed class HomeView : UserControl
     }
 
     // ---------------------------------------------------------------- 城市卡
-    FrameworkElement CityCard(int i)
+    /// <summary>
+    /// 一张城市卡的【细节部分】(温度/状态/曲线/逐小时)。
+    /// ★ 不再自带 Ui.Panel 外壳与标题 —— 外壳归 WeatherCard,城市名在摘要行里。
+    /// 折叠时它被 ClipToBounds 裁掉,而不是被换掉。
+    /// </summary>
+    FrameworkElement CityDetail(int i)
     {
         var place = _places[i];
         var city = place.City;
@@ -433,7 +502,10 @@ public sealed class HomeView : UserControl
         _cityMeta[i].SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _cityMeta[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        var timeCol = Ui.Stack(_cityTime[i], _cityMeta[i]);
+        // ★ 大时间【不进可视树】:摘要行已经显示时间了。
+        //   保留字段是因为 UpdateClocks 仍写它(写一个不在树上的控件无害),
+        //   这样时钟逻辑不用为版面变动而改。
+        var timeCol = Ui.Stack(_cityMeta[i]);
         timeCol.HorizontalAlignment = HorizontalAlignment.Right;
         DockPanel.SetDock(timeCol, Dock.Right);
 
@@ -478,177 +550,15 @@ public sealed class HomeView : UserControl
         DockPanel.SetDock(_cityHourly[i], Dock.Bottom); inner.Children.Add(_cityHourly[i]);
         inner.Children.Add(curve);
 
-        var title = string.IsNullOrEmpty(tag) ? city : $"{city} · {tag}";
-        // 所有卡片【同一边距】-> 宽度完全相等(末尾多出的一段由容器负边距吸收)
-        var card = Ui.Panel(title, inner, IconName.Weather, new Thickness(0, 0, WeatherGap, 0));
-
-        if (!draggable)
-        {
-            // 首格 = 当前所在地,固定不动。不给拖动光标,也不放角标。
-            return card;
-        }
-
-        // 右下角角标:提示这张卡可以拖(靠角标本身表达,不用 ToolTip)
-        var grip = new System.Windows.Shapes.Path
-        {
-            Data = Geometry.Parse("M1,7 L7,1 M1,11 L11,1 M5,11 L11,5"),
-            StrokeThickness = 1.5,
-            StrokeEndLineCap = PenLineCap.Round,
-            StrokeStartLineCap = PenLineCap.Round,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 0, 7, 5),
-            IsHitTestVisible = false,
-            Opacity = 0.55,
-        };
-        grip.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgSecondary");
-
-        // ★ 只有【右下角这块手柄区】才起手拖动 —— 不是整块板块(用户裁定)。
-        //   角标细、不好点,所以给它一个 30×30 的透明命中区兜住整个角。
-        //   卡片自身的右外边距因"是否末格"而不同(12 或 0),命中区/角标都要把它算进来,
-        //   否则末格的角落会偏出 12px。
-        var gripZone = new Grid
-        {
-            Width = 30,
-            Height = 30,
-            Background = System.Windows.Media.Brushes.Transparent,   // 透明但可命中
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 0, WeatherGap, 0),
-            Cursor = System.Windows.Input.Cursors.SizeAll,
-        };
-        gripZone.Children.Add(grip);
-
-        var host = new Grid();
-        host.Children.Add(card);
-        host.Children.Add(gripZone);
-
-        var shift = new TranslateTransform();
-        host.RenderTransform = shift;
-        _hosts[i] = host;
-        _shifts[i] = shift;
-
-        // ★ 横向拖拽换位【已停用】(2026-07-31 改成竖排折叠之后):
-        //   那套拖拽算的是横向位移(dx),而现在只有一张展开、其余是折叠行 ——
-        //   横拖无处可去。而且拖拽与悬停展开会打架。
-        //   需要改顺序时去【设置 › 地点】改 —— 不在这里留一个拖不动的把手。
-        gripZone.Visibility = Visibility.Collapsed;
-        return host;
+        inner.Margin = new Thickness(12, 0, 12, 10);
+        return inner;
     }
 
-    // ---------------------------------------------------------------- 拖拽排序(手动实现)
-    // ★ 为什么不用 WPF 的 DragDrop.DoDragDrop:那是 OLE 拖放,它【根本不移动元素】,
-    //   只换一个拖放光标 —— 所以"被拖的卡不跟随鼠标"是必然结果(用户反馈)。
-    //   而且让位动画挂在 DragOver 上,该事件持续触发,动画被反复重启,看起来就"很抽"。
-    // 现在改为自己捕获鼠标:
-    //   · 被拖的卡【直接跟手】(逐帧设位移,不加动画,才不会有迟滞感);
-    //   · 其它卡只在【目标位置改变时】才动一次动画(不再每次移动都重启);
-    //   · 松手时提交新顺序。
-    readonly Dictionary<int, Grid> _hosts = new();
-    readonly Dictionary<int, TranslateTransform> _shifts = new();
-    int? _dragIndex;
-    int _dragTarget;
-    Point _dragOrigin;
+    // ★ 拖拽换位整段【已删】(2026-07-31 改成固定总高 + 高度动画之后):
+    //   卡片不再有拖拽把手,那套按 dx 算位移的机器已无人调用 ——
+    //   留着只会让下一个人以为它还在工作。要改顺序去【设置 › 地点】。
 
-    void BeginDrag(int index, System.Windows.Input.MouseButtonEventArgs e)
-    {
-        _dragIndex = index;
-        _dragTarget = index;
-        _dragOrigin = e.GetPosition(_weatherStack);
-        if (_hosts.TryGetValue(index, out var host))
-        {
-            Panel.SetZIndex(host, 10);          // 拖起来的卡浮在其它卡之上
-            host.Opacity = 0.94;
-        }
-        _weatherStack.CaptureMouse();
-        _weatherStack.MouseMove += OnDragMove;
-        _weatherStack.MouseLeftButtonUp += OnDragEnd;
-        _weatherStack.LostMouseCapture += OnDragLost;
-    }
 
-    void OnDragMove(object? sender, System.Windows.Input.MouseEventArgs e)
-    {
-        if (_dragIndex is not int from) return;
-        var dx = e.GetPosition(_weatherStack).X - _dragOrigin.X;
-
-        // 被拖的卡逐帧跟手 —— 不用动画,否则永远追不上鼠标
-        if (_shifts.TryGetValue(from, out var t))
-        {
-            t.BeginAnimation(TranslateTransform.XProperty, null);   // 清掉可能残留的动画
-            t.X = dx;
-        }
-
-        // 目标位置 = 位移换算成整数格;只在【变化时】重排让位,避免动画被反复重启
-        var step = ColumnWidth();
-        var target = Math.Clamp(from + (int)Math.Round(dx / Math.Max(1, step)), 1, _places.Count - 1);
-        if (target == _dragTarget) return;
-        _dragTarget = target;
-        ApplyGaps(from, target, step);
-    }
-
-    /// <summary>把"若放在 target"的结果预演出来:被跨过的卡朝相反方向让开一格。</summary>
-    void ApplyGaps(int from, int target, double step)
-    {
-        for (int k = 1; k < _places.Count; k++)
-        {
-            if (k == from) continue;                       // 被拖的那张由鼠标控制
-            double to = 0;
-            if (from < target && k > from && k <= target) to = -step;
-            else if (from > target && k >= target && k < from) to = step;
-            AnimateShift(k, to);
-        }
-    }
-
-    void OnDragEnd(object? sender, System.Windows.Input.MouseButtonEventArgs e) => FinishDrag(commit: true);
-    void OnDragLost(object? sender, System.Windows.Input.MouseEventArgs e) => FinishDrag(commit: false);
-
-    void FinishDrag(bool commit)
-    {
-        if (_dragIndex is not int from) return;
-        var target = _dragTarget;
-
-        _weatherStack.MouseMove -= OnDragMove;
-        _weatherStack.MouseLeftButtonUp -= OnDragEnd;
-        _weatherStack.LostMouseCapture -= OnDragLost;
-        if (_weatherStack.IsMouseCaptured) _weatherStack.ReleaseMouseCapture();
-        _dragIndex = null;
-
-        var swap = commit && target != from;
-        // ★ 松手要【滑过去】而不是瞬间弹过去(用户裁定):
-        //   先把被拖的卡从当前手位平滑动画到目标格位,动画结束后才重建列表。
-        //   重建时新卡就在目标位置、位移为 0 —— 与动画终点像素重合,所以看不到跳变。
-        var settleTo = swap ? (target - from) * ColumnWidth() : 0;
-
-        void Land()
-        {
-            if (_hosts.TryGetValue(from, out var h2)) { Panel.SetZIndex(h2, 0); h2.Opacity = 1; }
-            if (swap) MovePlace(from, target);   // 重建天气区,位移归零
-        }
-
-        if (_shifts.TryGetValue(from, out var t))
-        {
-            var anim = new DoubleAnimation(settleTo, TimeSpan.FromMilliseconds(190))
-            { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
-            anim.Completed += (_, _) => Land();
-            // 从当前手位起算:先把动画值锚在当前 X,避免从 0 开始跳一下
-            t.BeginAnimation(TranslateTransform.XProperty, null);
-            var fromX = t.X;
-            anim.From = fromX;
-            t.BeginAnimation(TranslateTransform.XProperty, anim);
-        }
-        else Land();
-
-        // 其余卡同步滑回各自的最终位置(它们在拖动期间已经让位到那里了)
-        if (!swap) for (int k = 0; k < _places.Count; k++) if (k != from) AnimateShift(k, 0);
-    }
-
-    void AnimateShift(int index, double toX)
-    {
-        if (!_shifts.TryGetValue(index, out var t)) return;
-        var anim = new DoubleAnimation(toX, TimeSpan.FromMilliseconds(170))
-        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
-        t.BeginAnimation(TranslateTransform.XProperty, anim);
-    }
 
     double ColumnWidth()
     {

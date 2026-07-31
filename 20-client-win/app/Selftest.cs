@@ -2282,9 +2282,8 @@ public static class Selftest
 
                 // ★ 横向拖拽换位已停用(2026-07-31 改成竖排折叠):只剩一张展开卡 + 两行折叠,
                 //   按 dx 算的横拖无处可去,而且会与悬停展开打架。
-                Assert(homeTodo.Contains("gripZone.Visibility = Visibility.Collapsed"),
-                       "★ 竖排折叠后不再留一个拖不动的把手");
-                Assert(!homeTodo.Contains("card.PreviewMouseLeftButtonDown"), "整块卡片不作为拖拽起手区");
+                Assert(!homeTodo.Contains("void BeginDrag(") && !homeTodo.Contains("AnimateShift"),
+                       "★ 拖拽换位整段已删干净 —— 卡片没把手了,留着只会让下一个人以为它还在工作");
             }
             var todoEd = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
             if (todoEd is not null)
@@ -2600,10 +2599,16 @@ public static class Selftest
                     Assert(!homeSrc.Contains("i < _places.Count - 1 ? 12"),
                            "不再按'是否末格'给不同边距(那会让末格宽出一截)");
                     // ★ 天气改成【一展开 + 其余折叠】的竖排(用户裁定 2026-07-31)
-                    Assert(homeSrc.Contains("void SetWeatherFocus(int i)") && homeSrc.Contains("_cityCollapsed"),
-                           "★ 天气:一张展开、其余折叠成窄行");
-                    Assert(homeSrc.Contains("_weatherStack.MouseLeave"),
-                           "★ 鼠标离开整块 -> 恢复默认展开项");
+                    Assert(homeSrc.Contains("void SetWeatherFocus(int i, bool animate)") && homeSrc.Contains("_cityCards"),
+                           "★ 天气:一张展开、其余折叠(靠高度动画,不是换元素)");
+                    Assert(homeSrc.Contains("const double WeatherStackHeight") && homeSrc.Contains("Height = WeatherStackHeight"),
+                           "★★ 整块【固定总高】—— 不管展开哪一个,三者始终在同一个框内(用户裁定)");
+                    Assert(homeSrc.Contains("ExpandedCityHeight = WeatherStackHeight - 2 * CollapsedCityHeight"),
+                           "★ 展开高由总高【倒推】,保证三张之和恒等于总高");
+                    Assert(homeSrc.Contains("BeginAnimation(FrameworkElement.HeightProperty, anim)"),
+                           "★ 切换走高度动画(用户要丝滑切换)");
+                    Assert(homeSrc.Contains("ScheduleWeatherReset") && homeSrc.Contains("!host.IsMouseOver"),
+                           "★★ 离开后【延迟再实地确认】才恢复默认 —— 卡片变高时光标底下的元素会短暂易主,WPF 会瞬时抛 MouseLeave,立刻响应就会“啦地跳回科隆”");
                     Assert(homeSrc.Contains("Grid.SetRowSpan(calPanel, 2)"),
                            "★ 日历往下延伸跨两行,与右侧天气栈对齐");
                 }
