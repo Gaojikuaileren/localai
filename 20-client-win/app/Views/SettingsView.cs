@@ -175,6 +175,12 @@ public sealed class SettingsView : UserControl
         line.Margin = new Thickness(0, 8, 0, 0);
         line.SetResourceReference(TextBlock.ForegroundProperty, st.Installed ? "FgPrimary" : "RiskWarning");
         _driverBody.Children.Add(line);
+
+        // ★ 已安装 -> 显示【安装位置】,一行可复制的只读路径(用户裁定 2026-07-31)。
+        //   安装位置由 VB-CABLE 自己的安装器固定,客户端改不了,所以这里【只读】——
+        //   给一个能编辑的框会让人以为改了它就能挪动 VB-CABLE,那是骗人。要复制走用旁边的按钮。
+        if (st.Installed && st.InstallLocation is { Length: > 0 } loc)
+            _driverBody.Children.Add(CopyablePath("安装位置", loc));
         if (st.DriverPath is { Length: > 0 })
             _driverBody.Children.Add(Ui.Caption("驱动文件:" + st.DriverPath));
 
@@ -243,6 +249,37 @@ public sealed class SettingsView : UserControl
 
     readonly TextBlock _driverStatus = new();
 
+
+    /// <summary>一行【只读、可复制】的路径:标签 + 只读输入框(可选中)+ 复制按钮。</summary>
+    FrameworkElement CopyablePath(string label, string path)
+    {
+        var lab = Ui.Caption(label + ":");
+        lab.VerticalAlignment = VerticalAlignment.Center;
+        lab.Margin = new Thickness(0, 0, 8, 0);
+
+        // 只读输入框:用户可选中复制;IsReadOnly 明示"这里改了也没用"(安装位置由 VB-CABLE 决定)。
+        var box = new TextBox
+        {
+            Text = path,
+            IsReadOnly = true,
+            VerticalAlignment = VerticalAlignment.Center,
+            Padding = new Thickness(8, 4, 8, 4),
+            MinWidth = 220,
+        };
+
+        var copy = Ui.Secondary("复制", (_, _) =>
+        {
+            try { System.Windows.Clipboard.SetText(path); _driverStatus.Text = "已复制路径到剪贴板。"; }
+            catch { _driverStatus.Text = "复制失败(剪贴板被占用),请手动选中复制。"; }
+        });
+        copy.Margin = new Thickness(8, 0, 0, 0);
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        row.Children.Add(lab);
+        row.Children.Add(box);
+        row.Children.Add(copy);
+        return row;
+    }
 
     void InstallDriver()
     {

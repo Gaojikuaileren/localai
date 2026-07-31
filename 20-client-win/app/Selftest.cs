@@ -1388,6 +1388,8 @@ public static class Selftest
                        "★「检查更新」不再是单独按钮");
                 Assert(sdSrc.Contains("正在检查 VB-Audio 官方最新版本") && sdSrc.Contains("ResolveLatest("),
                        "★ 检查【并入】更新流程:点更新先查最新版、显示出来,再下载安装(用户裁定 2026-07-31)");
+                Assert(sdSrc.Contains("CopyablePath(\"安装位置\"") && sdSrc.Contains("IsReadOnly = true"),
+                       "★ 已安装时显示一行【只读、可复制】的安装位置(位置由 VB-CABLE 决定,改不了 -> 只读)");
                 Assert(sdSrc.Contains("第三方内核驱动"),
                        "★ 如实写明这是第三方驱动 ——\"察觉不到它的存在\"指的是不用你操作,不是不告诉你");
                 var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");
@@ -1415,6 +1417,13 @@ public static class Selftest
                            "★ 下载前动态解析最新 PackNN(通用名会 404 —— 用户反馈的“下载失败”成因)");
                     Assert(adSrc2.Contains("!string.IsNullOrWhiteSpace(pkg.Sha256) && !Verify(target"),
                            "★ 哈希退为可选:填了才比对(把关交给签名)");
+                    Assert(adSrc2.Contains("Path.Combine(DownloadsDir(), \"LocalAI-VBCABLE\")"),
+                           "★ 安装包默认下到【下载】文件夹的专属子目录(用户裁定 2026-07-31)");
+                    Assert(adSrc2.Contains("Contains(\"cable\", StringComparison.OrdinalIgnoreCase)")
+                           && adSrc2.Contains("public static string? FindOfflinePackage()"),
+                           "★ 自备包扫描只认名字含 cable 的(下载夹里别的 exe/zip 不会被当安装包)");
+                    Assert(adSrc2.Contains("InstallFolderOf(e.Command)") && adSrc2.Contains("InstallLocation"),
+                           "★ Detect 带出安装位置(注册表 InstallLocation,退回卸载程序目录)");
                 }
                 var acSrc = TryReadSource(Path.Combine("Services", "Authenticode.cs"));
                 if (acSrc is not null)

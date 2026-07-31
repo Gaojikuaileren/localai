@@ -25,7 +25,8 @@ namespace LocalAI.Client.Services;
 /// <param name="Installed">驱动是否已就位</param>
 /// <param name="Version">驱动文件版本号(读不到就是 null)</param>
 /// <param name="DriverPath">找到的驱动文件,便于用户自行核对</param>
-public sealed record AudioDriverStatus(bool Installed, string? Version, string? DriverPath);
+/// <param name="InstallLocation">VB-CABLE 的安装文件夹(取自注册表 InstallLocation,退回卸载程序所在目录)。给设置里那行可复制路径用。</param>
+public sealed record AudioDriverStatus(bool Installed, string? Version, string? DriverPath, string? InstallLocation = null);
 
 /// <summary>安装包清单:版本、下载地址、SHA-256、大小。★ 哈希是这份清单存在的唯一理由。</summary>
 public sealed record AudioDriverPackage(string Version, string Url, string Sha256, long Bytes, DateTime ManifestDate);
@@ -54,13 +55,16 @@ public static class AudioDriver
             {
                 var sysPath = FindDriverSys();   // 有就显示真 .sys 路径;没有(还没拷进磁盘/待重启)就不显示文件行
                 // 版本:先取注册表 DisplayVersion;没有就退回 .sys 的文件版本
-                var ver = ReadDisplayVersion(e.Command);
+                var ver = ReadUninstallValue(e.Command, "DisplayVersion");
                 if (string.IsNullOrWhiteSpace(ver) && sysPath is not null)
                 {
                     var fv = FileVersionInfo.GetVersionInfo(sysPath).FileVersion;
                     ver = string.IsNullOrWhiteSpace(fv) ? null : fv;
                 }
-                return new AudioDriverStatus(true, ver, sysPath);
+                // 安装位置:注册表 InstallLocation;没有就退回卸载程序所在目录(VB-CABLE 的 setup 就在装到的那个文件夹里)
+                var loc = ReadUninstallValue(e.Command, "InstallLocation");
+                if (string.IsNullOrWhiteSpace(loc)) loc = InstallFolderOf(e.Command);
+                return new AudioDriverStatus(true, ver, sysPath, loc);
             }
 
             // ★★ 没有注册表卸载项 = 未安装(2026-07-31 实测教训:用户卸载后仍报"已安装"就是这)。
@@ -76,8 +80,8 @@ public static class AudioDriver
         }
     }
 
-    /// <summary>从注册表卸载项读 DisplayVersion(和 DisplayName 同一条项)。读不到返回 null。</summary>
-    static string? ReadDisplayVersion(string uninstallCommand)
+    /// <summary>在注册表卸载项里(按 UninstallString 定位那一条)读某个值,如 DisplayVersion / InstallLocation。读不到返回 null。</summary>
+    static string? ReadUninstallValue(string uninstallCommand, string valueName)
     {
         try
         {
@@ -96,7 +100,7 @@ public static class AudioDriver
                         using var sub = key.OpenSubKey(name);
                         if (sub?.GetValue("UninstallString") as string == uninstallCommand)
                         {
-                            var v = sub.GetValue("DisplayVersion") as string;
+                            var v = sub.GetValue(valueName) as string;
                             return string.IsNullOrWhiteSpace(v) ? null : v;
                         }
                     }
@@ -104,6 +108,22 @@ public static class AudioDriver
         }
         catch { }
         return null;
+    }
+
+    /// <summary>从卸载命令推出安装文件夹 —— VB-CABLE 的 setup exe 就在它装到的那个文件夹里。处理带引号的命令。</summary>
+    static string? InstallFolderOf(string uninstallCommand)
+    {
+        try
+        {
+            var cmd = uninstallCommand.Trim();
+            if (cmd.StartsWith("\""))
+            {
+                var end = cmd.IndexOf('"', 1);
+                if (end > 1) cmd = cmd.Substring(1, end - 1);
+            }
+            return Path.GetDirectoryName(cmd);
+        }
+        catch { return null; }
     }
 
     /// <summary>在 DriverStore\FileRepository 与 System32\drivers 里找 VB-CABLE 的 .sys(递归)。</summary>
@@ -126,7 +146,29 @@ public static class AudioDriver
     }
 
     /// <summary>用户自备安装包的位置:{state}\audio-driver\ 下任意 exe/zip。离线场景走这里。</summary>
-    public static string OfflineDir => Path.Combine(AppPaths.StateDir, "audio-driver");
+    /// <summary>
+    /// VB-CABLE 安装包的存放文件夹 = 用户【下载】文件夹下一个专属子目录(用户裁定 2026-07-31)。
+    /// 一键安装把包下到这里;自备安装包也放这里。
+    /// ★ 用专属子目录而不是下载根:下载根里成百上千个无关文件,直接扫既慢、又可能把别的 exe/zip 当成安装包。
+    /// </summary>
+    public static string OfflineDir => Path.Combine(DownloadsDir(), "LocalAI-VBCABLE");
+
+    /// <summary>用户的下载文件夹(known folder;取不到就退回 %USERPROFILE%\Downloads)。</summary>
+    static string DownloadsDir()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders");
+            if (key?.GetValue("{374DE290-123F-4565-9164-39C4925E467B}") is string p && p.Length > 0)
+            {
+                var expanded = Environment.ExpandEnvironmentVariables(p);
+                if (Directory.Exists(expanded)) return expanded;
+            }
+        }
+        catch { }
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+    }
 
     /// <summary>只留安全字符 —— pkg.Version 可能来自用户自备清单,直接拼进路径会有 ..\ 穿越(审计 2026-07-31)。</summary>
     static string SafeVer(string v) => new string((v ?? "").Where(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-').ToArray());
@@ -136,9 +178,11 @@ public static class AudioDriver
         try
         {
             if (!Directory.Exists(OfflineDir)) return null;
+            // ★ 只认名字含 "cable" 的 exe/zip(防御:即便文件夹里混进别的下载,也不会被当成安装包)。
             return Directory.EnumerateFiles(OfflineDir)
-                            .FirstOrDefault(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                                              || f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+                            .FirstOrDefault(f => (f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                                                  || f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                                              && Path.GetFileName(f).Contains("cable", StringComparison.OrdinalIgnoreCase));
         }
         catch { return null; }
     }
