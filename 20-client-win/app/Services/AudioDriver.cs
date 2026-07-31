@@ -123,6 +123,7 @@ public static class AudioDriver
     {
         Directory.CreateDirectory(OfflineDir);
         var ver = SafeVer(pkg.Version);
+        if (string.IsNullOrWhiteSpace(ver)) ver = "download";   // "官方最新" 清洗后为空 -> 用固定基名,别落成 vbcable-.zip
         var target = Path.Combine(OfflineDir, $"vbcable-{ver}.tmp");
         try
         {
@@ -145,8 +146,10 @@ public static class AudioDriver
                 }
             }
 
-            // ★ 校验:不过就【销毁】,不留在盘上等人误点
-            if (!Verify(target, pkg.Sha256))
+            // ★ 哈希是【可选的额外一层】(信任模型改为 Authenticode 签名后):
+            //   清单里填了 Sha256 就多比对一次,不过就【销毁】,不留在盘上等人误点;
+            //   没填就跳过 —— 真正拦在提权运行前的把关是 RunInstaller 里的 Authenticode 验证。
+            if (!string.IsNullOrWhiteSpace(pkg.Sha256) && !Verify(target, pkg.Sha256))
             {
                 var actual = Sha256Of(target);
                 try { File.Delete(target); } catch { }
@@ -160,7 +163,7 @@ public static class AudioDriver
             var final = Path.Combine(OfflineDir, $"vbcable-{ver}{ext}");
             try { if (File.Exists(final)) File.Delete(final); } catch { }
             File.Move(target, final);
-            return (true, final, $"已下载并通过校验({pkg.Version})。");
+            return (true, final, $"已下载({pkg.Version})。安装前会验证它由 VB-Audio 官方签名。");
         }
         catch (Exception ex)
         {
@@ -279,6 +282,16 @@ public static class AudioDriver
                                       || Path.GetFileName(f).Contains("VBCABLE", StringComparison.OrdinalIgnoreCase));
                 if (setup is null) { message = "压缩包里没找到安装程序(*Setup*.exe)。"; return false; }
                 packagePath = setup;
+            }
+
+            // ★★ 提权运行【之前】必须过 Authenticode 签名(用户裁定 2026-07-31 · 信任模型):
+            //   验证这个 exe 确实由 VB-Audio 官方签发、证书链有效。验不过就【拒绝运行】——
+            //   与安装包哈希闸同一口径:装驱动不可逆且提权,"不确定"必须等于"不做"。
+            if (!Authenticode.VerifySignedByVbAudio(packagePath, out var signer))
+            {
+                message = $"拒绝运行:这个安装程序没通过 VB-Audio 官方签名验证({signer})。"
+                        + "为安全起见不提权运行未经签名核对的驱动安装程序。";
+                return false;
             }
 
             var psi = new ProcessStartInfo

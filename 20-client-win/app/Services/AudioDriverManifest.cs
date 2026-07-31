@@ -42,12 +42,14 @@ public static class AudioDriverManifest
         var user = ClientStore.Load<AudioDriverPackage>(Path);
         if (IsUsable(user)) return user;
 
-        // ② 内置清单 —— 见文件头:哈希未经核对之前故意留空,于是它【用不了】,
-        //    界面会退回离线安装。这是刻意的:宁可少一个便利,不要多一条能被投毒的路。
+        // ② 内置清单。★ 信任模型改为【Authenticode 签名】(用户裁定 2026-07-31):
+        //    提权运行安装程序前,验证它由 VB-Audio 官方签发(见 Authenticode + AudioDriver.RunInstaller)。
+        //    所以下载不再需要预先钉死哈希 —— 哈希退为【可选的额外一层】(清单里填了才多比对一次)。
+        //    下载来源仍锁死在官方 https 域(见 IsUsable),防清单被本地文件改成任意 URL。
         var builtin = new AudioDriverPackage(
-            Version: "",
+            Version: "官方最新",
             Url: "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack.zip",
-            Sha256: "",                       // ★ 未核对 —— 留空即禁用自动下载
+            Sha256: "",                       // 留空 = 不额外比对哈希;运行前的把关交给 Authenticode 签名
             Bytes: 0,
             ManifestDate: new DateTime(2026, 7, 31));
         return IsUsable(builtin) ? builtin : null;
@@ -66,7 +68,8 @@ public static class AudioDriverManifest
         => p is not null
            && !string.IsNullOrWhiteSpace(p.Version)
            && !string.IsNullOrWhiteSpace(p.Url)
-           && !string.IsNullOrWhiteSpace(p.Sha256)
+           // ★ 不再要求 Sha256 非空 —— 运行前的把关交给 Authenticode 签名(用户裁定 2026-07-31)。
+           //   哈希若填了会作为额外一层比对(见 AudioDriver.DownloadAsync),没填也能下。
            && Uri.TryCreate(p.Url, UriKind.Absolute, out var u)
            && u.Scheme == Uri.UriSchemeHttps                       // 不走明文 http
            && AllowedHosts.Contains(u.Host, StringComparer.OrdinalIgnoreCase);

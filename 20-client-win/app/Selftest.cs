@@ -1326,10 +1326,30 @@ public static class Selftest
                 Assert(!Services.AudioDriver.Verify(tmpPkg, "   "), "空白哈希同样拒绝");
 
                 // ★ 清单三要素缺一不可 —— 缺了就不许自动下载,退回离线安装
+                // ★ Authenticode 签名验证(用户裁定的信任模型)—— 实跑一次 WinVerifyTrust 互操作,
+                //   确认 P/Invoke 编组不崩、逻辑对得上。负路径是确定的:
+                var noSuch = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                 "localai-nope-" + Guid.NewGuid().ToString("N") + ".exe");
+                Assert(!Services.Authenticode.VerifySignedByVbAudio(noSuch, out var acSig1)
+                       && acSig1.Contains("文件不存在"),
+                       "★ 不存在的文件 -> 拒绝(不因此崩)");
+                try
+                {
+                    var unsigned = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                     "localai-sigtest-" + Guid.NewGuid().ToString("N")[..6] + ".exe");
+                    System.IO.File.WriteAllBytes(unsigned, new byte[] { 0x4D, 0x5A, 0, 0 });   // 不是真 exe,但足够验"没签名"
+                    var ok = Services.Authenticode.VerifySignedByVbAudio(unsigned, out var acSig2);
+                    System.IO.File.Delete(unsigned);
+                    Assert(!ok, "★ 没有有效签名的文件 -> 拒绝(WinVerifyTrust 互操作跑通、不崩)");
+                }
+                catch (Exception ex) { Assert(false, "Authenticode 互操作抛异常: " + ex.Message); }
+
                 Assert(!Services.AudioDriverManifest.IsUsable(null), "没有清单 = 不可用");
-                Assert(!Services.AudioDriverManifest.IsUsable(
+                // ★ 信任模型改为 Authenticode 签名(用户裁定 2026-07-31):哈希退为可选,空哈希也能下载,
+                //   真正的把关在提权运行前的签名验证(见 Authenticode + RunInstaller)。
+                Assert(Services.AudioDriverManifest.IsUsable(
                            new Services.AudioDriverPackage("1.0", "https://download.vb-audio.com/y", "", 1, DateTime.Now)),
-                       "★ 清单没有哈希 = 不许自动下载");
+                       "★ 官方域 + 版本齐全即可下载(哈希可选,把关交给 Authenticode 签名)");
                 Assert(!Services.AudioDriverManifest.IsUsable(
                            new Services.AudioDriverPackage("", "https://download.vb-audio.com/y", new string('a', 64), 1, DateTime.Now)),
                        "清单没有版本 = 不可用");
@@ -1344,11 +1364,10 @@ public static class Selftest
                            new Services.AudioDriverPackage("1.0", "http://download.vb-audio.com/y", new string('a', 64), 1, DateTime.Now)),
                        "★ 明文 http 也不认(只走 https)");
 
-                // ★ 内置清单【故意留空哈希】—— 没在本机核对过官方安装包,
-                //   凭印象写一串十六进制不是默认值,是伪造证据。所以它现在就该是"不可用"。
-                Assert(Services.AudioDriverManifest.Current is null
-                       || !string.IsNullOrWhiteSpace(Services.AudioDriverManifest.Current.Sha256),
-                       "★ 生效的清单要么没有,要么带真哈希 —— 不存在\"有清单但没哈希\"这种状态");
+                // ★ 内置清单现在【可用】(官方域 + 版本),哈希留空 —— 把关交给 Authenticode 签名。
+                Assert(Services.AudioDriverManifest.Current is not null
+                       && Services.AudioDriverManifest.Current.Url.StartsWith("https://download.vb-audio.com"),
+                       "★ 内置清单可用且下载来源锁死在 VB-Audio 官方域");
 
                 // 清单太旧时必须说出来 —— 一份两年没动的清单说"已是最新"是在撒谎
                 var old = new Services.AudioDriverPackage("1.0", "https://x/y", new string('a', 64), 1,
@@ -1387,6 +1406,20 @@ public static class Selftest
                            "★ 传进来是 .zip 先解包再找安装程序(官方发的是 zip)");
                     Assert(adSrc2.Contains("static string SafeVer"),
                            "★ pkg.Version 拼进路径前先清洗(挡路径穿越)");
+                    Assert(adSrc2.Contains("Authenticode.VerifySignedByVbAudio(packagePath, out var signer)"),
+                           "★★ 提权运行安装程序前必须过 Authenticode 签名(用户裁定:信任模型 = 官方签名)");
+                    Assert(adSrc2.Contains("!string.IsNullOrWhiteSpace(pkg.Sha256) && !Verify(target"),
+                           "★ 哈希退为可选:填了才比对(把关交给签名)");
+                }
+                var acSrc = TryReadSource(Path.Combine("Services", "Authenticode.cs"));
+                if (acSrc is not null)
+                {
+                    Assert(acSrc.Contains("WinVerifyTrust") && acSrc.Contains("WINTRUST_ACTION_GENERIC_VERIFY_V2"),
+                           "★ 用 WinVerifyTrust 验签名有效 + 证书链通到受信任根");
+                    Assert(acSrc.Contains("Contains(\"VB-Audio\", StringComparison.OrdinalIgnoreCase)"),
+                           "★ 且签名者主体必须含 VB-Audio(是它,不是别的合法签名者)");
+                    Assert(acSrc.Contains("WTD_STATEACTION_CLOSE"),
+                           "★ WinVerifyTrust 验完再 CLOSE 释放内部状态(不泄漏)");
                 }
                 Assert(TryReadSource(Path.Combine("Services", "AudioDevices.cs"))?.Contains("PropVariantClear") == true,
                        "★ 枚举设备时 PROPVARIANT / RCW 都释放(高频刷新路径,不能泄)");
@@ -2867,8 +2900,8 @@ public static class Selftest
                 {
                     Assert(sv2.Split("NotifyPoolChanged();").Length - 1 >= 2,
                            "★ 设置里增删语言池要广播 —— 设置页是覆盖式的,底下那个翻译界面不重建");
-                    Assert(sv2.Contains("校验不了这个安装包 —— 已拒绝运行"),
-                           "★ 没有清单就不装 —— 装驱动提权且不可逆,“不确定”必须等于“不做”");
+                    Assert(sv2.Contains("Authenticode 签名在这里把关"),
+                           "★ 提权运行前由 Authenticode 签名把关(装驱动提权且不可逆,“不确定”必须等于“不做”)");
                 }
                 if (tb2 is not null)
                 {
