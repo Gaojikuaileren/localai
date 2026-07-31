@@ -196,11 +196,30 @@ public sealed class SettingsView : UserControl
             //   手动拆内核驱动的残留会让下次安装也装不上,严重时整机没声音。
             var uninstall = Ui.Danger("一键卸载", (_, _) =>
             {
+                // ★ 先查注册表、再问(2026-07-31 审计):把实际会运行的那一条给用户核对过再启动 ——
+                //   而不是先弹一个写死"卸载 VB-CABLE"的框、点了之后才去查会启动哪个 exe。
+                var hits = AudioDriver.FindUninstallers();
+                if (hits.Count == 0)
+                {
+                    _driverStatus.Text = "找不到官方卸载入口 —— 请在「设置 › 应用」里卸载。"
+                        + "我们不会自己去删驱动文件:手动拆内核驱动的残留会让下次装不上。";
+                    return;
+                }
+                if (hits.Count > 1)
+                {
+                    // fail-closed(同 D45 路子):拿不准是哪一个就不替用户下手
+                    _driverStatus.Text = "找到多个 VB-Audio CABLE 卸载入口:"
+                        + string.Join(" / ", hits.Select(h => h.DisplayName))
+                        + " —— 为免卸错,请到「设置 › 应用」里自己选。";
+                    return;
+                }
+                var hit = hits[0];
                 if (!ConfirmDialog.Show("卸载虚拟声卡",
-                        $"将卸载 {AudioDriver.ProductName}。卸载后同传的译文语音无法送进会议软件,"
-                        + "但文字翻译与对方字幕不受影响。走官方卸载程序,会弹一次系统管理员提示。",
+                        $"将卸载:{hit.DisplayName}\n将运行:{hit.Command}\n\n"
+                        + "卸载后同传的译文语音无法送进会议软件,但文字翻译与对方字幕不受影响。"
+                        + "走官方卸载程序,会弹一次系统管理员提示。",
                         confirmText: "卸载", danger: true)) return;
-                AudioDriver.RunUninstaller(out var msg);
+                AudioDriver.RunUninstaller(hit, out var msg);
                 _driverStatus.Text = msg;
             });
             uninstall.Margin = new Thickness(8, 0, 0, 0);

@@ -1328,14 +1328,21 @@ public static class Selftest
                 // ★ 清单三要素缺一不可 —— 缺了就不许自动下载,退回离线安装
                 Assert(!Services.AudioDriverManifest.IsUsable(null), "没有清单 = 不可用");
                 Assert(!Services.AudioDriverManifest.IsUsable(
-                           new Services.AudioDriverPackage("1.0", "https://x/y", "", 1, DateTime.Now)),
+                           new Services.AudioDriverPackage("1.0", "https://download.vb-audio.com/y", "", 1, DateTime.Now)),
                        "★ 清单没有哈希 = 不许自动下载");
                 Assert(!Services.AudioDriverManifest.IsUsable(
-                           new Services.AudioDriverPackage("", "https://x/y", new string('a', 64), 1, DateTime.Now)),
+                           new Services.AudioDriverPackage("", "https://download.vb-audio.com/y", new string('a', 64), 1, DateTime.Now)),
                        "清单没有版本 = 不可用");
                 Assert(Services.AudioDriverManifest.IsUsable(
-                           new Services.AudioDriverPackage("1.0", "https://x/y", new string('a', 64), 1, DateTime.Now)),
-                       "三要素齐全才可用");
+                           new Services.AudioDriverPackage("1.0", "https://download.vb-audio.com/y", new string('a', 64), 1, DateTime.Now)),
+                       "三要素齐全 + 官方域才可用");
+                // ★ 下载来源白名单(2026-07-31 审计):用户自备清单能换版本/换官方镜像,但不能换信任来源。
+                Assert(!Services.AudioDriverManifest.IsUsable(
+                           new Services.AudioDriverPackage("1.0", "https://evil.example.com/x.zip", new string('a', 64), 1, DateTime.Now)),
+                       "★ 非 VB-Audio 官方域的下载地址一律不可用(挡本地清单被改成任意 URL + 自证哈希)");
+                Assert(!Services.AudioDriverManifest.IsUsable(
+                           new Services.AudioDriverPackage("1.0", "http://download.vb-audio.com/y", new string('a', 64), 1, DateTime.Now)),
+                       "★ 明文 http 也不认(只走 https)");
 
                 // ★ 内置清单【故意留空哈希】—— 没在本机核对过官方安装包,
                 //   凭印象写一串十六进制不是默认值,是伪造证据。所以它现在就该是"不可用"。
@@ -1368,6 +1375,21 @@ public static class Selftest
                 var inst = Slice(sdSrc, "void InstallDriver()", "async void DownloadThenInstall");
                 Assert(inst is not null && inst.Contains("已拒绝运行"),
                        "★ 自备的安装包同样要过校验");
+                Assert(sdSrc.Contains("var hits = AudioDriver.FindUninstallers();")
+                       && sdSrc.Contains("hits.Count > 1"),
+                       "★ 一键卸载先查后问:多个候选就交给用户自己选(不提权启动错的卸载程序)");
+                var adSrc2 = TryReadSource(Path.Combine("Services", "AudioDriver.cs"));
+                if (adSrc2 is not null)
+                {
+                    Assert(adSrc2.Contains("publisher.Contains(\"VB-Audio\"") && adSrc2.Contains("display.Contains(\"CABLE\""),
+                           "★ 卸载匹配收紧:Publisher=VB-Audio 且名字含 CABLE(不再把兄弟产品拉进来)");
+                    Assert(adSrc2.Contains("ExtractToDirectory"),
+                           "★ 传进来是 .zip 先解包再找安装程序(官方发的是 zip)");
+                    Assert(adSrc2.Contains("static string SafeVer"),
+                           "★ pkg.Version 拼进路径前先清洗(挡路径穿越)");
+                }
+                Assert(TryReadSource(Path.Combine("Services", "AudioDevices.cs"))?.Contains("PropVariantClear") == true,
+                       "★ 枚举设备时 PROPVARIANT / RCW 都释放(高频刷新路径,不能泄)");
             }
 
             // ---- 示例同传记录(用户要求:放到普通会话列表里可测) ----

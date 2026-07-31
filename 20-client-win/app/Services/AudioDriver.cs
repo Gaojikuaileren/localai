@@ -68,6 +68,9 @@ public static class AudioDriver
     /// <summary>用户自备安装包的位置:{state}\audio-driver\ 下任意 exe/zip。离线场景走这里。</summary>
     public static string OfflineDir => Path.Combine(AppPaths.StateDir, "audio-driver");
 
+    /// <summary>只留安全字符 —— pkg.Version 可能来自用户自备清单,直接拼进路径会有 ..\ 穿越(审计 2026-07-31)。</summary>
+    static string SafeVer(string v) => new string((v ?? "").Where(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-').ToArray());
+
     public static string? FindOfflinePackage()
     {
         try
@@ -119,7 +122,8 @@ public static class AudioDriver
     public static async Task<(bool Ok, string Path, string Message)> DownloadAsync(AudioDriverPackage pkg, IProgress<double>? progress = null)
     {
         Directory.CreateDirectory(OfflineDir);
-        var target = Path.Combine(OfflineDir, $"vbcable-{pkg.Version}.tmp");
+        var ver = SafeVer(pkg.Version);
+        var target = Path.Combine(OfflineDir, $"vbcable-{ver}.tmp");
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
@@ -149,7 +153,11 @@ public static class AudioDriver
                 return (false, "", $"哈希校验失败,已删除下载的文件。{Environment.NewLine}期望 {pkg.Sha256}{Environment.NewLine}实得 {actual}");
             }
 
-            var final = Path.Combine(OfflineDir, $"vbcable-{pkg.Version}.exe");
+            // ★ 落盘文件名跟随 URL 的真实扩展名(2026-07-31 审计):官方发的是 .zip,硬编码 .exe 会得到
+            //   一个"伪装成 exe 的 zip",RunInstaller 起它必然失败,还会被 FindOfflinePackage 反复捡起。
+            var ext = Path.GetExtension(new Uri(pkg.Url).AbsolutePath);
+            if (string.IsNullOrWhiteSpace(ext)) ext = ".exe";
+            var final = Path.Combine(OfflineDir, $"vbcable-{ver}{ext}");
             try { if (File.Exists(final)) File.Delete(final); } catch { }
             File.Move(target, final);
             return (true, final, $"已下载并通过校验({pkg.Version})。");
@@ -165,8 +173,18 @@ public static class AudioDriver
     /// 找到已安装的卸载入口(注册表里的卸载项)。★ 找不到就如实返回 null ——
     /// 不去猜路径、更不去手动删驱动文件:那是把系统搞坏的经典方式。
     /// </summary>
-    public static string? FindUninstaller()
+    /// <summary>一条卸载入口:给人看的名字 + 实际会运行的命令。</summary>
+    public sealed record UninstallEntry(string DisplayName, string Command);
+
+    /// <summary>
+    /// 找出所有【VB-CABLE 本体】的卸载入口 —— 收集全部,不"命中第一个就返回"。
+    /// ★ 收紧判定(2026-07-31 审计):此前只要 DisplayName 含 "VB-Audio" 就认,会把兄弟产品
+    ///   (Voicemeeter 等)也拉进来,而确认框却写死"卸载 VB-CABLE" —— 可能提权启动错的卸载程序。
+    ///   现在要求 Publisher = VB-Audio Software 且 DisplayName 含 CABLE;多于一个就交给用户自己选(fail-closed)。
+    /// </summary>
+    public static IReadOnlyList<UninstallEntry> FindUninstallers()
     {
+        var list = new List<UninstallEntry>();
         var branches = new[]
         {
             @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -183,14 +201,18 @@ public static class AudioDriver
                     {
                         using var sub = key.OpenSubKey(name);
                         var display = sub?.GetValue("DisplayName") as string ?? "";
-                        if (!display.Contains("VB-CABLE", StringComparison.OrdinalIgnoreCase)
-                            && !display.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (sub?.GetValue("UninstallString") is string cmd && !string.IsNullOrWhiteSpace(cmd)) return cmd;
+                        var publisher = sub?.GetValue("Publisher") as string ?? "";
+                        // 收紧:必须是 VB-Audio 出版 + 名字含 CABLE(CABLE 家族靠这一条已全覆盖,不再放 VB-Audio 泛匹配)
+                        if (!publisher.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!display.Contains("CABLE", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (sub?.GetValue("UninstallString") is string cmd && !string.IsNullOrWhiteSpace(cmd)
+                            && !list.Any(e => e.Command == cmd))
+                            list.Add(new UninstallEntry(display, cmd));
                     }
                 }
                 catch { /* 读不到就继续找下一处 */ }
             }
-        return null;
+        return list;
     }
 
     /// <summary>
@@ -198,16 +220,11 @@ public static class AudioDriver
     /// 手动拆内核驱动留下的残留会让下次安装也装不上,严重时整机没声音。
     /// 与安装同理:另起一个提权子进程,会弹一次 UAC。
     /// </summary>
-    public static bool RunUninstaller(out string message)
+    /// <summary>运行指定的那一条卸载入口。★ 由调用方【先查后问】,把实际命中的那条给用户核对过再传进来。</summary>
+    public static bool RunUninstaller(UninstallEntry entry, out string message)
     {
         message = "";
-        var cmd = FindUninstaller();
-        if (cmd is null)
-        {
-            message = "找不到官方卸载入口 —— 请在「设置 › 应用」里卸载。"
-                    + "我们不会自己去删驱动文件:手动拆内核驱动的残留会让下次装不上。";
-            return false;
-        }
+        var cmd = entry.Command;
         try
         {
             // UninstallString 可能是带引号的 exe + 参数,拆开再走 ShellExecute
@@ -223,7 +240,7 @@ public static class AudioDriver
                 if (sp > 0) { exe = cmd[..(sp + 4)]; args = cmd[(sp + 5)..].Trim(); }
             }
             Process.Start(new ProcessStartInfo { FileName = exe, Arguments = args, UseShellExecute = true, Verb = "runas" });
-            message = "卸载程序已启动。卸完回到这里点「重新检测」。";
+            message = $"卸载程序已启动({entry.DisplayName})。卸完回到这里点「重新检测」。";
             return true;
         }
         catch (Exception ex)
@@ -244,6 +261,26 @@ public static class AudioDriver
         try
         {
             if (!File.Exists(packagePath)) { message = "安装包不在:" + packagePath; return false; }
+
+            // ★ 传进来是 .zip 就先解包再找真正的安装程序(2026-07-31 审计):VB-Audio 官方只发 .zip。
+            //   哈希闸仍作用在下载/自备的【原包】上,解出来的 exe 来自已验哈希的压缩包,不放松任何校验。
+            if (packagePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                var outDir = Path.Combine(OfflineDir, Path.GetFileNameWithoutExtension(packagePath) + "-unpacked");
+                try
+                {
+                    if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
+                    System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, outDir);
+                }
+                catch (Exception zex) { message = "解压安装包失败:" + zex.Message; return false; }
+                // VB-CABLE 包里的安装程序名形如 VBCABLE_Setup_x64.exe / VBCABLE_Setup.exe
+                var setup = Directory.EnumerateFiles(outDir, "*.exe", SearchOption.AllDirectories)
+                    .FirstOrDefault(f => Path.GetFileName(f).Contains("Setup", StringComparison.OrdinalIgnoreCase)
+                                      || Path.GetFileName(f).Contains("VBCABLE", StringComparison.OrdinalIgnoreCase));
+                if (setup is null) { message = "压缩包里没找到安装程序(*Setup*.exe)。"; return false; }
+                packagePath = setup;
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = packagePath,

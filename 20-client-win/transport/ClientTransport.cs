@@ -62,7 +62,18 @@ public static class Transport
     static async Task<JsonElement> Post(HttpClient c, string url, object body)
     {
         using var r = await c.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
-        return JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+        var s = await r.Content.ReadAsStringAsync();
+        // ★ 非 2xx 时把服务端的 error 原样带出来(2026-07-31 审计):配对窗口默认关闭(D48),
+        //   第二台 PC 第一次点"开始配对"几乎必然撞上 403 {"error":"pairing window is closed"};
+        //   原来直接 JsonDocument.Parse 一个没有 requestId 的错误体 → 下游拿不到字段,以一句无意义的
+        //   KeyNotFound/格式异常收场。现在抛出带原因的异常,让界面能如实说"请先在主机上 open 配对窗口"。
+        if (!r.IsSuccessStatusCode)
+        {
+            var msg = s;
+            try { if (JsonDocument.Parse(s).RootElement.TryGetProperty("error", out var e)) msg = e.GetString() ?? s; } catch { }
+            throw new InvalidOperationException($"{(int)r.StatusCode} {msg}");
+        }
+        return JsonDocument.Parse(s).RootElement;
     }
 
     // onSas(reqId, sixWords): the caller shows the words and returns once the host has approved.

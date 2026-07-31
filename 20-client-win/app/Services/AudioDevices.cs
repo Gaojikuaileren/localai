@@ -30,20 +30,34 @@ public static class AudioDevices
         {
             en = (IMMDeviceEnumerator)new MMDeviceEnumerator();
             en.EnumAudioEndpoints(flow, DeviceStateActive, out var col);
-            col.GetCount(out var n);
-            for (uint i = 0; i < n; i++)
+            // ★ 设备集合本身也是 RCW,要释放(审计 2026-07-31):此前只释放了枚举器,
+            //   集合 / 每个设备 / 属性存储的 RCW 与 PROPVARIANT 全泄漏,而这条路每次刷新走两遍。
+            try
             {
-                try
+                col.GetCount(out var n);
+                for (uint i = 0; i < n; i++)
                 {
-                    col.Item(i, out var dev);
-                    dev.GetId(out var id);
-                    dev.OpenPropertyStore(StgmRead, out var store);
-                    store.GetValue(ref PkeyDeviceFriendlyName, out var v);
-                    var name = v.pwszVal != IntPtr.Zero ? Marshal.PtrToStringUni(v.pwszVal) ?? id : id;
-                    list.Add(new AudioDeviceInfo(id, name));
+                    IMMDevice? dev = null;
+                    IPropertyStore? store = null;
+                    try
+                    {
+                        col.Item(i, out dev);
+                        dev.GetId(out var id);
+                        dev.OpenPropertyStore(StgmRead, out store);
+                        store.GetValue(ref PkeyDeviceFriendlyName, out var v);
+                        var name = v.pwszVal != IntPtr.Zero ? Marshal.PtrToStringUni(v.pwszVal) ?? id : id;
+                        PropVariantClear(ref v);   // PROPVARIANT 里的 BSTR 得还给 COM,不能只读不放
+                        list.Add(new AudioDeviceInfo(id, name));
+                    }
+                    catch { /* 单个设备读不到就跳过,不因此丢掉整份列表 */ }
+                    finally
+                    {
+                        if (store is not null) Marshal.ReleaseComObject(store);
+                        if (dev is not null) Marshal.ReleaseComObject(dev);
+                    }
                 }
-                catch { /* 单个设备读不到就跳过,不因此丢掉整份列表 */ }
             }
+            finally { Marshal.ReleaseComObject(col); }
         }
         catch { /* 枚举整体失败 -> 空列表,界面如实说"读不到" */ }
         finally { if (en is not null) Marshal.ReleaseComObject(en); }
@@ -51,6 +65,9 @@ public static class AudioDevices
     }
 
     // ---------------------------------------------------------------- COM 互操作(最小集)
+    [DllImport("ole32.dll")]
+    static extern int PropVariantClear(ref PropVariant pvar);
+
     const uint DeviceStateActive = 0x1;
     const uint StgmRead = 0x0;
 

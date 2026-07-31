@@ -288,8 +288,11 @@ public sealed class TranslationBar : UserControl
         };
         cb.Items.Add(new ComboBoxItem { Content = "跟随系统默认", Tag = "" });
         foreach (var d in devices) cb.Items.Add(new ComboBoxItem { Content = d.Name, Tag = d.Id });
-        var idx = string.IsNullOrEmpty(currentId) ? 0 : devices.FindIndex(d => d.Id == currentId) + 1;
-        cb.SelectedIndex = Math.Max(0, idx);
+        // ★ 存的设备现在不可用时,下拉回落到"跟随系统默认",并【把状态里的旧 id 也清掉】(2026-07-31 审计)——
+        //   否则界面显示"默认"、状态里却还是那个拔掉的设备,界面和状态说的不是一回事。
+        var found = string.IsNullOrEmpty(currentId) ? -1 : devices.FindIndex(d => d.Id == currentId);
+        if (!string.IsNullOrEmpty(currentId) && found < 0) pick(null);   // 旧 id 已失效 -> 清成默认
+        cb.SelectedIndex = found >= 0 ? found + 1 : 0;
         cb.SelectionChanged += (_, _) =>
         {
             if (cb.SelectedItem is ComboBoxItem { Tag: string id }) pick(string.IsNullOrEmpty(id) ? null : id);

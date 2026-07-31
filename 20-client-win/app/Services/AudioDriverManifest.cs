@@ -53,10 +53,21 @@ public static class AudioDriverManifest
         return IsUsable(builtin) ? builtin : null;
     }
 
-    /// <summary>清单可用 = 版本、地址、哈希三者齐全。缺一个都不许自动下载。</summary>
+    /// <summary>
+    /// 清单可用 = 版本、地址、哈希三者齐全,【且下载地址落在编译进程序的白名单里】。
+    /// ★ 白名单是关键(2026-07-31 审计):用户自备的 manifest.json 会压过内置清单,而它同时带 Url + Sha256 ——
+    ///   一个本地明文文件就能把下载地址改成任意 URL、期望哈希改成那份恶意包的哈希(自证自洽必过校验),
+    ///   随后提权运行。哈希闸只保证"下的和清单说的一致",挡不住"清单本身被换掉"。
+    ///   所以下载来源必须钉死在 VB-Audio 官方域;用户清单只能换版本/换官方镜像,不能换信任来源。
+    /// </summary>
+    static readonly string[] AllowedHosts = { "download.vb-audio.com", "vb-audio.com", "www.vb-audio.com" };
+
     public static bool IsUsable(AudioDriverPackage? p)
         => p is not null
            && !string.IsNullOrWhiteSpace(p.Version)
            && !string.IsNullOrWhiteSpace(p.Url)
-           && !string.IsNullOrWhiteSpace(p.Sha256);
+           && !string.IsNullOrWhiteSpace(p.Sha256)
+           && Uri.TryCreate(p.Url, UriKind.Absolute, out var u)
+           && u.Scheme == Uri.UriSchemeHttps                       // 不走明文 http
+           && AllowedHosts.Contains(u.Host, StringComparer.OrdinalIgnoreCase);
 }

@@ -145,6 +145,10 @@ public sealed class DevicesView : UserControl
                 _sasCard.Visibility = Visibility.Collapsed;
                 status.Text = ex.Message.Contains("SAS mismatch") ? Strings.Get("pairing.mismatch")
                             : ex is TimeoutException ? Strings.Get("pairing.timeout")
+                            // ★ 配对窗口默认关闭(D48):这是第一次配对最常撞上的一条,给出可执行的下一步
+                            //   而不是干巴巴的异常(2026-07-31 审计)。
+                            : ex.Message.Contains("pairing window is closed")
+                                ? "主机侧的配对窗口是关着的。请到主机那台电脑的 Edge 窗口里输入 open,再回来点「开始配对」。"
                             : "配对失败:" + ex.Message;
             });
         }
