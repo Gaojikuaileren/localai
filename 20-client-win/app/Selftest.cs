@@ -3055,6 +3055,40 @@ public static class Selftest
                            "★★ 日历分组:【显示】过用词表、【存储】仍用原值(否则老档案匹配不上、日程被静默改组)");
             }
 
+            // ---- Apple 凭据保管(日历接入)----
+            {
+                // ★ 安全:本函数开头已把 LOCALAI_CLIENT_STATE 指到临时目录,
+                //   这里的 Clear() 动的是临时档,碰不到用户真实的 Apple 账号配置。
+                {
+                    Services.AppleCredentials.Clear();
+                    Assert(Services.AppleCredentials.Load() is null, "没配过时读到 null");
+
+                    Assert(Services.AppleCredentials.Save("someone@example.com", "abcd-efgh-ijkl-mnop"), "能存下账号");
+                    var info = Services.AppleCredentials.Load();
+                    Assert(info is not null && info.AppleId == "someone@example.com" && info.HasPassword,
+                           "读回账号 + 标记已有密码");
+                    Assert(Services.AppleCredentials.Reveal() == "abcd-efgh-ijkl-mnop", "DPAPI 加解密往返一致");
+
+                    // ★★ 落盘的文件里【绝不能】出现明文密码
+                    var raw = System.IO.File.ReadAllText(
+                        System.IO.Path.Combine(Services.AppPaths.StateDir, "apple-account.json"));
+                    Assert(!raw.Contains("abcd-efgh-ijkl-mnop"),
+                           "★★ 密码不以明文落盘(DPAPI 加密后才写)");
+                    Assert(raw.Contains("someone@example.com"), "Apple ID 本身可明文(界面要显示)");
+
+                    Services.AppleCredentials.Clear();
+                    Assert(Services.AppleCredentials.Load() is null && Services.AppleCredentials.Reveal() is null,
+                           "断开连接 = 本机凭据清干净");
+
+                    // ★ 抹去敏感文本 —— 异常消息常带着 Authorization 头,直接写 crash.log 就泄了
+                    Assert(!Services.AppleCredentials.Redact("Authorization: Basic dXNlcjpwYXNz").Contains("dXNlcjpwYXNz"),
+                           "★ Basic 认证头被抹掉(否则会落进 crash.log)");
+                    Assert(!Services.AppleCredentials.Redact("密码 abcd-efgh-ijkl-mnop 错误").Contains("abcd-efgh"),
+                           "★ 专用密码的形状也被抹掉");
+                }
+                Services.AppleCredentials.Clear();
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
