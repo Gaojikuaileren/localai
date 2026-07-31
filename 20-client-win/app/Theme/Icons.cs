@@ -23,6 +23,8 @@ public enum IconName
     Finance, Model, Folder, Ai, File, Pdf, Search, Extensions, Settings, Devices, Calendar, Tasks, Weather, Clock,
     // 天气实况(按 WMO 代码选,见 Icons.ForWeather)
     WxSun, WxPartly, WxCloud, WxFog, WxDrizzle, WxRain, WxSnow, WxShower, WxThunder,
+    // 夜间变体:晴 -> 月亮;局部多云 -> 月亮 + 云(用户裁定 2026-08-01)
+    WxMoon, WxPartlyNight,
     Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots, Refresh,
 }
 
@@ -179,6 +181,11 @@ public static class Icons
         // 阵雨:云 + 两条斜雨(比"雨"少一条,表示间歇)
         [IconName.WxShower] = "M7.6 13.4 A3.6 3.6 0 0 1 7.9 6.2 A4.8 4.8 0 0 1 17 7 A3.1 3.1 0 0 1 16.5 13.4 Z "
                             + "M10 16.4 L9 19.4 M15 16.4 L14 19.4",
+        // 月亮(夜间的"晴")—— 渐开弧:大圆挖去一个偏右上的小圆
+        [IconName.WxMoon] = "M14.6 3.6 A8.4 8.4 0 1 0 20.4 12.8 A6.5 6.5 0 0 1 14.6 3.6 Z",
+        // 夜间的局部多云:小月亮 + 一朵云(与白天那个同一个云,只把太阳换成月亮)
+        [IconName.WxPartlyNight] = "M11.4 3 A4.8 4.8 0 1 0 14.8 8.6 A3.7 3.7 0 0 1 11.4 3 Z "
+                                 + "M8 20 A3.6 3.6 0 0 1 8.3 12.9 A4.8 4.8 0 0 1 17.4 13.8 A3.1 3.1 0 0 1 16.9 20 Z",
         // 雷阵雨:云 + 闪电
         [IconName.WxThunder] = "M7.6 13.2 A3.6 3.6 0 0 1 7.9 6 A4.8 4.8 0 0 1 17 6.8 A3.1 3.1 0 0 1 16.5 13.2 Z "
                              + "M12.8 15.4 L10.4 18.6 H13 L11.4 21.4",
@@ -188,11 +195,15 @@ public static class Icons
     /// WMO 天气代码 -> 图标。★ 认不出的代码返回 null —— 界面据此【不画图标】,
     /// 而不是随便给一个太阳(那等于替天气编了个说法)。与 Weather.Describe 的口径一致。
     /// </summary>
-    public static IconName? ForWeather(int? code) => code switch
+    /// <param name="night">
+    /// 这一刻在那个城市是不是夜里 —— 夜里的"晴"该是月亮而不是太阳(用户裁定)。
+/// ★ 只有【晴、局部多云】分昼夜:阴天/雨/雪/雾 本来就看不见日月,分了反而多出两个认不出的图。
+    /// </param>
+    public static IconName? ForWeather(int? code, bool night = false) => code switch
     {
         null => null,
-        0 => IconName.WxSun,
-        1 or 2 => IconName.WxPartly,
+        0 => night ? IconName.WxMoon : IconName.WxSun,
+        1 or 2 => night ? IconName.WxPartlyNight : IconName.WxPartly,
         3 => IconName.WxCloud,
         45 or 48 => IconName.WxFog,
         51 or 53 or 55 or 56 or 57 => IconName.WxDrizzle,

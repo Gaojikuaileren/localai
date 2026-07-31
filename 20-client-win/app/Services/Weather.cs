@@ -27,13 +27,17 @@ public sealed record WeatherNow(
     double? PrecipMm,
     int? WeatherCode,
     DateTime? UpdatedAt,
-    List<WeatherHour>? Hours = null)
+    List<WeatherHour>? Hours = null,
+    List<WeatherDay>? Days = null)
 {
     /// <summary>这份读数是不是已经过期(超过 StaleAfter)。界面据此如实标注。</summary>
     public bool IsStale => UpdatedAt is null || DateTime.Now - UpdatedAt.Value > Weather.StaleAfter;
 }
 
 public sealed record WeatherHour(DateTime At, double? TempC, int? Code);
+
+/// <summary>某一天的汇总(目前只用降水合计:当前没下雨时,要说得出"几天后有雨")。</summary>
+public sealed record WeatherDay(DateTime Date, double? PrecipMm);
 
 public static class Weather
 {
@@ -81,9 +85,10 @@ public static class Weather
             var qlon = Math.Round(lon, 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var url = $"https://{Host}/v1/forecast?latitude={qlat}&longitude={qlon}"
                     + "&current=temperature_2m,precipitation,weather_code"
-                    + "&daily=temperature_2m_max,temperature_2m_min"
+                    + "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum"
                     + "&hourly=temperature_2m,weather_code"
-                    + "&forecast_days=2&timezone=auto";
+                    // ★ 拉 7 天 —— 当前不下雨时要回答"几天后有雨"。
+                    + "&forecast_days=7&timezone=auto";
 
             using var h = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false };
             using var c = new HttpClient(h) { Timeout = TimeSpan.FromSeconds(20) };
@@ -117,6 +122,13 @@ public static class Weather
             var doc = JsonSerializer.Deserialize<OmResponse>(json);
             if (doc is null) return null;
 
+            var days = new List<WeatherDay>();
+            if (doc.Daily?.Time is { } dts)
+                for (int i = 0; i < dts.Count; i++)
+                    if (DateTime.TryParse(dts[i], out var dd))
+                        days.Add(new WeatherDay(dd.Date,
+                            doc.Daily.Precip is { } ps && i < ps.Count ? ps[i] : null));
+
             var hours = new List<WeatherHour>();
             if (doc.Hourly?.Time is { } ts && doc.Hourly.Temperature is { } temps)
                 for (int i = 0; i < ts.Count && i < temps.Count; i++)
@@ -131,9 +143,32 @@ public static class Weather
                 PrecipMm: doc.Current?.Precipitation,
                 WeatherCode: doc.Current?.Code,
                 UpdatedAt: null,
-                Hours: hours.Count > 0 ? hours : null);
+                Hours: hours.Count > 0 ? hours : null,
+                Days: days.Count > 0 ? days : null);
         }
         catch { return null; }
+    }
+
+    /// <summary>今天算不算"有雨"的门槛(毫米)。低于它的痕量降水说"有雨"是夸大。</summary>
+    public const double RainThresholdMm = 0.2;
+
+    /// <summary>
+    /// 当前没在下雨时,回答"几天后有雨"。
+    /// ★ 诚实口径:预报窗口里【真的没有】就明说"未来 N 天无雨",而不是含糊其辞或者干脆不说;
+    ///   压根没有逐日数据就返回 null —— 那时界面只写"无",不假装知道以后的事。
+    /// </summary>
+    public static string? RainOutlook(WeatherNow? w)
+    {
+        var days = w?.Days;
+        if (days is null || days.Count == 0) return null;
+        var today = DateTime.Today;
+        var future = days.Where(d => d.Date > today).OrderBy(d => d.Date).ToList();
+        if (future.Count == 0) return null;
+
+        var hit = future.FirstOrDefault(d => d.PrecipMm is { } mm && mm >= RainThresholdMm);
+        if (hit is null) return $"未来 {future.Count} 天无雨";
+        var n = (hit.Date - today).Days;
+        return n switch { 1 => "明天有雨", 2 => "后天有雨", _ => $"{n} 天后有雨" };
     }
 
     /// <summary>
@@ -177,8 +212,10 @@ public static class Weather
 
     sealed class OmDaily
     {
+        [JsonPropertyName("time")] public List<string>? Time { get; set; }
         [JsonPropertyName("temperature_2m_max")] public List<double?>? Max { get; set; }
         [JsonPropertyName("temperature_2m_min")] public List<double?>? Min { get; set; }
+        [JsonPropertyName("precipitation_sum")] public List<double?>? Precip { get; set; }
     }
 
     sealed class OmHourly

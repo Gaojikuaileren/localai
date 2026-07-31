@@ -1065,7 +1065,15 @@ public sealed class HomeView : UserControl
                 tp.FontSize = hasTemp ? 30 : 19;
             }
             if (_cityHiLo[i] is { } hl)
-                hl.Text = $"最高 {Num(w?.HighC)}  最低 {Num(w?.LowC)}  降水 {Rain(w?.PrecipMm)}";
+            {
+                // ★ 当前没下雨就接一句【几天后有雨】(用户裁定)。
+                //   预报窗口里真的没有就明说"未来 N 天无雨" —— 不含糊其辞。
+                var rain = Rain(w?.PrecipMm);
+                var outlook = (w?.PrecipMm ?? 0) < Services.Weather.RainThresholdMm
+                    ? Services.Weather.RainOutlook(w) : null;
+                hl.Text = $"最高 {Num(w?.HighC)}  最低 {Num(w?.LowC)}  降水 {rain}"
+                        + (outlook is null ? "" : " · " + outlook);
+            }
 
             if (_cityStamp[i] is { } stamp)
             {
@@ -1077,13 +1085,14 @@ public sealed class HomeView : UserControl
                 stamp.Visibility = stale ? Visibility.Visible : Visibility.Collapsed;
             }
             // 图标随实况;认不出的代码【不画图标】(与 Describe 同一口径,不拿太阳冒充)
-            var wx = Icons.ForWeather(w?.WeatherCode);
+            var night = IsNightAt(_places[i]);
+            var wx = Icons.ForWeather(w?.WeatherCode, night);
             if (_cityIcon[i] is { } bigIcon)
                 bigIcon.Content = wx is { } n1 ? Icons.Make(n1, 26, "FgSecondary") : null;
             if (_miniIcon[i] is { } smIcon)
                 smIcon.Content = Icons.Make(wx ?? IconName.Weather, 13, "FgSecondary");
 
-            if (i < _cityHourly.Length && _cityHourly[i] is { } grid) FillHourly(grid, w);
+            if (i < _cityHourly.Length && _cityHourly[i] is { } grid) FillHourly(grid, w, _places[i]);
             if (i < _cityCurve.Length && _cityCurve[i] is { } cv) DrawCurve(cv, w);
         }
     }
@@ -1159,6 +1168,26 @@ public sealed class HomeView : UserControl
         }
     }
 
+    /// <summary>
+    /// 那座城【此刻】是不是夜里 —— 日出日落本地算(SunClock),不出网。
+    /// ★ 要用【那座城自己的当地时间】比,不是本机时间:
+    ///   本地是深夜时札幌可能已经早上了 —— 那一格该画太阳而不是月亮。
+    /// ★ 坐标认不出就当白天(宁可不分,不瞎猜)。
+    /// </summary>
+    static bool IsNightAt(Services.Place p, DateTime? atLocal = null)
+    {
+        if (Services.Places.CoordOf(p) is not { } c) return false;
+        try
+        {
+            var z = TimeZoneInfo.FindSystemTimeZoneById(p.TimeZoneId);
+            var now = atLocal ?? TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, z).DateTime;
+            var sun = Services.SunClock.ForDay(c.Lat, c.Lon, now.Date, z.GetUtcOffset(now).TotalHours);
+            var h = now.TimeOfDay.TotalHours;
+            return h < sun.Sunrise || h >= sun.Sunset;
+        }
+        catch { return false; }
+    }
+
     static string Num(double? v) => v is null ? "—" : $"{v:0}°";
     // ★ 小数点强制用【点】—— 系统区域是德国时 CurrentCulture 会给出 "0,2mm",
     //   在中文界面里看着像错字(渲染诊断的图上当场看到的)。
@@ -1166,7 +1195,7 @@ public sealed class HomeView : UserControl
         : v.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "mm";
 
     /// <summary>把逐小时那一排填上真实读数;没有就保持"—"。</summary>
-    static void FillHourly(UniformGrid grid, Services.WeatherNow? w)
+    static void FillHourly(UniformGrid grid, Services.WeatherNow? w, Services.Place place)
     {
         var step = Layout.HourlyStepHours(grid.Columns);
         var now = DateTime.Now;
@@ -1177,8 +1206,9 @@ public sealed class HomeView : UserControl
             var hit = w?.Hours?.FirstOrDefault(x => Math.Abs((x.At - want).TotalMinutes) <= 30);
             if (cell.Children[0] is TextBlock hr) hr.Text = want.ToString("HH");
             // ★ 中间那格换成真的天气图形;认不出/没数据就留一条短横,不拿太阳冒充
+            // ★ 逐小时也各算各的昼夜 —— 晚上 21 点那格的"晴"同样该是月亮
             if (cell.Children[1] is ContentControl ic)
-                ic.Content = Icons.ForWeather(hit?.Code) is { } nm
+                ic.Content = Icons.ForWeather(hit?.Code, IsNightAt(place, want)) is { } nm
                     ? Icons.Make(nm, 13, "FgSecondary")
                     : null;
             if (cell.Children[2] is TextBlock tp)

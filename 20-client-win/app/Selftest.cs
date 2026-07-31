@@ -3485,8 +3485,35 @@ public static class Selftest
                            "★ 卡片刚建好就刷一次读数 —— 只靠 Loaded 的话,拖拽排序后与离屏渲染里都是空态");
                     var ico = TryReadSource(Path.Combine("Theme", "Icons.cs"));
                     if (ico is not null)
-                        Assert(ico.Contains("public static IconName? ForWeather(int? code)") && ico.Contains("_ => null,"),
+                        Assert(ico.Contains("public static IconName? ForWeather(int? code, bool night = false)") && ico.Contains("_ => null,"),
                                "★★ 认不出的天气代码【不画图标】—— 随便给个太阳等于替天气编了个说法");
+                    // 夜间的"晴"该是月亮(用户裁定)
+                    Assert(Theme.Icons.ForWeather(0, night: false) == Theme.IconName.WxSun
+                           && Theme.Icons.ForWeather(0, night: true) == Theme.IconName.WxMoon,
+                           "★ 夜间的晴 = 月亮");
+                    Assert(Theme.Icons.ForWeather(2, night: true) == Theme.IconName.WxPartlyNight,
+                           "★ 夜间的局部多云 = 月亮 + 云");
+                    Assert(Theme.Icons.ForWeather(61, night: true) == Theme.Icons.ForWeather(61, night: false),
+                           "★ 雨/雪/阴/雾 不分昼夜 —— 本来就看不见日月,分了只多出认不出的图");
+                    Assert(!string.IsNullOrWhiteSpace(Theme.Icons.PathFor(Theme.IconName.WxMoon, Services.Skin.Ink)),
+                           "★ 月亮图形三套皮肤都取得到");
+
+                    // 降水展望:当前无雨时要说得出几天后有雨;真没有就明说
+                    var wxT0 = DateTime.Today;
+                    var wRain = new Services.WeatherNow(20, 25, 15, 0, 0, DateTime.Now, null, new()
+                    {
+                        new(wxT0, 0), new(wxT0.AddDays(1), 0), new(wxT0.AddDays(2), 0), new(wxT0.AddDays(3), 4.2),
+                    });
+                    Assert(Services.Weather.RainOutlook(wRain) == "3 天后有雨", "★ 算得出几天后有雨");
+                    var wDry = new Services.WeatherNow(20, 25, 15, 0, 0, DateTime.Now, null, new()
+                    {
+                        new(wxT0, 0), new(wxT0.AddDays(1), 0), new(wxT0.AddDays(2), 0.05),
+                    });
+                    Assert(Services.Weather.RainOutlook(wDry) == "未来 2 天无雨",
+                           "★★ 窗口里真的没有就【明说多少天无雨】—— 不含糊其辞;"
+                           + "0.05mm 这种痕量不算「有雨」(门槛 0.2mm)");
+                    Assert(Services.Weather.RainOutlook(new Services.WeatherNow(20, 25, 15, 0, 0, DateTime.Now)) is null,
+                           "★ 压根没逐日数据 -> null(界面只写「无」,不假装知道以后的事)");
                     Assert(hvw.Contains("NetworkInterface.GetIsNetworkAvailable()"),
                            "★ 没网就不试(与 Apple 自动拉取同一条规矩)");
                 }
