@@ -2025,9 +2025,16 @@ P3b 只认证到**设备**;而裁定 2/3 要求按**人**隔离。**P3c 开工�
 理由:与记忆库(`{state}/memory`,D22 不加密)、备份(D21 不加密)同一处理,**口径统一**;
 不为客户端单独引入一套密钥管理(那会与 D21/D22 冲突,须另立决议)。
 
-**落点:** `{state}/client/`(= `%LOCALAPPDATA%\LocalAI\client`,每用户、普通权限,
-可用 `LOCALAI_CLIENT_STATE` 覆盖)。`chat.json` / `projects.json` / `todos.json`。
+**落点:** `%LOCALAPPDATA%\LocalAI\client`(每用户、普通权限,可用 `LOCALAI_CLIENT_STATE` 覆盖)。
+`chat.json` / `projects.json` / `todos.json`。
 ★ 与 `{state}/secrets`(强 ACL + 排除备份)**分开**:这里存的是**内容**,不是凭据。
+
+> ⚠️ **更正(2026-07-31 审计)**:原文把落点写成 `{state}/client/` 并等同于 `%LOCALAPPDATA%\LocalAI\client`
+> —— 这是**两个不同的根**:`{state}` = `D:\AI\state`(见 paths.toml),而客户端实际落在
+> `%LOCALAPPDATA%\LocalAI\client`,**不在 `{state}` 之下**。后果:`backup.ps1` 备份的是 `{state}`,
+> 因此**客户端本地存档(会话/项目/待办)当前完全不进任何备份**。
+> 这不是 bug、是尚未拍板的决策:客户端数据要不要纳入备份?纳入就要面对 D22 那笔账
+> (备份盘 exFAT 不加密,聊天正文会被逐字复制到 U 盘)。**留作一条待决**,先把文档改成实情。
 
 **四条硬约束(均在 selftest 里钉死):**
 1. **幽灵会话绝不落盘** —— 它的定义就是"不保留记录、不纳入记忆",落盘等于毁约。
