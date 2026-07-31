@@ -2791,6 +2791,23 @@ public static class Selftest
                 }
             }
 
+            // ---- 界面文案里不允许出现字面 ** ----
+            // ★ 这里没有 markdown 渲染器:写了 **强调** 就是把星号原样画给用户看。
+            //   要强调用【】或「」—— 这两个在纯文本里自己就是强调。
+            foreach (var vf in new[] { "SettingsView.cs", "DevicesView.cs", "ModelsView.cs", "ExtensionsView.cs" })
+            {
+                var viewSrc = TryReadSource(Path.Combine("Views", vf));
+                if (viewSrc is null) continue;
+                var bad = false;
+                foreach (var line in viewSrc.Split('\n'))
+                {
+                    var t = line.TrimStart();
+                    if (t.StartsWith("//") || t.StartsWith("///")) continue;   // 注释里随便写
+                    if (line.Contains("**")) { bad = true; break; }
+                }
+                Assert(!bad, $"{vf} 的界面文案里没有字面 **(不渲染 markdown,写了就是画星号)");
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {

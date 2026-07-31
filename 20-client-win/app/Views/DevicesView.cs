@@ -99,7 +99,7 @@ public sealed class DevicesView : UserControl
 
         return Ui.Card(Ui.Stack(
             Ui.Subtitle(Strings.Get("pairing.title")),
-            Ui.Body("本机还没有和中枢配对。填写中枢地址后点一次「开始配对」即可,配对成功后**永久记住**,以后开机自动连接。", muted: true),
+            Ui.Body("本机还没有和中枢配对。填写中枢地址后点一次「开始配对」即可,配对成功后会【永久记住】,以后开机自动连接。", muted: true),
             new Border { Height = 10 },
             Ui.Body(Strings.Get("pairing.hub_address")), addr,
             Ui.Body(Strings.Get("pairing.device_name")), name,
