@@ -47,6 +47,22 @@ public static class CalendarEditor
 
         var endEdited = existing is not null;   // 用户手动动过结束就不再自动跟随
 
+        // ★★ 非全天日程也可以【跨天】(用户 2026-07-31 让我拿方案):
+        //   结束日偏移 0 = 当日,1 = 次日,2 = 第 3 天……存的时候
+        //   end = 开始那天 + 偏移 + 结束时刻。
+        //   为什么非得有它:转盘只给"时:分",一条 22:00 → 次日 03:00 的日程
+        //   在原来的模型里【根本表达不出来】—— 而且旧逻辑还会把开始一起往前拖,
+        //   把用户明明想要的跨天硬掰成同一天。
+        var endOffset = existing is not null
+            ? Math.Max(0, (existing.End.Date - existing.Start.Date).Days)
+            : 0;
+        TextBlock? endDayLabel = null;
+        void SyncEndDay()
+        {
+            if (endDayLabel is null) return;
+            endDayLabel.Text = endOffset switch { 0 => "当日", 1 => "次日", _ => $"第 {endOffset + 1} 天" };
+        }
+
         // ★★ 开始必须早于结束 —— 这条在【编辑器里当场纠正】,并且让另一个转盘【动给你看】。
         //   此前只在保存时悄悄夹一下(结束早于开始就改成开始+1 小时):
         //   界面上你看到的是"9:00 → 8:00",存进去的却是别的东西 —— 所见非所得,
@@ -58,11 +74,13 @@ public static class CalendarEditor
         {
             endAt = v;
             endEdited = true;
-            // 结束被拨到开始之前 -> 把开始一起往前带,保持同样的时长;带不动就贴到 0:00
-            if (endAt > startAt) return;
-            var want = endAt - DefaultDuration;
-            startAt = want >= TimeSpan.Zero ? want : TimeSpan.Zero;
-            setStartTime?.Invoke(startAt);
+            // ★★ 结束被拨到开始之前 = 【跨到次日】(用户裁定 2026-07-31)。
+            //   人嘴里说的"22:00 到 03:00"本来就是跨天的意思。
+            //   旧做法是把开始一起往前拖 —— 那等于替用户改了他刚刚没动的那一头,
+            //   而且让"跨天"这件事永远表达不出来。
+            if (endAt > startAt || endOffset > 0) return;
+            endOffset = 1;
+            SyncEndDay();
         });
         setEnd = setEndTime;
 
@@ -72,14 +90,61 @@ public static class CalendarEditor
             // 改开始 -> 结束自动跟到 +1 小时(夹在当天内)。
             // ★ 即使用户已经手动改过结束,只要开始越过了它,也必须把结束推开 ——
             //   "尊重用户改过的结束"不能凌驾于"起止不许颠倒"。
+            if (endOffset > 0) return;              // 已经跨天了,起止不可能颠倒
             if (endEdited && startAt < endAt) return;
             var next = startAt + DefaultDuration;
-            endAt = next < TimeSpan.FromDays(1) ? next : WheelPicker.Snap(TimeSpan.FromHours(23.5));
+            // ★ 开始推到很晚时,不再把结束贴到 23:30 —— 直接【跨到次日】,这才是它本来的意思
+            if (next < TimeSpan.FromDays(1)) endAt = next;
+            else { endAt = next - TimeSpan.FromDays(1); endOffset = 1; SyncEndDay(); }
             setEnd?.Invoke(endAt);   // 内部改值不回调,不会被误判成"用户手动改过"
         });
         setStartTime = setStart;
 
-        var timedRow = TwoUp("开始", startTimeEl, "结束", endTimeEl);
+        // 结束时刻下面挂一行「结束日」:− 当日 +
+        endDayLabel = new TextBlock { VerticalAlignment = VerticalAlignment.Center, MinWidth = 46, TextAlignment = TextAlignment.Center };
+        endDayLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        endDayLabel.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        SyncEndDay();
+
+        FrameworkElement OffsetKey(string glyph, int delta, string tip)
+        {
+            var t = new TextBlock { Text = glyph, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            var hit = new Border
+            {
+                Child = t, Width = 22, Height = 20, BorderThickness = new Thickness(1),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Cursor = System.Windows.Input.Cursors.Hand, ToolTip = tip,
+            };
+            hit.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            hit.SetResourceReference(Border.BorderBrushProperty, "Border");
+            hit.MouseEnter += (_, _) => hit.SetResourceReference(Border.BackgroundProperty, "BgHover");
+            hit.MouseLeave += (_, _) => hit.Background = System.Windows.Media.Brushes.Transparent;
+            hit.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                var next = endOffset + delta;
+                // ★ 回到"当日"时,结束时刻若还早于开始,那就不是一条合法日程 —— 不许退回去。
+                if (next < 0 || (next == 0 && endAt <= startAt)) return;
+                endOffset = next;
+                SyncEndDay();
+            };
+            return hit;
+        }
+
+        var endDayRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        endDayRow.Children.Add(OffsetKey("−", -1, "结束日往前一天"));
+        endDayRow.Children.Add(new Border { Width = 4 });
+        endDayRow.Children.Add(endDayLabel);
+        endDayRow.Children.Add(new Border { Width = 4 });
+        endDayRow.Children.Add(OffsetKey("+", 1, "结束日往后一天(跨天日程就靠它)"));
+
+        var endStack = new StackPanel();
+        endStack.Children.Add(endTimeEl);
+        endStack.Children.Add(endDayRow);
+
+        var timedRow = TwoUp("开始", startTimeEl, "结束", endStack);
         // 全天同理:结束日期不能早于开始日期。日期转盘没有 Set 回调,所以这里【就地夹住】
         // 并在下面的提示里如实说明 —— 至少不会存进一条颠倒的日程。
         var allDayRow = TwoUp("开始日期", WheelPicker.Date(startDay, d =>
@@ -170,7 +235,8 @@ public static class CalendarEditor
             {
                 var d0 = existing?.Start.Date ?? day.Date;   // 定时日程落在所选那天
                 s = d0 + startAt;
-                e2 = d0 + endAt;
+                // ★ 结束 = 开始那天 + 【结束日偏移】+ 结束时刻 —— 非全天也能跨天
+                e2 = d0.AddDays(endOffset) + endAt;
                 if (e2 <= s) e2 = s + DefaultDuration;        // 结束不晚于开始 -> 补 1 小时
             }
             return new CalendarEvent(

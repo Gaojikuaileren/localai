@@ -273,7 +273,8 @@ public static class WheelTest
             Ev("需求评审会", 16, 17);
             Ev("一对一", 16.5, 17.5);
             Ev("设计同步", 16.5, 17);
-            Ev("通宵", 22.5, 25);       // 跨零点 —— 画到 24 点线以下
+            Ev("通宵", 22.5, 27);       // 跨零点：次日 03:00 结束
+            Ev("长会", 13, 13 + 48);    // 跨【两天】的定时日程 —— 中间那天也要有
             // 全天/跨天：它们不在 TimedOn 里，只能靠【全天条带】看得见、点得着
             CalendarData.Events.Add(new CalendarEvent(day.AddDays(-1), day.AddDays(1), "出差", "me", "private", AllDay: true, CalendarGroup: groups[0], Id: "wt-trip"));
             CalendarData.Events.Add(new CalendarEvent(day, day, "体检", "me", "private", AllDay: true, CalendarGroup: groups[1], Id: "wt-med"));

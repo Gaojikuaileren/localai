@@ -120,7 +120,7 @@ public sealed class WeekTimeline : UserControl
         //   而为了一行文字单占一行高,在这个只有 300px 的板块里太奢侈。
         //   ‹ 今 › 三个键收进【刻度列正上方那一格】(星期几那一行的第 0 列),那里本来就是空的。
         // ★ 「今」左右的 ‹ › 已按用户要求去掉 —— 换周走上面那张月历(点哪一天,下面就跟到哪一周)。
-        _navCell.Children.Add(NavKey("今", "回到本周的此刻(保持当前缩放)", () =>
+        _navCell.Children.Add(NavKey("现在", "回到本周的此刻(保持当前缩放)", () =>
         {
             // ★ 【保持当前缩放】(用户裁定)—— 不再把 _hours 复位成默认值。
             //   把此刻放在视野中间,比顶在最上面更容易一眼找到。
@@ -149,9 +149,19 @@ public sealed class WeekTimeline : UserControl
         //   于是一条跨天的全天日程看起来像一条横幅,把它覆盖的那几天【连日期一起】框了进去。
         //   表头设成不参与命中测试,好让底下那条横幅仍然点得着、悬停得出提示。
         _head.IsHitTestVisible = false;
+
+        // ★★ 导航键必须【放在表头外面】—— 之前它挂在 _head 里,而 _head 刚被设成
+        //   IsHitTestVisible = false,于是连它一起失灵了(用户报的"「今」按钮不起作用")。
+        //   IsHitTestVisible 是往下传染的,子元素想单独恢复也恢复不了,只能挪出来。
+        _navCell.HorizontalAlignment = HorizontalAlignment.Left;
+        _navCell.VerticalAlignment = VerticalAlignment.Top;
+        _navCell.Width = GutterWidth;
+        _navCell.Height = HeadHeight;
+
         var topBlock = new Grid { Height = TopBlockHeight };
         topBlock.Children.Add(allDayRow);
         topBlock.Children.Add(_head);
+        topBlock.Children.Add(_navCell);
         _allDay.Child = topBlock;
         _allDay.Background = Brushes.Transparent;
 
@@ -313,7 +323,7 @@ public sealed class WeekTimeline : UserControl
         var hit = new Border
         {
             Child = t,
-            Width = 26, Height = 16,
+            Width = GutterWidth - 6, Height = 17,
             Margin = new Thickness(0, 0, 1, 0),
             BorderThickness = new Thickness(1),
             Background = Brushes.Transparent,
@@ -368,10 +378,6 @@ public sealed class WeekTimeline : UserControl
         _head.Background = null;      // ★ 透出底下那条全天横幅
         _head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(GutterWidth) });
         for (int i = 0; i < 7; i++) _head.ColumnDefinitions.Add(new ColumnDefinition());
-
-        // 第 0 格(刻度列正上方)放 ‹ 今 › —— 这一格本来就是空的
-        Grid.SetColumn(_navCell, 0);
-        _head.Children.Add(_navCell);
 
         for (int i = 0; i < 7; i++)
         {
@@ -562,22 +568,35 @@ public sealed class WeekTimeline : UserControl
         }
     }
 
-    /// <summary>某一天要画的所有条:自己的定时日程 + 【前一天越过 24 点续过来的】。</summary>
-    List<(CalendarEvent Ev, double S, double E, bool IsTail)> ItemsFor(DateTime day)
+    /// <summary>一条日程在某一天要画的那一截。</summary>
+    /// <param name="IsFirst">这一截包含【开始时刻】(= 起始那天)。只有它能拖顶边、能整体挪。</param>
+    /// <param name="IsLast">这一截包含【结束时刻】(= 结束那天)。只有它能拖底边。</param>
+    readonly record struct Seg(CalendarEvent Ev, double S, double E, bool IsFirst, bool IsLast);
+
+    /// <summary>一条定时日程真正结束在哪一天(23:00→次日 0:00 算结束在【起始那天】)。</summary>
+    static DateTime LastDayOf(CalendarEvent ev)
+        => ev.End > ev.Start ? ev.End.AddTicks(-1).Date : ev.Start.Date;
+
+    /// <summary>
+    /// 某一天要画的所有条:自己起始的 + 【前面几天跨过来的】。
+    /// ★ 往回找【整周】而不是只找前一天 —— 一条跨三天的定时日程,中间那天既不是它的起始日、
+    ///   也不是结束日,只看前一天就会把它整段漏掉,那一天看起来就是空的。
+    /// </summary>
+    List<Seg> ItemsFor(DateTime day)
     {
-        var outp = new List<(CalendarEvent, double, double, bool)>();
-        foreach (var ev in CalendarData.TimedOn(day))
-            outp.Add((ev, HoursFrom(day, ev.Start), HoursFrom(day, ev.End), false));
-        // ★ 跨天日程在【隔壁那一天】也要有(用户裁定 2026-07-31)——
-        //   一条 23:00→次日 01:00 的,昨天那列画到 25 点,今天这列还得从 -1 点续到 01:00。
-        //   不这么画的话,从今天看过去那条日程就凭空消失了。
-        var prev = day.Date.AddDays(-1);
-        foreach (var ev in CalendarData.TimedOn(prev))
+        var outp = new List<Seg>();
+        for (int back = 0; back <= 7; back++)
         {
-            if (HoursFrom(prev, ev.End) <= 24) continue;
-            outp.Add((ev, HoursFrom(day, ev.Start), HoursFrom(day, ev.End), true));
+            var from = day.Date.AddDays(-back);
+            foreach (var ev in CalendarData.TimedOn(from))
+            {
+                if (back > 0 && LastDayOf(ev) < day.Date) continue;      // 早就结束了,与这一天无关
+                outp.Add(new Seg(ev, HoursFrom(day, ev.Start), HoursFrom(day, ev.End),
+                                 IsFirst: back == 0,
+                                 IsLast: LastDayOf(ev) == day.Date));
+            }
         }
-        return outp.OrderBy(x => x.Item2).ToList();
+        return outp.OrderBy(x => x.S).ToList();
     }
 
     void BuildBody()
@@ -671,7 +690,7 @@ public sealed class WeekTimeline : UserControl
                 if (it.E <= _top || it.S >= _top + _hours) continue;
                 var slotW = Math.Max(8, (colW - 6) / total);
                 var x = i * colW + 3 + col * slotW;
-                AddEventBlock(it.Ev, x, YAt(it.S, h), YAt(it.E, h), slotW - (total > 1 ? 2 : 0), it.IsTail, placed,
+                AddEventBlock(it, x, YAt(it.S, h), YAt(it.E, h), slotW - (total > 1 ? 2 : 0), placed,
                               i * colW, (i + 1) * colW, h);
             }
         }
@@ -694,7 +713,7 @@ public sealed class WeekTimeline : UserControl
     /// 同一天里【互相重叠】的条各占一列,平分这一天的宽度(用户裁定)。
     /// 先按开始时刻切成"重叠簇",簇内贪心分列 —— 同簇共用列数,于是左右边对得齐。
     /// </summary>
-    static List<(int Index, int Col, int Total)> LayOut(List<(CalendarEvent Ev, double S, double E, bool IsTail)> items)
+    static List<(int Index, int Col, int Total)> LayOut(List<Seg> items)
     {
         var res = new List<(int, int, int)>();
         int i = 0;
@@ -727,9 +746,11 @@ public sealed class WeekTimeline : UserControl
     /// ★ 太矮【或】太窄的条,标题放到条【外面】(上方)—— 省略成一个"…"等于什么都没显示(用户裁定)。
     ///   外置标题之间互相避让:同一天里已经占住的位置会被往上让一行。
     /// </summary>
-    void AddEventBlock(CalendarEvent ev, double x, double yTop, double yBottom, double width,
-                       bool isTail, List<Rect> placedLabels, double colLeft, double colRight, double h)
+    void AddEventBlock(Seg seg, double x, double yTop, double yBottom, double width,
+                       List<Rect> placedLabels, double colLeft, double colRight, double h)
     {
+        var ev = seg.Ev;
+        var isTail = !seg.IsFirst;
         var height = Math.Max(3, yBottom - yTop);
         var w = Math.Max(10, width);
         // ★★ 定时日程用【描边框】，全天日程用【实心色块】(用户裁定 2026-07-31)。
@@ -779,11 +800,15 @@ public sealed class WeekTimeline : UserControl
             BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),
             Opacity = isTail ? 0.75 : 1,          // 续画的那一半淡一点 —— 它的"主体"在隔壁那天
             Cursor = Cursors.SizeAll,
-            ToolTip = $"{ev.Start:M月d日 HH:mm} – {ev.End:HH:mm}  {ev.Title}"
-                      + (ev.End.Date > ev.Start.Date ? "(跨天)" : "")
+            ToolTip = $"{ev.Start:M月d日 HH:mm} – " + (LastDayOf(ev) > ev.Start.Date ? $"{ev.End:M月d日 HH:mm}" : $"{ev.End:HH:mm}")
+                      + $"  {ev.Title}"
+                      + (LastDayOf(ev) > ev.Start.Date ? $"(跨 {(LastDayOf(ev) - ev.Start.Date).Days + 1} 天)" : "")
                       + (string.IsNullOrWhiteSpace(ev.CalendarGroup) ? "" : $"  [{ev.CalendarGroup}]"),
         };
-        box.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        // ★ 被切断的那一端【不收圆角】—— 与月历里那条全天线同一条视觉语言:
+        //   平口 = "还没完,隔壁那天接着";圆角 = "就到这儿"。
+        box.CornerRadius = new CornerRadius(seg.IsFirst ? 3 : 0, seg.IsFirst ? 3 : 0,
+                                            seg.IsLast ? 3 : 0, seg.IsLast ? 3 : 0);
 
         if (!textInside)
         {
@@ -835,13 +860,20 @@ public sealed class WeekTimeline : UserControl
             e.Handled = true;
             var y = e.GetPosition(box).Y;
             var mode = y <= grab ? DragMode.Start : y >= box.Height - grab ? DragMode.End : DragMode.Move;
-            // ★★ 续画的那半截(跨零点之后落在隔壁那天的部分)【底边可以拖】——
-            //   它的底边就是这条日程真正的结束时刻,拖它拉长是最自然的做法
-            //   (用户反馈:跨天日程建不出来,就是因为这半截整个不接受拖动)。
-            //   但它的【顶边】不是开始时刻(那在隔壁那天),拖了会让人搞不清动的是哪一头 ——
-            //   顶边与中间一律当成"点了一下",交给编辑抽屉。
-            if (isTail && mode != DragMode.End) mode = DragMode.Move;
-            if (isTail && mode == DragMode.Move) { _evDrag = new EventDrag(ev, DragMode.Move, e.GetPosition(_canvas), box, false, ev.Start, ev.End); _canvas.CaptureMouse(); return; }
+            // ★★ 一条跨天日程被切成好几段,每一段只对【它真的持有的那一端】负责:
+            //   · 顶边 = 开始时刻 -> 只有起始那段能拖;
+            //   · 底边 = 结束时刻 -> 只有末段能拖;
+            //   · 整体挪动 -> 只有起始那段能做(在中间段挪,人分不清动的是哪一头)。
+            //   够不着的那些,一律退化成"点了一下" -> 打开编辑抽屉,在那里改是明确的。
+            if (mode == DragMode.Start && !seg.IsFirst) mode = DragMode.Move;
+            if (mode == DragMode.End && !seg.IsLast) mode = DragMode.Move;
+            if (mode == DragMode.Move && !seg.IsFirst)
+            {
+                // 只登记一次"点了一下",不进入拖动
+                _evDrag = new EventDrag(ev, DragMode.Move, e.GetPosition(_canvas), box, false, ev.Start, ev.End, CanDrag: false);
+                _canvas.CaptureMouse();
+                return;
+            }
             _evDrag = new EventDrag(ev, mode, e.GetPosition(_canvas), box, false, ev.Start, ev.End);
             _canvas.CaptureMouse();
         };
@@ -868,8 +900,9 @@ public sealed class WeekTimeline : UserControl
     /// </summary>
     /// <param name="Box">被拖的那个方块 —— 拖动期间【直接挪它】,不重建。</param>
     /// <param name="Start">预览中的开始/结束(还没写进 CalendarData)。</param>
+    /// <param name="CanDrag">false = 这一段够不着它要改的那一端,只当"点了一下"。</param>
     sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,
-                            bool Moved, DateTime Start, DateTime End);
+                            bool Moved, DateTime Start, DateTime End, bool CanDrag = true);
     sealed record ScaleDrag(double FromY, double Hours0, double Anchor, double HourAtAnchor, UIElement Src, bool Moved);
 
     EventDrag? _evDrag;
@@ -905,6 +938,7 @@ public sealed class WeekTimeline : UserControl
         if (!dg.Moved)
         {
             if (Math.Abs(cur.Y - dg.From.Y) < DragThreshold && Math.Abs(cur.X - dg.From.X) < DragThreshold) return;
+            if (!dg.CanDrag) return;      // 中间段/末段的"整体挪动":登记了但不真的动
             _evDrag = dg = dg with { Moved = true };
         }
 
@@ -927,7 +961,9 @@ public sealed class WeekTimeline : UserControl
                 }
             case DragMode.End:
                 {
-                    var t = Math.Clamp(Snap(e0 + moved), SnapUp(s0 + SnapHours), DayMax);
+                    // ★ 上限不再是 DayMax:跨天日程本来就可以跨好几天。
+                    //   只保证"结束在开始之后至少一格",其余交给用户。
+                    var t = Math.Max(SnapUp(s0 + SnapHours), Snap(e0 + moved));
                     start = ev0.Start; end = day.AddHours(t);
                     break;
                 }

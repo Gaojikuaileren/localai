@@ -2378,8 +2378,15 @@ public static class Selftest
                 //   同一个漏洞的另一面：编辑抽屉也永远打不开。
                 Assert(tl.Contains("EndScale();") && tl.Contains("// ★★ 【无条件】收尾"),
                        "★★ 松手时【无条件】收尾(不能只在拖动过才收)");
-                Assert(tl.Contains("if (isTail && mode != DragMode.End) mode = DragMode.Move;"),
-                       "★★ 跨天那半截的【底边可拖】 —— 它就是真正的结束时刻(之前整个不接受拖动,跨天日程因此建不出来)");
+                Assert(tl.Contains("if (mode == DragMode.Start && !seg.IsFirst) mode = DragMode.Move;")
+                       && tl.Contains("if (mode == DragMode.End && !seg.IsLast) mode = DragMode.Move;"),
+                       "★★ 一条跨天日程被切成好几段,每一段只对【它真的持有的那一端】负责:"
+                       + "顶边只有起始段能拖、底边只有末段能拖");
+                Assert(tl.Contains("readonly record struct Seg(CalendarEvent Ev, double S, double E, bool IsFirst, bool IsLast)")
+                       && tl.Contains("static DateTime LastDayOf(CalendarEvent ev)"),
+                       "★ 跨天定时日程按天切段(每段知道自己是不是头/尾)");
+                Assert(tl.Contains("box.CornerRadius = new CornerRadius(seg.IsFirst ? 3 : 0"),
+                       "★ 被切断的那一端【不收圆角】—— 平口 = 还没完,圆角 = 就到这儿");
                 Assert(tl.Contains("protected override void OnLostMouseCapture"),
                        "★ 捕获丢失也收尾(拖到窗口外松手/Alt+Tab),否则拖拽状态永远挂着");
                 // ★★ 全天条带：拿掉月历左下角那份当日列表之后，
@@ -2413,7 +2420,7 @@ public static class Selftest
                        "★★ 滚轮【只有真的滑动了才吞】—— 到顶/到底还吞的话,光标停在这里整页就永远滑不动");
                 Assert(tl.Contains("sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,")
                        && tl.Contains("var moved = (cur.Y - dg.From.Y) / h * _hours;")
-                       && tl.Contains("Math.Clamp(Snap(e0 + moved), SnapUp(s0 + SnapHours), DayMax)"),
+                       && tl.Contains("var t = Math.Max(SnapUp(s0 + SnapHours), Snap(e0 + moved));"),
                        "★★ 拖动改时间是【绝对】口径(从起手那一刻重算 + 对绝对时刻吸附 + 守卫夹住)"
                        + " —— 增量口径会吞掉四舍五入的余量,慢拖时边界跑得比光标快近一倍,还留反向死区");
                 // ★ 夹取的【边界本身】也要落在半小时上 —— 否则顶到下限会得到 9:07 这种脏时刻
@@ -2429,16 +2436,33 @@ public static class Selftest
                        "★ 手势都没有可见按钮 —— 两边共用同一句提示(手势已经不分区域了)");
                 Assert(!tl.Contains("_weekStart:M月d日}"),
                        "★ 顶栏那行日期标签已去掉(横轴上每一格都写着日期了)");
-                Assert(tl.Contains("Grid.SetColumn(_navCell, 0);") && tl.Contains("FrameworkElement NavKey(")
-                       && !tl.Contains("NavKey(\"‹\""),
-                       "★ 只留「今」一个键(左右两个已去掉),收在刻度列正上方那一格、长得像按钮");
+                Assert(tl.Contains("NavKey(\"现在\"") && !tl.Contains("NavKey(\"‹\""),
+                       "★ 只留一个键且叫【现在】(不叫「今」,左右两个已去掉)");
+                // ★★ 它一度【点不动】—— 因为挂在 _head 里,而 _head 刚被设成 IsHitTestVisible = false
+                //   好让底下的全天横幅点得着。IsHitTestVisible 是往下传染的,
+                //   子元素想单独恢复也恢复不了 —— 只能挪到表头外面去。
+                Assert(tl.Contains("topBlock.Children.Add(_navCell);") && !tl.Contains("_head.Children.Add(_navCell);"),
+                       "★★ 导航键放在表头【外面】(挂在里面会被 IsHitTestVisible=false 一起传染成不可点)");
                 Assert(tl.Contains("_top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);"),
                        "★ 按「今」【保持当前缩放】,只把此刻挪到视野中间");
                 Assert(tl.Contains("if (!sc.Moved && at is { } when) OnCreateAt?.Invoke(when);")
                        && tl.Contains("_createAt = AtPoint(e.GetPosition(_canvas));"),
                        "★★ 表格空白处【单击 = 新建】(不是双击);按住拖才是缩放 —— 靠「有没有真的挪动过」区分");
-                Assert(tl.Contains("if (HoursFrom(prev, ev.End) <= 24) continue;"),
-                       "★★ 跨天日程在【隔壁那一天】续画 —— 否则从今天看过去那条日程就凭空消失了");
+                Assert(tl.Contains("for (int back = 0; back <= 7; back++)")
+                       && tl.Contains("if (back > 0 && LastDayOf(ev) < day.Date) continue;"),
+                       "★★ 往回找【整周】而不是只找前一天 —— 一条跨三天的定时日程,"
+                       + "中间那天既不是起始日也不是结束日,只看前一天会把它整段漏掉");
+                var ce2 = TryReadSource(Path.Combine("Views", "CalendarEditor.cs"));
+                if (ce2 is not null)
+                {
+                    Assert(ce2.Contains("var endOffset = existing is not null") && ce2.Contains("d0.AddDays(endOffset) + endAt"),
+                           "★★ 非全天日程也能跨天:结束 = 开始那天 + 【结束日偏移】+ 结束时刻");
+                    Assert(ce2.Contains("endOffset = 1;") && ce2.Contains("if (endAt > startAt || endOffset > 0) return;"),
+                           "★★ 把结束拨到早于开始 = 【跨到次日】,而不是把开始一起往前拖"
+                           + "(旧做法等于替用户改了他刚刚没动的那一头,而且让跨天永远表达不出来)");
+                    Assert(ce2.Contains("if (next < 0 || (next == 0 && endAt <= startAt)) return;"),
+                           "★ 退回「当日」时若起止会颠倒,就不许退 —— 不靠保存时偷偷夹一下");
+                }
             }
 
             var sun = TryReadSource(Path.Combine("Services", "SunClock.cs"));
@@ -2491,6 +2515,9 @@ public static class Selftest
                        "★ 城市名后面不再有「· 当前」(右侧那列已经写着「本地」,同一件事说两遍)");
                 Assert(!homeTodo.Contains("TempBar(i,"),
                        "★ 天气摘要行【没有滑块】(用户裁定:长得像滑块却不能拖,本身就是误导)");
+                Assert(homeTodo.Contains("i == _places.Count - 1 ? 0 : CityGap"),
+                       "★★ 末尾那张天气卡不留下边距 —— 否则它看得见的底边比框底高出 10px,"
+                       + "而日历对的是框底,看起来就是对不齐");
                 Assert(homeTodo.Contains("Margin = new Thickness(0, 0, 0, PanelGap),")
                        && homeTodo.Contains("_todoVisible ? 12 : 0, PanelGap);"),
                        "★ 日历与天气取同一个下边距 -> 下沿齐平,且与「正在进行的项目」留出间隔");
@@ -2823,7 +2850,7 @@ public static class Selftest
                     // ★★ 原来写死的是"减两张",只在正好 3 个地点时成立 ——
                     //   而地点数是会变的:Places.Load 会把与当前所在地重名的那个去重
                     //   (系统时区改成中国标准时间就只剩 2 张),用户也可以自己加城市。
-                    Assert(homeSrc.Contains("WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap) - CityGap"),
+                    Assert(homeSrc.Contains("WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap))"),
                            "★★ 展开高按【实际张数】倒推,不再假定正好 3 张");
                     Assert(homeSrc.Contains("Math.Max(ExpandedCityMin,"),
                            "★ 展开高有下限 —— 张数一多式子会算成负数,而 Height 拿到负值会【在构造期抛】(程序打不开)");
@@ -3612,8 +3639,12 @@ public static class Selftest
                     //     因为主页已经把时间轴合并进来了,"看那天有什么"下面就画着,
                     //     ① 那个 bug 的成因已经不存在了。
                     var oc = Slice(cv4, "void OnDayClicked(DateTime day)", "}");
-                    Assert(oc is not null && oc.Contains("if (reopen) OpenEditor(day, null);"),
-                           "★ 月视图点日期 = 直接开【新建日程】抽屉(2026-07-31 用户重新裁定)");
+                    Assert(oc is not null && !oc.Contains("OpenEditor(day, null)"),
+                           "★ 点日期 = 【只选中】(用户最终裁定:点击只是选中,新建要有自己的按钮)");
+                    Assert(cv4.Contains("public void NewEventOnSelected()"),
+                           "★ 新建走板块标题栏那个「+」，在选中的那一天建");
+                    Assert(cv4.Contains("public bool HideWeekdayHeader"),
+                           "★ 月历可以藏掉「一二三四五六日」那一行(与下方时间轴共用中间那行日期)");
                     // ★★ 浮层是【一摹】而不是一个:在抽屉里点"年月选择"会把整个抽屉关掉 ——
                     //   因为浮窗登记时把上一个(抽屉)关了,而浮窗的锚点就在那个抽屉里。
                     var ov = TryReadSource(Path.Combine("Views", "Overlay.cs"));

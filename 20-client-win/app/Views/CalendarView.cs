@@ -40,7 +40,7 @@ public sealed class CalendarView : UserControl
     /// = 顶栏 34 + 星期表头 15 + 6 行 × 40。★ 月排布【恒画 6 行】(见 MonthGrid):
     /// 5 行月和 6 行月若高度不同,下面的时间轴会随翻月上下跳 40px。
     /// </summary>
-    public const double MonthOnlyHeight = 34 + 15 + 6 * (MonthCellHeight + SpanRowHeight + DotsRowHeight);
+    public const double MonthOnlyHeight = 34 + 6 * (MonthCellHeight + SpanRowHeight + DotsRowHeight);
 
     // ★★★ 下面这几个是【宿主配置】属性,一律写成"改了就重建",不能用自动属性。
     //   踩过的坑:new CalendarView(Mode.Month) { HideDayArea = true, LeftGutter = 44 } ——
@@ -71,6 +71,18 @@ public sealed class CalendarView : UserControl
         set { if (_hideDayArea == value) return; _hideDayArea = value; Rebuild(); }
     }
     bool _hideDayArea;
+
+    /// <summary>
+    /// 藏掉「一 二 三 四 五 六 日」那一行(用户裁定 2026-07-31)。
+    /// 主页合并板块里,下方时间轴的「周一 27 / 周二 28 …」那一行【本来就在正中间】,
+    /// 上下两块又是列对齐的 —— 同一件事标两遍,还各占一行高。
+    /// </summary>
+    public bool HideWeekdayHeader
+    {
+        get => _hideWeekdayHeader;
+        set { if (_hideWeekdayHeader == value) return; _hideWeekdayHeader = value; Rebuild(); }
+    }
+    bool _hideWeekdayHeader;
 
     // 收紧日期区,把腾出的纵向空间让给周排布下方的当日日程表(用户裁定)
     const double MonthCellHeight = 28;
@@ -462,7 +474,7 @@ public sealed class CalendarView : UserControl
     UIElement MonthGrid()
     {
         var panel = new StackPanel();
-        panel.Children.Add(WeekdayHeader());
+        if (!_hideWeekdayHeader) panel.Children.Add(WeekdayHeader());
 
         var first = new DateTime(_anchor.Year, _anchor.Month, 1);
         var lead = ((int)first.DayOfWeek + 6) % 7;
@@ -707,11 +719,18 @@ public sealed class CalendarView : UserControl
         //   新建仍在 —— 当日标题右边那个「+」。
         Rebuild();
 
-        // ★★ 点日期 = 【直接开新建日程抽屉】(用户裁定 2026-07-31，推翻了上一版的当日浮窗)。
-        //   “看那天有什么”交给下方的时间轴 —— 选中哪天它就聚焦那一周，
-        //   同一份日程再开一个浮窗列一遍是重复的。
-        if (reopen) OpenEditor(day, null);
+        // ★★ 点日期 = 【只选中】(用户裁定 2026-07-31 最终版)。
+        //   这一条来回改过三轮,把结论和理由留在这里,免得以后又绕回去:
+        //     ① 最早:点日期直接开新增抽屉;
+        //     ② 用户报 bug"想看那天有什么反而无路可走" -> 改成选中 + 列出当天;
+        //     ③ 一度又改回"点日期直接开新建" -> 用户当场纠正：【点击只是选中,新建要有自己的按钮】。
+        //   所以:选中 = 下方时间轴聚焦那一周(那才是"看那天有什么"),
+        //         新建 = 板块标题栏那个「+」(见 HomeView 的装配)。
+        _ = reopen;
     }
+
+    /// <summary>在【当前选中的那一天】新建 —— 板块标题栏那个「+」走这里。</summary>
+    public void NewEventOnSelected() => OpenEditor(_selected, null);
 
     // ---------------------------------------------------------------- 周排布:下方就地列出
     void RebuildDayList()

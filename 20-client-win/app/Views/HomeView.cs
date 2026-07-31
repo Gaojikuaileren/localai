@@ -62,6 +62,9 @@ public sealed class HomeView : UserControl
     /// <summary>展开态卡片的最矮可读高度 —— 低于它就不再压缩,改让整块可以滚。</summary>
     const double ExpandedCityMin = 150;
 
+    /// <summary>地点数不超过它时,固定高度一定装得下 -> 直接禁掉滚动,免得动画中途闪滚动条。</summary>
+    const int WeatherFitsCount = 4;
+
     /// <summary>
     /// 展开态的卡片高度 = 总高 - 其余各张折叠行(含间隔),倒推保证总和恒定。
     /// ★★ 【必须按实际张数算】。原来写死的是"减两张",只在正好 3 个地点时成立 ——
@@ -78,9 +81,10 @@ public sealed class HomeView : UserControl
         get
         {
             var n = Math.Max(1, _places.Count);
-            // ★ 最后一张卡自己也带一道下边距 —— 不把它减掉的话总高比框大 10px，
-            //   于是天气板块就【可以上下滑一点】(用户反馈)。把展开那张相应改矮一点就刚好装下。
-            return Math.Max(ExpandedCityMin, WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap) - CityGap);
+            // ★★ 最后一张卡【不留下边距】(见 WeatherCard),所以这里不再减那一道。
+            //   之前每张都带下边距:末尾那 10px 是空白,于是【札幌看得见的底边】
+            //   比 300px 的框底高出 10px —— 日历下沿对的是框底,看起来就是对不齐。
+            return Math.Max(ExpandedCityMin, WeatherStackHeight - (n - 1) * (CollapsedCityHeight + CityGap));
         }
     }
 
@@ -169,6 +173,7 @@ public sealed class HomeView : UserControl
                 Height = CalendarView.MonthOnlyHeight,
                 HideModeSwitch = true,
                 HideDayArea = true,
+                HideWeekdayHeader = true,   // 与下方时间轴共用中间那一行「周一 27…」
                 LeftGutter = WeekTimeline.GutterWidth,   // 七列与下方时间轴对齐
             };
             var timeline = new WeekTimeline { MinHeight = 150 };
@@ -191,7 +196,9 @@ public sealed class HomeView : UserControl
             calPanel = Ui.Panel("日历", calStack, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
                 iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
                 iconActionTip: "与 Apple 家庭共享日历同步的设置",
-                headerAction: SyncNowButton(calView));
+                // ★ 新建日程的入口在【板块标题栏】(用户裁定):
+                //   点日期只是选中,新建得有自己的按钮 —— 两件事各走各的入口。
+                headerAction: CalendarHeaderActions(calView));
             // ★ 日历【跨行 1-2】(用户裁定 2026-07-31):天气改成一展开+两折叠后挪到了右列,
             //   左侧因此空出一整块 —— 日历往下延伸与它对齐,时间轴才有地方放。
             // ★ 底部与【武汉】那一行持平(用户裁定)—— 而不是一直拉到末尾的札幌。
@@ -259,10 +266,15 @@ public sealed class HomeView : UserControl
             //   于是"折叠"就是卡片变矮、摘要行留在原处 —— 而不是换掉一个元素。
             // ★ 地点多到 300px 装不下时【可以滚】—— 否则超出的那几张会被 ClipToBounds 裁掉,
             //   看不见也碰不到。三个地点以内根本不会出现滚动条,现状不受影响。
+            // ★★ 滚动条【只在真的装不下时才给】(用户反馈:在几个城市之间快速移动鼠标会闪出一条滑条)。
+            //   成因:折叠/展开走的是高度动画,动画中途总高会短暂超出 300px 一点点,
+            //   Auto 的滚动条就闪一下 —— 那条"滑条"其实是滚动条,不是什么控件。
+            //   地点数在容得下的范围内就直接禁掉滚动;超出了才给,那是审计要求的逃生口。
+            var weatherFits = _places.Count <= WeatherFitsCount;
             var weatherScroll = new ScrollViewer
             {
                 Content = _weatherStack,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = weatherFits ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             }.PassThrough();
             var weatherHost = new Border
@@ -418,6 +430,22 @@ public sealed class HomeView : UserControl
         }
     }
 
+    /// <summary>日历板块标题栏右侧:【+ 新建日程】+ 【立即同步】。</summary>
+    FrameworkElement CalendarHeaderActions(CalendarView calView)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(Ui.PlusButton(calView.NewEventOnSelected, "在选中的那一天新增日程"));
+        // ★ SyncNowButton 在【没配 Apple 账号时返回 null】—— 直接 Add 会抛
+        //   ArgumentNullException,而且是在构造期抛:整个客户端都打不开。
+        //   (这一条是被【视图构造冒烟】当场拦下的 —— 正是它存在的理由。)
+        if (SyncNowButton(calView) is { } sync)
+        {
+            row.Children.Add(new Border { Width = 6 });
+            row.Children.Add(sync);
+        }
+        return row;
+    }
+
     // ---------------------------------------------------------------- 天气区(可拖拽排序)
     void BuildWeather()
     {
@@ -470,7 +498,9 @@ public sealed class HomeView : UserControl
         {
             Child = body,
             Height = CollapsedCityHeight,
-            Margin = new Thickness(0, 0, 0, CityGap),
+            // ★ 末尾那张不留下边距 —— 它看得见的底边就是整块的底边,
+            //   日历下沿才真的与它齐(用户:"武汉的底部就是天气板块的底部")。
+            Margin = new Thickness(0, 0, 0, i == _places.Count - 1 ? 0 : CityGap),
             BorderThickness = new Thickness(1),
             ClipToBounds = true,
             Cursor = System.Windows.Input.Cursors.Hand,
