@@ -111,6 +111,7 @@ public sealed class HomeView : UserControl
     TranslateTransform[] _shifts = Array.Empty<TranslateTransform>();   // 拖拽期的位移(挤开/跟手)
     TextBlock[] _miniTime = Array.Empty<TextBlock>();
     TextBlock[] _miniSky = Array.Empty<TextBlock>();     // 当前气候(晴/多云/阴…)
+    TextBlock[] _miniTemp = Array.Empty<TextBlock>();    // 折叠行的当前气温
     TextBlock[] _miniPart = Array.Empty<TextBlock>();    // 时段词(早上/下午/晚上…)
     TextBlock[] _miniName = Array.Empty<TextBlock>();    // 城市名(只有展开那张才补「· 当前」)
     FrameworkElement[] _miniBar = Array.Empty<FrameworkElement>();   // 温度滑条
@@ -302,6 +303,9 @@ public sealed class HomeView : UserControl
                 //   光标停在缝里 220ms 就被当成"离开了天气板块",展开的卡啪地跳回第 0 张。
                 //   人明明还在板块上 —— 这正是用户之前报过的那种"乱跳"的同一个形状。
                 Background = System.Windows.Media.Brushes.Transparent,
+                // ★ 数据来源署名收在这里。Open-Meteo 的免费接口是 CC BY 4.0 ——
+                //   署名是许可要求,可以不占一整行,但不能直接拿掉。
+                ToolTip = Strings.Get("weather.source_credit"),
             };
             // ★ 鼠标真的离开整块才恢复默认 —— 【延迟一拍再确认】:
             //   卡片变高变矮时,光标底下的元素会短暂易主,WPF 会瞬时抛一次 MouseLeave;
@@ -496,6 +500,7 @@ public sealed class HomeView : UserControl
         _shifts = new TranslateTransform[n];
         _miniTime = new TextBlock[n];
         _miniSky = new TextBlock[n];
+        _miniTemp = new TextBlock[n];
         _miniPart = new TextBlock[n];
         _miniName = new TextBlock[n];
         _miniBar = new FrameworkElement[n];
@@ -792,6 +797,17 @@ public sealed class HomeView : UserControl
         _miniSky[i].SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         _miniSky[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
+        // ★ 折叠行也要看得到气温(用户裁定)—— 没取到就是"—°",不编一个
+        _miniTemp[i] = new TextBlock
+        {
+            Text = "—°",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0),
+            FontWeight = FontWeights.SemiBold,
+        };
+        _miniTemp[i].SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        _miniTemp[i].SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
         // 时段词(早上/上午/中午/下午/晚上/夜晚)—— 用户裁定:放在时间左边,
         // 比原来的"昼/夜"具体得多。与问候语共用同一套划分(见 Greetings.PartOfDay)。
         _miniPart[i] = new TextBlock { Text = "", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
@@ -810,6 +826,7 @@ public sealed class HomeView : UserControl
         left.Children.Add(_miniIcon[i]);
         left.Children.Add(new Border { Width = 6 });
         left.Children.Add(name);
+        left.Children.Add(_miniTemp[i]);
         left.Children.Add(_miniSky[i]);
 
         // ★ 温度滑条【已移除】(用户裁定 2026-07-31:"天气不应该有滑块")。
@@ -1032,6 +1049,7 @@ public sealed class HomeView : UserControl
             if (_citySky[i] is { } sky)
                 sky.Text = w?.WeatherCode is not null ? (Services.Weather.Describe(w.WeatherCode) ?? "—")
                          : known ? "还没取到天气" : "这个城市还没有坐标 —— 取不了天气";
+            if (_miniTemp[i] is { } mtp) mtp.Text = w?.TempC is not null ? $"{w.TempC:0}°" : "—°";
             if (_miniSky[i] is { } msky)
                 msky.Text = w?.WeatherCode is not null ? (Services.Weather.Describe(w.WeatherCode) ?? "—") : "—";
 
@@ -1046,10 +1064,12 @@ public sealed class HomeView : UserControl
 
             if (_cityStamp[i] is { } stamp)
             {
-                // ★ 过期就把"上次是什么时候"摆到台面上
-                stamp.Text = w?.UpdatedAt is { } at && w.IsStale
-                    ? $"暂时取不到 · 显示上次 {at:HH:mm}"
-                    : Strings.Get("weather.source_credit");
+                // ★★ 过期就把"上次是什么时候"摆到台面上(诚实口径,不能省)。
+                //   没过期时这一行【收起来】—— 数据来源改挂在悬停提示里。
+                //   ★ 来源不能直接删掉:Open-Meteo 的免费接口是 CC BY 4.0,署名是许可要求。
+                var stale = w?.UpdatedAt is not null && w.IsStale;
+                stamp.Text = stale ? $"暂时取不到 · 显示上次 {w!.UpdatedAt:HH:mm}" : "";
+                stamp.Visibility = stale ? Visibility.Visible : Visibility.Collapsed;
             }
             // 图标随实况;认不出的代码【不画图标】(与 Describe 同一口径,不拿太阳冒充)
             var wx = Icons.ForWeather(w?.WeatherCode);
@@ -1100,12 +1120,18 @@ public sealed class HomeView : UserControl
         {
             var wpx = host.ActualWidth; var hpx = host.ActualHeight;
             if (wpx <= 0 || hpx <= 0) return;
-            const double pad = 3;
+            // ★ 上下留足夹道:原来只留 3px,峰值就贴在格子上沿(看着就是"超了"),
+        //   而且正好与顶部那个最高温标注叠在一起。
+            const double padY = 9;
+            // ★ 左侧留出标注的位置 —— 线与字不再挤在同一块地方。
+            const double padL = 28;
+            var usableW = Math.Max(1, wpx - padL);
+            var usableH = Math.Max(1, hpx - 2 * padY);
             var pc = new PointCollection();
             for (int k = 0; k < pts.Count; k++)
             {
-                var x = pts.Count == 1 ? wpx / 2 : k * (wpx - 1) / (pts.Count - 1);
-                var y = hpx - pad - (pts[k].TempC!.Value - lo) / span * (hpx - 2 * pad);
+                var x = padL + (pts.Count == 1 ? usableW / 2 : k * usableW / (pts.Count - 1));
+                var y = hpx - padY - (pts[k].TempC!.Value - lo) / span * usableH;
                 pc.Add(new Point(x, y));
             }
             poly.Points = pc;

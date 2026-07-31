@@ -3456,8 +3456,9 @@ public static class Selftest
                 {
                     Assert(hvw.Contains("暂时取不到 · 显示上次"),
                            "★★ 过期的读数【如实标出它是什么时候的】—— 无假实时(状态矩阵 §8 第 6 条)");
-                    Assert(hvw.Contains("Strings.Get(\"weather.source_credit\")"),
-                           "★ 标出数据来源(Open-Meteo 要求署名)");
+                    Assert(hvw.Contains("ToolTip = Strings.Get(\"weather.source_credit\")"),
+                           "★★ 数据来源仍然在(收进悬停提示) —— Open-Meteo 的免费接口是 CC BY 4.0,"
+                           + "署名是许可要求:可以不占一整行,不能直接拿掉");
                     Assert(hvw.Contains("if (Services.Places.CoordOf(p) is not { } c) continue;"),
                            "★ 认不出坐标的城市直接跳过 —— 不拿别处的坐标顶替");
                     var appw = TryReadSource("App.xaml.cs");
