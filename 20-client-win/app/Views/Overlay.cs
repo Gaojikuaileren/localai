@@ -19,20 +19,41 @@ namespace LocalAI.Client.Views;
 
 public static class Overlay
 {
-    static Action? _close;
+    // ★★ 浮层是【一摞】而不是一个(2026-07-31 修 bug):
+    //   在抽屉里点"年月选择"会把整个抽屉关掉 —— 因为浮窗登记时把上一个(抽屉)关了,
+    //   而浮窗的锚点就在那个抽屉里,于是两个一起消失,看起来就是"点了就关了"。
+    //   现在:抽屉之间仍然【互相替换】(Register),浮窗【叠在上面】(Push),
+    //   关闭永远只关最上面那一个。
+    static readonly List<Action> _stack = new();
+
+    static Action? _close
+    {
+        get => _stack.Count > 0 ? _stack[^1] : null;
+        set
+        {
+            _stack.Clear();
+            if (value is not null) _stack.Add(value);
+        }
+    }
 
     /// <summary>当前是否有浮层(抽屉或浮窗)开着。</summary>
-    public static bool IsOpen => _close is not null;
+    public static bool IsOpen => _stack.Count > 0;
+
+    /// <summary>
+    /// 叠一层上去,【不关掉】下面那层 —— 浮窗从抽屉里弹出来时走这条。
+    /// </summary>
+    public static void Push(Action close) => _stack.Add(close);
 
     /// <summary>
     /// 登记一个已打开的浮层及其关闭方法。会先关掉上一个 —— 保证全局只有一个。
     /// </summary>
     public static void Register(Action close)
     {
-        var previous = _close;
-        _close = null;          // 先清空,避免 previous() 内部回调再次触发关闭造成递归
-        previous?.Invoke();
-        _close = close;
+        // 关掉【整摞】,再放这一个 —— 抽屉之间是互相替换的关系
+        var previous = _stack.ToList();
+        _stack.Clear();         // 先清空,避免 previous() 内部回调再次触发关闭造成递归
+        for (int i = previous.Count - 1; i >= 0; i--) previous[i].Invoke();
+        _stack.Add(close);
     }
 
     /// <summary>浮层自己关闭时(例如 WPF Popup 因点击外部而关)回调,用于清账。</summary>
@@ -41,15 +62,27 @@ public static class Overlay
         // ★ 用 Equals 而非 ReferenceEquals:每次 `Register(Foo)` 都会新建一个委托实例,
         //   引用比较必然失败(实测:清账不生效,留下失效的关闭回调,后续点击被误消费)。
         //   委托的 Equals 按"目标 + 方法"比较,正是我们要的语义。
-        if (Equals(_close, close)) _close = null;
+        // 从摞里摘掉这一层(不一定在最上面 —— 比如浮窗自己因为点了外部而关)
+        for (int i = _stack.Count - 1; i >= 0; i--)
+            if (Equals(_stack[i], close)) { _stack.RemoveAt(i); return; }
     }
 
     /// <summary>关闭当前浮层(若有)。</summary>
+    /// <summary>关掉【最上面】那一层。抽屉里开着浮窗时,第一下只关浮窗。</summary>
     public static void CloseActive()
     {
-        var c = _close;
-        _close = null;
-        c?.Invoke();
+        if (_stack.Count == 0) return;
+        var c = _stack[^1];
+        _stack.RemoveAt(_stack.Count - 1);
+        c.Invoke();
+    }
+
+    /// <summary>关掉所有层(退出/切页时用)。</summary>
+    public static void CloseAll()
+    {
+        var all = _stack.ToList();
+        _stack.Clear();
+        for (int i = all.Count - 1; i >= 0; i--) all[i].Invoke();
     }
 
     /// <summary>

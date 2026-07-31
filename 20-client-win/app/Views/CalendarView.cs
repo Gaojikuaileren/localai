@@ -584,24 +584,29 @@ public sealed class CalendarView : UserControl
             if (timed.Count > DotsMaxBeforeTriangle)
             {
                 // 超过阈值:一个实心三角形代替一排点(用户裁定)
+                // 太多了就一个三角代替 —— 颜色取当天第一条(点都数不清了,颜色只是个"这天很满"的提示)
                 var tri = new System.Windows.Shapes.Path
                 {
                     Data = Geometry.Parse("M0,0 L9,0 L4.5,6 Z"),
                     VerticalAlignment = VerticalAlignment.Center,
                     Opacity = dim ? 0.55 : 1,
+                    Fill = new SolidColorBrush(Services.CalendarGroups.ColorOf(timed[0].CalendarGroup)),
                 };
-                tri.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isToday ? "FgOnAccent" : "Accent");
+                // ★ 今天那格底色是着重色 —— 分类色直接画上去会糊,描一圈反色边才分得开
+                if (isToday) { tri.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgOnAccent"); tri.StrokeThickness = 0.9; }
                 dots.Children.Add(tri);
             }
-            else foreach (var _ in timed)
+            else foreach (var ev in timed)
             {
+                // ★ 每个点 = 一条日程,用【它自己分类的颜色】(用户裁定 2026-07-31)
                 var d = new System.Windows.Shapes.Ellipse
                 {
                     Width = 3.5, Height = 3.5, Margin = new Thickness(1.2, 0, 1.2, 0),
                     VerticalAlignment = VerticalAlignment.Center,
                     Opacity = dim ? 0.55 : 1,
+                    Fill = new SolidColorBrush(Services.CalendarGroups.ColorOf(ev.CalendarGroup)),
                 };
-                d.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isToday ? "FgOnAccent" : "Accent");
+                if (isToday) { d.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "FgOnAccent"); d.StrokeThickness = 0.9; }
                 dots.Children.Add(d);
             }
             Grid.SetColumn(dots, i); Grid.SetRow(dots, dotsRow);
@@ -612,10 +617,10 @@ public sealed class CalendarView : UserControl
         // ④ 全天线:在数字与圆点【之间】,统一画在【同一行】。
         //    多条全天日程重叠时不分行 —— 按"哪些天被覆盖"合并成连续线段,
         //    于是每一天最多只有一条线、高度完全一致(用户裁定)。
-        foreach (var (col, span, clipStart, clipEnd) in MergeSpans(spans))
+        foreach (var (col, span, clipStart, clipEnd, color) in MergeSpans(spans))
         {
             var dim = isDim(weekStart.AddDays(col));
-            var bar = SpanBar(clipStart, clipEnd, dim);
+            var bar = SpanBar(clipStart, clipEnd, dim, color);
             Grid.SetColumn(bar, col); Grid.SetColumnSpan(bar, span); Grid.SetRow(bar, 1);
             Panel.SetZIndex(bar, 1);
             grid.Children.Add(bar);
@@ -630,31 +635,35 @@ public sealed class CalendarView : UserControl
     /// 分行画会一上一下,也会让日期区高度随条数浮动。
     /// 合并后每段的两端各自判断是否被周界裁断(用于决定收不收圆角)。
     /// </summary>
-    static List<(int Col, int Span, bool ClipStart, bool ClipEnd)> MergeSpans(
+    static List<(int Col, int Span, bool ClipStart, bool ClipEnd, Color Color)> MergeSpans(
         List<(CalendarEvent Ev, int Col, int Span, bool ClipStart, bool ClipEnd)> spans)
     {
         // 先把"哪些列被覆盖"以及"该列是否续前/续后"摊平到 7 格
         var covered = new bool[7];
         var contPrev = new bool[7];
         var contNext = new bool[7];
+        // ★ 每一格记一个颜色 = 覆盖这一格的【第一条】全天日程的分类色。
+        //   合并线段时【颜色不同就断开】—— 否则一根线横跨两个分类,那根线到底是谁的说不清。
+        var color = new Color[7];
         foreach (var s in spans)
             for (int i = 0; i < s.Span; i++)
             {
                 var col = s.Col + i;
                 if (col is < 0 or > 6) continue;
+                if (!covered[col]) color[col] = Services.CalendarGroups.ColorOf(s.Ev.CalendarGroup);
                 covered[col] = true;
                 if (i == 0 && s.ClipStart) contPrev[col] = true;
                 if (i == s.Span - 1 && s.ClipEnd) contNext[col] = true;
             }
 
-        var result = new List<(int, int, bool, bool)>();
+        var result = new List<(int, int, bool, bool, Color)>();
         int c0 = 0;
         while (c0 < 7)
         {
             if (!covered[c0]) { c0++; continue; }
             var c1 = c0;
-            while (c1 + 1 < 7 && covered[c1 + 1]) c1++;
-            result.Add((c0, c1 - c0 + 1, contPrev[c0], contNext[c1]));
+            while (c1 + 1 < 7 && covered[c1 + 1] && color[c1 + 1] == color[c0]) c1++;   // ★ 颜色变了就断开
+            result.Add((c0, c1 - c0 + 1, contPrev[c0], contNext[c1], color[c0]));
             c0 = c1 + 1;
         }
         return result;
@@ -666,7 +675,7 @@ public sealed class CalendarView : UserControl
     /// 不可点击:它横跨多天,点它无从判断指的是哪天,且会绕过"先选日期"这条统一路径。
     /// 被区间裁断的一端不收圆角,表示"还在继续"。
     /// </summary>
-    static Border SpanBar(bool clipStart, bool clipEnd, bool dim)
+    static Border SpanBar(bool clipStart, bool clipEnd, bool dim, Color color)
     {
         var bar = new Border
         {
@@ -680,10 +689,10 @@ public sealed class CalendarView : UserControl
             IsHitTestVisible = false,             // 点击穿透到背景块 -> 仍能选中当天
             CornerRadius = new CornerRadius(clipStart ? 0 : 2, clipEnd ? 0 : 2, clipEnd ? 0 : 2, clipStart ? 0 : 2),
         };
-        // ★ 用【次着重色】而不是着重色:同一格里既有当日日程的点、又有这条跨天线,
-        //   两者同色就分不出今天有事和这几天都在这件事里。
-        //   次着重色的职责正是同一类东西的另一种,不表示状态、也不表示危险。
-        bar.SetResourceReference(Border.BackgroundProperty, "AccentSecondary");
+        // ★ 颜色跟随【这条全天日程所属分类】(用户裁定 2026-07-31)——
+        //   原来固定用次着重色,那时颜色还不携带信息;现在分类有颜色了,
+        //   线与点用同一套色,一眼就能把"这几天都在这件事里"和它属于哪个日历对上。
+        bar.Background = new SolidColorBrush(color);
         return bar;
     }
 
@@ -698,46 +707,10 @@ public sealed class CalendarView : UserControl
         //   新建仍在 —— 当日标题右边那个「+」。
         Rebuild();
 
-        // ★★ 月排布【弹当日浮窗】(用户裁定 2026-07-31 恢复):里面是当天日程的预览 + 一个新建入口。
-        //   注意这是"预览 + 入口",不是"直接开新增抽屉" —— 后者正是之前报过的那个 bug。
-        // ★ 必须在 Rebuild【之后】再取格子:重建把旧元素整批换掉了,
-        //   挂在已经离开可视树的元素上,浮窗会定位到左上角或者干脆不出来。
-        if (reopen && _dayCells.TryGetValue(day.Date, out var cell) && cell.IsVisible)
-            ShowDayFlyout(day, cell);
-    }
-
-    /// <summary>当日浮窗:列出那天的日程(点一条 = 编辑),底部一个「新增日程」。</summary>
-    void ShowDayFlyout(DateTime day, FrameworkElement anchor)
-    {
-        var body = new StackPanel();
-        var evts = CalendarData.On(day).ToList();
-        if (evts.Count == 0)
-        {
-            var none = new TextBlock { Text = "这一天还没有日程。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(2, 2, 2, 8) };
-            none.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            none.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            body.Children.Add(none);
-        }
-        else
-        {
-            var list = new StackPanel();
-            foreach (var ev in evts) list.Children.Add(EventRow(ev, compact: true));
-            body.Children.Add(new ScrollViewer
-            {
-                Content = list,
-                MaxHeight = 220,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                Margin = new Thickness(0, 0, 0, 6),
-            }.PassThrough());
-        }
-
-        var add = CompactAdd(() => { Overlay.CloseActive(); OpenEditor(day, null); });
-        add.Margin = new Thickness(0);
-        add.HorizontalAlignment = HorizontalAlignment.Left;
-        body.Children.Add(add);
-
-        Flyout.Show(anchor, day.ToString("M月d日 dddd", Zh), body, width: 240);
+        // ★★ 点日期 = 【直接开新建日程抽屉】(用户裁定 2026-07-31，推翻了上一版的当日浮窗)。
+        //   “看那天有什么”交给下方的时间轴 —— 选中哪天它就聚焦那一周，
+        //   同一份日程再开一个浮窗列一遍是重复的。
+        if (reopen) OpenEditor(day, null);
     }
 
     // ---------------------------------------------------------------- 周排布:下方就地列出

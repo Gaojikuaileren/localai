@@ -108,6 +108,9 @@ public partial class MainWindow : Window
             //   IsInsideDrawer 顺着本窗口的树找不到它 -> 判成"点在抽屉外面" -> 关掉整个抽屉。
             //   现象:在新增日程里点一下"重复方式"的某个选项,选没选上,抽屉没了,填的全丢。
             if (AnyDropDownOpen(this)) return;
+            // ★ 浮窗内部照常操作 —— 它活在独立的 Popup 视觉树里,IsInsideDrawer 顺着本窗口的树找不到它,
+            //   不特判的话点浮窗里的任何东西都会被当成"点在外面"(年月选择就是这么点不中的)。
+            if (me.OriginalSource is DependencyObject fd && Flyout.IsInside(fd)) return;
             if (me.OriginalSource is DependencyObject d && IsInsideDrawer(d)) return;   // 抽屉内部照常操作
             Overlay.CloseActive();
             me.Handled = true;   // 吞掉这一次点击,不让它落到按钮上
@@ -323,7 +326,10 @@ public partial class MainWindow : Window
     void OnOpenCalendar(object sender, RoutedEventArgs e)
     {
         if (_drawerKind == "calendar") { CloseDrawer(); return; }
-        OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Month));
+        // ★ 顶栏这个日历【只保留周排布】(用户裁定 2026-07-31):
+        //   月排布归主页那个大板块(它下面还接着时间轴);这里是随手看一眼最近两周,
+        //   两种排布都给反而让人不知道该用哪个。
+        OpenRightDrawer("calendar", "日历", new CalendarView(CalendarView.Mode.Week) { HideModeSwitch = true });
     }
 
     /// <summary>

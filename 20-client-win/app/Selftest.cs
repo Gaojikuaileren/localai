@@ -2353,8 +2353,12 @@ public static class Selftest
                        && tl.Contains("placedLabels.Add(new Rect(x, yTop, w, height));"),
                        "★★ 太矮【或太窄】的条都把标题挪到条外，且外置标题要避开【其它标题与日程色块】"
                        + "(用户反馈:多个共享宽度时名字被省略成'…',什么都看不见)");
-                Assert(tl.Contains("Fill = new SolidColorBrush(onBack),") && tl.Contains("EdgeLinesAbove"),
-                       "★ 日程条的起止各画一条【反色】线(反的是这条日程所属分类的颜色)");
+                Assert(tl.Contains("BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),")
+                       && tl.Contains("var edgeThick = height >= EdgeLinesAbove ? 2.0 : 1.0;"),
+                       "★★ 定时日程用【描边框】,上下两条边加粗 = 起止标记"
+                       + "(描边不会把底下的昼夜带盖死 —— 一眼能看出日程是白天还是夜里)");
+                Assert(tl.Contains("Background = new SolidColorBrush(back),") ,
+                       "★ 全天日程用【实心色块】,与定时的描边框分开");
                 Assert(tl.Contains("CalendarGroups.ColorOf(ev.CalendarGroup)") && tl.Contains("CalendarGroups.TextOn(back)"),
                        "★★ 日程块用【分类的颜色】,字色按底色亮度反选(深底白字/浅底黑字)");
                 Assert(tl.Contains("Math.Clamp(y - 8, 0, Math.Max(0, h - 15))"),
@@ -2386,9 +2390,14 @@ public static class Selftest
                 Assert(tl.Contains("chip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OnEditEvent?.Invoke(captured); }"),
                        "★ 全天条可点 —— 走的仍是日历那个编辑抽屉");
                 Assert(tl.Contains("const double AllDayStripHeight = AllDayLabelHeight + AllDayRows * AllDayBarHeight + 4;")
-                       && tl.Contains("_allDay = new() { Height = AllDayStripHeight")
+                       && tl.Contains("_allDay = new() { Height = TopBlockHeight")
+                       && tl.Contains("const double TopBlockHeight = HeadHeight + AllDayStripHeight;")
                        && tl.Contains("const int AllDayRows = 2;"),
-                       "★★ 全天条带【常驻固定高】—— 不要那种有才出现的一栏(高度会一周一个样)");
+                       "★★ 表头与全天条带合成一块、常驻固定高(不要那种有才出现的一栏)");
+                Assert(tl.Contains("if (coverHeader)") && tl.Contains("Color.FromArgb(0x33, back.R, back.G, back.B)")
+                       && tl.Contains("_head.IsHitTestVisible = false;"),
+                       "★★ 跨天的全天日程把横轴的【周几/几号】也囊括进去"
+                       + "(表头铺一层同色淡底与下面的实心条连成一根横幅;表头不参与命中,横幅仍然点得着)");
                 Assert(tl.Contains("var lanes = Math.Clamp(perDay[sp.Col], 1, AllDayMaxLanes);")
                        && tl.Contains("var slotW = colW / lanes;")
                        && tl.Contains("var multi = spans.Where(x => x.Span > 1).ToList();"),
@@ -2425,6 +2434,9 @@ public static class Selftest
                        "★ 只留「今」一个键(左右两个已去掉),收在刻度列正上方那一格、长得像按钮");
                 Assert(tl.Contains("_top = ClampTop(DateTime.Now.TimeOfDay.TotalHours - _hours / 2);"),
                        "★ 按「今」【保持当前缩放】,只把此刻挪到视野中间");
+                Assert(tl.Contains("if (!sc.Moved && at is { } when) OnCreateAt?.Invoke(when);")
+                       && tl.Contains("_createAt = AtPoint(e.GetPosition(_canvas));"),
+                       "★★ 表格空白处【单击 = 新建】(不是双击);按住拖才是缩放 —— 靠「有没有真的挪动过」区分");
                 Assert(tl.Contains("if (HoursFrom(prev, ev.End) <= 24) continue;"),
                        "★★ 跨天日程在【隔壁那一天】续画 —— 否则从今天看过去那条日程就凭空消失了");
             }
@@ -3593,9 +3605,47 @@ public static class Selftest
                 var cv4 = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
                 if (cv4 is not null)
                 {
+                    // ★★ 这一条翻过两次,把经过记下来免得以后又改回去:
+                    //   ① 最早:点日期直接开新增抽屉;
+                    //   ② 2026-07-31 用户报 bug——"想看那天有什么反而无路可走",改成选中 + 列当天;
+                    //   ③ 同日晚些时候用户重新裁定:点日期【直接开新建抽屉】——
+                    //     因为主页已经把时间轴合并进来了,"看那天有什么"下面就画着,
+                    //     ① 那个 bug 的成因已经不存在了。
                     var oc = Slice(cv4, "void OnDayClicked(DateTime day)", "}");
-                    Assert(oc is not null && !oc.Contains("OpenEditor(day, null)"),
-                           "★ 月视图点日期 = 【查看当天】,不再直接弹新增抽屉(用户报的 bug)");
+                    Assert(oc is not null && oc.Contains("if (reopen) OpenEditor(day, null);"),
+                           "★ 月视图点日期 = 直接开【新建日程】抽屉(2026-07-31 用户重新裁定)");
+                    // ★★ 浮层是【一摹】而不是一个:在抽屉里点"年月选择"会把整个抽屉关掉 ——
+                    //   因为浮窗登记时把上一个(抽屉)关了,而浮窗的锚点就在那个抽屉里。
+                    var ov = TryReadSource(Path.Combine("Views", "Overlay.cs"));
+                    var fo = TryReadSource(Path.Combine("Views", "Flyout.cs"));
+                    if (ov is not null && fo is not null)
+                    {
+                        Assert(ov.Contains("public static void Push(Action close) => _stack.Add(close);"),
+                               "★★ 浮层可以【叠】—— 浮窗从抽屉里弹出来时不关抽屉");
+                        Assert(fo.Contains("Overlay.Push(Close);") && !fo.Contains("Overlay.Register(Close)"),
+                               "★ 浮窗走 Push 而不是 Register(抽屉之间才是互相替换)");
+                        Assert(fo.Contains("public static bool IsInside(DependencyObject? node)"),
+                               "★★ 能判出「点在浮窗里」 —— 浮窗活在独立 Popup 视觉树里,"
+                               + "外壳顺着主窗口的树找不到它,不特判就会把“点浮窗里”当成“点外面”");
+                    }
+                    var mw4 = TryReadSource("MainWindow.xaml.cs");
+                    if (mw4 is not null)
+                    {
+                        Assert(mw4.Contains("Flyout.IsInside(fd)"),
+                               "★ 外壳放行点在浮窗内部的点击");
+                        Assert(mw4.Contains("new CalendarView(CalendarView.Mode.Week) { HideModeSwitch = true }"),
+                               "★ 顶栏日历抽屉【只保留周排布】(月排布归主页那个大板块)");
+                    }
+                    Assert(cv4.Contains("Fill = new SolidColorBrush(Services.CalendarGroups.ColorOf(ev.CalendarGroup))"),
+                           "★★ 日期格里的圆点跟随【那条日程自己分类】的颜色");
+                    Assert(cv4.Contains("bar.Background = new SolidColorBrush(color);")
+                           && cv4.Contains("color[c1 + 1] == color[c0]"),
+                           "★★ 全天线也跟随分类颜色,且【颜色变了就断开】"
+                           + "(一根线横跨两个分类的话,那根线到底是谁的说不清)");
+                    Assert(cv4.Contains("if (isToday) { d.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, \"FgOnAccent\")"),
+                           "★ 今天那格底色是着重色 —— 分类色圆点要描一圈反色边才分得开");
+                    Assert(!cv4.Contains("void ShowDayFlyout"),
+                           "★ 当日预览浮窗已移除 —— 同一份日程下方时间轴已经画着,再列一遍是重复的");
                 }
                 // 主页刷新按钮:透明命中块 + 图标不吃命中
                 var hv4 = TryReadSource(Path.Combine("Views", "HomeView.cs"));

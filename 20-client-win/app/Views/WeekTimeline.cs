@@ -63,10 +63,16 @@ public sealed class WeekTimeline : UserControl
     //     · 下面一行 = 只占一天的,同一天有几条就【共享那一天的宽度】(用户要的就是这个)。
     //   两行都是固定高 -> 整条带常驻、高度恒定。
     const double AllDayLabelHeight = 14;
-    const double AllDayBarHeight = 15;
+    const double AllDayBarHeight = 17;   // 条高 —— 减去下留白后要能完整装下一行 FontCaption
     const int AllDayRows = 2;
     const double AllDayStripHeight = AllDayLabelHeight + AllDayRows * AllDayBarHeight + 4;
     const int AllDayMaxLanes = 4;
+
+    // 表头 + 全天条带合成一块。自上而下:表头 / 跨天条 / 名字行 / 单日条。
+    const double TopBlockHeight = HeadHeight + AllDayStripHeight;
+    const double MultiBarTop = HeadHeight;                                   // 跨天条紧贴表头下沿
+    const double AllDayLabelTop = MultiBarTop + AllDayBarHeight;             // 名字行
+    const double SingleBarTop = AllDayLabelTop + AllDayLabelHeight;          // 单日条
 
     const double TextOutsideBelow = 20;   // 比这还矮的条:标题挪到条外
     const double TextNeedsWidth = 52;     // 比这还窄的条:标题挪到条外(用户裁定:省略号什么都看不见)
@@ -81,7 +87,7 @@ public sealed class WeekTimeline : UserControl
 
     readonly Grid _head = new();
     readonly StackPanel _navCell = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-    readonly Border _allDay = new() { Height = AllDayStripHeight, ClipToBounds = true };
+    readonly Border _allDay = new() { Height = TopBlockHeight, ClipToBounds = true };
     readonly Canvas _allDayCanvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
     readonly Canvas _canvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
     readonly Canvas _gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent, Cursor = Cursors.SizeNS };
@@ -128,7 +134,8 @@ public sealed class WeekTimeline : UserControl
         {
             Text = "全天",
             Width = GutterWidth,
-            Margin = new Thickness(4, AllDayLabelHeight + 2, 0, 0),
+            Margin = new Thickness(4, SingleBarTop + 1, 0, 0),
+            VerticalAlignment = VerticalAlignment.Top,
             IsHitTestVisible = false,
         };
         allDayTag.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -137,7 +144,15 @@ public sealed class WeekTimeline : UserControl
         DockPanel.SetDock(allDayTag, Dock.Left);
         allDayRow.Children.Add(allDayTag);
         allDayRow.Children.Add(_allDayCanvas);
-        _allDay.Child = allDayRow;
+
+        // ★★ 表头与全天条带【叠在一起】:全天条在下层,周几/几号浮在上层 ——
+        //   于是一条跨天的全天日程看起来像一条横幅,把它覆盖的那几天【连日期一起】框了进去。
+        //   表头设成不参与命中测试,好让底下那条横幅仍然点得着、悬停得出提示。
+        _head.IsHitTestVisible = false;
+        var topBlock = new Grid { Height = TopBlockHeight };
+        topBlock.Children.Add(allDayRow);
+        topBlock.Children.Add(_head);
+        _allDay.Child = topBlock;
         _allDay.Background = Brushes.Transparent;
 
         var body = new DockPanel { LastChildFill = true };
@@ -146,7 +161,6 @@ public sealed class WeekTimeline : UserControl
         body.Children.Add(_canvas);
 
         var root = new DockPanel { LastChildFill = true, Background = Brushes.Transparent };
-        DockPanel.SetDock(_head, Dock.Top); root.Children.Add(_head);
         DockPanel.SetDock(_allDay, Dock.Top); root.Children.Add(_allDay);
         root.Children.Add(body);
         Content = root;
@@ -169,16 +183,13 @@ public sealed class WeekTimeline : UserControl
             e.Handled = true;
             BeginScale(e.GetPosition(_gutter).Y, _gutter.ActualHeight, _gutter);
         };
+        // ★ 表格空白处:【单击 = 新建】(用户裁定 2026-07-31),按住拖 = 缩放。
+        //   两者靠"有没有真的挪动过"区分 —— 与日程块那套"点=编辑、拖=改时间"是同一条规矩。
         _canvas.MouseLeftButtonDown += (_, e) =>
         {
             e.Handled = true;
-            if (e.ClickCount >= 2)
-            {
-                EndScale();
-                if (AtPoint(e.GetPosition(_canvas)) is { } w) OnCreateAt?.Invoke(w);
-                return;
-            }
             if (_canvas.ActualHeight <= 0) return;
+            _createAt = AtPoint(e.GetPosition(_canvas));
             BeginScale(e.GetPosition(_canvas).Y, _canvas.ActualHeight, _canvas);
         };
 
@@ -250,9 +261,12 @@ public sealed class WeekTimeline : UserControl
     void BeginScale(double y, double height, UIElement src)
     {
         var anchor = height > 0 ? Math.Clamp(y / height, 0, 1) : 0.5;
-        _scale = new ScaleDrag(y, _hours, anchor, _top + _hours * anchor, src);
+        _scale = new ScaleDrag(y, _hours, anchor, _top + _hours * anchor, src, false);
         src.CaptureMouse();
     }
+
+    /// <summary>按下空白处那一刻对应的时刻 —— 松手时若没挪动过,就在这里新建。</summary>
+    DateTime? _createAt;
 
     void OnTick(object? sender, EventArgs e)
     {
@@ -350,7 +364,8 @@ public sealed class WeekTimeline : UserControl
         _head.Children.Clear();
         _head.ColumnDefinitions.Clear();
         _head.Height = HeadHeight;
-        _head.Background = Brushes.Transparent;
+        _head.VerticalAlignment = VerticalAlignment.Top;
+        _head.Background = null;      // ★ 透出底下那条全天横幅
         _head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(GutterWidth) });
         for (int i = 0; i < 7; i++) _head.ColumnDefinitions.Add(new ColumnDefinition());
 
@@ -404,7 +419,7 @@ public sealed class WeekTimeline : UserControl
             rowEnd = sp.Col + sp.Span - 1;
             var x = sp.Col * colW + (sp.ClipStart ? 0 : 2);
             var bw = Math.Max(6, sp.Span * colW - (sp.ClipStart ? 0 : 2) - (sp.ClipEnd ? 0 : 2));
-            AddAllDayChip(sp.Ev, x, AllDayLabelHeight, bw, sp.Span, colW, null);
+            AddAllDayChip(sp.Ev, x, MultiBarTop, bw, sp.Span, colW, null, coverHeader: true);
         }
 
         // ---- 第二行:只占一天的,同一天【共享宽度】 ----
@@ -420,7 +435,7 @@ public sealed class WeekTimeline : UserControl
             var slotW = colW / lanes;
             var x = sp.Col * colW + used[sp.Col] * slotW + 2;
             used[sp.Col]++;
-            AddAllDayChip(sp.Ev, x, AllDayLabelHeight + AllDayBarHeight, Math.Max(6, slotW - 4), 1, colW, labelRight);
+            AddAllDayChip(sp.Ev, x, SingleBarTop, Math.Max(6, slotW - 4), 1, colW, labelRight, coverHeader: false);
         }
 
         // ★ 名字/条没能画出来的【如实说有几条】—— 悄悄少画会让人以为那几天真的没安排
@@ -437,7 +452,7 @@ public sealed class WeekTimeline : UserControl
             more.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             more.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             Canvas.SetLeft(more, Math.Max(0, w - more.DesiredSize.Width - 2));
-            Canvas.SetTop(more, 0);
+            Canvas.SetTop(more, AllDayLabelTop);
             _allDayCanvas.Children.Add(more);
         }
     }
@@ -446,13 +461,32 @@ public sealed class WeekTimeline : UserControl
     /// 一条全天日程的横条。塞不下名字就把名字放到条【上方那一行】——
     /// 与定时日程的窄条同一套规矩(用户裁定:省略成一个"…"等于什么都没显示)。
     /// </summary>
-    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, int span, double colW, double[]? labelRight)
+    void AddAllDayChip(CalendarEvent ev, double x, double y, double bw, int span, double colW,
+                       double[]? labelRight, bool coverHeader)
     {
         var back = CalendarGroups.ColorOf(ev.CalendarGroup);
+
+        // ★ 跨天的那一行:在【表头】上再铺一层同色淡底,与下面的实心条连成一整根横幅,
+        //   把它覆盖的那几天连"周四 30 / 周五 31"一起框进去(用户裁定)。
+        //   用淡底而不是实心:日期文字要照旧读得清,不必为它改字色。
+        if (coverHeader)
+        {
+            var banner = new Border
+            {
+                Width = bw,
+                Height = HeadHeight,
+                Background = new SolidColorBrush(Color.FromArgb(0x33, back.R, back.G, back.B)),
+                IsHitTestVisible = false,
+            };
+            banner.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            Canvas.SetLeft(banner, x);
+            Canvas.SetTop(banner, 0);
+            _allDayCanvas.Children.Add(banner);
+        }
         var fits = bw >= TextNeedsWidth;
         var chip = new Border
         {
-            Height = AllDayBarHeight - 3,
+            Height = AllDayBarHeight - 2,
             Width = bw,
             Background = new SolidColorBrush(back),
             Cursor = Cursors.Hand,
@@ -477,7 +511,7 @@ public sealed class WeekTimeline : UserControl
         var captured = ev;
         chip.MouseLeftButtonUp += (_, e) => { e.Handled = true; OnEditEvent?.Invoke(captured); };
         Canvas.SetLeft(chip, x);
-        Canvas.SetTop(chip, y + 1);
+        Canvas.SetTop(chip, y);
         _allDayCanvas.Children.Add(chip);
 
         if (fits || labelRight is null) return;
@@ -497,7 +531,7 @@ public sealed class WeekTimeline : UserControl
         lb.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         lb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Canvas.SetLeft(lb, x);
-        Canvas.SetTop(lb, 0);
+        Canvas.SetTop(lb, AllDayLabelTop);
         _allDayCanvas.Children.Add(lb);
         labelRight[col] = x + Math.Min(lb.DesiredSize.Width, lb.MaxWidth) + 6;
     }
@@ -698,8 +732,12 @@ public sealed class WeekTimeline : UserControl
     {
         var height = Math.Max(3, yBottom - yTop);
         var w = Math.Max(10, width);
+        // ★★ 定时日程用【描边框】，全天日程用【实心色块】(用户裁定 2026-07-31)。
+        //   好处不只是好看：描边不会把底下的昼夜带与"今天"那列盖死，
+        //   一眼就能看出一条日程是白天还是夜里。
         var back = CalendarGroups.ColorOf(ev.CalendarGroup);
-        var onBack = CalendarGroups.TextOn(back);
+        var onBack = back;                                   // 描边框里的字就用分类色本色
+        var fill = Color.FromArgb(0x22, back.R, back.G, back.B);   // 极淡的同色底，只为了让块还是个块
         // ★★ 三档：
         //   ① 够宽够高 -> 名字写在条里，单行；
         //   ② 窄但【够高】 -> 仍写在条里，但【换行】—— 一条两小时高、只有 40px 宽的，
@@ -727,26 +765,18 @@ public sealed class WeekTimeline : UserControl
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             inner.Children.Add(t);
         }
-        if (height >= EdgeLinesAbove)
-        {
-            foreach (var atTop in new[] { true, false })
-            {
-                var edge = new System.Windows.Shapes.Rectangle
-                {
-                    Height = 2, Opacity = 0.9, IsHitTestVisible = false,
-                    VerticalAlignment = atTop ? VerticalAlignment.Top : VerticalAlignment.Bottom,
-                    Fill = new SolidColorBrush(onBack),
-                };
-                inner.Children.Add(edge);
-            }
-        }
+        // 起止两条线：描边框下它们就是【上下两条加粗的边】——
+        // 仍然明确标出"从哪儿起、到哪儿止",而且不再需要额外元素。
+        var edgeThick = height >= EdgeLinesAbove ? 2.0 : 1.0;
 
         var box = new Border
         {
             Child = inner,
             Width = w,
             Height = height,
-            Background = new SolidColorBrush(back),
+            Background = new SolidColorBrush(fill),
+            BorderBrush = new SolidColorBrush(back),
+            BorderThickness = new Thickness(1, edgeThick, 1, edgeThick),
             Opacity = isTail ? 0.75 : 1,          // 续画的那一半淡一点 —— 它的"主体"在隔壁那天
             Cursor = Cursors.SizeAll,
             ToolTip = $"{ev.Start:M月d日 HH:mm} – {ev.End:HH:mm}  {ev.Title}"
@@ -840,7 +870,7 @@ public sealed class WeekTimeline : UserControl
     /// <param name="Start">预览中的开始/结束(还没写进 CalendarData)。</param>
     sealed record EventDrag(CalendarEvent Ev0, DragMode Mode, Point From, Border Box,
                             bool Moved, DateTime Start, DateTime End);
-    sealed record ScaleDrag(double FromY, double Hours0, double Anchor, double HourAtAnchor, UIElement Src);
+    sealed record ScaleDrag(double FromY, double Hours0, double Anchor, double HourAtAnchor, UIElement Src, bool Moved);
 
     EventDrag? _evDrag;
     ScaleDrag? _scale;
@@ -855,6 +885,11 @@ public sealed class WeekTimeline : UserControl
         if (_scale is { } sc)
         {
             var dy = e.GetPosition(sc.Src).Y - sc.FromY;
+            if (!sc.Moved)
+            {
+                if (Math.Abs(dy) < DragThreshold) return;    // 还没真的挪动 -> 仍然算"点一下"
+                _scale = sc = sc with { Moved = true };
+            }
             var factor = Math.Pow(2, -dy / 220.0);          // 拖 220px 约缩放一倍
             var next = Math.Clamp(sc.Hours0 * factor, MinHours, MaxHours);
             if (Math.Abs(next - _hours) < 0.001) return;
@@ -955,7 +990,11 @@ public sealed class WeekTimeline : UserControl
     {
         if (_scale is not { } sc) return;
         _scale = null;
+        var at = _createAt;
+        _createAt = null;
         if (sc.Src.IsMouseCaptured) sc.Src.ReleaseMouseCapture();
+        // ★ 没挪动过 = 点了一下空白处 -> 直接开【新建日程】抽屉(用户裁定)
+        if (!sc.Moved && at is { } when) OnCreateAt?.Invoke(when);
     }
 
     void EndEventDrag()

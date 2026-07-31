@@ -29,6 +29,20 @@ public static class Flyout
 
     public static bool IsOpen => _current is not null;
 
+    /// <summary>
+    /// 这个元素是不是【当前浮窗内部】的。
+    /// ★ 浮窗的内容活在独立的 Popup 视觉树里,外壳顺着主窗口的树往上找是找不到它的 ——
+    ///   不特判的话,点浮窗里的任何东西都会被判成"点在浮层外面",于是选没选上、浮层先没了。
+    /// </summary>
+    public static bool IsInside(DependencyObject? node)
+    {
+        var child = _current?.Child;
+        if (child is null) return false;
+        for (var n = node; n is not null; n = VisualTreeHelper.GetParent(n))
+            if (ReferenceEquals(n, child)) return true;
+        return false;
+    }
+
     public static void CloseAll()
     {
         var p = _current;
@@ -112,7 +126,9 @@ public static class Flyout
         // 点浮窗外面时 WPF 自己会关 -> 通知协调器清账,免得留下一个已失效的关闭回调
         popup.Closed += (_, _) => { if (ReferenceEquals(_current, popup)) _current = null; Overlay.Unregister(Close); };
 
-        Overlay.Register(Close);   // 登记到统一协调器:会先关掉上一个浮层(抽屉或浮窗)
+        // ★ 浮窗【叠】在上面而不是替换 —— 它常常是从抽屉里弹出来的,
+        //   替换会把承载它的抽屉一起关掉(用户报的"点了就关了")。
+        Overlay.Push(Close);
         _current = popup;
         popup.IsOpen = true;
     }
