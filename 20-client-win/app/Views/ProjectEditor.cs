@@ -97,8 +97,17 @@ public static class ProjectEditor
 
         var save = Ui.Primary(existing is null ? "创建项目" : "保存", (_, _) =>
         {
-            // ★ 同路径已有项目 -> 这颗按钮此刻是【转跳至该项目】,不再建新的
-            if (dup is not null) { if (onJump is not null) onJump(dup); else onDone(); return; }
+            // ★ 同路径已有项目 -> 不再建新的。
+            //   若它还没挂在当前工作空间,顺手【补上标签】再过去 ——
+            //   你在这儿选这个文件夹,本意就是要在这儿用它;只把人送走却不让它在这儿出现,
+            //   等于建也建不了、找也找不到(用户裁定 2026-08-01:工作空间是标签不是归属)。
+            if (dup is not null)
+            {
+                TheApp.Projects.AddToWorkspace(dup.ProjectId, workspaceKey);
+                var go = TheApp.Projects.Find(dup.ProjectId) ?? dup;
+                if (onJump is not null) onJump(go); else onDone();
+                return;
+            }
 
             if (string.IsNullOrWhiteSpace(name.Text)) { name.Focus(); return; }
             if (folder is null) { ConfirmDialog.Show("还没选文件夹", "请先为项目选择一个文件夹。", confirmText: "好", cancelText: "关闭"); return; }
@@ -128,8 +137,12 @@ public static class ProjectEditor
             }
             var where = dup.DeletedAt is not null ? "已删除项目"
                       : dup.Status == ProjectStatus.Done ? "已完成项目" : "进行中";
-            dupHint.Text = $"该路径已经有项目「{dup.Title}」({where})—— 一个文件夹只对应一个项目。";
-            save.Content = "转跳至该项目";
+            // ★ 按钮文字要说出【真正会发生什么】:同一个项目已经在这儿了 = 只是跳过去;
+            //   它在别的工作空间 = 会把当前工作空间的标签加给它(而不是把它搬过来)。
+            var here = dup.InWorkspace(workspaceKey);
+            dupHint.Text = $"该路径已经有项目「{dup.Title}」({where})—— 一个文件夹只对应一个项目。"
+                         + (here ? "" : $"它现在挂在{ProjectUi.SpacesText(dup)};继续会把它也挂到当前工作空间(不会从原来的地方拿走)。");
+            save.Content = here ? "转跳至该项目" : "加入本工作空间并打开";
         };
         refreshDup();
         var cancel = Ui.Secondary("取消", (_, _) => onDone());

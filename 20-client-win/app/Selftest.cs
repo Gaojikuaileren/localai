@@ -2085,10 +2085,88 @@ public static class Selftest
                 Assert(cm.SessionsOf(kept).Count() == 2, "★ 被合并项目的会话并到保留的那个项目下(不丢会话)");
                 Assert(pm.Items.Any(x => x.ProjectId == "keep-sub"), "子路径项目不参与合并");
             }
+            // ---- 工作空间是【标签】不是【归属】(2026-08-01 用户裁定)----
+            //   起因:唯一性判据是 (机器, 路径) 且不看工作空间,于是同一个文件夹全局只有一个项目;
+            //   可 WorkspaceKey 是单值的,导致"在 B 里选了 A 占用的文件夹"时人被送去那个项目,
+            //   而它在 B 的列表与主页方块里根本不出现 —— 建也建不了、找也找不到。
+            {
+                var root = Path.Combine(Path.GetTempPath(), "localai-wstag-" + Guid.NewGuid().ToString("N")[..6]);
+                var pt = new Services.ProjectCenter();
+                var inA = pt.Create("A 空间建的", root, null, Services.ProjectScope.Personal, "chat");
+                Assert(inA.Spaces.Count == 1 && inA.PrimarySpace == "chat", "新建的项目只挂它建出来的那个空间");
+
+                var inB = pt.Create("B 空间想建同一个文件夹", root, null, Services.ProjectScope.Personal, "translation");
+                Assert(inB.ProjectId == inA.ProjectId && pt.Items.Count == 1, "同路径仍然只有一个项目(不因为换了空间就建出第二个)");
+                var pid = inA.ProjectId;
+                Assert(pt.Find(pid)!.InWorkspace("chat") && pt.Find(pid)!.InWorkspace("translation"),
+                       "★ 在 B 里选同路径 = 给它【补上 B 的标签】,而不是把它搬走");
+                Assert(pt.Ongoing("chat").Any(x => x.ProjectId == pid) && pt.Ongoing("translation").Any(x => x.ProjectId == pid),
+                       "★ 同一个项目在两个工作空间的【进行中】里都看得见(这正是原来那个坑)");
+                Assert(pt.Ongoing().Count(x => x.ProjectId == pid) == 1, "★ 是一个项目挂两个标签,不是两份复制");
+                pt.SetStatus(pid, Services.ProjectStatus.Done);
+                Assert(pt.Completed("chat").Any(x => x.ProjectId == pid) && pt.Completed("translation").Any(x => x.ProjectId == pid),
+                       "已完成清单同样按标签显示");
+                pt.SetStatus(pid, Services.ProjectStatus.Active);
+
+                pt.MoveToWorkspace(pid, "courses");
+                Assert(pt.Find(pid)!.Spaces.Count == 1 && pt.Find(pid)!.InWorkspace("courses"),
+                       "★【移动】= 换标签:原来的空间都不再挂着(与【也放到】后果不同,菜单里必须分开给)");
+                pt.AddToWorkspace(pid, "assets");
+                pt.AddToWorkspace(pid, "assets");
+                Assert(pt.Find(pid)!.Spaces.Count == 2, "★【也放到】= 加标签;重复加不会加出两份");
+
+                Assert(pt.RemoveFromWorkspace(pid, "assets") && pt.Find(pid)!.Spaces.Count == 1, "可以从某个工作空间移除");
+                Assert(!pt.RemoveFromWorkspace(pid, "courses") && pt.Find(pid)!.Spaces.Count == 1,
+                       "★ 不许把【最后一个】标签也去掉 —— 那样它在任何空间都看不见,等于一次误点就藏起来了");
+                pt.AddToWorkspace(pid, "assets");
+                pt.RemoveFromWorkspace(pid, "courses");
+                Assert(pt.Find(pid)!.PrimarySpace == "assets", "去掉主标签后,剩下的顶上来当主标签(不会留下空的主标签)");
+
+                // 老存档:只有单个 WorkspaceKey、没有 AlsoIn —— 照旧可见,不需要迁移
+                var legacyWs = new Services.ProjectCenter();
+                legacyWs.Import(new List<Services.Project>
+                {
+                    new("old-ws", "老存档的", "", "chat", Services.ProjectScope.Personal, DateTime.Now, OwnerMemberId: Services.MemberContext.Current),
+                });
+                Assert(legacyWs.Find("old-ws")!.Spaces.SequenceEqual(new[] { "chat" }) && legacyWs.Ongoing("chat").Any(x => x.ProjectId == "old-ws"),
+                       "★ 老存档(只有单个 WorkspaceKey)照旧可见 —— 这次改动不需要迁移");
+
+                // 合并同路径重复时,标签取【并集】
+                var pmu = new Services.ProjectCenter();
+                pmu.Import(new List<Services.Project>
+                {
+                    new("mu-1", "旧的", "", "chat", Services.ProjectScope.Personal, DateTime.Now.AddDays(-1), FolderPath: root, OwnerMemberId: Services.MemberContext.Current),
+                    new("mu-2", "新的", "", "courses", Services.ProjectScope.Personal, DateTime.Now, FolderPath: root, OwnerMemberId: Services.MemberContext.Current),
+                });
+                pmu.MergeDuplicateFolders();
+                Assert(pmu.Items.Count == 1 && pmu.Items[0].InWorkspace("chat") && pmu.Items[0].InWorkspace("courses"),
+                       "★ 合并同路径重复项目时标签取并集 —— 不让它从其中一个空间凭空消失");
+
+                var rt = System.Text.Json.JsonSerializer.Deserialize<List<Services.Project>>(
+                             System.Text.Json.JsonSerializer.Serialize(pmu.Items))!;
+                Assert(rt.Count == 1 && rt[0].Spaces.Count == 2, "★ 标签能落盘也能读回(重启后不会退回单一空间)");
+            }
+            var pcTag = TryReadSource(Path.Combine("Services", "ProjectCenter.cs"));
+            if (pcTag is not null)
+            {
+                Assert(!pcTag.Contains("p.WorkspaceKey == workspaceKey"),
+                       "★ 列表不再按【单一归属】筛选(留一处就够让多空间项目在那儿隐身)");
+                Assert(pcTag.Contains("p.InWorkspace(workspaceKey)"), "列表一律走 InWorkspace(按标签判定)");
+            }
+            var puTag = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puTag is not null)
+                Assert(puTag.Contains("移动到工作空间") && puTag.Contains("也放到工作空间"),
+                       "★ 菜单把【移动(换标签)】与【也放到(加标签)】分开给 —— 后果差太远,不能靠猜");
+            var hvTag = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (hvTag is not null)
+                Assert(!hvTag.Contains("p.WorkspaceKey"), "★ 主页方块不再拿单一归属当作项目所在的空间(它跨空间汇总)");
+
             var peDup = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
             if (peDup is not null)
             {
                 Assert(peDup.Contains("转跳至该项目") && peDup.Contains("FindByFolder"), "★ 路径已有项目时,创建按钮变【转跳至该项目】");
+                Assert(peDup.Contains("加入本工作空间并打开") && peDup.Contains("AddToWorkspace"),
+                       "★ 那个项目不在当前工作空间时,按钮说清楚它会【加标签并打开】(而不是搬走)");
                 Assert(peDup.Contains("已删除项目") && peDup.Contains("已完成项目"), "提示里说明该项目当前在哪(进行中/已完成/已删除)");
                 Assert(peDup.Contains("MachineOptions") && peDup.Contains("本机"), "可选择文件夹所在机器(本机 / 已配对电脑)");
             }

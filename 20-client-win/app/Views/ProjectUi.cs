@@ -19,6 +19,45 @@ public static class ProjectUi
         _ => ("已完成", "FgMuted"),
     };
 
+    // ---------------------------------------------------------------- 工作空间标签
+    // ★ 工作空间是【标签】不是【归属】(用户裁定 2026-08-01,见 Project.Spaces 那段)。
+    //   一个文件夹全局只有一个项目,所以它必须能同时挂在多个工作空间下;界面要把这件事显出来,
+    //   否则用户会以为自己看到的是"两个同名项目"。
+
+    /// <summary>工作空间 key -> 图标。表里没有的 key 用通用的任务图标,不猜。</summary>
+    public static Theme.IconName SpaceIcon(string key)
+        => Workspaces.All.FirstOrDefault(w => w.Key == key)?.Icon ?? Theme.IconName.Tasks;
+
+    /// <summary>工作空间 key -> 显示名。表里没有就【原样显示这个 key】,不编一个好听的名字。</summary>
+    public static string SpaceName(string key)
+        => Workspaces.All.FirstOrDefault(w => w.Key == key) is { } d ? I18n.Strings.Get(d.TitleKey) : key;
+
+    /// <summary>「对话、资产」这样的一串,给提示文字与 tooltip 用。</summary>
+    public static string SpacesText(Project p) => string.Join("、", p.Spaces.Select(SpaceName));
+
+    /// <summary>
+    /// 挂了【多个】工作空间时,给出一排小图标标签;只挂一个就返回 null ——
+    /// 在某个空间的抽屉里再标一遍"这是这个空间的"是废话,而多空间才是需要一眼看出的例外。
+    /// </summary>
+    public static FrameworkElement? SpaceTags(Project p, string fgKey = "FgMuted", double size = 12)
+    {
+        if (p.Spaces.Count < 2) return null;
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        foreach (var k in p.Spaces)
+        {
+            var chip = new Border { Padding = new Thickness(3, 1, 3, 1), Margin = new Thickness(0, 0, 3, 0) };
+            chip.SetResourceReference(Border.BackgroundProperty, "BgHover");
+            chip.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            var ic = Theme.Icons.Make(SpaceIcon(k), size, fgKey);
+            ic.VerticalAlignment = VerticalAlignment.Center;
+            chip.Child = ic;
+            chip.ToolTip = SpaceName(k);
+            row.Children.Add(chip);
+        }
+        row.ToolTip = "同时挂在:" + SpacesText(p) + "\n(同一个项目,不是多份复制)";
+        return row;
+    }
+
     /// <summary>可见范围显示名。★ 过界面用词表 —— 存的是 ProjectScope 枚举,这里只是显示。</summary>
     public static string ScopeLabel(ProjectScope s) => Services.Vocab.Apply(s switch
     {
@@ -171,17 +210,47 @@ public static class ProjectUi
             m.Items.Add(share);
         }
 
-        // 发送到别的工作空间(项目不跨空间共享;会话跟着走)
-        var toWs = new MenuItem { Header = "发送到工作空间" };
+        // ---- 工作空间:移动(换标签) / 也放到(加标签) / 移除(减标签)----
+        // ★ 三件事分开给,别塞进同一个菜单项:
+        //   "移动"会把它从现在的空间拿走,"也放到"不会 —— 这两个后果差得太远,不能靠猜。
+        var toWs = new MenuItem { Header = "移动到工作空间(离开现有的)" };
         foreach (var w in Workspaces.All)
         {
-            if (w.Key == p.WorkspaceKey) continue;
-            var mi = new MenuItem { Header = I18n.Strings.Get(w.TitleKey) };
+            if (p.Spaces.Count == 1 && p.Spaces[0] == w.Key) continue;   // 已经只在这儿了,移过去是空操作
+            var mi = new MenuItem { Header = SpaceName(w.Key) };
             var key = w.Key;
+            // 会话跟着走 —— 移动是"换地方",留在原空间的会话会变成找不到出处的孤儿
             mi.Click += (_, _) => { Projects.MoveToWorkspace(p.ProjectId, key); Chat.SetSessionsWorkspace(p.ProjectId, key); };
             toWs.Items.Add(mi);
         }
         m.Items.Add(toWs);
+
+        var alsoWs = new MenuItem { Header = "也放到工作空间(保留现有的)" };
+        foreach (var w in Workspaces.All)
+        {
+            if (p.InWorkspace(w.Key)) continue;
+            var mi = new MenuItem { Header = SpaceName(w.Key) };
+            var key = w.Key;
+            // ★ 这里【不动会话】:会话按 ProjectId 归属项目(见 ChatCenter.SessionsOf),
+            //   项目在哪个空间露面不影响它们,搬会话反而会把它们从原来的空间里抽走。
+            mi.Click += (_, _) => Projects.AddToWorkspace(p.ProjectId, key);
+            alsoWs.Items.Add(mi);
+        }
+        if (alsoWs.Items.Count > 0) m.Items.Add(alsoWs);
+
+        // 只挂一个空间时不给"移除" —— 那会让它在所有空间里都消失,是伪装成整理的隐藏操作
+        if (p.Spaces.Count > 1)
+        {
+            var offWs = new MenuItem { Header = "从工作空间移除" };
+            foreach (var k in p.Spaces)
+            {
+                var mi = new MenuItem { Header = SpaceName(k) };
+                var key = k;
+                mi.Click += (_, _) => Projects.RemoveFromWorkspace(p.ProjectId, key);
+                offWs.Items.Add(mi);
+            }
+            m.Items.Add(offWs);
+        }
 
         m.Items.Add(new Separator());
         var edit = new MenuItem { Header = "编辑项目 / 重定向路径…" };

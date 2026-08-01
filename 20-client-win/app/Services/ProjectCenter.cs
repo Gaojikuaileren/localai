@@ -41,7 +41,38 @@ public sealed record Project(
     DateTime? DeletedAt = null,            // 软删除:进【已删除项目】共享垃圾篓,保留 30 天
     DateTime? CompletedAt = null,          // 标记完成的时刻(用于"完成后停留 3 秒再划走"的宽限)
     string? HostMachine = null,            // 项目文件夹在哪台机器上(null/空 = 本机);跨 PC 项目用
-    bool Shared = false);                  // ★ 是否已【提升为共享】。默认只在本机;单向,不可收回
+    bool Shared = false,                   // ★ 是否已【提升为共享】。默认只在本机;单向,不可收回
+    IReadOnlyList<string>? AlsoIn = null)  // ★ 除主工作空间外,还挂着哪些工作空间标签
+{
+    /// <summary>
+    /// 这个项目挂在哪些工作空间下 —— 【永不为空】,主标签打头。
+    /// ★ 工作空间是【标签】不是【归属】(用户裁定 2026-08-01):
+    ///   同一个文件夹全局只有一个项目(唯一性判据是 机器+路径,与工作空间无关),
+    ///   所以它必须能同时出现在 A 和 B —— 否则在 B 里选了 A 占用的文件夹,
+    ///   人被送去那个项目,而它在 B 里根本看不见。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> Spaces
+    {
+        get
+        {
+            var primary = string.IsNullOrWhiteSpace(WorkspaceKey) ? "chat" : WorkspaceKey;
+            if (AlsoIn is not { Count: > 0 }) return new[] { primary };
+            var list = new List<string> { primary };
+            foreach (var k in AlsoIn)
+                if (!string.IsNullOrWhiteSpace(k) && !list.Contains(k, StringComparer.Ordinal)) list.Add(k);
+            return list;
+        }
+    }
+
+    /// <summary>主标签 —— 只用来定【方块图标】与【导航默认去哪个空间】,别处不该关心。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string PrimarySpace => Spaces[0];
+
+    /// <summary>key 为 null = 不筛(全部)。</summary>
+    public bool InWorkspace(string? key)
+        => key is null || Spaces.Contains(key, StringComparer.Ordinal);
+}
 
 public sealed class ProjectCenter
 {
@@ -69,7 +100,14 @@ public sealed class ProjectCenter
                           string workspaceKey = "chat", string? hostMachine = null)
     {
         // ★ 同一台机器的【同一个文件夹】只能有一个项目:已经有就直接返回它,不再重复建(用户裁定)。
-        if (FindByFolder(folder, hostMachine) is { } existing) return existing;
+        // ★★ 并且【把当前工作空间的标签补上】(用户裁定 2026-08-01)——
+        //   你在 B 里选这个文件夹,本来就是想在 B 里用它;只把你送过去、却不让它出现在 B,
+        //   就是原来那个坑。补标签是幂等的:已经挂着就什么也不做。
+        if (FindByFolder(folder, hostMachine) is { } existing)
+        {
+            AddToWorkspace(existing.ProjectId, workspaceKey);
+            return Find(existing.ProjectId) ?? existing;
+        }
         var p = new Project(NewId(), title, "", workspaceKey, scope, DateTime.Now,
             Status: ProjectStatus.Preparing, FolderPath: folder, Attachments: attachments?.ToList(),
             OwnerMemberId: MemberContext.Current,   // D45:建的时候就定所有者
@@ -116,7 +154,7 @@ public sealed class ProjectCenter
     public bool HasCompletionGrace(string? workspaceKey = null, DateTime? asOf = null)
     {
         var now = asOf ?? DateTime.Now;
-        return _items.Any(p => p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey) && InCompletionGrace(p, now));
+        return _items.Any(p => p.DeletedAt is null && p.InWorkspace(workspaceKey) && InCompletionGrace(p, now));
     }
 
     /// <summary>某项目是否正处在"刚完成、还没划走"的宽限期(界面据此播放划出动画)。</summary>
@@ -209,6 +247,9 @@ public sealed class ProjectCenter
             foreach (var dup in g.Where(p => p.ProjectId != keep.ProjectId))
             {
                 moveSessions?.Invoke(dup.ProjectId, keep.ProjectId);   // 会话并到保留的那个项目下
+                // ★★ 标签取【并集】—— 合并前它们可能分别待在不同工作空间,
+                //   直接丢掉被合并那个的标签,等于让它从那个空间里凭空消失。
+                foreach (var k in dup.Spaces) AddToWorkspace(keep.ProjectId, k);
                 _items.RemoveAll(x => x.ProjectId == dup.ProjectId);
                 merged++;
             }
@@ -295,7 +336,7 @@ public sealed class ProjectCenter
         var now = asOf ?? DateTime.Now;
         return _items.Where(p => p.DeletedAt is null
                                  && (p.Status != ProjectStatus.Done || (includeJustCompleted && InCompletionGrace(p, now)))
-                                 && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+                                 && p.InWorkspace(workspaceKey))
                      .Where(Visible)                                 // D45:别人的个人/仅本人项目绝不出现
                      .OrderByDescending(p => p.Pinned).ThenByDescending(p => p.LastOpened);
     }
@@ -303,16 +344,53 @@ public sealed class ProjectCenter
     /// <summary>D45 可见性:家庭范围全家可见;个人/仅本人只有所有者可见;所有者未知一律不可见。</summary>
     public static bool Visible(Project p) => MemberContext.CanSee(p.Scope, p.OwnerMemberId);
 
-    /// <summary>把项目【发送到另一个工作空间】。它名下的会话由调用方一并迁移(SetSessionsWorkspace)。</summary>
+    /// <summary>
+    /// 把项目【移动】到另一个工作空间 —— 换标签:原来的标签全部去掉,只留这一个。
+    /// 它名下的会话由调用方一并迁移(SetSessionsWorkspace)。
+    /// </summary>
     public void MoveToWorkspace(string projectId, string workspaceKey)
     {
         var i = _items.FindIndex(x => x.ProjectId == projectId);
-        if (i >= 0 && _items[i].WorkspaceKey != workspaceKey) { _items[i] = _items[i] with { WorkspaceKey = workspaceKey }; Changed?.Invoke(); }
+        if (i < 0) return;
+        if (_items[i].WorkspaceKey == workspaceKey && _items[i].AlsoIn is not { Count: > 0 }) return;
+        _items[i] = _items[i] with { WorkspaceKey = workspaceKey, AlsoIn = null };
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 【也放到】某个工作空间 —— 加一个标签,原来的都留着。幂等。
+    /// </summary>
+    public void AddToWorkspace(string projectId, string workspaceKey)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceKey)) return;
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i < 0 || _items[i].InWorkspace(workspaceKey)) return;
+        var also = new List<string>(_items[i].AlsoIn ?? Array.Empty<string>()) { workspaceKey };
+        _items[i] = _items[i] with { AlsoIn = also };
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// 【从某个工作空间移除】这个标签。
+    /// ★ 不允许移到零个标签 —— 那样这个项目在任何工作空间里都看不见了,只能靠"全部"翻出来,
+    ///   等于用一次误点把它藏起来。要真的不想要了,走删除(那条路有回收站)。
+    /// ★ 去掉的若是主标签,把剩下的第一个提上来当主标签。
+    /// </summary>
+    public bool RemoveFromWorkspace(string projectId, string workspaceKey)
+    {
+        var i = _items.FindIndex(x => x.ProjectId == projectId);
+        if (i < 0) return false;
+        var p = _items[i];
+        var spaces = p.Spaces.Where(k => !string.Equals(k, workspaceKey, StringComparison.Ordinal)).ToList();
+        if (spaces.Count == 0 || spaces.Count == p.Spaces.Count) return false;
+        _items[i] = p with { WorkspaceKey = spaces[0], AlsoIn = spaces.Skip(1).ToList() };
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>已完成(未删除)。★ 已完成项目【不共享】,按工作空间隔离(用户裁定);不传则全部。</summary>
     public IEnumerable<Project> Completed(string? workspaceKey = null)
-        => _items.Where(p => p.Status == ProjectStatus.Done && p.DeletedAt is null && (workspaceKey is null || p.WorkspaceKey == workspaceKey))
+        => _items.Where(p => p.Status == ProjectStatus.Done && p.DeletedAt is null && p.InWorkspace(workspaceKey))
                  .Where(Visible).OrderByDescending(p => p.LastOpened);
 
     /// <summary>全部未删除(项目抽屉里可能想全看,按状态分组)。</summary>

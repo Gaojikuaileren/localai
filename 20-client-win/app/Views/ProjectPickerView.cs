@@ -342,6 +342,15 @@ public sealed class ProjectPickerView : UserControl
         FrameworkElement bottom = page == Page.Deleted
             ? OriginLabel(p, sel)
             : ProjectUi.StatusChip(p.Status, sel ? "FgOnSelected" : null);
+        // ★ 同时挂在多个工作空间时,把标签也摆在这一行 —— 让人看出"这是一个项目,不是两份"。
+        if (page != Page.Deleted && ProjectUi.SpaceTags(p, sel ? "FgOnSelected" : "FgMuted") is { } tags)
+        {
+            var line = new StackPanel { Orientation = Orientation.Horizontal };
+            bottom.Margin = new Thickness(0, 0, 6, 0);
+            line.Children.Add(bottom);
+            line.Children.Add(tags);
+            bottom = line;
+        }
         bottom.Margin = new Thickness(0, 0, 30, 0);   // 给右下角的三点让位
         var body = new StackPanel();
         body.Children.Add(folder);
@@ -408,7 +417,8 @@ public sealed class ProjectPickerView : UserControl
 
     static FrameworkElement OriginLabel(Project p, bool sel)
     {
-        var def = Workspaces.All.FirstOrDefault(w => w.Key == p.WorkspaceKey);
+        // 已删除项目只标【主工作空间】—— 回收站要回答的是"它原本在哪",不是它挂过几个标签
+        var def = Workspaces.All.FirstOrDefault(w => w.Key == p.PrimarySpace);
         var fg = sel ? "FgOnSelected" : "FgMuted";
         var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var ic = Icons.Make(def?.Icon ?? IconName.Chat, 12, fg);
@@ -417,7 +427,7 @@ public sealed class ProjectPickerView : UserControl
         row.Children.Add(ic);
         var t = new TextBlock
         {
-            Text = def is null ? p.WorkspaceKey : I18n.Strings.Get(def.TitleKey),
+            Text = def is null ? p.PrimarySpace : I18n.Strings.Get(def.TitleKey),
             VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
         };
         t.SetResourceReference(TextBlock.ForegroundProperty, fg);

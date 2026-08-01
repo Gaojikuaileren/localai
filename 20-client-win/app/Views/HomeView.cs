@@ -1490,17 +1490,16 @@ public sealed class HomeView : UserControl
 
     Border ProjectTile(Project p)
     {
-        var icon = Icons.Make(p.WorkspaceKey switch
+        // ★ 主页把所有工作空间【一起列出来】—— 这个面板是跨空间汇总的,
+        //   只画主标签的话,多空间项目看上去就像"只属于其中一个"(用户裁定 2026-08-01)。
+        var icon = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 6) };
+        foreach (var k in p.Spaces)
         {
-            "chat" => IconName.Chat,
-            "assets" => IconName.Assets,
-            "translation" => IconName.Translation,
-            "courses" => IconName.Courses,
-            "computer" => IconName.Computer,
-            _ => IconName.Tasks,
-        }, 18, "FgSecondary");
-        icon.HorizontalAlignment = HorizontalAlignment.Left;
-        icon.Margin = new Thickness(0, 0, 0, 6);
+            var one = Icons.Make(ProjectUi.SpaceIcon(k), 18, "FgSecondary");
+            one.Margin = new Thickness(0, 0, 6, 0);
+            one.ToolTip = ProjectUi.SpaceName(k);
+            icon.Children.Add(one);
+        }
 
         var title = new TextBlock { Text = p.Title, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis, MaxHeight = 36 };
         title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -1573,9 +1572,11 @@ public sealed class HomeView : UserControl
             // 菜单刚被这一下点关掉 -> 只关菜单,不要顺势进项目(用户反馈)
             if (ProjectUi.JustClosedMenu()) return;
             TheApp.Projects.Touch(p.ProjectId);
-            (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.WorkspaceKey, p.ProjectId);
+            // 挂了多个空间时进【主标签】那个 —— 总得挑一个,挑它最初所在的那个最不意外
+            (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.PrimarySpace, p.ProjectId);
         };
-        tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}";
+        tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}"
+                     + (p.Spaces.Count > 1 ? $"\n同时挂在:{ProjectUi.SpacesText(p)}(同一个项目)" : "");
         return tile;
     }
 
