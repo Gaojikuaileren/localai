@@ -4004,49 +4004,44 @@ public static class Selftest
 
             // ---- 这一批(用户 2026-07-31)----
             {
-                // 待办的合并层:与日历同一套规则
-                var box = new List<TodoItem>();
-                var todo1 = new TodoItem("", "买菜", TodoKind.Chore, Source: "apple", ExternalId: "r-1");
-                Assert(TodoCenter.MergeInto(box, new[] { todo1 }) == 1, "待办首次合并加入");
-                Assert(TodoCenter.MergeInto(box, new[] { todo1 }) == 0, "★ 同 Apple UID 的待办不重复加");
-                Assert(TodoCenter.MergeInto(box, new[] { new TodoItem("", "  ", TodoKind.Chore) }) == 0,
-                       "空标题的待办不并入");
-
-                // VTODO 解析
-                static string V(params string[] ls) => string.Join(Environment.NewLine, ls);
-                var (tds, _, _) = Services.ICalParser.ParseTodos(V(
-                    "BEGIN:VTODO", "UID:t-1", "SUMMARY:交电费", "DUE;VALUE=DATE:20260805",
-                    "PRIORITY:1", "STATUS:COMPLETED", "END:VTODO"), TodoKind.Personal);
-                Assert(tds.Count == 1 && tds[0].Title == "交电费", "VTODO 能解析");
-                Assert(tds[0].Done && tds[0].Priority == TodoPriority.High, "★ 完成状态与优先级都读到(PRIORITY 1-4 = 高)");
-                Assert(tds[0].Source == "apple" && tds[0].ExternalId == "t-1", "回填来源与 UID");
-
-                // ---- Apple「提醒事项已升级】的墓碑条目(用户实遇 2026-07-31,已查证)----
-                // ★★ 这两条不是待办,是 Apple 在说"东西不在这儿"。当任务导入 =
-                //   替 Apple 把一句通知伪装成两条任务,用户会以为同步成功了。
-                Assert(Services.AppleReminderNotice.IsUpgradeNotice("在哪里可以找到我的提醒事项？", null),
-                       "★ 认得出中文公告一(全角问号也要能匹配)");
-                Assert(Services.AppleReminderNotice.IsUpgradeNotice("此列表的创建者已升级这些提醒事项。", null),
-                       "★ 认得出中文公告二");
-                Assert(Services.AppleReminderNotice.IsUpgradeNotice("Where are my reminders?", null),
-                       "认得出英文公告一");
-                Assert(Services.AppleReminderNotice.IsUpgradeNotice("The creator of this list has upgraded these reminders.", null),
-                       "认得出英文公告二");
-                Assert(Services.AppleReminderNotice.IsUpgradeNotice("随便什么", "详见 support.apple.com/HT210220"),
-                       "★ 描述里的 Apple 支持链接是【与语言无关】的标记(换什么语言都认得出)");
-                Assert(!Services.AppleReminderNotice.IsUpgradeNotice("买菜", null),
-                       "★ 普通待办不会被误判成公告");
-                Assert(Services.AppleReminderNotice.IsUpgradedList("提醒 ⚠️") && !Services.AppleReminderNotice.IsUpgradedList("工作"),
-                       "★ 清单名带 ⚠ = Apple 的占位清单(集合层判定,最稳)");
-
-                // 解析层:公告不入待办,且【单独计数】—— 与"读不懂而跳过"分开
-                var (nt, nsk, nnotice) = Services.ICalParser.ParseTodos(string.Join(Environment.NewLine,
-                    "BEGIN:VTODO", "UID:n-1", "SUMMARY:在哪里可以找到我的提醒事项？", "END:VTODO",
-                    "BEGIN:VTODO", "UID:n-2", "SUMMARY:此列表的创建者已升级这些提醒事项。", "END:VTODO",
-                    "BEGIN:VTODO", "UID:r-9", "SUMMARY:真的待办", "END:VTODO"), TodoKind.Personal);
-                Assert(nt.Count == 1 && nt[0].Title == "真的待办", "★ 只有真待办被导入");
-                Assert(nnotice == 2 && nsk == 0,
-                       "★★ Apple 公告单独计数(2),不混进「读不懂」那个数 —— 混了就只能说「没东西」,而真相是「拿不到」");
+                // ---- 待办是【纯本机】的:不接任何外部源(2026-08-02 用户裁定,D57)----
+                // ★★ 这一组断言是【负向】的:它们守着"别把同步接口偷偷加回来"。
+                //   原先这里测的是"从 Apple 提醒事项导入并去重"以及 Apple 那两条
+                //   「提醒事项已升级」公告的识别 —— 整条路已经删掉,连同它的测试。
+                Assert(typeof(TodoItem).GetProperty("Source") is null
+                    && typeof(TodoItem).GetProperty("ExternalId") is null,
+                       "★ 待办没有【来源】与【外部 UID】字段 —— 留着就是在暗示一个不会兑现的同步承诺");
+                Assert(typeof(TodoCenter).GetMethod("MergeIn") is null
+                    && typeof(TodoCenter).GetMethod("MergeInto") is null,
+                       "★ 待办没有增量合并层 —— 没有数据源的合并层等于摆着「只差接上最后一根线」的假象");
+                Assert(typeof(Services.ICalParser).GetMethod("ParseTodos") is null,
+                       "★ 不再解析 VTODO(提醒事项)");
+                Assert(Type.GetType("LocalAI.Client.Services.AppleReminderNotice, localai-client") is null,
+                       "★ Apple「提醒事项已升级」的识别整体删除 —— 我们从不去拉它,也就没有公告要挡");
+                Assert(typeof(Services.AppSettings).GetProperty("AppleReminderList") is null,
+                       "★ 设置里不再存提醒事项清单 —— 列出来就是在暗示能同步");
+                {
+                    var cdNoTodo = TryReadSource(Path.Combine("Services", "AppleCalDav.cs"));
+                    if (cdNoTodo is not null)
+                    {
+                        Assert(typeof(Services.AppleCalDav).GetMethod("FetchTodosAsync") is null,
+                               "CalDAV 侧不再拉 VTODO");
+                        // ★ 但【识别】VTODO 集合那一段必须留着 —— 它现在的用处是把提醒事项清单
+                        //   排除在日历勾选列表之外,否则用户会在日历里看到"购物清单"这种勾了也没用的条目。
+                        Assert(cdNoTodo.Contains("comps.Contains(\"VTODO\")"),
+                               "★ 仍然认得出提醒事项集合 —— 好把它们【排除】在日历清单之外");
+                    }
+                    var tcSrc = TryReadSource(Path.Combine("Services", "TodoCenter.cs"));
+                    if (tcSrc is not null)
+                        Assert(tcSrc.Contains("纯本机数据") && tcSrc.Contains("不会自愈"),
+                               "★ 数据模型头部写明:待办只在这台电脑上、不会自愈(换机/重装就没了)");
+                    // ★★ 而且要【说给用户听】,不能只写在注释里:
+                    //   日历丢了能从 iCloud 再拉一次,待办不能 —— 不说清楚,换电脑那天才发现就太晚了。
+                    var taSrc = TryReadSource(Path.Combine("Views", "TodoArchiveView.cs"));
+                    if (taSrc is not null)
+                        Assert(taSrc.Contains("只存在这台电脑上") && taSrc.Contains("不会自动带走"),
+                               "★ 界面上如实告诉用户:待办不同步、换机不会自动带走");
+                }
 
                 // 自动拉取:三道闸
                 var au2 = TryReadSource(Path.Combine("Services", "AppleAutoSync.cs"));
@@ -4062,9 +4057,8 @@ public static class Selftest
                 // 默认间隔 30 分钟
                 Assert(new Services.AppSettings().AppleAutoPullMinutes == 30, "自动拉取默认间隔 30 分钟(用户裁定)");
                 // 清单落盘
-                Assert(new Services.AppSettings().AppleCalendarList is not null
-                       && new Services.AppSettings().AppleReminderList is not null,
-                       "★ 日历/提醒清单落盘保存 —— 连上后一直在,不必每次先点刷新");
+                Assert(new Services.AppSettings().AppleCalendarList is not null,
+                       "★ 日历清单落盘保存 —— 连上后一直在,不必每次先点刷新");
 
                 // ---- 提醒事项的【勾选入口整体移除】(2026-08-02 用户裁定,D56)----
                 //   Apple 2019 起把 iCloud 提醒事项升级进 CloudKit,CalDAV 上永远拉不到;
@@ -4075,8 +4069,10 @@ public static class Selftest
                     {
                         Assert(!svApple.Contains("勾选要拉取的【提醒事项】"),
                                "★ 设置页不再有【勾选提醒事项】那一组(它对 iCloud 账号永远拉不到东西)");
-                        Assert(svApple.Contains("Apple 从 2019 年起不再通过"),
-                               "★ 但要说清【为什么】没有 —— 同一个账号的日历照旧能拉,不解释的话用户只会以为是我们坏了");
+                        // ★ D57 起这张卡【只管日历】,连提醒事项清单都不取回来显示 ——
+                        //   在这儿提它就是在暗示能同步。为什么不能同步,放在【待办自己那儿】说。
+                        Assert(!svApple.Contains("AppleReminderList"),
+                               "★ Apple 这张卡只管日历,不再碰提醒事项清单");
                     }
                     // ★★ 不许留【看不见的开关】:界面上的勾选框没了,同步却照着旧存档里的 URL 继续拉,
                     //   用户就再也关不掉它。字段与读取一起去掉,旧存档里那个键反序列化时自然被忽略。

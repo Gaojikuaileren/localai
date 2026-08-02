@@ -5,10 +5,16 @@
 //   · 家务(Chore)  —— "提醒我们…" 建的家庭事务。
 // 归属(Owner)与可见范围(Scope)沿用 D45 两成员家庭口径。
 //
-// ★ 与日历不同:日历是【镜像 Apple 家庭共享日历】,本地改不了、故保存如实拒绝;
-//   待办/家务是【中枢自有数据】,手动新增/编辑/删除【当场生效】,不是伪造。
-//   本机【已落盘】(明文,D50 / ClientStore);【跨设备同步】随中枢接入(P4+)启用 ——
-//   界面上如实说明,不谎称已跨设备同步。
+// ★★ 待办是【纯本机数据】—— 不连任何外部服务、不同步任何数据(用户裁定 2026-08-02,D57)。
+//   与日历正相反:日历镜像 Apple 家庭共享日历、本地改不了;待办完全归本机,
+//   手动新增/编辑/删除当场生效,落盘在 %LOCALAPPDATA%\LocalAI\client	odos.json。
+//
+//   ★ 为什么不接 iPhone 的提醒事项:Apple 只给了 EventKit 一条官方通道,而它必须跑在
+//     Apple 设备上 —— CalDAV 自 2019 年起对 iCloud 提醒事项关闭,也没有任何远程接口。
+//     要么让用户装东西,要么靠 iOS 快捷指令做尽力而为的推送;两条都被裁定不做(D57)。
+//   ★ 所以这里【不留】任何"以后会同步"的接口:没有 Source/ExternalId,没有 MergeIn。
+//     留着它们就是在暗示一个不会兑现的承诺 —— 下一个人会以为只差接上最后一根线。
+//   ★ 直接后果(必须在界面上说清):这份数据只在这台电脑上,不会自愈。见 D57。
 //
 // 标题 / 备注是自由文本:仅作显示,永不进 prompt(与设备自报名同一纪律)。
 
@@ -34,9 +40,7 @@ public sealed record TodoItem(
     string Owner = "我",
     string Scope = "家庭",
     DateTime? CompletedAt = null,
-    bool CreatedByAi = false,   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
-    string Source = "local",    // 来源:local(本机建) / apple(从提醒事项拉来)
-    string? ExternalId = null)  // Apple 那边的 UID —— 合并去重的首选判据(同日历口径)
+    bool CreatedByAi = false)   // ★ 是否由 AI 建立(界面用小标记区分手动/AI 创建,用户裁定)
 {
     /// <summary>已逾期:有截止、未完成、且截止在此刻之前。</summary>
     public bool IsOverdue => Due is { } d && !Done && d < DateTime.Now;
@@ -89,45 +93,10 @@ public sealed class TodoCenter
     public static string NewId() => Guid.NewGuid().ToString("N")[..8];
 
     // ---------------------------------------------------------------- 存档(明文,见 ClientStore)
-    // ---------------------------------------------------------------- 与 Apple 提醒事项的【增量合并】
-    // ★ 规则照抄日历那套(CalendarData.MergeInto,D50 补充):
-    //   已有的不重复加、同一条不覆盖、空条目不并入。
-    //   两边用同一套口径,以后只需要记住一种行为。
+    // ★★ 这里【故意没有】增量合并(原 MergeInto / MergeIn / Identity / ContentKey,2026-08-02 删除)。
+    //   那一套是为"从 Apple 提醒事项导入并去重"造的,而待办已裁定为纯本机、不接任何外部源(D57)。
+    //   留一套没有数据源的合并层,等于摆着一个"只差接上最后一根线"的假象。
 
-    /// <summary>空条目:没标题的不参与合并、也永不用来覆盖。</summary>
-    public static bool IsBlank(TodoItem t) => string.IsNullOrWhiteSpace(t.Title);
-
-    /// <summary>内容签名:没有 Apple UID 时,按"标题+截止"判断是否同一条。</summary>
-    public static string ContentKey(TodoItem t)
-        => $"{(t.Title ?? "").Trim()}|{t.Due:o}";
-
-    /// <summary>去重判据:有 Apple UID 用 UID,否则用内容签名。</summary>
-    public static string Identity(TodoItem t)
-        => !string.IsNullOrEmpty(t.ExternalId) ? "x:" + t.ExternalId : "c:" + ContentKey(t);
-
-    /// <summary>把 incoming 增量并入:只加【没有的】。纯函数,便于测试。返回新增条数。</summary>
-    public static int MergeInto(List<TodoItem> existing, IEnumerable<TodoItem> incoming)
-    {
-        var seen = new HashSet<string>();
-        foreach (var t in existing) seen.Add(Identity(t));
-        var added = 0;
-        foreach (var inc in incoming)
-        {
-            if (IsBlank(inc)) continue;
-            if (!seen.Add(Identity(inc))) continue;
-            existing.Add(string.IsNullOrEmpty(inc.Id) ? inc with { Id = NewId() } : inc);
-            added++;
-        }
-        return added;
-    }
-
-    /// <summary>接入后:把 Apple 拉来的待办合并进本机(不覆盖、不重复)。返回新增条数。</summary>
-    public int MergeIn(IEnumerable<TodoItem> incoming)
-    {
-        var n = MergeInto(_items, incoming);
-        if (n > 0) Changed?.Invoke();
-        return n;
-    }
 
     public List<TodoItem> Export() => _items.ToList();
 

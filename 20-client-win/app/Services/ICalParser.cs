@@ -66,93 +66,9 @@ public static class ICalParser
         return (list, skipped);
     }
 
-    /// <summary>
-    /// 解析一段 .ics 里的所有 VTODO(Apple 提醒事项)。
-    /// ★ 与 VEVENT 共用折行/转义/时间那三套 —— 那几个坑两边一模一样。
-    /// 只取能对上号的字段:标题 / 截止 / 完成 / 优先级 / 备注 / UID。
-    /// </summary>
-    /// <param name="notices">
-    /// 这个清单里有几条是 Apple 的【已升级】公告(不是用户的待办)。
-    /// ★★ 必须与 "skipped" 分开计:前者意味着【拿不到】(这条路永远拿不到),
-    ///   后者只是【这几条读不懂】。混在一起的话界面就只能说"没东西",
-    ///   而真相是"拿不到" —— 后者才是用户真正需要知道的那句话。
-    /// </param>
-    public static (List<TodoItem> todos, int skipped, int notices) ParseTodos(string ics, TodoKind kind)
-    {
-        var list = new List<TodoItem>();
-        var skipped = 0;
-        var notices = 0;
-        if (string.IsNullOrWhiteSpace(ics)) return (list, 0, 0);
+    // ★★ 原 ParseTodos / BuildTodo(解析 VTODO = Apple 提醒事项)已删除(2026-08-02,D57):
+    //   待办改成纯本机、不接任何外部源,这段解析没有任何调用方,也不该再有。
 
-        var lines = Unfold(ics);
-        List<(string name, Dictionary<string, string> parms, string value)>? cur = null;
-
-        foreach (var line in lines)
-        {
-            if (line.StartsWith("BEGIN:VTODO", StringComparison.OrdinalIgnoreCase)) { cur = new(); continue; }
-            if (line.StartsWith("END:VTODO", StringComparison.OrdinalIgnoreCase))
-            {
-                if (cur is not null)
-                {
-                    // ★ 先看是不是 Apple 的「已升级」公告 —— 那不是待办,不能当任务导入
-                    string? sm = null, de = null;
-                    foreach (var (nm, _, vl) in cur)
-                    {
-                        if (nm.Equals("SUMMARY", StringComparison.OrdinalIgnoreCase)) sm = Unescape(vl);
-                        else if (nm.Equals("DESCRIPTION", StringComparison.OrdinalIgnoreCase)) de = Unescape(vl);
-                    }
-                    if (AppleReminderNotice.IsUpgradeNotice(sm, de)) { notices++; cur = null; continue; }
-
-                    var t = BuildTodo(cur, kind);
-                    if (t is not null) list.Add(t); else skipped++;
-                }
-                cur = null;
-                continue;
-            }
-            if (cur is null) continue;
-            if (TryParseLine(line, out var pr)) cur.Add(pr);
-        }
-        return (list, skipped, notices);
-    }
-
-    static TodoItem? BuildTodo(
-        List<(string name, Dictionary<string, string> parms, string value)> props, TodoKind kind)
-    {
-        string? uid = null, summary = null, notes = null, status = null;
-        DateTime? due = null;
-        var dueHasTime = false;
-        var priority = TodoPriority.None;
-        var completed = false;
-
-        foreach (var (name, parms, value) in props)
-        {
-            switch (name.ToUpperInvariant())
-            {
-                case "UID": uid = value.Trim(); break;
-                case "SUMMARY": summary = Unescape(value); break;
-                case "DESCRIPTION": notes = Unescape(value); break;
-                case "STATUS": status = value.Trim().ToUpperInvariant(); break;
-                case "COMPLETED": completed = true; break;   // 有这个属性就是已完成
-                case "DUE":
-                    if (ParseDate(value, parms) is { } d) { due = d.when; dueHasTime = !d.allDay; }
-                    break;
-                case "PRIORITY":
-                    // RFC 5545:1-4 高 / 5 中 / 6-9 低;0 = 未定。Apple 提醒事项用的就是 1/5/9。
-                    if (int.TryParse(value.Trim(), out var pv) && pv > 0)
-                        priority = pv <= 4 ? TodoPriority.High : pv == 5 ? TodoPriority.Medium : TodoPriority.Low;
-                    break;
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(summary)) return null;   // 空条目不并入(同 TodoCenter.IsBlank)
-        if (status == "COMPLETED") completed = true;
-
-        return new TodoItem(
-            Id: "", Title: summary!.Trim(), Kind: kind, Done: completed,
-            Due: due, DueHasTime: dueHasTime, Priority: priority,
-            Notes: NullIfBlank(notes),
-            Source: "apple", ExternalId: NullIfBlank(uid));
-    }
 
     // ---------------------------------------------------------------- 折行合并
     /// <summary>

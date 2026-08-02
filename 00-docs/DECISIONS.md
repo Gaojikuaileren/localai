@@ -2355,3 +2355,44 @@ iCloud 提醒事项「升级」到新格式、搬进 CloudKit，**CalDAV 上的�
 
 **未定:** 真正的目标是让 iPhone 用户把提醒事项同步进来。
 CalDAV / EventKit / CloudKit Web Services / 扒 iCloud.com 四条路全不通（见下次裁定）。
+
+---
+
+## 2026-08-02 · D57 · 待办是【纯本机】数据:不接任何外部源、不同步任何数据
+
+**裁定(用户):** 把待办事项弄成本地的，不要任何连接，不同步任何数据。
+
+**为什么走到这一步(把推演留下，免得以后又绕一圈):**
+目标是"iPhone 用户能把提醒事项同步进来"。四条路查完，全不通：
+
+| 路 | 结论 |
+|---|---|
+| CalDAV | Apple 2019 起把 iCloud 提醒事项搬进 CloudKit，CalDAV 上只剩 ⚠ 占位清单（D56） |
+| CloudKit Web Services | 只能访问**自己 App 的容器**，Apple 系统容器不对第三方开放 |
+| 扒 iCloud.com | 需要真实 Apple ID 密码 + 2FA（专用密码在网页登录上无效）—— 安全上不可接受 |
+| EventKit | **唯一官方通道**，但只能跑在 Apple 设备上 |
+
+于是只剩两种形态：**iOS 快捷指令**（系统自带、一次导入、尽力而为的推送）
+或**自家手机端 App**（EventKit、可靠、要下载）。
+用户判断售卖产品的用户不会为此装东西或建账号，两者都不做 —— 那么诚实的结论就是**不承诺同步**。
+
+**★ 于是必须把所有"以后会同步"的残留清干净。** 留着比没有更糟：
+它们在暗示一个不会兑现的承诺，下一个人会以为只差接上最后一根线。已删除：
+· `TodoItem.Source` / `ExternalId`（来源与外部 UID）
+· `TodoCenter.MergeIn` / `MergeInto` / `Identity` / `ContentKey`（为"从 Apple 导入去重"造的合并层）
+· `AppleCalDav.FetchTodosAsync`、`ICalParser.ParseTodos` / `BuildTodo`
+· `Services/AppleReminderNotice.cs`（整文件）
+· `AppSettings.AppleReminderList`，以及 Apple 设置卡里所有提醒事项相关的显示
+Selftest 里这一组断言改成**负向**的：用反射守着这些字段/方法**不存在**。
+
+**保留:** `DiscoverAsync` 里**识别 VTODO 集合**那一段。它现在的用处是把提醒事项清单
+**排除**在日历勾选列表之外 —— 否则用户会在日历里看到"购物清单"这种勾了也没用的条目。
+
+**★ 直接后果，必须说给用户听:** 待办**不会自愈**。
+日历丢了能从 iCloud 再拉一次，待办不能。已在归档页写明
+「只存在这台电脑上…换电脑、重装系统或硬盘损坏都不会自动带走它们」，并有断言钉住。
+
+**未解决(记下来，不假装没有):** 客户端数据在 `%LOCALAPPDATA%\LocalAI\client`，
+而 `90-ops/backup/backup.ps1` 备的是中枢的 `D:\AI\state` —— **两者毫无关系，`todos.json` 不进任何备份**。
+纯本机 + 无备份 + 无导出 = 一次磁盘故障全部丢失。要么把客户端 state 纳入备份，
+要么给用户一个导出/打开数据文件夹的入口。这条没做，不是忘了。

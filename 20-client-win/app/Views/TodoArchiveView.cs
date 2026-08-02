@@ -40,6 +40,14 @@ public sealed class TodoArchiveView : UserControl
         _list.Children.Clear();
         var items = TheApp.Todos.Completed().ToList();
 
+        // ★★ 如实说清待办的性质(D57):它是【纯本机】数据 —— 不与任何服务同步,
+        //   也【不会自愈】。日历丢了能从 iCloud 再拉一次,待办不能。
+        //   这句话必须摆在用户看得见的地方:不说,换电脑那天才发现就太晚了。
+        _list.Children.Add(Ui.Caption(
+            "待办与家务只存在这台电脑上 —— 不与 iPhone 的提醒事项或任何云服务同步。"
+            + "换电脑、重装系统或硬盘损坏都不会自动带走它们。"));
+        _list.Children.Add(new Border { Height = 8 });
+
         // ① 保留期(分段按钮,无弹出层)
         _list.Children.Add(RetentionRow());
 

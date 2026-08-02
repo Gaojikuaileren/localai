@@ -474,7 +474,7 @@ public sealed class SettingsView : UserControl
     // ---------------------------------------------------------------- 与 Apple 同步(日历,只读拉取)
     readonly StackPanel _appleBody = new();
     readonly TextBlock _appleStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
-    // ★ 不再只活在内存里:清单【落盘保存】(见 AppSettings.AppleCalendarList / AppleReminderList)——
+    // ★ 不再只活在内存里:清单【落盘保存】(见 AppSettings.AppleCalendarList)——
     //   此前切走再回来/重启就没了,用户得再点一次"刷新日历列表"才能勾选。
     // 存盘格式：URL|显示名[|#RRGGBB] —— 颜色是后加的第三段，
     // 旧存档只有两段也能读(颜色为 null -> 按名字算一个稳定色)。
@@ -577,7 +577,7 @@ public sealed class SettingsView : UserControl
                 TheApp.Settings.AppleCalendarList = Encode(cals);
             PushGroups(cals);
                 PushGroups(cals);
-                TheApp.Settings.AppleReminderList = Encode(rems);
+
                 TheApp.Settings.Save();
                 RefreshApple();
             });
@@ -596,15 +596,13 @@ public sealed class SettingsView : UserControl
         // ★ 清单来自【落盘保存】的那份 -> 连上之后一直都在,不必每次先点刷新。
         //   ★ 构造界面时仍然【不静默联网】—— 要拿最新清单得按「刷新清单」,用户没按就发请求是不该有的行为。
         var calList = Decode(s.AppleCalendarList);
-        var remList = Decode(s.AppleReminderList);
 
-        if (calList.Count == 0 && remList.Count == 0)
+        if (calList.Count == 0)
         {
-            _appleBody.Children.Add(Ui.Caption("还没取过清单 —— 点下面的「刷新清单」把 iCloud 里的日历与提醒事项取过来。"));
+            _appleBody.Children.Add(Ui.Caption("还没取过清单 —— 点下面的「刷新清单」把 iCloud 里的日历取过来。"));
         }
         else
         {
-            if (calList.Count > 0)
             {
                 _appleBody.Children.Add(Ui.Caption("勾选要拉取的【日历】:"));
                 foreach (var cal in calList)
@@ -621,16 +619,12 @@ public sealed class SettingsView : UserControl
                     _appleBody.Children.Add(cb);
                 }
             }
-            // ★★ 【提醒事项】那一组勾选框已【整体移除】(2026-08-02 用户裁定,见 D56)。
-            //   Apple 从 iOS 13 / macOS Catalina 起把 iCloud 提醒事项升级进 CloudKit,
-            //   CalDAV 上只剩一个名字带 ⚠ 的占位清单 —— 这条路对 iCloud 账号【永远拉不到东西】,
-            //   而且升级是账号级、不可逆的。留着一排勾了也没用的清单,是在卖一个坏掉的开关。
-            //   ★ 这里仍然【说一句为什么】:一个字不提的话,用户只会以为是我们做坏了,
-            //     而真相是 Apple 关掉了这条路 —— 同一个账号的【日历】照旧能拉,不对称本身就需要解释。
-            if (remList.Count > 0)
-                _appleBody.Children.Add(Ui.Caption(
-                    "你的 iCloud 里有提醒事项清单,但它们【拉不进来】—— Apple 从 2019 年起不再通过 "
-                    + "CalDAV 提供提醒事项(账号级、不可逆),这条路对任何第三方都是关的。日历不受影响。"));
+            // ★★ 这张卡【只管日历】(2026-08-02 用户裁定,D57)。
+            //   提醒事项那一组勾选框已整体移除,连清单也不再取回来显示 ——
+            //   待办改成【纯本机】数据,不接任何外部源;在这儿列出提醒事项清单
+            //   就是在暗示"能同步",而那是不会兑现的。
+            //   ★ 为什么不能同步的解释,放在【待办自己那儿】说(见 TodoCenter 头部与待办板块),
+            //     不放这里 —— 这是待办的属性,不是 Apple 连接的属性。
         }
 
         // ---- 自动拉取(用户要求 2026-07-31)----
@@ -680,7 +674,7 @@ public sealed class SettingsView : UserControl
             if (!ok) return;
             TheApp.Settings.AppleCalendarList = Encode(cals);
             PushGroups(cals);
-            TheApp.Settings.AppleReminderList = Encode(rems);
+
             TheApp.Settings.Save();
             RefreshApple();
         }));
@@ -707,7 +701,7 @@ public sealed class SettingsView : UserControl
             TheApp.Settings.AppleCalendarUrls.Clear();
             TheApp.Settings.AppleCalendarList.Clear();
             PushGroups(new List<AppleCalendar>());   // 断开 -> 分类表退回本地占位
-            TheApp.Settings.AppleReminderList.Clear();
+
             TheApp.Settings.Save();
             AppleAutoSync.Stop();          // 停表 + 清熔断 —— 断开后不该还留着上次的报错
             _appleStatus.Text = "已断开。本机已有的日程原样保留。";
