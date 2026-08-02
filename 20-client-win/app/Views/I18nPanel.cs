@@ -98,10 +98,19 @@ public sealed class I18nPanel : UserControl
         _grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
         _grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
         foreach (var _ in langs) _grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
+        _grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });   // + 号列
 
         _grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         Header("键", 0); Header("源 · " + st.Doc.SourceLang, 1);
         for (int c = 0; c < langs.Count; c++) Header(langs[c], c + 2);
+        // ★ 表头末尾「+」= 加语言(用户裁定):开底部的目标语言抽屉,勾选即加列
+        var addLang = new TextBlock { Text = "+", FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
+                                      Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(6, 2, 6, 4) };
+        addLang.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        addLang.MouseLeftButtonUp += (_, e3) => { e3.Handled = true; TheApp.I18n.SetLangDrawer(true); };
+        var addCell = Line(addLang);
+        Grid.SetRow(addCell, 0); Grid.SetColumn(addCell, 2 + langs.Count);
+        _grid.Children.Add(addCell);
 
         // ★ 空表也照常显示表格(用户裁定 2026-08-03):没导入任何 JSON 时从下面那行直接开工,
         //   填完点「导出」就得到一份相应内容的 JSON 文件 —— 从零建表和导入改表是同一条路。
@@ -109,11 +118,21 @@ public sealed class I18nPanel : UserControl
         foreach (var e in st.Doc.Entries)
         {
             _grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            // 键列【只读】:格式与标题是 AI/导入定的(用户裁定 2026-08-03)
-            var k = new TextBlock { Text = e.Key, TextTrimming = TextTrimming.CharacterEllipsis,
-                                    VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 2, 6, 2) };
-            k.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            var kc = Line(k);
+            // 键列【可编辑】(用户改裁定 2026-08-03):回车/失焦提交;空或与别的键重复 -> 还原不动
+            var keyBox = new TextBox { Text = e.Key, VerticalAlignment = VerticalAlignment.Center,
+                                       Padding = new Thickness(4, 2, 4, 2), BorderThickness = new Thickness(0),
+                                       Background = Brushes.Transparent };
+            keyBox.SetResourceReference(TextBox.ForegroundProperty, "FgSecondary");
+            var oldKey = e.Key;
+            void CommitKey()
+            {
+                if (keyBox.Text.Trim() == oldKey) return;
+                if (!TheApp.I18n.RenameKey(oldKey, keyBox.Text))
+                { keyBox.Text = oldKey; TheApp.I18n.SetStatus("键没有改:不能为空、也不能与已有键重复。", true); }
+            }
+            keyBox.KeyDown += (_, e4) => { if (e4.Key == System.Windows.Input.Key.Enter) { CommitKey(); e4.Handled = true; } };
+            keyBox.LostFocus += (_, _) => CommitKey();
+            var kc = Line(keyBox);
             Grid.SetRow(kc, r); Grid.SetColumn(kc, 0);
             _grid.Children.Add(kc);
 

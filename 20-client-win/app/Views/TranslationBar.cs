@@ -482,7 +482,6 @@ public sealed class TranslationBar : UserControl
     readonly TextBlock _i18nTargetsSummary = new() { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(2, 4, 0, 0) };
     readonly StackPanel _i18nDrawer = new();
     FrameworkElement _i18nDrawerHost = null!;
-    bool _i18nDrawerOpen;
     bool _i18nSrcInit;
     bool _i18nSrcSyncing;   // 程序性回选中,SelectionChanged 不当成用户操作
 
@@ -518,23 +517,25 @@ public sealed class TranslationBar : UserControl
         finally { _i18nSrcSyncing = false; }
 
         // ---- 目标语言:按钮 + 摘要 + 抽屉勾选
-        _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count}){(_i18nDrawerOpen ? " ▾" : " ▴")}", _i18nDrawerOpen, () =>
-        {
-            _i18nDrawerOpen = !_i18nDrawerOpen;
-            _i18nDrawerHost.Visibility = _i18nDrawerOpen ? Visibility.Visible : Visibility.Collapsed;
-            Refresh();
-        });
+        var drawerOpen = st.LangDrawerOpen;
+        _i18nDrawerHost.Visibility = drawerOpen ? Visibility.Visible : Visibility.Collapsed;
+        _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count}){(drawerOpen ? " ▾" : " ▴")}", drawerOpen, () =>
+            st.SetLangDrawer(!st.LangDrawerOpen));
         _i18nTargetsSummary.Text = st.Doc.TargetLangs.Count == 0
             ? "还没选目标语言 —— 点上面的按钮勾选。"
             : string.Join(" · ", st.Doc.TargetLangs);
         _i18nTargetsSummary.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _i18nTargetsSummary.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
-        if (_i18nDrawerOpen)
+        if (drawerOpen)
         {
+            // ★★ 字段控件(_i18nAddBox)重挂前必须先断开旧父(WPF-PITFALLS #1,2026-08-03 又犯):
+            //   Children.Clear() 只清了抽屉这层,addBox 还挂在上一轮的 custom 行里 ——
+            //   再 Add 就是"已是另一个元素的逻辑子元素"当场炸,抽屉从此打不开、网格编辑跟着闪退。
+            (_i18nAddBox.Parent as Panel)?.Children.Remove(_i18nAddBox);
             _i18nDrawer.Children.Clear();
             var head = new DockPanel { LastChildFill = true };
-            var close = ToolChip("完成 ▾", true, () => { _i18nDrawerOpen = false; _i18nDrawerHost.Visibility = Visibility.Collapsed; Refresh(); });
+            var close = ToolChip("完成 ▾", true, () => st.SetLangDrawer(false));
             DockPanel.SetDock(close, Dock.Right);
             head.Children.Add(close);
             var ttl = Ui.Caption("勾选目标语言(百分比 = 全球使用者占比,静态口径含二语):");

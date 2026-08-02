@@ -2272,6 +2272,18 @@ public static class Selftest
                 try { Directory.Delete(dir2, true); } catch { }
             }
 
+            {
+                // D60 五补:改键 + 两父节点事故钉
+                var i9 = new Services.I18nState();
+                i9.ImportJson("{\"a\":\"甲\",\"b\":\"乙\"}");
+                Assert(i9.RenameKey("a", "c") && i9.Doc.Entries.Any(x => x.Key == "c"), "键可改名(用户改裁定)");
+                Assert(!i9.RenameKey("c", "b") && !i9.RenameKey("b", " "), "改成重复键/空键被拒,原样不动");
+                var tbP = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+                if (tbP is not null)
+                    Assert(tbP.Contains("(_i18nAddBox.Parent as Panel)?.Children.Remove(_i18nAddBox);"),
+                           "★ 字段控件重挂前先断开旧父(WPF 两父节点,抽屉重开就炸的根因)");
+            }
+
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----
             {
                 var cPurple = Views.HomeView.TempColor(-20);
