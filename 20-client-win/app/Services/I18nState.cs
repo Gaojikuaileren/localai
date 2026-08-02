@@ -123,6 +123,30 @@ public sealed class I18nState
         catch (Exception ex) { return (false, "导出失败:" + ex.Message); }
     }
 
+    /// <summary>源码视图(底条按钮开/应用,面板显示编辑器 —— 状态放这儿两边才对得上)。</summary>
+    public bool RawMode { get; private set; }
+    public string RawText { get; set; } = "";
+    public void SetRawMode(bool on) { if (RawMode != on) { RawMode = on; Changed?.Invoke(); } }
+
+    /// <summary>当前表序列化成对照 JSON(与导出①同形)—— 进源码视图时的种子。</summary>
+    public string ToTableJson()
+    {
+        var table = new SortedDictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var e in Doc.Entries)
+        {
+            var row = new Dictionary<string, string> { ["@src"] = Doc.SourceLang, [Doc.SourceLang] = e.Source };
+            foreach (var l in Doc.TargetLangs) if (e.Trans.TryGetValue(l, out var t) && t.Length > 0) row[l] = t;
+            table[e.Key] = row;
+        }
+        return System.Text.Json.JsonSerializer.Serialize(table, new System.Text.Json.JsonSerializerOptions
+        { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+    }
+
+    /// <summary>给界面看的一句状态(导入/导出/应用的结果)。</summary>
+    public string StatusLine { get; private set; } = "";
+    public bool StatusWarn { get; private set; }
+    public void SetStatus(string s, bool warn = false) { StatusLine = s; StatusWarn = warn; Changed?.Invoke(); }
+
     public I18nDoc ExportDoc() => Doc;
     public void Import(I18nDoc? d) { if (d is null) return; Doc = d; Changed?.Invoke(); }
 }

@@ -1708,7 +1708,7 @@ public static class Selftest
                        "两个池子各自用自己的宽度");
                 Assert(tbSrc.Contains("GridUnitType.Star") && tbSrc.Contains("Grid.SetColumn(rightStack, 2)"),
                        "★ 右侧那一格占剩余空间");
-                Assert(tbSrc.Contains("var pool = PoolCard();            // ★ 只此一处:两种模式共用"),
+                Assert(tbSrc.Contains("var pool = PoolCard();            // ★ 只此一处:各模式共用(多语言场景除外 —— 它不限量)"),
                        "★ 语言池两种模式共用、只建一次(两边都要从它往外拖)");
                 // ★★ 两种模式都要显示的东西【只能建一次】,且要建在切换范围之外 ——
                 //   同一天里三次栽在"一个元素两个父节点"上,最后一次让整个翻译界面打不开。

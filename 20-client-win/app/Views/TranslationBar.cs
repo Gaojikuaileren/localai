@@ -99,7 +99,8 @@ public sealed class TranslationBar : UserControl
         leftStack.Children.Add(_interpretLayout);
         Grid.SetColumn(leftStack, 0);
 
-        var pool = PoolCard();            // ★ 只此一处:两种模式共用
+        var pool = PoolCard();            // ★ 只此一处:各模式共用(多语言场景除外 —— 它不限量)
+        _poolCard = pool;
         pool.Margin = new Thickness(0, 0, Gap, 0);
         Grid.SetColumn(pool, 1);
 
@@ -113,10 +114,13 @@ public sealed class TranslationBar : UserControl
         rightStack.Children.Add(_fileTools);
         Grid.SetColumn(rightStack, 2);
 
+        _i18nBar = I18nBarCard();          // 多语言场景:整条横跨(语言不限量,不用限 3 的池)
         var stack = new Grid();
         stack.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         stack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LangPoolWidth + Gap) });
         stack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(_i18nBar, 0); Grid.SetColumnSpan(_i18nBar, 3);
+        stack.Children.Add(_i18nBar);
         stack.Children.Add(leftStack);
         stack.Children.Add(pool);
         stack.Children.Add(rightStack);
@@ -162,6 +166,20 @@ public sealed class TranslationBar : UserControl
         var mode = TheApp.Interpret.Mode;
         var interpreting = mode == TranslationMode.Interpret;
         var filing = mode == TranslationMode.FileTrans;
+        // ★ 多语言(D60 补,用户裁定回归常规版式):整条底条换成 语言chips+工具+主动作 的横跨卡
+        var i18ing = mode == TranslationMode.I18n;
+        _i18nBar.Visibility = i18ing ? Visibility.Visible : Visibility.Collapsed;
+        _poolCard.Visibility = i18ing ? Visibility.Collapsed : Visibility.Visible;
+        if (i18ing)
+        {
+            _textLayout.Visibility = Visibility.Collapsed;
+            _interpretLayout.Visibility = Visibility.Collapsed;
+            _notesCardHost.Visibility = Visibility.Collapsed;
+            _interpretSettings.Visibility = Visibility.Collapsed;
+            _fileTools.Visibility = Visibility.Collapsed;
+            RefreshI18nBar();
+            return;
+        }
         // 方向卡与语言池:同传/文件翻译共用(用户裁定 2026-08-02:文件翻译的语言选择参考同传)
         _textLayout.Visibility = interpreting || filing ? Visibility.Collapsed : Visibility.Visible;
         _interpretLayout.Visibility = interpreting || filing ? Visibility.Visible : Visibility.Collapsed;
@@ -402,6 +420,84 @@ public sealed class TranslationBar : UserControl
             c.Width = _narrowPickerW;
             c.Margin = new Thickness(0, 0, 8, 0);
         }
+    }
+
+    // ---------------------------------------------------------------- 多语言:底条(D60 补)
+    FrameworkElement _i18nBar = null!;
+    FrameworkElement _poolCard = null!;
+    readonly WrapPanel _i18nLangs = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+    readonly WrapPanel _i18nTools = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+    readonly ContentControl _i18nMainHost = new() { Focusable = false, VerticalAlignment = VerticalAlignment.Center };
+    readonly TextBox _i18nAddBox = new() { Width = 84, VerticalAlignment = VerticalAlignment.Center, ToolTip = "语言码,如 en / ja / pt-BR" };
+
+    FrameworkElement I18nBarCard()
+    {
+        // 版式与其他场景同构:左 = 语言(源 + 目标 chips,不限量),右 = 工具,主动作最右常驻
+        var row = new DockPanel { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(_i18nMainHost, Dock.Right);
+        row.Children.Add(_i18nMainHost);
+        DockPanel.SetDock(_i18nTools, Dock.Right);
+        _i18nTools.Margin = new Thickness(10, 0, 10, 0);
+        row.Children.Add(_i18nTools);
+        row.Children.Add(_i18nLangs);
+        var body = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        body.Children.Add(row);
+        var tip = Ui.Caption("目标语言不限量;键与译文在上方编辑,「JSON 源码」整表直编(粘外部 AI 产物的通道)。");
+        tip.Margin = new Thickness(0, 4, 0, 0);
+        body.Children.Add(tip);
+        return Card(body, "多语言设置", scroll: false);
+    }
+
+    void RefreshI18nBar()
+    {
+        var st = TheApp.I18n;
+        _i18nLangs.Children.Clear();
+        _i18nLangs.Children.Add(ToolChip($"源:{st.Doc.SourceLang}", true, () => { }));
+        foreach (var l in st.Doc.TargetLangs)
+        { var cap = l; _i18nLangs.Children.Add(ToolChip(cap + " ×", false, () => st.RemoveLang(cap))); }
+        _i18nLangs.Children.Add(_i18nAddBox);
+        _i18nLangs.Children.Add(ToolChip("+ 语言", false, () =>
+        { var c = _i18nAddBox.Text.Trim(); if (c.Length > 0) { st.AddLang(c); _i18nAddBox.Text = ""; } }));
+
+        _i18nTools.Children.Clear();
+        _i18nTools.Children.Add(ToolChip("导入 JSON", false, () =>
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "JSON|*.json" };
+            if (dlg.ShowDialog() != true) return;
+            var n = st.ImportJson(System.IO.File.ReadAllText(dlg.FileName));
+            st.SetStatus(n < 0 ? "解析失败:不是合法 JSON。" : $"读入 {n} 条词条。", n < 0);
+        }));
+        _i18nTools.Children.Add(ToolChip("导出(一源两出)", false, () =>
+        {
+            var dlg = new Microsoft.Win32.OpenFolderDialog();
+            if (dlg.ShowDialog() != true) return;
+            var (ok, msg) = st.Export(dlg.FolderName);
+            st.SetStatus(msg, !ok);
+        }));
+        _i18nTools.Children.Add(ToolChip(st.RawMode ? "应用源码" : "JSON 源码", st.RawMode, () =>
+        {
+            if (!st.RawMode) { st.RawText = st.ToTableJson(); st.SetRawMode(true); st.SetStatus("源码视图:改完点「应用源码」—— 非法 JSON 会被拒绝,不会吞掉半张表。"); return; }
+            var n = st.ImportJson(st.RawText);
+            if (n < 0) { st.SetStatus("改动没有应用:不是合法 JSON(检查逗号/引号/花括号)。", true); return; }
+            st.SetRawMode(false);
+            st.SetStatus($"已应用:{n} 条词条。");
+        }));
+
+        // 主动作两枚(用户裁定 2026-08-03):
+        //   翻译缺失项 = 只补空着的格子(不动已填的);翻译校准 = 把已填的整表过一遍 ——
+        //   术语一致性、语气统一、占位符,像审校而不是重翻。引擎(P4)未接,两个都如实说。
+        var mains = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var calib = ToolChip("翻译校准", false, () =>
+            ConfirmDialog.Show("还不能校准",
+                "「校准」= 把已填的译文整表过一遍:术语一致、语气统一、占位符完好 —— 只改有问题的。\n翻译引擎(P4)接入后可用。",
+                confirmText: "知道了", cancelText: "关闭"));
+        calib.Margin = new Thickness(0, 0, 6, 0);
+        mains.Children.Add(calib);
+        mains.Children.Add(ToolChip("翻译缺失项", true, () =>
+            ConfirmDialog.Show("还不能自动翻译",
+                "「翻译缺失项」只补空着的格子,不动已填的。\n翻译引擎(P4)还没接入 —— 表、语言与已填的译文都会保留;先用「JSON 源码」粘外部 AI 的产物,或逐条手填。",
+                confirmText: "知道了", cancelText: "关闭")));
+        _i18nMainHost.Content = mains;
     }
 
     // ---------------------------------------------------------------- 文件翻译:工具栏(D59)
