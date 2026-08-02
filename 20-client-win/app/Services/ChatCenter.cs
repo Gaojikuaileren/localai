@@ -68,7 +68,9 @@ public sealed record ChatSession(
     /// </summary>
     bool Interpret = false,
     /// <summary>文件翻译会话(D59):与同传同款 —— 不能搬到项目/别的工作空间,点开自动切到文件翻译场景。</summary>
-    bool FileTrans = false);
+    bool FileTrans = false,
+    /// <summary>JSON 译表会话(D60 八补):一个 JSON 文件对应一个会话,同款不可搬走。</summary>
+    bool I18nTable = false);
 
 public sealed class ChatCenter
 {
@@ -83,12 +85,12 @@ public sealed class ChatCenter
     /// <summary>消息的稳定标识。前缀区别于会话 id,方便肉眼分辨。</summary>
     public static string NewMsgId() => "m-" + Guid.NewGuid().ToString("N")[..10];
 
-    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null, bool interpret = false, bool fileTrans = false)
+    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null, bool interpret = false, bool fileTrans = false, bool i18nTable = false)
     {
-        var s = new ChatSession(NewId(), title ?? (interpret ? "同传记录" : fileTrans ? "文件翻译" : "新会话"),
-            interpret || fileTrans ? null : projectId, scope, DateTime.Now,
+        var s = new ChatSession(NewId(), title ?? (interpret ? "同传记录" : fileTrans ? "文件翻译" : i18nTable ? "JSON 译表" : "新会话"),
+            interpret || fileTrans || i18nTable ? null : projectId, scope, DateTime.Now,
             WorkspaceKey: workspaceKey, OwnerMemberId: MemberContext.Current,   // D45:建的时候就定所有者
-            Interpret: interpret, FileTrans: fileTrans);
+            Interpret: interpret, FileTrans: fileTrans, I18nTable: i18nTable);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -580,7 +582,7 @@ public sealed class ChatCenter
     /// 它的内容(两方对话、固定的语言方向)只有在同传界面里才讲得通,
     /// 搬到聊天空间就成了一堆没有上下文的碎句。与其搬完让人困惑,不如一开始就不许。
     /// </summary>
-    public static bool CanMove(ChatSession s) => !s.Interpret && !s.FileTrans;   // 同传/文件翻译都只在自己的场景里讲得通
+    public static bool CanMove(ChatSession s) => !s.Interpret && !s.FileTrans && !s.I18nTable;   // 场景会话只在自己的场景里讲得通
 
     static string Trim(string t) => t.Length <= 18 ? t : t[..18] + "…";
 }

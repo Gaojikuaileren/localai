@@ -20,6 +20,17 @@ public sealed class I18nPanel : UserControl
     readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap };
     bool _editing;   // 正在格子里打字 -> Touch 引发的重建跳过,不打断输入
 
+    TextBlock MakeAddLang()
+    {
+        var t = new TextBlock { Text = "+", FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
+                                Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(6, 2, 6, 4) };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        t.MouseLeftButtonUp += (_, e3) => { e3.Handled = true; I18nLangPicker.Show(t); };
+        return t;
+    }
+    TextBlock? _addLangBtnBack;
+    TextBlock _addLangBtn => _addLangBtnBack ??= MakeAddLang();
+
     readonly TextBox _pathBox = new() { IsReadOnly = true, BorderThickness = new Thickness(0),
         Background = Brushes.Transparent, VerticalAlignment = VerticalAlignment.Center,
         TextWrapping = TextWrapping.NoWrap, Visibility = Visibility.Collapsed };
@@ -38,11 +49,12 @@ public sealed class I18nPanel : UserControl
             if (n >= 0) st0.Doc.SourcePath = dlg.FileName;
             st0.SetStatus(n < 0 ? "解析失败:不是合法 JSON。" : $"读入 {n} 条词条。", n < 0);
         }));
-        var exp = Ui.Secondary("导出(一源两出)", (_, _) =>
+        var exp = Ui.Secondary("导出 JSON", (_, _) =>
         {
-            var dlg = new Microsoft.Win32.OpenFolderDialog();
+            // ★ 单文件导出(用户裁定 2026-08-03,推翻一源两出):一个完整对照 JSON,AI 直接读
+            var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "JSON|*.json", FileName = "strings.i18n.json" };
             if (dlg.ShowDialog() != true) return;
-            var (ok, msg) = TheApp.I18n.Export(dlg.FolderName);
+            var (ok, msg) = TheApp.I18n.Export(dlg.FileName);
             TheApp.I18n.SetStatus(msg, !ok);
         });
         exp.Margin = new Thickness(6, 0, 0, 0);
@@ -102,13 +114,32 @@ public sealed class I18nPanel : UserControl
 
         _grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         Header("键", 0); Header("源 · " + st.Doc.SourceLang, 1);
-        for (int c = 0; c < langs.Count; c++) Header(langs[c], c + 2);
+        for (int c = 0; c < langs.Count; c++)
+        {
+            // ★ 语言列标题自带删除入口(用户裁定 2026-08-03):点「×」摘掉该语言列 ——
+            //   自定义码也由此删;已填的译文仍留在词条里,重新勾选即恢复显示。
+            var lc = langs[c];
+            var hRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(6, 2, 6, 4) };
+            var hT = new TextBlock { Text = lc, FontWeight = FontWeights.SemiBold };
+            hT.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            hT.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            hRow.Children.Add(hT);
+            var hX = new TextBlock { Text = " ×", Cursor = System.Windows.Input.Cursors.Hand };
+            hX.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            hX.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            hX.MouseLeftButtonUp += (_, e5) => { e5.Handled = true; TheApp.I18n.RemoveLang(lc); };
+            hX.MouseEnter += (_, _) => hX.SetResourceReference(TextBlock.ForegroundProperty, "RiskDanger");
+            hX.MouseLeave += (_, _) => hX.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            hRow.Children.Add(hX);
+            var hCell = Line(hRow);
+            Grid.SetRow(hCell, 0); Grid.SetColumn(hCell, c + 2);
+            _grid.Children.Add(hCell);
+        }
         // ★ 表头末尾「+」= 加语言(用户裁定):开底部的目标语言抽屉,勾选即加列
-        var addLang = new TextBlock { Text = "+", FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
-                                      Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(6, 2, 6, 4) };
-        addLang.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
-        addLang.MouseLeftButtonUp += (_, e3) => { e3.Handled = true; I18nLangPicker.Show(addLang); };   // 浮窗跟着 + 号走
-        var addCell = Line(addLang);
+        // ★ 「+」用字段(锚点要稳定):浮窗开着时表格重建,锚点若是新建控件,浮窗就跟着"飞了"。
+        //   重挂前先断旧父(WPF 两父节点)。
+        (_addLangBtn.Parent as Panel)?.Children.Remove(_addLangBtn);
+        var addCell = Line(_addLangBtn);
         Grid.SetRow(addCell, 0); Grid.SetColumn(addCell, 2 + langs.Count);
         _grid.Children.Add(addCell);
 
@@ -212,8 +243,11 @@ public sealed class I18nPanel : UserControl
         _status.Text = st.StatusLine;
         _status.SetResourceReference(TextBlock.ForegroundProperty, st.StatusWarn ? "RiskWarning" : "FgMuted");
         // 路径行:导入过才显示;只读 TextBox = 可选中可复制
-        _pathBox.Text = st.Doc.SourcePath ?? "";
-        _pathBox.Visibility = string.IsNullOrEmpty(st.Doc.SourcePath) ? Visibility.Collapsed : Visibility.Visible;
+        var sp = st.Doc.SourcePath;
+        var missing = !string.IsNullOrEmpty(sp) && !System.IO.File.Exists(sp);
+        _pathBox.Text = missing ? $"文件丢失:{sp} —— 表内容仍在;点「导入 JSON」重新指到同一份文件即可。" : sp ?? "";
+        _pathBox.SetResourceReference(TextBox.ForegroundProperty, missing ? "RiskWarning" : "FgMuted");
+        _pathBox.Visibility = string.IsNullOrEmpty(sp) ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>包一层右/下 1px 边 —— 与外框的左/上边拼成完整表格线。</summary>

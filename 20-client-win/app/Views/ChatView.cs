@@ -111,6 +111,7 @@ public sealed class ChatView : UserControl
         {
             TheApp.Interpret.Changed += OnInterpretChanged;
             TheApp.FileTrans.FocusSession += OnFileTransFocus;
+            TheApp.I18n.FocusSession += OnFileTransFocus;   // 同一个动作:选中新建的场景会话
         }
         // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
@@ -126,6 +127,7 @@ public sealed class ChatView : UserControl
             {
                 TheApp.Interpret.Changed -= OnInterpretChanged;
                 TheApp.FileTrans.FocusSession -= OnFileTransFocus;
+                TheApp.I18n.FocusSession -= OnFileTransFocus;
             }
             // ★ 离开翻译空间 = 这一场同传结束(D58 的口径;审计 2026-08-02:
             //   原先只有空间内切模式会停,切去别的工作空间就留下一个看不见的进行中)。
@@ -149,6 +151,13 @@ public sealed class ChatView : UserControl
         _projectId = null;
         BuildSessions();
         BuildConversation();
+    }
+
+    /// <summary>多语言场景:把当前选中的 JSON 译表会话绑给状态(没选中 = 草稿态,首笔编辑自建会话)。</summary>
+    FrameworkElement BuildI18nPanel()
+    {
+        TheApp.I18n.SetSession(_sessionId is { } sid && TheApp.Chat.Find(sid)?.I18nTable == true ? sid : null);
+        return new I18nPanel();
     }
 
     void OnInterpretChanged()
@@ -304,6 +313,7 @@ public sealed class ChatView : UserControl
         if (s is null || !SpecFor(_wsKey).ModeSwitch) return;
         TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret
                                : s.FileTrans ? TranslationMode.FileTrans
+                               : s.I18nTable ? TranslationMode.I18n
                                : TranslationMode.Text);
     }
 
@@ -433,9 +443,9 @@ public sealed class ChatView : UserControl
         }
         // ★ 同传记录和普通会话排在同一个列表里(用户裁定),所以要有个标记告诉用户"这条不一样" ——
         //   用麦克风图标而不是加一行字:列表本来就窄,一个图标就够分辨,也不挤掉标题。
-        if (s.Interpret || s.FileTrans)
+        if (s.Interpret || s.FileTrans || s.I18nTable)
         {
-            var mk = Icons.Make(s.Interpret ? IconName.Mic : IconName.File, 12, selected ? "FgOnSelected" : "Accent");
+            var mk = Icons.Make(s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : IconName.Extensions, 12, selected ? "FgOnSelected" : "Accent");
             mk.Margin = new Thickness(0, 0, 5, 0);
             mk.VerticalAlignment = VerticalAlignment.Center;
             titleRow.Children.Add(mk);
@@ -1091,7 +1101,7 @@ public sealed class ChatView : UserControl
                 var ftSid = _sessionId is { } fsid && TheApp.Chat.Find(fsid)?.FileTrans == true ? _sessionId : null;
                 body.Children.Add(mode == TranslationMode.Interpret ? new InterpretPanel(interpSid)
                     : mode == TranslationMode.FileTrans ? new FileTransPanel(ftSid)
-                    : mode == TranslationMode.I18n ? new I18nPanel()
+                    : mode == TranslationMode.I18n ? BuildI18nPanel()
                     : (FrameworkElement)ReservedScenePlaceholder());
                 var only = ConvCard(body);
                 if (spec.BottomAccessory is null) return only;

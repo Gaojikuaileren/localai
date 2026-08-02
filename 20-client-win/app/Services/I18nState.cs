@@ -29,13 +29,46 @@ public sealed class I18nDoc
 public sealed class I18nState
 {
     public event Action? Changed;
-    public I18nDoc Doc { get; private set; } = new();
+    /// <summary>导入/首次编辑时新建了会话 -> 请界面选中它(与 FileTransState 同款)。</summary>
+    public event Action<string>? FocusSession;
+
+    // ★ 会话化(D60 八补,用户裁定):一个 JSON 文件对应一个【JSON 译表会话】。
+    //   Docs 按会话存;没绑会话时先落在草稿上,一旦发生真实编辑就当场建会话并把草稿挂过去。
+    readonly Dictionary<string, I18nDoc> _docs = new(StringComparer.Ordinal);
+    I18nDoc _scratch = new();
+
+    public string? SessionId { get; private set; }
+    public void SetSession(string? sid)
+    {
+        if (SessionId == sid) return;
+        SessionId = sid;
+        RawMode = false;   // 换会话不该带着上一个的源码视图
+        Changed?.Invoke();
+    }
+
+    public I18nDoc Doc => SessionId is { } sid
+        ? (_docs.TryGetValue(sid, out var d) ? d : _docs[sid] = new I18nDoc())
+        : _scratch;
+
+    /// <summary>第一笔真实编辑(导入/加词条/加语言)时建会话 —— 编辑必须有会话记录(用户裁定)。</summary>
+    void EnsureSession(string? titleHint = null)
+    {
+        if (SessionId is not null) return;
+        var app = (LocalAI.Client.App)System.Windows.Application.Current;
+        var sess = app.Chat.NewSession(null, "translation", ProjectScope.Personal,
+            $"JSON 译表 · {titleHint ?? "未命名"} · {DateTime.Now:M月d日 HH:mm}", i18nTable: true);
+        _docs[sess.SessionId] = _scratch;
+        _scratch = new I18nDoc();
+        SessionId = sess.SessionId;
+        FocusSession?.Invoke(sess.SessionId);
+    }
     public string? SelectedKey { get; private set; }
     public void SelectKey(string? k) { if (SelectedKey != k) { SelectedKey = k; Changed?.Invoke(); } }
     public void Touch() => Changed?.Invoke();
 
     public void AddLang(string code)
     {
+        EnsureSession();
         if (string.IsNullOrWhiteSpace(code) || code == Doc.SourceLang || Doc.TargetLangs.Contains(code)) return;
         Doc.TargetLangs.Add(code); Changed?.Invoke();
     }
@@ -44,6 +77,7 @@ public sealed class I18nState
     /// <summary>手建词条(空表也能开工,用户裁定 2026-08-03):键非空且唯一;保持键序。</summary>
     public bool AddEntry(string key)
     {
+        EnsureSession(key);
         key = key.Trim();
         if (key.Length == 0 || Doc.Entries.Any(e => e.Key == key)) return false;
         Doc.Entries.Add(new I18nEntry(key, "", new()));
@@ -109,6 +143,7 @@ public sealed class I18nState
     /// <summary>导入键值 JSON(平铺 {"key":"文案"} 或对照表)。返回读入条数,-1 = 解析失败。</summary>
     public int ImportJson(string json)
     {
+        EnsureSession();
         try
         {
             using var d = JsonDocument.Parse(json);
@@ -147,8 +182,11 @@ public sealed class I18nState
         => (Doc.TargetLangs.Count(l => e.Trans.TryGetValue(l, out var t) && t.Length > 0 && PlaceholdersOk(e.Source, t)),
             Doc.TargetLangs.Count);
 
-    /// <summary>导出「一源两出」。占位符坏的【拒绝导出】并列出坏在哪(硬规则③)。</summary>
-    public (bool Ok, string Msg) Export(string dir)
+    /// <summary>
+    /// 导出【单个完整 JSON】(用户裁定 2026-08-03,推翻先前的一源两出):
+    /// 就是对照表本体 —— 所有语言都在里面,给 AI 直接读。占位符坏的仍【拒绝导出】。
+    /// </summary>
+    public (bool Ok, string Msg) Export(string filePath)
     {
         var bad = new List<string>();
         foreach (var e in Doc.Entries)
@@ -156,23 +194,11 @@ public sealed class I18nState
                 if (e.Trans.TryGetValue(l, out var t) && !PlaceholdersOk(e.Source, t))
                     bad.Add($"{e.Key} [{l}]");
         if (bad.Count > 0)
-            return (false, "占位符校验不过,拒绝导出(AI/引擎读了会炸):\n" + string.Join("、", bad.Take(8)) + (bad.Count > 8 ? $" 等 {bad.Count} 处" : ""));
+            return (false, "占位符校验不过,拒绝导出(AI 读了会错):\n" + string.Join("、", bad.Take(8)) + (bad.Count > 8 ? $" 等 {bad.Count} 处" : ""));
         try
         {
-            System.IO.Directory.CreateDirectory(dir);
-            var opt = new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "strings.i18n.json"), ToTableJson());
-            foreach (var l in Doc.TargetLangs.Prepend(Doc.SourceLang).Distinct())
-            {
-                var flat = new SortedDictionary<string, string>(StringComparer.Ordinal);
-                foreach (var e in Doc.Entries)
-                {
-                    var v = l == Doc.SourceLang ? e.Source : e.Trans.GetValueOrDefault(l, "");
-                    if (v.Length > 0) flat[e.Key] = v;
-                }
-                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, l + ".json"), JsonSerializer.Serialize(flat, opt));
-            }
-            return (true, $"已导出:对照表 + {Doc.TargetLangs.Count + 1} 个语言文件 -> {dir}");
+            System.IO.File.WriteAllText(filePath, ToTableJson());   // UTF-8 无 BOM
+            return (true, "已导出 -> " + filePath);
         }
         catch (Exception ex) { return (false, "导出失败:" + ex.Message); }
     }
@@ -205,6 +231,12 @@ public sealed class I18nState
     public bool StatusWarn { get; private set; }
     public void SetStatus(string s, bool warn = false) { StatusLine = s; StatusWarn = warn; Changed?.Invoke(); }
 
-    public I18nDoc ExportDoc() => Doc;
-    public void Import(I18nDoc? d) { if (d is null) return; Doc = d; Changed?.Invoke(); }
+    public Dictionary<string, I18nDoc> ExportDocs() => new(_docs);
+    public void Import(Dictionary<string, I18nDoc>? d)
+    {
+        if (d is null) return;
+        _docs.Clear();
+        foreach (var kv in d) if (kv.Value is not null) _docs[kv.Key] = kv.Value;
+        Changed?.Invoke();
+    }
 }

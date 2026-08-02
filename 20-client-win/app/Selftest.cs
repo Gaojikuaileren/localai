@@ -1503,8 +1503,8 @@ public static class Selftest
                        "列表点开与深链打开走同一条切场景的路(别一处切一处不切)");
                 Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
                        "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
-                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : IconName.File"),
-                       "同传/文件翻译会话在列表里各用自己的图标区分(列表窄,一个图标够用)");
+                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : IconName.Extensions"),
+                       "同传/文件翻译/JSON译表会话在列表里各用自己的图标区分(列表窄,一个图标够用)");
                 // 顶部场景切换只要图标 + 透明命中块
                 var modeSw = Slice(cvIS, "FrameworkElement ModeSwitcher()", "return row;");
                 Assert(modeSw is not null && modeSw.Contains("Background = Brushes.Transparent") && modeSw.Contains("IsHitTestVisible = false"),
@@ -2260,16 +2260,17 @@ public static class Selftest
                 i18.AddLang("en"); i18.AddLang("en"); i18.AddLang("ja"); i18.AddLang("pt-BR");
                 Assert(i18.Doc.TargetLangs.Count == 3, "★ 目标语言不限量且去重(pt-BR 这类自定义码也收)");
                 i18.Doc.Entries[1].Trans["en"] = "Hello name";   // 占位符坏
-                var (okA, msgA) = i18.Export(Path.Combine(Path.GetTempPath(), "localai-i18n-" + Guid.NewGuid().ToString("N")[..6]));
-                Assert(!okA && msgA.Contains("占位符"), "★★ 占位符校验不过【拒绝导出】(硬规则③:AI/引擎读了会炸)");
+                var f1 = Path.Combine(Path.GetTempPath(), "localai-i18n-" + Guid.NewGuid().ToString("N")[..6] + ".json");
+                var (okA, msgA) = i18.Export(f1);
+                Assert(!okA && msgA.Contains("占位符"), "★★ 占位符校验不过【拒绝导出】(AI 读了会错)");
                 i18.Doc.Entries[1].Trans["en"] = "Hello {name}";
-                var dir2 = Path.Combine(Path.GetTempPath(), "localai-i18n-" + Guid.NewGuid().ToString("N")[..6]);
-                var (okB, _) = i18.Export(dir2);
-                Assert(okB && File.Exists(Path.Combine(dir2, "strings.i18n.json")) && File.Exists(Path.Combine(dir2, "en.json")),
-                       "★ 一源两出:对照表 + 每语言平铺文件");
-                var enBytes = File.ReadAllBytes(Path.Combine(dir2, "en.json"));
-                Assert(enBytes.Length > 0 && enBytes[0] != 0xEF, "★ UTF-8 无 BOM(硬规则①)");
-                try { Directory.Delete(dir2, true); } catch { }
+                var (okB, _) = i18.Export(f1);
+                // ★ 单文件导出(用户裁定 2026-08-03,推翻一源两出):一个完整对照 JSON
+                Assert(okB && File.Exists(f1), "★ 导出 = 单个完整对照 JSON(所有语言都在里面,AI 直接读)");
+                var fb = File.ReadAllBytes(f1);
+                Assert(fb.Length > 0 && fb[0] != 0xEF, "★ UTF-8 无 BOM(硬规则①)");
+                Assert(File.ReadAllText(f1).Contains("\"@src\""), "对照表形状(@src 在内)");
+                try { File.Delete(f1); } catch { }
             }
 
             {

@@ -342,7 +342,7 @@ public partial class App : Application
         SafeImport(ClientStore.InterpretPath, () => Interpret.Import(ClientStore.Load<InterpretState.Snapshot>(ClientStore.InterpretPath)));
         SafeImport(ClientStore.TranslationPath, () => Translation.Import(ClientStore.Load<TranslationState.Snapshot>(ClientStore.TranslationPath)));
         SafeImport(ClientStore.FileTransPath, () => FileTrans.Import(ClientStore.Load<Dictionary<string, FileDoc>>(ClientStore.FileTransPath)));
-        SafeImport(ClientStore.I18nPath, () => I18n.Import(ClientStore.Load<I18nDoc>(ClientStore.I18nPath)));
+        SafeImport(ClientStore.I18nPath, () => I18n.Import(ClientStore.Load<Dictionary<string, I18nDoc>>(ClientStore.I18nPath)));
         // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
         //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
         var merged = Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
@@ -393,7 +393,7 @@ public partial class App : Application
         S(ClientStore.InterpretPath, Interpret.Export());
         S(ClientStore.TranslationPath, Translation.Export());
         S(ClientStore.FileTransPath, FileTrans.Export());
-        S(ClientStore.I18nPath, I18n.ExportDoc());
+        S(ClientStore.I18nPath, I18n.ExportDocs());
     }
 
     void RegisterCleanupSteps()

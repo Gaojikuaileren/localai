@@ -489,14 +489,11 @@ public sealed class TranslationBar : UserControl
         }
         var srcName = Services.Languages.Find(st.Doc.SourceLang)?.Name ?? st.Doc.SourceLang;
         _i18nSrcHost.Content = ToolChip($"源:{srcName} ({st.Doc.SourceLang})…", true, () =>
-        {
-            if (_i18nSrcHost.Content is FrameworkElement fe) I18nLangPicker.Show(fe, forSource: true);
-        });
+            I18nLangPicker.Show(_i18nSrcHost, forSource: true));
 
+        // ★ 锚点用【宿主】(ContentControl 常驻):chip 每轮刷新都换新,浮窗跟着旧 chip 就"飞了"
         _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count})…", false, () =>
-        {
-            if (_i18nTargetsBtnHost.Content is FrameworkElement fe) I18nLangPicker.Show(fe);
-        });
+            I18nLangPicker.Show(_i18nTargetsBtnHost));
         _i18nTargetsSummary.Text = st.Doc.TargetLangs.Count == 0
             ? "还没选目标语言 —— 点上面的按钮挑。"
             : string.Join(" · ", st.Doc.TargetLangs);
