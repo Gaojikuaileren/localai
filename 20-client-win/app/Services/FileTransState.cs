@@ -71,6 +71,14 @@ public sealed class FileTransState
         return true;
     }
 
+    /// <summary>改一个框(拖角标移动 / 拉边调大小,松手时提交)。</summary>
+    public void UpdateBox(string sessionId, int index, MarkBox box)
+    {
+        if (!_docs.TryGetValue(sessionId, out var d) || index < 0 || index >= d.Boxes.Count) return;
+        d.Boxes[index] = box;
+        Changed?.Invoke();
+    }
+
     /// <summary>清空全部框。</summary>
     public void ClearBoxes(string sessionId)
     {

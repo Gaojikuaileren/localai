@@ -53,8 +53,36 @@ public sealed class FileTransPanel : UserControl
         empty.Children.Add(import);
         stage.Children.Add(empty);
         _emptyHost = empty;
+        // ★ 页码角标(用户裁定):左上角显示当前页;多页 PDF 的翻页随渲染(P4)接入,按下如实说
+        _pageTag.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        _pageTag.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var pageHost = new Border { Child = _pageTag, Padding = new Thickness(6, 2, 6, 2),
+            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(6), Cursor = Cursors.Hand };
+        pageHost.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+        pageHost.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        pageHost.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            if (_isPdf) ConfirmDialog.Show("还翻不了页",
+                "PDF 的渲染与翻页要等系统渲染组件随引擎(P4)一起接入 —— 页数现在也读不出来,不编一个数。",
+                confirmText: "知道了", cancelText: "关闭");
+        };
+        _pageHost = pageHost;
 
-        var left = new Border { Child = stage, Margin = new Thickness(0, 0, 6, 0), AllowDrop = true, ClipToBounds = true };
+        var leftGrid = new Grid();
+        leftGrid.Children.Add(stage);
+        leftGrid.Children.Add(pageHost);   // 角标压在缩放层外面,缩放不跟着跑
+        var left = new Border { Child = leftGrid, Margin = new Thickness(0, 0, 6, 0), AllowDrop = true, ClipToBounds = true };
+        // ★ 平移改【右键拖拽】(用户裁定 2026-08-02:左键专职标注/选择,两个左键抢一个手势是冲突源)
+        left.MouseRightButtonDown += (_, e) =>
+        { _panStart = e.GetPosition(this); _panBase = (_panT.X, _panT.Y); left.CaptureMouse(); };
+        left.MouseMove += (_, e) =>
+        {
+            if (_panStart is { } ps && _panBase is { } pb && e.RightButton == MouseButtonState.Pressed)
+            { var p2 = e.GetPosition(this); _panT.X = pb.X + (p2.X - ps.X); _panT.Y = pb.Y + (p2.Y - ps.Y); }
+        };
+        left.MouseRightButtonUp += (_, _) => { _panStart = null; _panBase = null; left.ReleaseMouseCapture(); };
         left.MouseWheel += (_, e) =>
         {
             var z = Math.Clamp(_zoomT.ScaleX * (e.Delta > 0 ? 1.15 : 1 / 1.15), 1, 5);
@@ -122,6 +150,9 @@ public sealed class FileTransPanel : UserControl
         Focusable = true;
         KeyDown += (_, e) =>
         {
+            // Ctrl+Z 撤回(用户裁定)—— 与工具栏「撤回」同一动作
+            if (e.Key == System.Windows.Input.Key.Z && Keyboard.Modifiers == ModifierKeys.Control)
+            { if (Sid is { } zsid) TheApp.FileTrans.UndoBox(zsid); e.Handled = true; return; }
             if (e.Key != System.Windows.Input.Key.Delete) return;
             if (Sid is { } dsid && TheApp.FileTrans.SelectedBox is { } di)
             { TheApp.FileTrans.RemoveBox(dsid, di); e.Handled = true; }
@@ -133,6 +164,9 @@ public sealed class FileTransPanel : UserControl
     }
 
     readonly StackPanel _emptyHost;
+    readonly TextBlock _pageTag = new() { Text = "" };
+    Border _pageHost = null!;
+    bool _isPdf;
 
     void PickFile()
     {
@@ -166,6 +200,7 @@ public sealed class FileTransPanel : UserControl
         if (doc is null || !File.Exists(doc.Path))
         {
             _img.Source = null;
+            if (_pageHost is not null) _pageHost.Visibility = Visibility.Collapsed;
             _emptyHost.Visibility = Visibility.Visible;
             _hint.Text = doc is null
                 ? "把 PNG / JPG / PDF 拖到这里,或点下面导入。\n再用右下工具栏的「创建标注框」圈出要翻译的部分。"
@@ -174,7 +209,10 @@ public sealed class FileTransPanel : UserControl
             return;
         }
         _emptyHost.Visibility = Visibility.Collapsed;
-        if (Path.GetExtension(doc.Path).ToLowerInvariant() == ".pdf")
+        _isPdf = Path.GetExtension(doc.Path).ToLowerInvariant() == ".pdf";
+        _pageHost.Visibility = Visibility.Visible;
+        _pageTag.Text = _isPdf ? "第 1 页 / ?" : "第 1 页 / 1";
+        if (_isPdf)
         {
             // ★ 如实:PDF 的渲染要 WinRT(随引擎一起接),现在不画一个假封面
             _img.Source = null;
@@ -210,7 +248,31 @@ public sealed class FileTransPanel : UserControl
         return new Rect((_overlay.ActualWidth - w) / 2, (_overlay.ActualHeight - h) / 2, w, h);
     }
 
-    Point? _panStart;          // 平移起点(工具关着时的左键拖动)
+    (int Index, bool Move, Point From, Services.MarkBox Orig)? _boxDrag;   // 正在移动/调大小的框
+    (int Index, Services.MarkBox Box)? _tempBox;                            // 拖动中的预览值(未提交)
+
+    /// <summary>按拖动量算出新框:Move = 整体平移;否则把【离起点最近的那个角】拉到当前位置。都夹在图内。</summary>
+    Services.MarkBox Adjusted((int Index, bool Move, Point From, Services.MarkBox Orig) bd, Point now)
+    {
+        var img = ImageRect();
+        if (img.IsEmpty) return bd.Orig;
+        var dx = (now.X - bd.From.X) / img.Width;
+        var dy = (now.Y - bd.From.Y) / img.Height;
+        var b = bd.Orig;
+        if (bd.Move)
+            return new Services.MarkBox(Math.Clamp(b.X + dx, 0, 1 - b.W), Math.Clamp(b.Y + dy, 0, 1 - b.H), b.W, b.H);
+        // 调大小:动离按下点最近的角,对角不动
+        var px = (bd.From.X - img.X) / img.Width; var py = (bd.From.Y - img.Y) / img.Height;
+        var left0 = Math.Abs(px - b.X) < Math.Abs(px - (b.X + b.W));
+        var top0 = Math.Abs(py - b.Y) < Math.Abs(py - (b.Y + b.H));
+        var x1 = left0 ? Math.Clamp(b.X + dx, 0, b.X + b.W - 0.01) : b.X;
+        var y1 = top0 ? Math.Clamp(b.Y + dy, 0, b.Y + b.H - 0.01) : b.Y;
+        var x2 = left0 ? b.X + b.W : Math.Clamp(b.X + b.W + dx, b.X + 0.01, 1);
+        var y2 = top0 ? b.Y + b.H : Math.Clamp(b.Y + b.H + dy, b.Y + 0.01, 1);
+        return new Services.MarkBox(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    Point? _panStart;          // 平移起点(右键拖拽)
     (double X, double Y)? _panBase;
     ScaleTransform _zoomT = null!;
     TranslateTransform _panT = null!;
@@ -219,10 +281,23 @@ public sealed class FileTransPanel : UserControl
     {
         if (!TheApp.FileTrans.BoxTool)
         {
-            // 工具关着:按下先当【可能的平移】;松手没挪动就是【点选框】(见 EndBox)
-            _panStart = e.GetPosition(this);
-            _panBase = (_panT.X, _panT.Y);
-            _overlay.CaptureMouse();
+            var img1 = ImageRect();
+            var pt1 = e.GetPosition(_overlay);
+            if (img1.IsEmpty || Sid is not { } sid1 || TheApp.FileTrans.DocOf(sid1) is not { } d1) return;
+            Rect R(Services.MarkBox b) => new(img1.X + b.X * img1.Width, img1.Y + b.Y * img1.Height,
+                                              b.W * img1.Width, b.H * img1.Height);
+            for (int i = d1.Boxes.Count - 1; i >= 0; i--)
+            {
+                var r1 = R(d1.Boxes[i]);
+                var tag = new Rect(r1.X, r1.Y, 16, 14);                       // 角标热区
+                var inner = Rect.Inflate(r1, -5, -5);
+                if (tag.Contains(pt1))                                        // 按住角标 = 移动框
+                { _boxDrag = (i, true, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
+                if (r1.Contains(pt1) && !inner.Contains(pt1))                 // 边框带 = 拉大小
+                { _boxDrag = (i, false, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
+                if (r1.Contains(pt1)) { TheApp.FileTrans.SelectBox(i); return; }   // 框内 = 选中
+            }
+            TheApp.FileTrans.SelectBox(null);                                 // 空白 = 清选
             return;
         }
         if (Sid is null || ImageRect() is { IsEmpty: true }) return;
@@ -236,11 +311,10 @@ public sealed class FileTransPanel : UserControl
 
     void DragBox(object s, MouseEventArgs e)
     {
-        if (_panStart is { } ps && _panBase is { } pb && e.LeftButton == MouseButtonState.Pressed)
+        if (_boxDrag is { } bd && e.LeftButton == MouseButtonState.Pressed)
         {
-            var p2 = e.GetPosition(this);
-            _panT.X = pb.X + (p2.X - ps.X);
-            _panT.Y = pb.Y + (p2.Y - ps.Y);
+            _tempBox = (bd.Index, Adjusted(bd, e.GetPosition(_overlay)));
+            RedrawBoxes();
             return;
         }
         if (_dragStart is not { } p0 || _ghost is null) return;
@@ -255,26 +329,11 @@ public sealed class FileTransPanel : UserControl
     void EndBox(object s, MouseButtonEventArgs e)
     {
         _overlay.ReleaseMouseCapture();
-        // 工具关着:没挪动 = 点选(选中点下的框,点空白清选);挪动了 = 平移,不选
-        if (_panStart is { } ps)
+        if (_boxDrag is { } bd)
         {
-            var pe = e.GetPosition(this);
-            var moved = Math.Abs(pe.X - ps.X) + Math.Abs(pe.Y - ps.Y) > 4;
-            _panStart = null; _panBase = null;
-            if (!moved && Sid is { } psid && TheApp.FileTrans.DocOf(psid) is { } pd)
-            {
-                var img0 = ImageRect();
-                var pt = e.GetPosition(_overlay);
-                int? hit = null;
-                for (int i = pd.Boxes.Count - 1; i >= 0; i--)   // 后画的在上层,先算它
-                {
-                    var b0 = pd.Boxes[i];
-                    var r0 = new Rect(img0.X + b0.X * img0.Width, img0.Y + b0.Y * img0.Height,
-                                      b0.W * img0.Width, b0.H * img0.Height);
-                    if (r0.Contains(pt)) { hit = i; break; }
-                }
-                TheApp.FileTrans.SelectBox(hit);
-            }
+            // 提交移动/调大小(拖动过程中只画预览,这里才写状态)
+            if (Sid is { } msid) TheApp.FileTrans.UpdateBox(msid, bd.Index, Adjusted(bd, e.GetPosition(_overlay)));
+            _boxDrag = null; _tempBox = null;
             return;
         }
         if (_dragStart is not { } p0) return;
@@ -299,7 +358,7 @@ public sealed class FileTransPanel : UserControl
         if (img.IsEmpty || doc is null) return;
         for (int i = 0; i < doc.Boxes.Count; i++)
         {
-            var b = doc.Boxes[i];
+            var b = _tempBox is { } tb && tb.Index == i ? tb.Box : doc.Boxes[i];
             var sel = TheApp.FileTrans.SelectedBox == i;
             var rc = new System.Windows.Shapes.Rectangle
             {

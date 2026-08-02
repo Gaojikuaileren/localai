@@ -412,7 +412,7 @@ public sealed class TranslationBar : UserControl
     {
         var body = new StackPanel();
         body.Children.Add(_fileToolsRow);
-        var tip = Ui.Caption("在左侧原文件上圈出要翻译的部分;不圈 = 整页。工具关着时:滚轮缩放、拖动平移、点框选中(Del 删除)。「双语对照」= 原文下加译文,关 = 直接替换 —— 引擎接入(P4)后生效。");
+        var tip = Ui.Caption("左键:画框 / 点框选中 / 按住角标移动 / 拉边调大小(Del 删除,Ctrl+Z 撤回);右键拖拽平移,滚轮缩放。「双语对照」「行政翻译」引擎接入(P4)后生效。");
         tip.Margin = new Thickness(0, 4, 0, 0);
         body.Children.Add(tip);
         return Card(body, "文件翻译工具", scroll: false);
@@ -458,11 +458,8 @@ public sealed class TranslationBar : UserControl
                     ft.ClearBoxes(curSid);
             }));
 
-        // —— 留位(用户选定,如实标未接入):术语表 / 输出模式
-        _fileToolsRow.Children.Add(ToolChip("术语表", false, () =>
-            ConfirmDialog.Show("术语表还没接",
-                "术语表锁定专有名词的译法 —— 要和翻译引擎(P4)一起定型,现在先把位置留在这儿。",
-                confirmText: "知道了", cancelText: "关闭")));
+        // ★ 术语表【不暴露给用户】(用户裁定 2026-08-02 改):给人看太鸡肋 ——
+        //   它是 AI 翻译时自己维护、自己参考的内部一致性表,引擎(P4)接入时长在引擎侧。
         _fileToolsRow.Children.Add(new ToggleSwitch("双语对照", ft.BilingualOutput,
             on => ft.SetBilingualOutput(on), compact: true));
         // 普通 vs 行政翻译(用户追加):开 = 公文/证件的正式语体与套语
