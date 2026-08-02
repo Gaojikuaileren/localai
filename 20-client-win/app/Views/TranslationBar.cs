@@ -483,6 +483,7 @@ public sealed class TranslationBar : UserControl
     FrameworkElement _i18nDrawerHost = null!;
     bool _i18nDrawerOpen;
     bool _i18nSrcInit;
+    bool _i18nSrcSyncing;   // 程序性回选中,SelectionChanged 不当成用户操作
 
     void RefreshI18nBar()
     {
@@ -503,11 +504,17 @@ public sealed class TranslationBar : UserControl
             // 第一次进来:源语言还是默认 zh 的话,按母语顶上(已有表就尊重表里存的)
             if (st.Doc.Entries.Count == 0 && st.Doc.SourceLang == "zh") st.Doc.SourceLang = native;
             _i18nSrcBox.SelectionChanged += (_, _) =>
-            { if (_i18nSrcBox.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.I18n.SetSourceLang(c); };
+            { if (!_i18nSrcSyncing && _i18nSrcBox.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.I18n.SetSourceLang(c); };
         }
-        for (int k = 0; k < _i18nSrcBox.Items.Count; k++)
-            if (_i18nSrcBox.Items[k] is ComboBoxItem { Tag: string cc } && cc == st.Doc.SourceLang && _i18nSrcBox.SelectedIndex != k)
-            { _i18nSrcBox.SelectionChanged -= null; _i18nSrcBox.SelectedIndex = k; break; }
+        // 程序性回选不触发 SetSourceLang(重入护栏);别用 -= null,WPF 会当场抛 ArgumentNull
+        _i18nSrcSyncing = true;
+        try
+        {
+            for (int k = 0; k < _i18nSrcBox.Items.Count; k++)
+                if (_i18nSrcBox.Items[k] is ComboBoxItem { Tag: string cc } && cc == st.Doc.SourceLang && _i18nSrcBox.SelectedIndex != k)
+                { _i18nSrcBox.SelectedIndex = k; break; }
+        }
+        finally { _i18nSrcSyncing = false; }
 
         // ---- 目标语言:按钮 + 摘要 + 抽屉勾选
         _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count}){(_i18nDrawerOpen ? " ▾" : " ▴")}", _i18nDrawerOpen, () =>

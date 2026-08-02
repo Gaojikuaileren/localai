@@ -2242,6 +2242,14 @@ public static class Selftest
 
             // ---- 多语言表(D60,2026-08-02/03 用户裁定)----
             {
+                // ★ 事故钉(2026-08-03):`SelectionChanged -= null` 会当场 ArgumentNullException,
+                //   把整个翻译界面炸开 —— 程序性回选一律走布尔护栏,不许再出现 -= null。
+                var tbNull = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+                var cvNull = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                Assert(tbNull is null || !tbNull.Contains("-= null;"), "★ 不许 `事件 -= null`(WPF 当场抛,整页打不开)");
+                Assert(cvNull is null || !cvNull.Contains("-= null;"), "★ 不许 `事件 -= null`(ChatView 同规)");
+            }
+            {
                 var i18 = new Services.I18nState();
                 Assert(i18.ImportJson("{\"b\":\"你好 {name}\",\"a\":\"开始\"}") == 2, "平铺 JSON 能导入");
                 Assert(i18.Doc.Entries[0].Key == "a", "★ 键序排序(硬规则②:diff 干净)");
