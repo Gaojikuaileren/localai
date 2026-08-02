@@ -79,6 +79,8 @@ public sealed class I18nState
          + "2. 键名与 @src 原样保留,不增删改任何键;\n"
          + "3. 源文中的占位符({name}、{0}、%s、%1$s 等)必须在每种译文中【原样】出现;\n"
          + "4. 没把握的语言留空字符串 \"\",不要编造。\n"
+         // ★ 源语言随下拉实时变(用户确认 2026-08-03):Prompt 点击时现生成,@src/源文键/下一行明示全跟 Doc.SourceLang 走。
+         + "源语言:" + Doc.SourceLang + "\n"
          + "目标语言:" + string.Join("、", Doc.TargetLangs) + "\n以下是词条表:\n" + ToTableJson();
 
     /// <summary>导入键值 JSON(平铺 {"key":"文案"} 或对照表)。返回读入条数,-1 = 解析失败。</summary>
