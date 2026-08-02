@@ -24,8 +24,10 @@ public enum TranslationMode
     Text,
     /// <summary>同声传译。</summary>
     Interpret,
-    /// <summary>第三个场景 —— 尚未确定做什么(用户裁定先留空)。</summary>
+    /// <summary>第四个场景 —— 用户说想好了但还没讲,位置留着(2026-08-02)。</summary>
     Reserved,
+    /// <summary>文件翻译(第三场景,用户裁定 2026-08-02,D59):PDF/PNG/JPG 进,同排版出。</summary>
+    FileTrans,
 }
 
 public sealed class InterpretState

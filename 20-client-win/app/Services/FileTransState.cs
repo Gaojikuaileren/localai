@@ -1,0 +1,83 @@
+// P3c -- 翻译工作空间【第三场景:文件翻译】的状态(用户裁定 2026-08-02)。
+//
+// 设计:PDF / PNG / JPG 进,同样格式与排版出。
+//   · 上方会话区分左右:左 = 原文件预览(导入/拖入),右 = 翻译结果实时预览 + 保存;
+//   · 下方与同传共用 语言方向 + 语言池;右侧换成【工具栏】:
+//     AI 自动标注(第一位)/ 创建标注框 / 撤回 / 实时预览开关(默认关)/ 开始翻译(实时开着则灰);
+//   · 标注框 = 用户在原文件上圈出【要翻译的部分】,喂给 AI。
+//
+// ★ 诚实:翻译引擎未接入(P4)。现在【真的】:导入、预览(PNG/JPG)、画框、撤回、落盘;
+//   【不做】:自动标注、翻译输出、保存结果 —— 界面如实说"引擎未接入",不伪造译文。
+// ★ 文件翻译会话与同传会话同一条规矩:不能搬到项目/别的工作空间(内容只有在本场景里讲得通)。
+
+namespace LocalAI.Client.Services;
+
+/// <summary>一个标注框(归一化坐标 0..1,相对原图 —— 缩放窗口不跑偏)。</summary>
+public sealed record MarkBox(double X, double Y, double W, double H);
+
+/// <summary>一个文件翻译文档:原文件 + 标注框。译文输出等引擎(P4)。</summary>
+public sealed record FileDoc(string Path, List<MarkBox> Boxes);
+
+public sealed class FileTransState
+{
+    public event Action? Changed;
+
+    /// <summary>支持的输入格式(用户裁定):PNG / JPG / PDF。</summary>
+    public static readonly string[] Extensions = { ".png", ".jpg", ".jpeg", ".pdf" };
+    public static bool Supported(string path)
+        => Extensions.Contains(System.IO.Path.GetExtension(path).ToLowerInvariant());
+
+    // 会话 id -> 文档。会话删除时的清理由界面层触发(与同传同一口径:记录归 ChatCenter 管)。
+    readonly Dictionary<string, FileDoc> _docs = new(StringComparer.Ordinal);
+
+    /// <summary>标注框工具是否处于【正在画框】状态(工具栏切换;不落盘)。</summary>
+    public bool BoxTool { get; private set; }
+    public void SetBoxTool(bool on) { if (BoxTool != on) { BoxTool = on; Changed?.Invoke(); } }
+
+    /// <summary>实时翻译预览。★ 默认关(用户裁定),且【不落盘】—— 每次进来都从关开始。</summary>
+    public bool RealtimePreview { get; private set; }
+    public void SetRealtimePreview(bool on) { if (RealtimePreview != on) { RealtimePreview = on; Changed?.Invoke(); } }
+
+    /// <summary>引擎未接入(P4)之前恒 false —— 工具栏据此如实解释,不做假动作。</summary>
+    public static bool EngineReady => false;
+
+    public FileDoc? DocOf(string? sessionId)
+        => sessionId is not null && _docs.TryGetValue(sessionId, out var d) ? d : null;
+
+    public void SetFile(string sessionId, string path)
+    {
+        _docs[sessionId] = new FileDoc(path, _docs.TryGetValue(sessionId, out var old) ? old.Boxes : new List<MarkBox>());
+        Changed?.Invoke();
+    }
+
+    public void AddBox(string sessionId, MarkBox box)
+    {
+        if (!_docs.TryGetValue(sessionId, out var d)) return;
+        d.Boxes.Add(box);
+        Changed?.Invoke();
+    }
+
+    /// <summary>撤回:去掉最后一个框。没有可撤的返回 false(按钮据此说"没有可撤回的")。</summary>
+    public bool UndoBox(string sessionId)
+    {
+        if (!_docs.TryGetValue(sessionId, out var d) || d.Boxes.Count == 0) return false;
+        d.Boxes.RemoveAt(d.Boxes.Count - 1);
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>会话没了,它的文档也清掉(界面在会话删除时调)。</summary>
+    public void Drop(string sessionId) { if (_docs.Remove(sessionId)) Changed?.Invoke(); }
+
+    // ---- 存档(文件路径 + 标注框;工具态/预览开关不落盘)----
+    public Dictionary<string, FileDoc> Export() => new(_docs);
+    public void Import(Dictionary<string, FileDoc>? saved)
+    {
+        if (saved is null) return;
+        _docs.Clear();
+        foreach (var kv in saved)
+            if (kv.Value is { Path.Length: > 0 })
+                _docs[kv.Key] = kv.Value with { Boxes = kv.Value.Boxes ?? new List<MarkBox>() };
+        Changed?.Invoke();
+    }
+}

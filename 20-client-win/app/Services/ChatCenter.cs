@@ -66,7 +66,9 @@ public sealed record ChatSession(
     ///   · 在文字翻译界面点开它,自动切到同传界面。
     /// 位置记录末尾追加可选参数:老档案没有这个字段 -> 读成 false,照常读得动。
     /// </summary>
-    bool Interpret = false);
+    bool Interpret = false,
+    /// <summary>文件翻译会话(D59):与同传同款 —— 不能搬到项目/别的工作空间,点开自动切到文件翻译场景。</summary>
+    bool FileTrans = false);
 
 public sealed class ChatCenter
 {
@@ -81,11 +83,12 @@ public sealed class ChatCenter
     /// <summary>消息的稳定标识。前缀区别于会话 id,方便肉眼分辨。</summary>
     public static string NewMsgId() => "m-" + Guid.NewGuid().ToString("N")[..10];
 
-    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null, bool interpret = false)
+    public ChatSession NewSession(string? projectId, string workspaceKey = "chat", ProjectScope scope = ProjectScope.Personal, string? title = null, bool interpret = false, bool fileTrans = false)
     {
-        var s = new ChatSession(NewId(), title ?? (interpret ? "同传记录" : "新会话"), interpret ? null : projectId, scope, DateTime.Now,
+        var s = new ChatSession(NewId(), title ?? (interpret ? "同传记录" : fileTrans ? "文件翻译" : "新会话"),
+            interpret || fileTrans ? null : projectId, scope, DateTime.Now,
             WorkspaceKey: workspaceKey, OwnerMemberId: MemberContext.Current,   // D45:建的时候就定所有者
-            Interpret: interpret);
+            Interpret: interpret, FileTrans: fileTrans);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
@@ -577,7 +580,7 @@ public sealed class ChatCenter
     /// 它的内容(两方对话、固定的语言方向)只有在同传界面里才讲得通,
     /// 搬到聊天空间就成了一堆没有上下文的碎句。与其搬完让人困惑,不如一开始就不许。
     /// </summary>
-    public static bool CanMove(ChatSession s) => !s.Interpret;
+    public static bool CanMove(ChatSession s) => !s.Interpret && !s.FileTrans;   // 同传/文件翻译都只在自己的场景里讲得通
 
     static string Trim(string t) => t.Length <= 18 ? t : t[..18] + "…";
 }

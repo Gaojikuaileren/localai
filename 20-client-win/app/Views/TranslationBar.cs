@@ -106,9 +106,11 @@ public sealed class TranslationBar : UserControl
         var notes = NotesCard();          // ★ 只此一处
         _notesCardHost = notes;
         _interpretSettings = InterpretSettingsCard();
+        _fileTools = FileToolsCard();     // 文件翻译的工具栏(D59)
         var rightStack = new Grid();
         rightStack.Children.Add(notes);
         rightStack.Children.Add(_interpretSettings);
+        rightStack.Children.Add(_fileTools);
         Grid.SetColumn(rightStack, 2);
 
         var stack = new Grid();
@@ -157,15 +159,20 @@ public sealed class TranslationBar : UserControl
 
     void RefreshCore()
     {
-        var interpreting = TheApp.Interpret.Mode == TranslationMode.Interpret;
-        _textLayout.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
-        _interpretLayout.Visibility = interpreting ? Visibility.Visible : Visibility.Collapsed;
+        var mode = TheApp.Interpret.Mode;
+        var interpreting = mode == TranslationMode.Interpret;
+        var filing = mode == TranslationMode.FileTrans;
+        // 方向卡与语言池:同传/文件翻译共用(用户裁定 2026-08-02:文件翻译的语言选择参考同传)
+        _textLayout.Visibility = interpreting || filing ? Visibility.Collapsed : Visibility.Visible;
+        _interpretLayout.Visibility = interpreting || filing ? Visibility.Visible : Visibility.Collapsed;
 
-        _notesCardHost.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
+        _notesCardHost.Visibility = interpreting || filing ? Visibility.Collapsed : Visibility.Visible;
         _interpretSettings.Visibility = interpreting ? Visibility.Visible : Visibility.Collapsed;
+        _fileTools.Visibility = filing ? Visibility.Visible : Visibility.Collapsed;
 
-        RefreshPools();                       // 语言池两种模式都要刷(池里显示什么随模式变)
+        RefreshPools();                       // 语言池各模式都要刷(池里显示什么随模式变)
         if (interpreting) { RefreshDirection(); RefreshInterpretSettings(); return; }
+        if (filing) { RefreshDirection(); RefreshFileTools(); return; }
         RefreshLevel(); RefreshNotes();
     }
 
@@ -395,6 +402,71 @@ public sealed class TranslationBar : UserControl
             c.Width = _narrowPickerW;
             c.Margin = new Thickness(0, 0, 8, 0);
         }
+    }
+
+    // ---------------------------------------------------------------- 文件翻译:工具栏(D59)
+    FrameworkElement _fileTools = null!;
+    readonly WrapPanel _fileToolsRow = new() { Orientation = Orientation.Horizontal };
+
+    FrameworkElement FileToolsCard()
+    {
+        var body = new StackPanel();
+        body.Children.Add(_fileToolsRow);
+        var tip = Ui.Caption("在左侧原文件上圈出要翻译的部分;不圈 = 整页。");
+        tip.Margin = new Thickness(0, 4, 0, 0);
+        body.Children.Add(tip);
+        return Card(body, "文件翻译工具", scroll: false);
+    }
+
+    void RefreshFileTools()
+    {
+        var ft = TheApp.FileTrans;
+        _fileToolsRow.Children.Clear();
+
+        // ① AI 自动标注 —— 用户指定放第一位。★ 引擎未接入:按下如实说,不做假动作
+        _fileToolsRow.Children.Add(ToolChip("AI 自动标注", false, () =>
+            ConfirmDialog.Show("还不能自动标注",
+                "自动找出该翻译的区域要用视觉模型 —— 翻译引擎(P4)接入后这里一键标完。\n先用「创建标注框」手动圈。",
+                confirmText: "知道了", cancelText: "关闭")));
+
+        // ② 创建标注框(开关型:开着才能在左侧画框)
+        _fileToolsRow.Children.Add(ToolChip("创建标注框", ft.BoxTool, () => ft.SetBoxTool(!ft.BoxTool)));
+
+        // ③ 撤回(没有可撤的就说,不装聋)
+        _fileToolsRow.Children.Add(ToolChip("撤回", false, () =>
+        {
+            var sid = TheApp.Chat.Sessions.LastOrDefault(x => x.FileTrans && x.DeletedAt is null)?.SessionId;
+            if (sid is null || !ft.UndoBox(sid))
+                ConfirmDialog.Show("没有可撤回的", "还没画过标注框。", confirmText: "好", cancelText: "关闭");
+        }));
+
+        // ④ 实时翻译预览(默认关,用户裁定)
+        _fileToolsRow.Children.Add(new ToggleSwitch("实时预览", ft.RealtimePreview,
+            on => ft.SetRealtimePreview(on), compact: true));
+
+        // ⑤ 开始翻译:实时预览开着就【灰】(用户裁定 —— 实时模式下没有"开始"这回事)
+        var start = ToolChip("开始翻译", false, () =>
+            ConfirmDialog.Show("还不能翻译",
+                "翻译引擎(P4)还没接入 —— 标注框和文件都会保留,接入后一键出结果。",
+                confirmText: "知道了", cancelText: "关闭"));
+        start.IsEnabled = !ft.RealtimePreview;
+        start.Opacity = ft.RealtimePreview ? 0.45 : 1;
+        _fileToolsRow.Children.Add(start);
+    }
+
+    /// <summary>工具栏的小胶囊(与 Chip 同族;on = 选中态,给"创建标注框"这类开关用)。</summary>
+    FrameworkElement ToolChip(string text, bool on, Action onClick)
+    {
+        var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
+        t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border { Child = t, Padding = new Thickness(8, 4, 8, 4), Margin = new Thickness(0, 0, 6, 4),
+                             Cursor = Cursors.Hand, BorderThickness = new Thickness(1) };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        if (on) { b.SetResourceReference(Border.BackgroundProperty, "Accent"); b.SetResourceReference(Border.BorderBrushProperty, "Accent"); }
+        else { b.Background = Brushes.Transparent; b.SetResourceReference(Border.BorderBrushProperty, "Border"); }
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        return b;
     }
 
     /// <summary>一条竖直音量 + 底下的名字。空槽 —— 接入采集后才有数据。</summary>

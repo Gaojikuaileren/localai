@@ -1496,14 +1496,15 @@ public static class Selftest
             var cvIS = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvIS is not null)
             {
-                Assert(cvIS.Contains("TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret : TranslationMode.Text);"),
+                Assert(cvIS.Contains("TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret")
+                       && cvIS.Contains(": s.FileTrans ? TranslationMode.FileTrans"),
                        "★ 点开会话就把界面切到它自己那套模块 —— 【两个方向都切】(在同传里点开文字会话要切回文字翻译,否则那条会话根本没被打开)");
                 Assert(cvIS.Contains("ApplySessionScene(s);") && cvIS.Contains("ApplySessionScene(TheApp.Chat.Find(sessionId));"),
                        "列表点开与深链打开走同一条切场景的路(别一处切一处不切)");
                 Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
                        "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
-                Assert(cvIS.Contains("Icons.Make(IconName.Mic, 12"),
-                       "同传记录在列表里用麦克风图标区分(列表窄,一个图标够用)");
+                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : IconName.File"),
+                       "同传/文件翻译会话在列表里各用自己的图标区分(列表窄,一个图标够用)");
                 // 顶部场景切换只要图标 + 透明命中块
                 var modeSw = Slice(cvIS, "FrameworkElement ModeSwitcher()", "return row;");
                 Assert(modeSw is not null && modeSw.Contains("Background = Brushes.Transparent") && modeSw.Contains("IsHitTestVisible = false"),
@@ -2201,6 +2202,41 @@ public static class Selftest
                 if (ccA is not null)
                     Assert(ccA.Contains("SessionArchive.ArchivedSessionIds())") && ccA.Contains("SessionArchive.Load(sid)"),
                            "★ 「清理缓存」的引用表把温层归档也算上 —— 否则归档消息的截图唯一副本被当垃圾删掉");
+            }
+
+            // ---- 文件翻译场景(D59,2026-08-02 用户裁定)----
+            {
+                var ftst = new Services.FileTransState();
+                Assert(!ftst.RealtimePreview, "★ 实时预览默认【关】(用户裁定)");
+                Assert(Services.FileTransState.Supported("a.PNG") && Services.FileTransState.Supported("b.pdf")
+                       && !Services.FileTransState.Supported("c.docx"), "只吃 PNG/JPG/PDF,别的如实拒绝");
+                ftst.SetFile("fs-1", Path.Combine(Path.GetTempPath(), "localai-ft-demo.png"));
+                ftst.AddBox("fs-1", new Services.MarkBox(0.1, 0.2, 0.3, 0.4));
+                Assert(ftst.DocOf("fs-1")!.Boxes.Count == 1, "标注框记在文档上");
+                Assert(ftst.UndoBox("fs-1") && ftst.DocOf("fs-1")!.Boxes.Count == 0, "撤回去掉最后一个框");
+                Assert(!ftst.UndoBox("fs-1"), "没有可撤的如实返回 false(按钮据此说话,不装聋)");
+                ftst.AddBox("fs-1", new Services.MarkBox(0.5, 0.5, 0.2, 0.2));
+                var rt2 = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Services.FileDoc>>(
+                              System.Text.Json.JsonSerializer.Serialize(ftst.Export()))!;
+                Assert(rt2["fs-1"].Boxes.Count == 1, "★ 文件与标注框能落盘往返(重启不丢已画的框)");
+
+                var cf = new Services.ChatCenter();
+                var fsess = cf.NewSession(null, "translation", fileTrans: true);
+                Assert(fsess.FileTrans && !Services.ChatCenter.CanMove(fsess),
+                       "★ 文件翻译会话与同传同款:不能搬到项目/别的工作空间");
+                var tbF = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
+                if (tbF is not null)
+                {
+                    var iAuto = tbF.IndexOf("AI 自动标注", StringComparison.Ordinal);
+                    var iBox = tbF.IndexOf("\"创建标注框\"", StringComparison.Ordinal);
+                    Assert(iAuto >= 0 && iBox > iAuto, "★ 「AI 自动标注」排工具栏第一位(用户指定)");
+                    Assert(tbF.Contains("start.IsEnabled = !ft.RealtimePreview;"),
+                           "★ 实时预览开着时「开始翻译」灰掉(用户裁定:实时模式下没有\"开始\"这回事)");
+                }
+                var cvF = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                if (cvF is not null)
+                    Assert(cvF.Contains("引用该会话") && cvF.Contains("[引用会话 {s.SessionId}]"),
+                           "★ 所有会话的三点菜单都有【引用该会话】(复制 ID,发到别的会话让 AI 读;AI 未接入前如实说明)");
             }
 
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----

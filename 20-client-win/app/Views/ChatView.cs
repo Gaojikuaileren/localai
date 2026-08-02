@@ -285,7 +285,9 @@ public sealed class ChatView : UserControl
     void ApplySessionScene(ChatSession? s)
     {
         if (s is null || !SpecFor(_wsKey).ModeSwitch) return;
-        TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret : TranslationMode.Text);
+        TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret
+                               : s.FileTrans ? TranslationMode.FileTrans
+                               : TranslationMode.Text);
     }
 
     /// <summary>
@@ -414,12 +416,12 @@ public sealed class ChatView : UserControl
         }
         // ★ 同传记录和普通会话排在同一个列表里(用户裁定),所以要有个标记告诉用户"这条不一样" ——
         //   用麦克风图标而不是加一行字:列表本来就窄,一个图标就够分辨,也不挤掉标题。
-        if (s.Interpret)
+        if (s.Interpret || s.FileTrans)
         {
-            var mic = Icons.Make(IconName.Mic, 12, selected ? "FgOnSelected" : "Accent");
-            mic.Margin = new Thickness(0, 0, 5, 0);
-            mic.VerticalAlignment = VerticalAlignment.Center;
-            titleRow.Children.Add(mic);
+            var mk = Icons.Make(s.Interpret ? IconName.Mic : IconName.File, 12, selected ? "FgOnSelected" : "Accent");
+            mk.Margin = new Thickness(0, 0, 5, 0);
+            mk.VerticalAlignment = VerticalAlignment.Center;
+            titleRow.Children.Add(mk);
         }
         // ★ 跨空间会话(只会出现在项目会话列表里 —— 项目能同时挂多个工作空间,会话各归各的空间)。
         //   标记方式:第三个前缀图标,和置顶点、同传麦克风同一个位置,用该空间自己的图标。
@@ -555,6 +557,19 @@ public sealed class ChatView : UserControl
             toWs.Items.Add(mi);
         }
         if (movable) m.Items.Add(toWs);
+
+        // ★ 引用该会话(用户裁定 2026-08-02):复制会话 ID,粘贴到别的会话里发送,
+        //   让那边的 AI 去读这段会话。★ 诚实:AI 未接入(P4),现在只是把引用标记复制好;
+        //   接入后 AI 才会真的解引用 —— 提示里写明,不装作已经生效。
+        var cite = new MenuItem { Header = "引用该会话" };
+        cite.Click += (_, _) =>
+        {
+            try { Clipboard.SetText($"[引用会话 {s.SessionId}]"); } catch { }
+            ConfirmDialog.Show("已复制引用",
+                $"已复制:[引用会话 {s.SessionId}]\n\n粘贴到任何能对话的会话里发送,AI 会去读这段会话。\n★ AI 尚未接入(P4)——接入后这个引用才会真的被读取。",
+                confirmText: "好", cancelText: "关闭");
+        };
+        m.Items.Add(cite);
 
         var rename = new MenuItem { Header = "重命名会话…" };
         rename.Click += (_, _) => RenameSession(s, anchor);
@@ -992,6 +1007,7 @@ public sealed class ChatView : UserControl
                  {
                      (TranslationMode.Text, IconName.Translation, "文字翻译"),
                      (TranslationMode.Interpret, IconName.Mic, "同声传译"),
+                     (TranslationMode.FileTrans, IconName.File, "文件翻译"),
                      (TranslationMode.Reserved, IconName.Dots, "未定"),
                  })
         {
@@ -1055,9 +1071,10 @@ public sealed class ChatView : UserControl
                 var interpSid = TheApp.Interpret.Running && TheApp.Interpret.RunningSessionId is { } rsid
                     ? rsid
                     : _sessionId is { } isid && TheApp.Chat.Find(isid)?.Interpret == true ? _sessionId : null;
-                body.Children.Add(mode == TranslationMode.Interpret
-                    ? new InterpretPanel(interpSid)
-                    : ReservedScenePlaceholder());
+                var ftSid = _sessionId is { } fsid && TheApp.Chat.Find(fsid)?.FileTrans == true ? _sessionId : null;
+                body.Children.Add(mode == TranslationMode.Interpret ? new InterpretPanel(interpSid)
+                    : mode == TranslationMode.FileTrans ? new FileTransPanel(ftSid)
+                    : (FrameworkElement)ReservedScenePlaceholder());
                 var only = ConvCard(body);
                 if (spec.BottomAccessory is null) return only;
                 var wrap = new DockPanel { LastChildFill = true };
