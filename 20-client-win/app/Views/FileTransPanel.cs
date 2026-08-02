@@ -254,28 +254,48 @@ public sealed class FileTransPanel : UserControl
         return new Rect((_overlay.ActualWidth - w) / 2, (_overlay.ActualHeight - h) / 2, w, h);
     }
 
-    (int Index, bool Move, Point From, Services.MarkBox Orig)? _boxDrag;   // 正在移动/调大小的框
+    // 拖动模式:0=移动 1=左边 2=右边 3=上边 4=下边 5=右下角(双向)
+    (int Index, int Mode, Point From, Services.MarkBox Orig)? _boxDrag;
     (int Index, Services.MarkBox Box)? _tempBox;                            // 拖动中的预览值(未提交)
 
-    /// <summary>按拖动量算出新框:Move = 整体平移;否则把【离起点最近的那个角】拉到当前位置。都夹在图内。</summary>
-    Services.MarkBox Adjusted((int Index, bool Move, Point From, Services.MarkBox Orig) bd, Point now)
+    /// <summary>
+    /// 按拖动量算出新框。★ 上下边只动高、左右边只动宽、右下角才双向(用户裁定 2026-08-03)——
+    ///   原先"动离按下点最近的角"让拖上边时宽也跟着变,看起来就是抖。
+    /// ★ 最小尺寸 12px(换算成归一化):框不会被拉没。
+    /// </summary>
+    Services.MarkBox Adjusted((int Index, int Mode, Point From, Services.MarkBox Orig) bd, Point now)
     {
         var img = ImageRect();
         if (img.IsEmpty) return bd.Orig;
         var dx = (now.X - bd.From.X) / img.Width;
         var dy = (now.Y - bd.From.Y) / img.Height;
         var b = bd.Orig;
-        if (bd.Move)
-            return new Services.MarkBox(Math.Clamp(b.X + dx, 0, 1 - b.W), Math.Clamp(b.Y + dy, 0, 1 - b.H), b.W, b.H);
-        // 调大小:动离按下点最近的角,对角不动
-        var px = (bd.From.X - img.X) / img.Width; var py = (bd.From.Y - img.Y) / img.Height;
-        var left0 = Math.Abs(px - b.X) < Math.Abs(px - (b.X + b.W));
-        var top0 = Math.Abs(py - b.Y) < Math.Abs(py - (b.Y + b.H));
-        var x1 = left0 ? Math.Clamp(b.X + dx, 0, b.X + b.W - 0.01) : b.X;
-        var y1 = top0 ? Math.Clamp(b.Y + dy, 0, b.Y + b.H - 0.01) : b.Y;
-        var x2 = left0 ? b.X + b.W : Math.Clamp(b.X + b.W + dx, b.X + 0.01, 1);
-        var y2 = top0 ? b.Y + b.H : Math.Clamp(b.Y + b.H + dy, b.Y + 0.01, 1);
+        var minW = 12 / img.Width; var minH = 12 / img.Height;
+        double x1 = b.X, y1 = b.Y, x2 = b.X + b.W, y2 = b.Y + b.H;
+        switch (bd.Mode)
+        {
+            case 0: return new Services.MarkBox(Math.Clamp(b.X + dx, 0, 1 - b.W), Math.Clamp(b.Y + dy, 0, 1 - b.H), b.W, b.H);
+            case 1: x1 = Math.Clamp(b.X + dx, 0, x2 - minW); break;                     // 左边:只宽
+            case 2: x2 = Math.Clamp(x2 + dx, x1 + minW, 1); break;                      // 右边:只宽
+            case 3: y1 = Math.Clamp(b.Y + dy, 0, y2 - minH); break;                     // 上边:只高
+            case 4: y2 = Math.Clamp(y2 + dy, y1 + minH, 1); break;                      // 下边:只高
+            case 5: x2 = Math.Clamp(x2 + dx, x1 + minW, 1); y2 = Math.Clamp(y2 + dy, y1 + minH, 1); break;   // 右下角:双向
+        }
         return new Services.MarkBox(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    /// <summary>命中在框的哪个部位:0 无 1 左 2 右 3 上 4 下 5 右下角(带 5px 边带,角优先)。</summary>
+    static int EdgeHit(Rect r, Point p)
+    {
+        if (!Rect.Inflate(r, 5, 5).Contains(p)) return 0;
+        var nearL = Math.Abs(p.X - r.X) <= 5; var nearR = Math.Abs(p.X - r.Right) <= 5;
+        var nearT = Math.Abs(p.Y - r.Y) <= 5; var nearB = Math.Abs(p.Y - r.Bottom) <= 5;
+        if (nearR && nearB) return 5;
+        if (nearL && p.Y > r.Y - 5 && p.Y < r.Bottom + 5) return 1;
+        if (nearR) return 2;
+        if (nearT) return 3;
+        if (nearB) return 4;
+        return 0;
     }
 
     Point? _panStart;          // 平移起点(右键拖拽)
@@ -295,11 +315,11 @@ public sealed class FileTransPanel : UserControl
             {
                 var r1 = R(d1.Boxes[i]);
                 var tag = new Rect(r1.X, r1.Y, 16, 14);                       // 角标热区
-                var inner = Rect.Inflate(r1, -5, -5);
                 if (tag.Contains(pt1))                                        // 按住角标 = 移动框
-                { _boxDrag = (i, true, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
-                if (r1.Contains(pt1) && !inner.Contains(pt1))                 // 边框带 = 拉大小
-                { _boxDrag = (i, false, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
+                { _boxDrag = (i, 0, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
+                var edge = EdgeHit(r1, pt1);                                  // 边/角 = 各管各的方向
+                if (edge != 0)
+                { _boxDrag = (i, edge, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
                 if (r1.Contains(pt1)) { TheApp.FileTrans.SelectBox(i); return; }   // 框内 = 选中
             }
             TheApp.FileTrans.SelectBox(null);                                 // 空白 = 清选 -> 落到画框
@@ -328,7 +348,10 @@ public sealed class FileTransPanel : UserControl
                     var r2 = new Rect(imgH.X + b2.X * imgH.Width, imgH.Y + b2.Y * imgH.Height,
                                       b2.W * imgH.Width, b2.H * imgH.Height);
                     if (new Rect(r2.X, r2.Y, 16, 14).Contains(ptH)) { cur = Cursors.SizeAll; break; }
-                    if (r2.Contains(ptH) && !Rect.Inflate(r2, -5, -5).Contains(ptH)) { cur = Cursors.SizeNWSE; break; }
+                    var eh = EdgeHit(r2, ptH);
+                    if (eh == 5) { cur = Cursors.SizeNWSE; break; }
+                    if (eh is 1 or 2) { cur = Cursors.SizeWE; break; }
+                    if (eh is 3 or 4) { cur = Cursors.SizeNS; break; }
                     if (r2.Contains(ptH)) { cur = Cursors.Hand; break; }
                 }
             _overlay.Cursor = cur;

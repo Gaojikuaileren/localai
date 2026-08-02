@@ -415,12 +415,15 @@ public sealed class TranslationBar : UserControl
         //   「开始翻译」是这一格的主动作 -> 自己的宿主、Dock.Right 常驻,任何宽度都不被裁;
         //   其余工具在 WrapPanel 里按【动作 -> 整理 -> 偏好】排,窄了换行:
         //   AI 自动标注(用户定死第一位)· 撤回 · 清除所选 · 清空全部 | 实时预览 · 双语对照 · 行政翻译
-        var toolsRow = new DockPanel { LastChildFill = true };
+        // ★ 高度居中(用户反馈 2026-08-03):卡有一整格的高,内容全堆左上看着失衡 ——
+        //   工具行+提示行作为整体在卡内垂直居中,与左边方向卡/语言池的视觉重心持平。
+        var toolsRow = new DockPanel { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
         DockPanel.SetDock(_fileStartHost, Dock.Right);
         _fileStartHost.VerticalAlignment = VerticalAlignment.Center;
         toolsRow.Children.Add(_fileStartHost);
         toolsRow.Children.Add(_fileToolsRow);
-        var body = new StackPanel();
+        var body = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        _fileToolsRow.VerticalAlignment = VerticalAlignment.Center;
         body.Children.Add(toolsRow);
         var tip = Ui.Caption("左键:画框 / 点框选中 / 按住角标移动 / 拉边调大小(Del 删除,Ctrl+Z 撤回);右键拖拽平移,滚轮缩放。「双语对照」「行政翻译」引擎接入(P4)后生效。");
         tip.Margin = new Thickness(0, 4, 0, 0);
