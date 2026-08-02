@@ -2137,6 +2137,62 @@ public static class Selftest
                 Assert(cm.SessionsOf(kept).Count() == 2, "★ 被合并项目的会话并到保留的那个项目下(不丢会话)");
                 Assert(pm.Items.Any(x => x.ProjectId == "keep-sub"), "子路径项目不参与合并");
             }
+            // ---- 全项目审计修复(2026-08-02,42 条发现 39 条成立)——钉住最要害的几条 ----
+            {
+                // 同传方向:空串 = 清空(原先被语言校验静默吞掉 -> 方向永久锁死)
+                var d2 = new Services.InterpretState();
+                d2.SetMyLang("zh"); d2.SetMyLang("");
+                Assert(d2.MyLang.Length == 0, "★ 方向坑能【清空】—— 否则两坑一满语言池整体禁用,方向从此改不了");
+                // 同语言方向拦下(坑到坑一拖能造出「中文↔中文」)
+                d2.SetMode(Services.TranslationMode.Interpret);
+                d2.SetMyLang("zh"); d2.SetTheirLang("zh");
+                Assert(d2.Start(null).Contains("同一种语言") && !d2.Running,
+                       "★ 「中文↔中文」开始不了 —— 那不是同传,是复读");
+                // Import 对 null 字段的档不炸(语法合法的 {} 反序列化出来就是 null 字段)
+                var cc0 = new Services.ChatCenter();
+                cc0.Import(new Services.ChatCenter.Snapshot(null!, null!));
+                Assert(cc0.Sessions.Count == 0, "★ 字段为 null 的存档当空表,不炸 —— 炸了会连累退出时用空数据覆盖别的档");
+                // RainOutlook 按城市当地的今天切(隔日界线的城市原先整体错一天)
+                var wDays = new Services.WeatherNow(null, null, null, null, null, null,
+                    Days: new List<Services.WeatherDay> { new(DateTime.Today.AddDays(2), 5.0) });
+                Assert(Services.Weather.RainOutlook(wDays, DateTime.Today.AddDays(1))!.Contains("明天"),
+                       "★ RainOutlook 按【那座城】的今天切,不按本机(隔日界线会整体错一天)");
+            }
+            {
+                var cvA = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                if (cvA is not null)
+                {
+                    Assert(cvA.Contains(".FirstOrDefault(x => x.WorkspaceKey == _wsKey)?.SessionId"),
+                           "★ SelectProject 只自动打开【本空间】的会话 —— 否则三道跳转护栏被整体绕过,聊天写进翻译历史");
+                    Assert(cvA.Contains("if (ViewingDeletedProject)") && cvA.Contains("只读就是只读"),
+                           "★ 已删除项目的只读浏览不给三点菜单(搬软删会话只会造孤儿)");
+                    Assert(cvA.Contains("if (TheApp.Interpret.Running) return;") || TryReadSource(Path.Combine("Views", "TranslationBar.cs"))!.Contains("if (TheApp.Interpret.Running) return;"),
+                           "★ 重复点「开始同传」不再多建一条空记录");
+                    Assert(cvA.Contains("TheApp.Interpret.Stop();"),
+                           "★ 离开翻译空间 = 这一场同传结束(不留一个看不见的进行中)");
+                }
+                var appA = TryReadSource("App.xaml.cs");
+                if (appA is not null)
+                {
+                    Assert(appA.Contains("_failedStores") && appA.Contains("if (!_failedStores.Contains(path))"),
+                           "★★ 导入失败的存档【不参与退出保存】—— 否则空表覆盖盘上完好的数据");
+                }
+                var hvA = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                if (hvA is not null)
+                {
+                    Assert(!hvA.Contains("hit.ToolTip = r.Message") && hvA.Contains("ShowPullResult(r.Ok, r.Message);"),
+                           "★★ 拉取结果【真的显示出来】—— 原先写进全局已关闭的 ToolTip,同步失败完全无声");
+                    Assert(hvA.Contains("{ RefreshWeatherUi(); PullWeather(); }"),
+                           "★ 天气每轮先重画 —— 拉取失败不发 Changed,stale 标记全靠这一下,否则断网后整卡冻结");
+                    Assert(!hvA.Contains("与 Apple 提醒事项同步的设置"),
+                           "★ 待办板块不再有跳 Apple 同步的齿轮(D57:待办与 Apple 已毫无关系)");
+                }
+                var ccA = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                if (ccA is not null)
+                    Assert(ccA.Contains("SessionArchive.ArchivedSessionIds())") && ccA.Contains("SessionArchive.Load(sid)"),
+                           "★ 「清理缓存」的引用表把温层归档也算上 —— 否则归档消息的截图唯一副本被当垃圾删掉");
+            }
+
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----
             {
                 var cPurple = Views.HomeView.TempColor(-20);
@@ -2687,9 +2743,9 @@ public static class Selftest
                        && tl.Contains("var blocked = new bool[AllDayRows, 7];"),
                        "★★ 两行【都能放任何一条】(先长后短贪心),单日的还能在同一格里共享宽度"
                        + " —— 之前跨天的只有一行,两条一重叠就挤掉一条,那个「+1」就是这么来的");
-                Assert(tl.Contains("$\"+{hiddenNames.Count}\"") && tl.Contains("_allDayMore.ToolTip")
-                       && tl.Contains("string.Join(\"、\", hiddenNames)"),
-                       "★ 没画出来的【悬停列出是哪几条】,且这个计数摆在【左侧刻度列】"
+                Assert(tl.Contains("$\"+{hiddenNames.Count}\"") && tl.Contains("_allDayMore.MouseLeftButtonUp")
+                       && tl.Contains("MenuHost.Show(m, _allDayMore)"),
+                       "★ 没画出来的【点击列出是哪几条】(全局 ToolTip 已关,挂提示上等于没解释),计数摆在【左侧刻度列】"
                        + "—— 钉在画布右端的话会盖住周日那一格的日期与条");
                 Assert(tl.Contains("ToolTip = box.ToolTip,") && tl.Contains("if (e.OriginalSource is not Canvas) return;"),
                        "★★ 外置标题悬停出全名、点一下能编辑 —— 前提是画布【只在真的按在自己身上时】才抢捕获;"
@@ -3744,7 +3800,7 @@ public static class Selftest
                     var appw = TryReadSource("App.xaml.cs");
                     if (appw is not null)
                         Assert(appw.Contains("Services.Weather.Changed += Touch;")
-                               && appw.Contains("ClientStore.Save(ClientStore.WeatherPath"),
+                               && appw.Contains("S(ClientStore.WeatherPath, Services.Weather.Export());"),
                                "★★ 天气缓存【真的会落盘】—— 不接变更通知的话它只活在内存里,"
                                + "重启/断网时「显示上次那份」无从谈起");
                     Assert(hvw.Contains("CultureInfo.InvariantCulture) + \"mm\""),

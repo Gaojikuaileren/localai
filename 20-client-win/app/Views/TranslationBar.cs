@@ -138,7 +138,17 @@ public sealed class TranslationBar : UserControl
     Grid _textLayout = null!;
     FrameworkElement _interpretLayout = null!;
 
+    bool _inRefresh;   // ★ 重入护栏:构建设置卡途中,设备下拉发现存档 id 失效会同步清状态并触发
+                       //   Changed -> Refresh 重入,把"我方麦克风/音频输出"整组画两遍(审计 2026-08-02)。
+
     void Refresh()
+    {
+        if (_inRefresh) return;
+        _inRefresh = true;
+        try { RefreshCore(); } finally { _inRefresh = false; }
+    }
+
+    void RefreshCore()
     {
         var interpreting = TheApp.Interpret.Mode == TranslationMode.Interpret;
         _textLayout.Visibility = interpreting ? Visibility.Collapsed : Visibility.Visible;
@@ -300,6 +310,9 @@ public sealed class TranslationBar : UserControl
 
     void StartInterpret()
     {
+        // ★ 防重复(审计 2026-08-02):事件时序上这颗按钮可能在"已开始"之后仍显示旧态,
+        //   再点一次不该再建一条从未运行的空记录。
+        if (TheApp.Interpret.Running) return;
         var why = TheApp.Interpret.WhyCannotStart();
         if (why.Length > 0) { ConfirmDialog.Show("还不能开始", why, confirmText: "知道了", cancelText: "关闭"); return; }
 
@@ -386,7 +399,9 @@ public sealed class TranslationBar : UserControl
         var connected = drv.Installed && Services.InterpretState.PipelineReady;
         var (dotKey, text) = !drv.Installed ? ("RiskDanger", "未找到")
                            : connected      ? ("RiskSafe", drv.Version ?? "已连接")
-                                            : ("RiskWarning", "未开启");
+                           // ★ 措辞把账算对(审计 2026-08-02):驱动明明装好了,差的是翻译引擎(P4)。
+                           //   写"未开启"会让人去折腾驱动 —— 那儿没有任何可开的东西。
+                                            : ("RiskWarning", "已装好 · 翻译引擎未接入(P4)");
         // ★ 光一个彩点看不出它在说什么(用户反馈):把话【写全】——
         //   「· VB-CABLE 声卡驱动状态:未找到」。点只是让状态一眼可扫,不承担表意。
         var dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };

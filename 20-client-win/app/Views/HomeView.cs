@@ -206,6 +206,9 @@ public sealed class HomeView : UserControl
             var calStack = new DockPanel { LastChildFill = true };
             DockPanel.SetDock(calView, Dock.Top);
             calStack.Children.Add(calView);
+            // 拉取结果行(失败常驻,成功一闪即收 —— 见 ShowPullResult)
+            DockPanel.SetDock(_pullStatus, Dock.Top);
+            calStack.Children.Add(_pullStatus);
             calStack.Children.Add(timeline);
             calPanel = Ui.Panel("日历", calStack, IconName.Calendar, new Thickness(0, 0, _todoVisible ? 12 : 0, 12),
                 iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
@@ -255,9 +258,8 @@ public sealed class HomeView : UserControl
         _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
             headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"),
-            // 图标 hover 变齿轮 -> 跳到"与 Apple 同步"设置(用户裁定)
-            iconAction: () => (Application.Current.MainWindow as MainWindow)?.OpenAppleSyncSettings(),
-            iconActionTip: "与 Apple 提醒事项同步的设置",
+            // ★ 原来这里有个齿轮跳"与 Apple 同步"设置 —— D57 之后待办是纯本机数据,
+            //   与 Apple 毫无关系,留着等于继续承诺一条已经删掉的同步链路(审计 2026-08-02)。
             titleAction: TodoFilterCaret());
         // 与日历等高 —— 两块并排,高度锁死才不会一高一矮(日历本体 + 标题行与内边距 ≈ 62)。
         _todoPanel.Height = CalendarView.PanelHeight + 62;
@@ -376,7 +378,10 @@ public sealed class HomeView : UserControl
             Services.Weather.Changed -= RefreshWeatherUi;
             _weatherTimer.Stop();
         };
-        _weatherTimer.Tick += (_, _) => PullWeather();
+        // ★ 每一轮都先重画一次(审计 2026-08-02):拉取失败【故意】不动缓存、不发 Changed,
+        //   但"过期要标 stale、显示上次 HH:mm"是随时间自己变真的 —— 没人重画的话,
+        //   断网后天气卡整体冻结,过了 2 小时门槛也照样装作实时。
+        _weatherTimer.Tick += (_, _) => { RefreshWeatherUi(); PullWeather(); };
         // ★ 被系统页(设置/模型/扩展)盖住时停表:那时主页整个不可见,
         //   秒针再走也没人看得到 —— 和显存条"不可见就停表"是同一条规矩(省电远比调长间隔有效)。
         //   盖住的做法是把宿主 IsEnabled 置 false(见 MainWindow.OpenSystemPage),所以认这个信号。
@@ -464,8 +469,32 @@ public sealed class HomeView : UserControl
         {
             _slots = slots;
             for (int i = 0; i < _places.Count; i++) SetHourly(_cityHourly[i], slots);
+            // ★ 重建完当场用真实读数补齐(审计 2026-08-02):SetHourly 只画占位标签(本机时间),
+            //   不补这一下,外地城市的小时标签就错成本机时间、曲线与刻度成了两根轴,
+            //   要一直错到下一次拉取成功 —— 离线时是永远。
+            RefreshWeatherUi();
         }
     }
+
+    // 拉取结果行(审计 2026-08-02):失败常驻显示直到下次成功;成功显示 4 秒自动收。
+    readonly TextBlock _pullStatus = new() { TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 4, 0, 0) };
+    readonly DispatcherTimer _pullStatusTimer = new() { Interval = TimeSpan.FromSeconds(4) };
+
+    void ShowPullResult(bool ok, string message)
+    {
+        _pullStatusTimer.Stop();
+        _pullStatus.Text = message;
+        _pullStatus.SetResourceReference(TextBlock.ForegroundProperty, ok ? "FgMuted" : "RiskWarning");
+        _pullStatus.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _pullStatus.Visibility = Visibility.Visible;
+        if (ok)
+        {
+            _pullStatusTimer.Tick -= HidePullStatus;
+            _pullStatusTimer.Tick += HidePullStatus;
+            _pullStatusTimer.Start();
+        }
+    }
+    void HidePullStatus(object? _, EventArgs __) { _pullStatusTimer.Stop(); _pullStatus.Visibility = Visibility.Collapsed; }
 
     /// <summary>日历板块标题栏右侧:【+ 新建日程】+ 【立即同步】。</summary>
     FrameworkElement CalendarHeaderActions(CalendarView calView)
@@ -1073,8 +1102,9 @@ public sealed class HomeView : UserControl
                 // ★ 当前没下雨就接一句【几天后有雨】(用户裁定)。
                 //   预报窗口里真的没有就明说"未来 N 天无雨" —— 不含糊其辞。
                 var rain = Rain(w?.PrecipMm);
+                // ★ 按那座城自己的"今天"切(审计 2026-08-02:隔日界线的城市会整体错一天)
                 var outlook = (w?.PrecipMm ?? 0) < Services.Weather.RainThresholdMm
-                    ? Services.Weather.RainOutlook(w) : null;
+                    ? Services.Weather.RainOutlook(w, HourlyOrigin(_places[i]).Date) : null;
                 hl.Text = $"最高 {Num(w?.HighC)}  最低 {Num(w?.LowC)}  降水 {rain}"
                         + (outlook is null ? "" : " · " + outlook);
             }
@@ -1337,7 +1367,7 @@ public sealed class HomeView : UserControl
             Height = 24,
             Background = System.Windows.Media.Brushes.Transparent,
             Cursor = System.Windows.Input.Cursors.Hand,
-            ToolTip = "立即从 Apple 拉取日历与提醒事项",
+            ToolTip = "立即从 Apple 拉取日历",
         };
         hit.Children.Add(glyph);
 
@@ -1360,7 +1390,11 @@ public sealed class HomeView : UserControl
                 var r = await Services.AppleCalendarSync.PullAsync(
                     TheApp.Settings, Services.MemberContext.Current, "家庭");
                 if (r.Ok) Services.AppleAutoSync.NoteManualSuccess();
-                hit.ToolTip = r.Message;                    // 结果如实挂在提示上,不弹窗打断
+                // ★★ 结果要【真的显示出来】(审计 2026-08-02):原先写进 ToolTip,
+                //   而全局 ToolTip 已按 2026-07-30 裁定整体关闭 —— 同步失败完全无声,
+                //   用户以为拉成功了,日历静默停更能持续数天。现在:失败在面板里亮一行原因,
+                //   成功一闪即收(不长期占版面)。
+                ShowPullResult(r.Ok, r.Message);
                 calView.Rebuild();
             }
             finally
@@ -1657,8 +1691,20 @@ public sealed class HomeView : UserControl
             // 菜单刚被这一下点关掉 -> 只关菜单,不要顺势进项目(用户反馈)
             if (ProjectUi.JustClosedMenu()) return;
             TheApp.Projects.Touch(p.ProjectId);
-            // 挂了多个空间时进【主标签】那个 —— 总得挑一个,挑它最初所在的那个最不意外
-            (Application.Current.MainWindow as MainWindow)?.NavigateToProject(p.PrimarySpace, p.ProjectId);
+            // 挂多个空间时优先【左栏可见】的标签(审计 2026-08-02):主标签可能已在扩展里被隐藏,
+            //   闷头送进去左栏一个都不亮、也回不来 —— D54 的目的地规则在这儿同样适用。
+            var target = p.Spaces.FirstOrDefault(k => TheApp.Settings.IsWorkspaceVisible(k));
+            if (target is null)
+            {
+                var nm = ProjectUi.SpaceName(p.PrimarySpace);
+                if (!ConfirmDialog.Show($"「{nm}」已经在扩展里隐藏了",
+                        $"这个项目挂的工作空间都被隐藏了。前往会把「{nm}」重新显示在左栏。",
+                        confirmText: "前往并显示", cancelText: "取消")) return;
+                TheApp.Settings.SetWorkspaceVisible(p.PrimarySpace, true);
+                (Application.Current.MainWindow as MainWindow)?.RefreshNavRail();
+                target = p.PrimarySpace;
+            }
+            (Application.Current.MainWindow as MainWindow)?.NavigateToProject(target, p.ProjectId);
         };
         tile.ToolTip = $"{p.Title}\n{p.Subtitle}\n最近打开:{p.LastOpened:M月d日 HH:mm}"
                      + (p.Spaces.Count > 1 ? $"\n同时挂在:{ProjectUi.SpacesText(p)}(同一个项目)" : "");

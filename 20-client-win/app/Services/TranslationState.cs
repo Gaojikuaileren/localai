@@ -130,7 +130,7 @@ public sealed class TranslationState
     {
         if (s is null) return;
         _targets.Clear();
-        foreach (var c in s.Targets.Distinct().Take(Languages.MaxTargets))
+        foreach (var c in (s.Targets ?? new List<string>()).Distinct().Take(Languages.MaxTargets))
             if (Languages.Find(c) is not null) _targets.Add(c);   // 认不出的语言码丢掉,别留脏数据
         Level = s.Level;
         Changed?.Invoke();

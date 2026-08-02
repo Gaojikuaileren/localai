@@ -1,7 +1,7 @@
 // P3c -- 客户端本地存档(项目 / 会话 / 待办)。
 //
 // 用户裁定(2026-07-30):**沿用 D21/D22 的口径落盘为明文** —— 与记忆库、备份同一处理,
-//   不引入客户端侧的密钥管理。落点 ${state}/client/(每用户、普通权限,见 AppPaths),
+//   不引入客户端侧的密钥管理。落点 %LOCALAPPDATA%\LocalAI\client\(见 AppPaths.StateDir;与主机的 {state} 无关)(每用户、普通权限,见 AppPaths),
 //   与 ${state}/secrets(强 ACL、排除备份)分开:这里存的是内容,不是凭据。
 //
 // 硬性约束(都在 selftest 里钉死):
@@ -51,8 +51,19 @@ public static class ClientStore
             File.WriteAllText(tmp, JsonSerializer.Serialize(data, J));
             File.Move(tmp, path, overwrite: true);
         }
-        catch { /* 存档失败不能拖垮应用;下次变更还会再存一次 */ }
+        catch (Exception ex)
+        {
+            // ★ 失败不能拖垮应用(下次变更还会再存),但也【不能无声】(审计 2026-08-02):
+            //   盘满/文件被锁时,用户以为一切正常,实际每一次改动都没落盘。
+            //   记住最后一次失败,存储页据此显示一行警告;成功后自动清掉。
+            LastSaveError = $"{DateTime.Now:HH:mm} 写入 {Path.GetFileName(path)} 失败:{ex.GetType().Name}";
+            return;
+        }
+        LastSaveError = null;   // 这次成功 -> 清掉旧警告
     }
+
+    /// <summary>最近一次写盘失败(null = 一切正常)。存储页显示,不弹窗。</summary>
+    public static string? LastSaveError { get; private set; }
 
     /// <summary>读取存档。文件不存在 -> default;损坏 -> 改名留证后当空档,绝不抛。</summary>
     public static T? Load<T>(string path)

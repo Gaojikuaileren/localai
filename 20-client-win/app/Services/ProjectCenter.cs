@@ -359,8 +359,12 @@ public sealed class ProjectCenter
         var i = _items.FindIndex(x => x.ProjectId == projectId);
         if (i < 0 || string.IsNullOrWhiteSpace(workspaceKey)) return;
         var spaces = new List<string> { workspaceKey };
+        // ★ 只保留【本来就挂着】的标签(审计 2026-08-02):有会话但项目从没挂过的空间,
+        //   悄悄补成新标签会跟确认框「这几个标签会保留」的口径对不上 —— 保留 ≠ 新增。
+        var current = _items[i].Spaces;
         foreach (var k in spacesWithSessions ?? Array.Empty<string>())
-            if (!string.IsNullOrWhiteSpace(k) && !spaces.Contains(k, StringComparer.Ordinal)) spaces.Add(k);
+            if (!string.IsNullOrWhiteSpace(k) && current.Contains(k, StringComparer.Ordinal)
+                && !spaces.Contains(k, StringComparer.Ordinal)) spaces.Add(k);
         if (_items[i].Spaces.SequenceEqual(spaces, StringComparer.Ordinal)) return;
         _items[i] = _items[i] with { WorkspaceKey = spaces[0], AlsoIn = spaces.Skip(1).ToList() };
         Changed?.Invoke();

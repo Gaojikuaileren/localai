@@ -91,7 +91,8 @@ public sealed class WeekTimeline : UserControl
     readonly StackPanel _navCell = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
     readonly Border _allDay = new() { Height = TopBlockHeight, ClipToBounds = true };
     readonly Canvas _allDayCanvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
-    TextBlock? _allDayMore;   // 左侧"全天"下面那个 "+N"
+    TextBlock? _allDayMore;   // 左侧"全天"下面那个 "+N"(点击列出是哪几条 —— ToolTip 全局关着)
+    List<string> _hiddenAllDay = new();   // 这一周没画出来的全天日程标题
     readonly Canvas _canvas = new() { ClipToBounds = true, Background = Brushes.Transparent };
     readonly Canvas _gutter = new() { Width = GutterWidth, ClipToBounds = true, Background = Brushes.Transparent, Cursor = Cursors.SizeNS };
 
@@ -144,7 +145,18 @@ public sealed class WeekTimeline : UserControl
         //   一条周四到周六的全天日程会看起来像是周三到周五的。
         // ★ 左侧那一小块:上行写"全天",下行在有没画出来的时候写 "+N"。
         //   之前把"还有 N 条全天"钉在画布右端 —— 它会盖在周日那一格的日期与条上。
-        _allDayMore = new TextBlock { Text = "", Visibility = Visibility.Collapsed, Background = Brushes.Transparent };
+        // ★ 解释走【点击弹层】而不是 ToolTip(审计 2026-08-02):全局 ToolTip 已按裁定关闭,
+        //   挂在它上面的解释一条也弹不出来 —— 又退回当初被用户点名的"这个 +1 是什么"。
+        _allDayMore = new TextBlock { Text = "", Visibility = Visibility.Collapsed, Background = Brushes.Transparent, Cursor = Cursors.Hand };
+        _allDayMore.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            if (_hiddenAllDay.Count == 0) return;
+            var m = new ContextMenu();
+            m.Items.Add(new MenuItem { Header = "这一周没画出来的全天日程(上方月历里仍看得到):", IsEnabled = false });
+            foreach (var nm in _hiddenAllDay) m.Items.Add(new MenuItem { Header = nm, IsEnabled = false });
+            MenuHost.Show(m, _allDayMore);
+        };
         _allDayMore.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _allDayMore.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var tagText = new TextBlock { Text = "全天", IsHitTestVisible = false };
@@ -509,15 +521,12 @@ public sealed class WeekTimeline : UserControl
 
         // ★ 真的没画出来的【如实说】。★★ 原来只写一个「+1」—— 用户直接问"这个 +1 是什么",
         //   一个要人猜的标记等于没标。改成一句白话,悬停再列出是哪几条。
+        _hiddenAllDay = hiddenNames;
         if (_allDayMore is not null)
         {
             var any = hiddenNames.Count > 0;
             _allDayMore.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
             _allDayMore.Text = any ? $"+{hiddenNames.Count}" : "";
-            _allDayMore.ToolTip = any
-                ? "这一周还有这几条全天日程没能画出来:" + string.Join("、", hiddenNames)
-                  + "(上方月历那一格里仍然看得到)"
-                : null;
         }
     }
 

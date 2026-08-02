@@ -157,11 +157,13 @@ public static class Weather
     /// ★ 诚实口径:预报窗口里【真的没有】就明说"未来 N 天无雨",而不是含糊其辞或者干脆不说;
     ///   压根没有逐日数据就返回 null —— 那时界面只写"无",不假装知道以后的事。
     /// </summary>
-    public static string? RainOutlook(WeatherNow? w)
+    /// <param name="cityToday">那座城【当地】的今天。★ 不传就用本机的 —— 但对与本机隔着
+    /// 日界线的城市,"明天有雨"会整体错一天(审计 2026-08-02),调用方应传城市当地日期。</param>
+    public static string? RainOutlook(WeatherNow? w, DateTime? cityToday = null)
     {
         var days = w?.Days;
         if (days is null || days.Count == 0) return null;
-        var today = DateTime.Today;
+        var today = (cityToday ?? DateTime.Today).Date;
         var future = days.Where(d => d.Date > today).OrderBy(d => d.Date).ToList();
         if (future.Count == 0) return null;
 

@@ -491,7 +491,9 @@ public sealed class SettingsView : UserControl
     ///   而不是拿上一次的缓存假装还连着。
     /// </summary>
     static void PushGroups(List<AppleCalendar> cals)
-        => Services.CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex)));
+        // ★ URL 必须带上(审计 2026-08-02):重名日历靠它算稳定短码去重,
+        //   丢了的话两个同名日历会合并成一个,颜色和下拉都混在一起。
+        => Services.CalendarGroups.SetFromApple(cals.Select(c => (c.DisplayName, c.ColorHex, (string?)c.Url)));
 
     /// <summary>
     /// 范围裁定(用户 2026-07-31):【只读拉取 + 只做日历】。
@@ -575,7 +577,6 @@ public sealed class SettingsView : UserControl
                 AppleCredentials.Save(aid, p);
                 AppleAutoSync.ResetTrip();   // 新密码填过了 -> 允许自动拉取再跑
                 TheApp.Settings.AppleCalendarList = Encode(cals);
-            PushGroups(cals);
                 PushGroups(cals);
 
                 TheApp.Settings.Save();
@@ -668,7 +669,7 @@ public sealed class SettingsView : UserControl
         {
             var p = AppleCredentials.Reveal();
             if (p is null) { _appleStatus.Text = "读不出已保存的密码(多半是换了 Windows 用户)。请断开后重新连接。"; return; }
-            _appleStatus.Text = "正在取日历与提醒事项清单…";
+            _appleStatus.Text = "正在取日历清单…";
             var (ok, msg, cals, rems) = await AppleCalDav.DiscoverAsync(acct.AppleId, p);
             _appleStatus.Text = msg;
             if (!ok) return;
@@ -700,6 +701,7 @@ public sealed class SettingsView : UserControl
             TheApp.Settings.AppleAutoPull = false;
             TheApp.Settings.AppleCalendarUrls.Clear();
             TheApp.Settings.AppleCalendarList.Clear();
+            TheApp.Settings.AppleLastSync = null;   // 换账号重连后不该还显示前一个账号的时间
             PushGroups(new List<AppleCalendar>());   // 断开 -> 分类表退回本地占位
 
             TheApp.Settings.Save();

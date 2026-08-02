@@ -188,7 +188,21 @@ public sealed class ChatCenter
         foreach (var m in _messages)
             foreach (var a in m.Attachments ?? (IReadOnlyList<ChatAttachment>)Array.Empty<ChatAttachment>())
                 if (!string.IsNullOrEmpty(a.Path)) set.Add(a.Path);
+        // ★★ 温层归档的消息也在引用(审计 2026-08-02):热层里看不见 ≠ 没人用 ——
+        //   归档消息里粘贴的截图,唯一副本就是 clips\ 里那个 png;
+        //   不算上它们,「清理缓存」会把还被引用的图当垃圾删掉,回头"加载更早"就是死链。
+        foreach (var sid in SessionArchive.ArchivedSessionIds())
+            foreach (var m in SessionArchive.Load(sid))
+                foreach (var a in m.Attachments ?? (IReadOnlyList<ChatAttachment>)Array.Empty<ChatAttachment>())
+                    if (!string.IsNullOrEmpty(a.Path)) set.Add(a.Path);
         return set;
+    }
+
+    /// <summary>归档目录被外部整体删除后调用:清掉计数缓存,别再显示"加载更早的 N 条"。</summary>
+    public void InvalidateArchiveCounts()
+    {
+        _archiveCount.Clear();
+        Changed?.Invoke();
     }
 
     /// <summary>把会话【发送到另一个工作空间】。跨空间就离开原项目(项目不跨空间);随后可在新空间继续。</summary>
@@ -365,16 +379,20 @@ public sealed class ChatCenter
     /// <summary>从存档恢复(启动时)。顺带扫掉已过保留期的已删除会话。</summary>
     public void Import(Snapshot? snap, DateTime? asOf = null)
     {
+        // ★ 字段为 null 的档(如手写的 {})反序列化不抛 —— 这里当空表,别往下走到 NRE
+        //   (那会让 LoadStores 把这份档标成导入失败、改名留证;空表才是它的本意)。
         if (snap is null) return;
+        var sess = snap.Sessions ?? new List<ChatSession>();
+        var msgs = snap.Messages ?? new List<ChatMessage>();
         _sessions.Clear();
         _messages.Clear();
         // 双保险:即便存档里混进了幽灵(不该发生),恢复时也丢掉
         // 旧存档没有 OwnerMemberId:那时只有本机本人能写,故认领为本地成员(运行期规则仍 fail-closed)
-        _sessions.AddRange(snap.Sessions.Where(s => !s.Ghost)
+        _sessions.AddRange(sess.Where(s => !s.Ghost)
             .Select(s => string.IsNullOrWhiteSpace(s.OwnerMemberId)
                 ? s with { OwnerMemberId = MemberContext.LocalMemberId } : s));
         var ids = _sessions.Select(s => s.SessionId).ToHashSet();
-        _messages.AddRange(snap.Messages.Where(m => ids.Contains(m.SessionId)));
+        _messages.AddRange(msgs.Where(m => ids.Contains(m.SessionId)));
         SweepExpiredDeleted(asOf ?? DateTime.Now);
         Changed?.Invoke();
     }

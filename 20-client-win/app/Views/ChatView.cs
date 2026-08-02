@@ -106,6 +106,8 @@ public sealed class ChatView : UserControl
         BuildConversation();
         TheApp.Chat.Changed += OnChatChanged;
         TheApp.Projects.Changed += UpdateContext;
+        // 只有翻译空间要跟同传的进行态(开始选中新会话/被删即停)
+        if (_wsKey == "translation") TheApp.Interpret.Changed += OnInterpretChanged;
         // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
         TheApp.Translation.Changed += RefreshSendEnabled;
@@ -116,11 +118,33 @@ public sealed class ChatView : UserControl
             TheApp.Projects.Changed -= UpdateContext;
             TheApp.Translation.Changed -= RefreshSendEnabled;
             TheApp.History.JumpRequested -= OnJumpToHistory;
+            if (_wsKey == "translation") TheApp.Interpret.Changed -= OnInterpretChanged;
+            // ★ 离开翻译空间 = 这一场同传结束(D58 的口径;审计 2026-08-02:
+            //   原先只有空间内切模式会停,切去别的工作空间就留下一个看不见的进行中)。
+            if (_wsKey == "translation" && TheApp.Interpret.Running) TheApp.Interpret.Stop();
             TheApp.Chat.PurgeGhosts();
         };
     }
 
     void OnChatChanged() { BuildSessions(); BuildConversation(); }
+
+    /// <summary>
+    /// 同传的进行态变了(开始/结束)—— 只有翻译空间关心。
+    /// ★ 开始那一刻把新建的会话选中:按钮在 TranslationBar 里,它够不到本视图的 _sessionId;
+    ///   不选中的话,列表里多出来一条,面板却还挂在旧会话上(审计 2026-08-02)。
+    /// ★ 会话在进行中被删掉 -> 当场结束这一场,不留一个指着回收站的"进行中"。
+    /// </summary>
+    void OnInterpretChanged()
+    {
+        var st = TheApp.Interpret;
+        if (st.Running && st.RunningSessionId is { } rid)
+        {
+            if (TheApp.Chat.Find(rid) is null or { DeletedAt: not null }) { st.Stop(); return; }
+            if (_sessionId != rid) { _sessionId = rid; _projectId = null; }
+        }
+        BuildSessions();
+        BuildConversation();
+    }
 
     // 底部"已删除 (N)"入口
     FrameworkElement TrashLink()
@@ -222,8 +246,12 @@ public sealed class ChatView : UserControl
         _projectId = projectId;
         // 已删除项目的会话都软删了,用 AllSessionsOf 才选得到(只读浏览);其余用 SessionsOf。
         var proj = TheApp.Projects.Find(projectId);
+        // ★ 只自动打开【本空间】的会话(审计 2026-08-02):排第一的可能是跨空间的,
+        //   替用户打开它 = JumpToOwnWorkspace 那三道护栏(隐藏空间/草稿/未知 key)整体被绕过,
+        //   聊天内容还能直接写进翻译会话、混进翻译历史 —— 正是 D53 要防的那条污染路。
+        //   没有本空间的会话就不自动开(空态),想开跨空间的,列表里点它、走跳转。
         _sessionId = (proj?.DeletedAt is not null ? TheApp.Chat.AllSessionsOf(projectId) : TheApp.Chat.SessionsOf(projectId))
-            .FirstOrDefault()?.SessionId;
+            .FirstOrDefault(x => x.WorkspaceKey == _wsKey)?.SessionId;
         TheApp.Chat.PurgeGhosts();
         BuildSessions();
         BuildConversation();
@@ -283,16 +311,20 @@ public sealed class ChatView : UserControl
         }
 
         // 在扩展里关掉的空间:用户明说过"我不要这个",一次点击就把人送进去属于越权 —— 先问
+        var draftLoss = !string.IsNullOrWhiteSpace(_draft) || _pending.Count > 0;
         if (!TheApp.Settings.IsWorkspaceVisible(s.WorkspaceKey))
         {
+            // ★ 这个分支同样会重建页面丢草稿 —— 把损失写进同一个确认框(审计 2026-08-02:
+            //   原先 else-if 让"前往并显示"把草稿确认整个跳过,确认完草稿被静默丢掉)。
             if (!ConfirmDialog.Show($"「{name}」已经在扩展里隐藏了",
-                    $"这条会话属于「{name}」。要前往吗?前往会把它重新显示在左栏。",
+                    $"这条会话属于「{name}」。要前往吗?前往会把它重新显示在左栏。"
+                    + (draftLoss ? "\n★ 这边还没发出去的内容不会带过去。" : ""),
                     confirmText: "前往并显示", cancelText: "取消")) return;
             TheApp.Settings.SetWorkspaceVisible(s.WorkspaceKey, true);
             (Application.Current.MainWindow as MainWindow)?.RefreshNavRail();
         }
         // ★ 切走会重建整个页面,这边没发出去的草稿和待发附件【不会跟过去】—— 别默默丢
-        else if ((!string.IsNullOrWhiteSpace(_draft) || _pending.Count > 0)
+        else if (draftLoss
                  && !ConfirmDialog.Show("切到别的工作空间?",
                         $"这条会话属于「{name}」,点开会切过去。\n这边还没发出去的内容不会带过去。",
                         confirmText: "切过去", cancelText: "留在这里")) return;
@@ -416,6 +448,19 @@ public sealed class ChatView : UserControl
         textCol.Children.Add(time);
 
         // 三个点(左键拉菜单),取代右键
+        // ★ 已删除项目的只读浏览【不给三点菜单】(审计 2026-08-02):那套菜单按活会话设计,
+        //   「移动到项目/新建项目并移入」会把软删的会话搬进活项目 —— 处处不可见的孤儿,
+        //   30 天后随原项目清理一起被删,还把活项目的空间标签卡死。只读就是只读。
+        if (ViewingDeletedProject)
+        {
+            var roRow = new DockPanel { LastChildFill = true };
+            roRow.Children.Add(textCol);
+            var roHost = new Border { Child = roRow, Padding = new Thickness(9, 6, 4, 6), Margin = new Thickness(0, 1, 0, 1), Cursor = Cursors.Hand };
+            roHost.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            roHost.Background = selected ? (Brush)FindResource("BgSelected") : Brushes.Transparent;
+            roHost.MouseLeftButtonUp += (_, _) => { _sessionId = s.SessionId; BuildSessions(); BuildConversation(); };
+            return roHost;
+        }
         var dots = SessionDots(s);
         dots.Opacity = selected ? 1 : 0;   // 平时隐藏,hover/选中显示
 
@@ -532,7 +577,12 @@ public sealed class ChatView : UserControl
         // 删除 = 软删除进"已删除"(30 天可恢复),不弹确认(用户裁定)
         // 删除:普通会话不弹确认(用户裁定)。★ 但【共享会话】任何机器都能删,而删除会影响所有设备 ——
         //   这是对外可见的动作,必须先问一句(不是"确认删除",而是"你要替所有人删")。
-        var del = new MenuItem { Header = s.Shared ? "删除共享会话…" : "删除会话" };
+        // ★ 跨空间会话的删除要说一句去向(审计 2026-08-02):它落进【它自己空间】的垃圾篓,
+        //   本空间的"已删除"计数纹丝不动 —— 一个字不说,观感就是"彻底消失了"。
+        var delHeader = s.Shared ? "删除共享会话…"
+                      : s.WorkspaceKey != _wsKey ? $"删除会话(进「{ProjectUi.SpaceName(s.WorkspaceKey)}」的已删除)"
+                      : "删除会话";
+        var del = new MenuItem { Header = delHeader };
         del.Click += (_, _) =>
         {
             if (s.Shared)
@@ -585,7 +635,9 @@ public sealed class ChatView : UserControl
     {
         var folder = ProjectUi.PickFolder("为新项目选择文件夹");
         if (folder is null) return;
-        var p = TheApp.Projects.Create(string.IsNullOrWhiteSpace(s.Title) ? "新项目" : s.Title, folder, null, s.Scope, _wsKey);
+        // ★ 项目建在【会话自己的】空间(审计 2026-08-02):对跨空间会话用 _wsKey 的话,
+        //   会话被移进一个它自己空间里不存在的项目 —— 在那儿失去唯一入口。
+        var p = TheApp.Projects.Create(string.IsNullOrWhiteSpace(s.Title) ? "新项目" : s.Title, folder, null, s.Scope, s.WorkspaceKey);
         TheApp.Chat.MoveToProject(s.SessionId, p.ProjectId);
         SelectProject(p.ProjectId);
         _sessionId = s.SessionId;
@@ -995,7 +1047,11 @@ public sealed class ChatView : UserControl
                 // ★ fail-closed(审计 2026-07-31):只有【真正的同传会话】才把转写交给 InterpretPanel。
                 //   否则在同传场景下点开一条普通文字翻译会话,客户端自己那条
                 //   "AI 未接入"系统说明会被当成【对方说的话】渲染到左边。
-                var interpSid = _sessionId is { } isid && TheApp.Chat.Find(isid)?.Interpret == true ? _sessionId : null;
+                // ★ 进行中优先绑【这一场】的会话(审计 2026-08-02):原先只看"当前打开的",
+                //   开始那一刻面板可能还挂在旧会话上,转写到时候会进错地方。
+                var interpSid = TheApp.Interpret.Running && TheApp.Interpret.RunningSessionId is { } rsid
+                    ? rsid
+                    : _sessionId is { } isid && TheApp.Chat.Find(isid)?.Interpret == true ? _sessionId : null;
                 body.Children.Add(mode == TranslationMode.Interpret
                     ? new InterpretPanel(interpSid)
                     : ReservedScenePlaceholder());

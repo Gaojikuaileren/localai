@@ -293,14 +293,36 @@ public partial class App : Application
     // 用户裁定(2026-07-30):项目/会话/待办落盘为明文,与记忆库、备份同一处理,不引入客户端密钥管理。
     // ★ 幽灵会话不落盘(ChatCenter.Export 排除),已删除会话连 DeletedAt 一起存、启动时扫过期。
     /// <summary>读存档。返回 true 表示【加载过程中改动过数据】(如合并了重复项目),调用方需要补存一次。</summary>
+    // ★★ 导入失败的存档【禁止参与退出保存】(审计 2026-08-02):
+    //   某一份档字段为 null(语法合法,反序列化不抛,ClientStore 的"损坏改名"兜不住)时,
+    //   原先 LoadStores 在那一步整个炸掉 —— 其后所有 store 都没导入(内存为空),
+    //   而退出钩子照样跑 SaveStores,把盘上完好的日历/记忆/笔记全部用【空表】覆盖。
+    //   现在:每份档各自 try(坏档改名留证、当空档继续),写盘只跳过【真的没导入成功】的那几份。
+    readonly HashSet<string> _failedStores = new(StringComparer.OrdinalIgnoreCase);
+
+    void SafeImport(string path, Action import)
+    {
+        try { import(); }
+        catch (Exception ex)
+        {
+            _failedStores.Add(path);
+            try
+            {
+                if (File.Exists(path)) File.Move(path, path + ".corrupt", overwrite: true);
+                LogCrash("store-import:" + Path.GetFileName(path), ex);
+            }
+            catch { }
+        }
+    }
+
     bool LoadStores()
     {
-        Projects.Import(ClientStore.Load<List<Project>>(ClientStore.ProjectsPath));
-        Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath));
-        Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath));
-        Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath));
+        SafeImport(ClientStore.ProjectsPath, () => Projects.Import(ClientStore.Load<List<Project>>(ClientStore.ProjectsPath)));
+        SafeImport(ClientStore.TodosPath, () => Todos.Import(ClientStore.Load<List<TodoItem>>(ClientStore.TodosPath)));
+        SafeImport(ClientStore.ChatPath, () => Chat.Import(ClientStore.Load<ChatCenter.Snapshot>(ClientStore.ChatPath)));
+        SafeImport(ClientStore.CalendarPath, () => Views.CalendarData.Import(ClientStore.Load<List<Views.CalendarEvent>>(ClientStore.CalendarPath)));
         // ★ 天气缓存恢复 —— 重启后仍然如实标着它是什么时候取的(断网也能看到上次那份)
-        Services.Weather.Import(ClientStore.Load<Dictionary<string, Services.WeatherNow>>(ClientStore.WeatherPath));
+        SafeImport(ClientStore.WeatherPath, () => Services.Weather.Import(ClientStore.Load<Dictionary<string, Services.WeatherNow>>(ClientStore.WeatherPath)));
         // ★ 日程分类表(= Apple 那边的日历清单 + 颜色)从存档恢复 ——
         //   否则开机后到"去设置里刷新一次清单"之前，新建日程的归类会先退回本地占位，
         //   颜色也跟着变一次 —— 看起来就像断连了。
@@ -312,11 +334,11 @@ public partial class App : Application
                 .ToList();
             if (saved.Count > 0) Services.CalendarGroups.SetFromApple(saved!);
         }
-        Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath));
-        Notes.Import(ClientStore.Load<List<StudyNote>>(ClientStore.NotesPath));
-        History.Import(ClientStore.Load<List<string>>(ClientStore.HistoryFavPath));
-        Interpret.Import(ClientStore.Load<InterpretState.Snapshot>(ClientStore.InterpretPath));
-        Translation.Import(ClientStore.Load<TranslationState.Snapshot>(ClientStore.TranslationPath));
+        SafeImport(ClientStore.MemoryPath, () => Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath)));
+        SafeImport(ClientStore.NotesPath, () => Notes.Import(ClientStore.Load<List<StudyNote>>(ClientStore.NotesPath)));
+        SafeImport(ClientStore.HistoryFavPath, () => History.Import(ClientStore.Load<List<string>>(ClientStore.HistoryFavPath)));
+        SafeImport(ClientStore.InterpretPath, () => Interpret.Import(ClientStore.Load<InterpretState.Snapshot>(ClientStore.InterpretPath)));
+        SafeImport(ClientStore.TranslationPath, () => Translation.Import(ClientStore.Load<TranslationState.Snapshot>(ClientStore.TranslationPath)));
         // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
         //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
         var merged = Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
@@ -351,16 +373,19 @@ public partial class App : Application
 
     void SaveStores()
     {
-        ClientStore.Save(ClientStore.ProjectsPath, Projects.Export());
-        ClientStore.Save(ClientStore.TodosPath, Todos.Export());
-        ClientStore.Save(ClientStore.ChatPath, Chat.Export());
-        ClientStore.Save(ClientStore.CalendarPath, Views.CalendarData.Export());
-        ClientStore.Save(ClientStore.WeatherPath, Services.Weather.Export());
-        ClientStore.Save(ClientStore.MemoryPath, Memory.Export());
-        ClientStore.Save(ClientStore.NotesPath, Notes.Export());
-        ClientStore.Save(ClientStore.HistoryFavPath, History.Export());
-        ClientStore.Save(ClientStore.InterpretPath, Interpret.Export());
-        ClientStore.Save(ClientStore.TranslationPath, Translation.Export());
+        // ★ 只存【导入成功过】的档(fail-closed):没导入成功的那份,内存里是空的,
+        //   写回去等于用空表覆盖盘上可能还完好的数据(见 SafeImport 的说明)。
+        void S<T>(string path, T data) { if (!_failedStores.Contains(path)) ClientStore.Save(path, data); }
+        S(ClientStore.ProjectsPath, Projects.Export());
+        S(ClientStore.TodosPath, Todos.Export());
+        S(ClientStore.ChatPath, Chat.Export());
+        S(ClientStore.CalendarPath, Views.CalendarData.Export());
+        S(ClientStore.WeatherPath, Services.Weather.Export());
+        S(ClientStore.MemoryPath, Memory.Export());
+        S(ClientStore.NotesPath, Notes.Export());
+        S(ClientStore.HistoryFavPath, History.Export());
+        S(ClientStore.InterpretPath, Interpret.Export());
+        S(ClientStore.TranslationPath, Translation.Export());
     }
 
     void RegisterCleanupSteps()

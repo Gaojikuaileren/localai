@@ -173,6 +173,9 @@ public sealed class StorageView : UserControl
                     var affected = SessionArchive.ArchivedSessionIds();
                     System.IO.Directory.Delete(dir, recursive: true);
                     TheApp.Memory.MarkOriginalsDeleted(affected);
+                    // ★ 计数缓存要跟着清(审计 2026-08-02):否则会话顶上还挂着
+                    //   "加载更早的 N 条",点了什么也不发生。
+                    TheApp.Chat.InvalidateArchiveCounts();
                     done.Add($"归档原文:已删除(涉及 {affected.Count} 个会话;摘要仍在并已标注原文已删除)");
                 }
                 catch (Exception ex) { done.Add("归档原文:删除失败 —— " + ex.Message); }

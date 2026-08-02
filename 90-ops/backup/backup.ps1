@@ -236,7 +236,14 @@ Write-Host '内容:' -ForegroundColor Cyan
 $memDump = Join-Path $PSScriptRoot 'memory-dump.ps1'
 $memRoot = $P['state.memory']
 $excludeAbs = @()
-if (Test-Path $memRoot) {
+# ★★ fail-closed(审计 2026-08-02):memory 根找不到时【必须炸】,不能静默跳过 ——
+#   否则:逻辑转储整体缺席、活库/api_key 的排除表为空(PG data 与 qdrant config 会被
+#   逐字复制到不加密的备份盘)、报告却照样宣称"已排除、恢复源在 memory-db\"。
+#   这正是本脚本 2026-07-31 对 state 根修过的同一形状 —— 当时漏了 memory 这块。
+if (-not (Test-Path $memRoot)) {
+    throw "拒绝执行:记忆库根不存在($memRoot)—— paths.toml 的 state.memory 与实际目录失配。修好再备,不产出一个'看起来成功'的备份。"
+}
+if ($true) {
     if (-not $DryRun) {
         $okMem = & $memDump -DestDir $dest
         if ($okMem -ne $true) {
@@ -338,8 +345,15 @@ if (-not $DryRun) {
             }
         }
     }
+    # ★ 空清单要【响亮】(审计 2026-08-02):models 根缺失/为空时,零条的清单文件看着像正常产物,
+    #   恢复日才发现唯一的权重清单其实什么都没记。写警告 + 报告里标红,不静默。
+    if (@($manifest).Count -eq 0) {
+        Write-Host "  [警告] models 清单为 0 条(根不存在或为空:$rootModels)—— 本备份不含任何权重记录!" -ForegroundColor Yellow
+        $report.Add("- **models**: ⚠ 清单 0 条(根不存在或为空:$rootModels)—— 恢复时没有权重清单可对账")
+    } else {
+        $report.Add("- **models**: 清单 $($manifest.Count) 条(路径 + 大小" + $(if ($SkipHash) { '' } else { ' + sha256' }) + ")")
+    }
     $manifest | ConvertTo-Json -Depth 3 | Out-File (Join-Path $dest 'models-manifest.json') -Encoding utf8
-    $report.Add("- **models**: 清单 $($manifest.Count) 条(路径 + 大小" + $(if ($SkipHash) { '' } else { ' + sha256' }) + ")")
 }
 
 # --- 校验与报告 ---------------------------------------------------------------

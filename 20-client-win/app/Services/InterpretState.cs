@@ -92,8 +92,10 @@ public sealed class InterpretState
         Changed?.Invoke();
     }
 
-    public void SetMyLang(string code) { if (MyLang != code && Languages.Find(code) is not null) { MyLang = code; Changed?.Invoke(); } }
-    public void SetTheirLang(string code) { if (TheirLang != code && Languages.Find(code) is not null) { TheirLang = code; Changed?.Invoke(); } }
+    // ★ 空串 = 【清空这个坑】(审计 2026-08-02):原先校验把 "" 当无效语言码静默吞掉,
+    //   于是"从坑里拖出去"是死代码 —— 两坑一满语言池又整体禁用,方向从此永远改不了。
+    public void SetMyLang(string code) { if (MyLang != code && (code.Length == 0 || Languages.Find(code) is not null)) { MyLang = code; Changed?.Invoke(); } }
+    public void SetTheirLang(string code) { if (TheirLang != code && (code.Length == 0 || Languages.Find(code) is not null)) { TheirLang = code; Changed?.Invoke(); } }
 
     /// <summary>把两端对调 —— 换人说话时最常按的一个键。</summary>
     public void SwapLangs() { (MyLang, TheirLang) = (TheirLang, MyLang); Changed?.Invoke(); }
@@ -135,7 +137,11 @@ public sealed class InterpretState
     ///   在 P4 之前这个按钮永远按不动,用户连自己设定的流程都走不通。
     /// </summary>
     public string WhyCannotStart()
-        => DirectionReady ? "" : "先把语言方向的两个坑填上 —— 从语言池拖进来。";
+        => !DirectionReady ? "先把语言方向的两个坑填上 —— 从语言池拖进来。"
+         // ★ 同语言方向拦下(审计 2026-08-02):坑到坑一拖能造出「中文↔中文」,
+         //   那不是一场同传,是一场复读 —— 建出来的记录也没意义。
+         : MyLang == TheirLang ? "两边是同一种语言 —— 先把其中一个换掉。"
+         : "";
 
     /// <summary>开始一场同传。返回空串 = 已开始;否则是不能开始的原因(此时什么也没变)。</summary>
     public string Start(string? sessionId)

@@ -141,7 +141,7 @@ public static class AppleAutoSync
         if (r.AuthFailed)
         {
             TrippedReason = "上次自动拉取时 Apple 拒绝了认证,已【自动停止】以免账号被锁。"
-                          + "请重新填写专用密码后再打开。";
+                          + "请到设置里【断开连接】后用新的专用密码重新连接,再打开自动拉取。";
             s.AppleAutoPull = false;
             s.Save();
             Timer.Stop();

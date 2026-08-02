@@ -141,7 +141,7 @@ public static class TodoEditor
 
             buttons,
             status,
-            Ui.Caption("新增/修改当场生效并保存在本机;【跨设备同步】在接入中枢后启用。")
+            Ui.Caption("新增/修改当场生效并保存在本机。★ 待办只存在这台电脑上,不与任何服务同步(见归档页说明)。")
         );
 
         return new ScrollViewer
