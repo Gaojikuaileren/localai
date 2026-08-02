@@ -2278,10 +2278,19 @@ public static class Selftest
                 i9.ImportJson("{\"a\":\"甲\",\"b\":\"乙\"}");
                 Assert(i9.RenameKey("a", "c") && i9.Doc.Entries.Any(x => x.Key == "c"), "键可改名(用户改裁定)");
                 Assert(!i9.RenameKey("c", "b") && !i9.RenameKey("b", " "), "改成重复键/空键被拒,原样不动");
+                // 抽屉已改浮窗(D60 六/七补):每次 Show 全新构建内容,不存在字段控件重挂 ——
+                //   两父节点那类事故从结构上消失。钉住:选择器只有浮窗一条路,源/目标共用。
+                var lpSrc = TryReadSource(Path.Combine("Views", "I18nLangPicker.cs"));
+                if (lpSrc is not null)
+                {
+                    Assert(lpSrc.Contains("Flyout.Show(anchor, forSource ? \"源语言\" : \"目标语言\""),
+                           "★ 源/目标语言共用一个浮窗(单选/多选两模式),跟着点击锚点走");
+                    Assert(lpSrc.Contains("OrderByDescending(x => I18nState.PercentValue(x.Code))"),
+                           "浮窗清单按全球使用者占比排序(静态)");
+                }
                 var tbP = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
                 if (tbP is not null)
-                    Assert(tbP.Contains("(_i18nAddBox.Parent as Panel)?.Children.Remove(_i18nAddBox);"),
-                           "★ 字段控件重挂前先断开旧父(WPF 两父节点,抽屉重开就炸的根因)");
+                    Assert(!tbP.Contains("_i18nDrawer"), "★ 抽屉已拆干净,不留死结构");
             }
 
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----

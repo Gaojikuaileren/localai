@@ -430,7 +430,6 @@ public sealed class TranslationBar : UserControl
     readonly WrapPanel _i18nLangs = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     readonly WrapPanel _i18nTools = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     readonly ContentControl _i18nMainHost = new() { Focusable = false, VerticalAlignment = VerticalAlignment.Center };
-    readonly TextBox _i18nAddBox = new() { Width = 84, VerticalAlignment = VerticalAlignment.Center, ToolTip = "语言码,如 en / ja / pt-BR" };
 
     FrameworkElement I18nBarCard()
     {
@@ -438,23 +437,15 @@ public sealed class TranslationBar : UserControl
         //   目标语言抽屉从底部拉出,【只覆盖左卡】(宽度=左卡)。
         var langsBody = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         var row1 = new WrapPanel { Orientation = Orientation.Horizontal };
-        row1.Children.Add(_i18nSrcBox);
+        row1.Children.Add(_i18nSrcHost);
         row1.Children.Add(_i18nTargetsBtnHost);
         langsBody.Children.Add(row1);
         langsBody.Children.Add(_i18nTargetsSummary);
         var langsCard = Card(langsBody, "多语言设置", scroll: false);
 
-        // 抽屉:盖在左卡上,从底部展开;勾选目标语言,每种带全球使用者占比(静态)
-        var drawerCard = new Border { Child = _i18nDrawer, Padding = new Thickness(10), BorderThickness = new Thickness(1) };
-        drawerCard.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-        drawerCard.SetResourceReference(Border.BorderBrushProperty, "Accent");
-        drawerCard.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
-        _i18nDrawerHost = drawerCard;
-        drawerCard.Visibility = Visibility.Collapsed;
-
+        // ★ 抽屉已拆(D60 六补):语言选择改浮窗(I18nLangPicker),跟着点击锚点走。
         var leftStack = new Grid();
         leftStack.Children.Add(langsCard);
-        leftStack.Children.Add(drawerCard);   // 覆盖层:宽高都跟左卡走
 
         var toolsBody = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         var row2 = new DockPanel { LastChildFill = true };
@@ -477,100 +468,40 @@ public sealed class TranslationBar : UserControl
         return grid;
     }
 
-    readonly ComboBox _i18nSrcBox = new() { Width = 150, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+    readonly ContentControl _i18nSrcHost = new() { Focusable = false, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
     readonly ContentControl _i18nTargetsBtnHost = new() { Focusable = false, VerticalAlignment = VerticalAlignment.Center };
     readonly TextBlock _i18nTargetsSummary = new() { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(2, 4, 0, 0) };
-    readonly StackPanel _i18nDrawer = new();
-    FrameworkElement _i18nDrawerHost = null!;
     bool _i18nSrcInit;
-    bool _i18nSrcSyncing;   // 程序性回选中,SelectionChanged 不当成用户操作
 
     void RefreshI18nBar()
     {
         var st = TheApp.I18n;
 
-        // ---- 源语言下拉:母语默认、英语第二、其余按目录(用户裁定)
+        // ---- 源语言(用户裁定 2026-08-03):与目标语言同一个浮窗,单选模式 ——
+        //   首次进来还没定源语言时按母语顶上(设置里的母语,没设就按界面语言)。
         if (!_i18nSrcInit)
         {
             _i18nSrcInit = true;
             var native = string.IsNullOrWhiteSpace(TheApp.Settings.NativeLangOverride)
                 ? (TheApp.Settings.Language?.StartsWith("en") == true ? "en" : TheApp.Settings.Language?.StartsWith("ja") == true ? "ja" : "zh")
                 : TheApp.Settings.NativeLangOverride!;
-            var ordered = new List<string> { native };
-            if (!ordered.Contains("en")) ordered.Add("en");
-            foreach (var l in Services.Languages.Catalog) if (!ordered.Contains(l.Code)) ordered.Add(l.Code);
-            foreach (var code in ordered)
-                _i18nSrcBox.Items.Add(new ComboBoxItem { Content = (Services.Languages.Find(code)?.Name ?? code) + " (" + code + ")", Tag = code });
-            // 第一次进来:源语言还是默认 zh 的话,按母语顶上(已有表就尊重表里存的)
             if (st.Doc.Entries.Count == 0 && st.Doc.SourceLang == "zh") st.Doc.SourceLang = native;
-            _i18nSrcBox.SelectionChanged += (_, _) =>
-            { if (!_i18nSrcSyncing && _i18nSrcBox.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.I18n.SetSourceLang(c); };
         }
-        // 程序性回选不触发 SetSourceLang(重入护栏);别用 -= null,WPF 会当场抛 ArgumentNull
-        _i18nSrcSyncing = true;
-        try
+        var srcName = Services.Languages.Find(st.Doc.SourceLang)?.Name ?? st.Doc.SourceLang;
+        _i18nSrcHost.Content = ToolChip($"源:{srcName} ({st.Doc.SourceLang})…", true, () =>
         {
-            for (int k = 0; k < _i18nSrcBox.Items.Count; k++)
-                if (_i18nSrcBox.Items[k] is ComboBoxItem { Tag: string cc } && cc == st.Doc.SourceLang && _i18nSrcBox.SelectedIndex != k)
-                { _i18nSrcBox.SelectedIndex = k; break; }
-        }
-        finally { _i18nSrcSyncing = false; }
+            if (_i18nSrcHost.Content is FrameworkElement fe) I18nLangPicker.Show(fe, forSource: true);
+        });
 
-        // ---- 目标语言:按钮 + 摘要 + 抽屉勾选
-        var drawerOpen = st.LangDrawerOpen;
-        _i18nDrawerHost.Visibility = drawerOpen ? Visibility.Visible : Visibility.Collapsed;
-        _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count}){(drawerOpen ? " ▾" : " ▴")}", drawerOpen, () =>
-            st.SetLangDrawer(!st.LangDrawerOpen));
+        _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count})…", false, () =>
+        {
+            if (_i18nTargetsBtnHost.Content is FrameworkElement fe) I18nLangPicker.Show(fe);
+        });
         _i18nTargetsSummary.Text = st.Doc.TargetLangs.Count == 0
-            ? "还没选目标语言 —— 点上面的按钮勾选。"
+            ? "还没选目标语言 —— 点上面的按钮挑。"
             : string.Join(" · ", st.Doc.TargetLangs);
         _i18nTargetsSummary.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _i18nTargetsSummary.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        if (drawerOpen)
-        {
-            // ★★ 字段控件(_i18nAddBox)重挂前必须先断开旧父(WPF-PITFALLS #1,2026-08-03 又犯):
-            //   Children.Clear() 只清了抽屉这层,addBox 还挂在上一轮的 custom 行里 ——
-            //   再 Add 就是"已是另一个元素的逻辑子元素"当场炸,抽屉从此打不开、网格编辑跟着闪退。
-            (_i18nAddBox.Parent as Panel)?.Children.Remove(_i18nAddBox);
-            _i18nDrawer.Children.Clear();
-            var head = new DockPanel { LastChildFill = true };
-            var close = ToolChip("完成 ▾", true, () => st.SetLangDrawer(false));
-            DockPanel.SetDock(close, Dock.Right);
-            head.Children.Add(close);
-            var ttl = Ui.Caption("勾选目标语言(百分比 = 全球使用者占比,静态口径含二语):");
-            ttl.VerticalAlignment = VerticalAlignment.Center;
-            head.Children.Add(ttl);
-            _i18nDrawer.Children.Add(head);
-            var list = new StackPanel();
-            // ★ 按占比从高到低排(用户裁定):常用语言不用翻着找;没数据的沉底按目录序
-            var byPct = Services.Languages.Catalog
-                .Where(x => x.Code != st.Doc.SourceLang)
-                .OrderByDescending(x => Services.I18nState.PercentValue(x.Code))
-                .ToList();
-            foreach (var l in byPct)
-            {
-                var code = l.Code;
-                var rowD = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 1, 0, 1) };
-                var pct = Ui.Caption(Services.I18nState.PercentOf(code));
-                DockPanel.SetDock(pct, Dock.Right);
-                rowD.Children.Add(pct);
-                var cb = new CheckBox { Content = $"{l.Name} ({code})", IsChecked = st.Doc.TargetLangs.Contains(code) };
-                cb.Checked += (_, _) => TheApp.I18n.AddLang(code);
-                cb.Unchecked += (_, _) => TheApp.I18n.RemoveLang(code);
-                rowD.Children.Add(cb);
-                list.Children.Add(rowD);
-            }
-            // 自定义码(pt-BR 这类)仍然收:抽屉底部一行
-            var custom = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 4, 0, 0) };
-            var addBtn = ToolChip("+ 添加", false, () =>
-            { var c = _i18nAddBox.Text.Trim(); if (c.Length > 0) { TheApp.I18n.AddLang(c); _i18nAddBox.Text = ""; } });
-            DockPanel.SetDock(addBtn, Dock.Right);
-            custom.Children.Add(addBtn);
-            custom.Children.Add(_i18nAddBox);
-            _i18nDrawer.Children.Add(new ScrollViewer { Content = list, MaxHeight = 96, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-            _i18nDrawer.Children.Add(custom);
-        }
 
         // ---- 工具卡
         _i18nTools.Children.Clear();

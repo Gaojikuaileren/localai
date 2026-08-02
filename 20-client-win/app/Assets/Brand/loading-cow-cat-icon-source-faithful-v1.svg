@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Source-faithful outlined loading cow cat icon</title>
+  <desc id="desc">A close vector interpretation of the original skewed loading-cat meme frame, using smooth outlines and flat fills.</desc>
+
+  <!-- The square crop intentionally follows the source image; no added icon frame. -->
+  <rect width="1024" height="1024" fill="#d6d5d0"/>
+
+  <!-- Cat silhouette: long left ear, low forehead, rounded right ear, cropped right side. -->
+  <path d="
+    M 101 19
+    C 126 28 165 61 213 101
+    C 275 153 330 199 391 213
+    C 444 225 501 210 548 211
+    C 595 211 626 215 646 190
+    C 666 164 674 119 686 73
+    C 701 19 731 -8 774 -4
+    C 821 0 846 43 877 94
+    C 913 154 953 194 1024 229
+    L 1024 1024
+    L 337 1024
+    C 334 977 313 939 281 901
+    C 246 859 228 809 226 750
+    C 224 687 246 625 246 560
+    C 246 492 229 431 205 373
+    C 180 312 150 252 117 197
+    C 89 149 65 107 66 70
+    C 66 35 77 12 101 19Z"
+    fill="#111516" stroke="#080a0a" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Ear interior remains small and dim, as in the source. -->
+  <path d="M 728 70 C 748 49 772 57 793 89 C 813 119 826 145 839 174 C 809 166 781 158 751 151 C 729 133 719 96 728 70Z"
+        fill="#745f50" stroke="#080a0a" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- White facial blaze and muzzle: traced to the source's narrow-to-wide transition. -->
+  <path d="
+    M 450 372
+    C 460 355 475 356 485 378
+    C 499 411 501 460 510 507
+    C 520 559 533 605 559 650
+    C 586 698 621 728 670 754
+    C 723 782 788 804 858 828
+    C 920 848 974 871 1024 907
+    L 1024 1024 L 363 1024
+    C 366 989 351 961 326 936
+    C 304 913 301 884 319 858
+    C 336 834 362 820 384 800
+    C 424 764 449 724 457 682
+    C 467 631 462 578 453 527
+    C 445 477 438 414 450 372Z"
+    fill="#eeeae1" stroke="#080a0a" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Chest shadow is a single flat plane, not a new anatomical shape. -->
+  <path d="M 326 938 C 406 949 485 945 566 953 C 650 962 728 991 798 1024 L 363 1024 C 366 989 351 961 326 938Z"
+        fill="#d4cfc5"/>
+
+  <!-- Hollow eyes retain the source's placement and slight size mismatch. -->
+  <g id="eyes">
+    <path d="M 269 573 C 270 527 297 505 330 507 C 370 509 393 541 390 582 C 387 624 361 649 328 649 C 293 649 266 620 269 573Z"
+          fill="#e9e8e2" stroke="#080a0a" stroke-width="19" stroke-linejoin="round"/>
+    <path d="M 300 576 C 300 549 313 536 332 537 C 352 538 363 554 361 578 C 359 603 346 617 328 616 C 309 614 299 599 300 576Z"
+          fill="#131718"/>
+    <path d="M 575 583 C 578 539 605 518 638 521 C 675 524 697 553 695 592 C 692 633 667 658 635 657 C 599 655 572 627 575 583Z"
+          fill="#e9e8e2" stroke="#080a0a" stroke-width="19" stroke-linejoin="round"/>
+    <path d="M 606 584 C 607 558 620 545 639 546 C 660 548 670 564 667 588 C 665 612 652 625 634 624 C 615 622 605 607 606 584Z"
+          fill="#131718"/>
+  </g>
+
+  <!-- The source mouth is barely visible; keep the mark restrained. -->
+  <path d="M 455 787 C 466 793 478 793 488 786 C 484 801 477 811 470 814 C 462 809 457 800 455 787Z" fill="#9d9489"/>
+  <path d="M 470 812 C 471 826 468 834 462 840 M 470 829 C 482 839 496 842 509 836"
+        fill="none" stroke="#9d9489" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Spinner follows the original position and dominates the forehead. -->
+  <g id="loading-spinner" fill="#f4f2ec">
+    <rect x="446" y="198" width="20" height="62" rx="10"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(30 456 292)" opacity="0.95"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(60 456 292)" opacity="0.90"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(90 456 292)" opacity="0.84"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(120 456 292)" opacity="0.78"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(150 456 292)" opacity="0.72"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(180 456 292)" opacity="0.66"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(210 456 292)" opacity="0.60"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(240 456 292)" opacity="0.54"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(270 456 292)" opacity="0.48"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(300 456 292)" opacity="0.42"/>
+    <rect x="446" y="198" width="20" height="62" rx="10" transform="rotate(330 456 292)" opacity="0.36"/>
+  </g>
+</svg>

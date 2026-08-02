@@ -52,10 +52,6 @@ public sealed class I18nState
         return true;
     }
 
-    /// <summary>目标语言抽屉开着吗(底条画、网格的 + 号也能开 —— 状态放这儿两边才对得上)。</summary>
-    public bool LangDrawerOpen { get; private set; }
-    public void SetLangDrawer(bool on) { if (LangDrawerOpen != on) { LangDrawerOpen = on; Changed?.Invoke(); } }
-
     /// <summary>改键名(用户裁定 2026-08-03:键也可编辑)。空/重复返回 false,什么都不动。</summary>
     public bool RenameKey(string oldKey, string newKey)
     {

@@ -107,7 +107,7 @@ public sealed class I18nPanel : UserControl
         var addLang = new TextBlock { Text = "+", FontWeight = FontWeights.SemiBold, TextAlignment = TextAlignment.Center,
                                       Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(6, 2, 6, 4) };
         addLang.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
-        addLang.MouseLeftButtonUp += (_, e3) => { e3.Handled = true; TheApp.I18n.SetLangDrawer(true); };
+        addLang.MouseLeftButtonUp += (_, e3) => { e3.Handled = true; I18nLangPicker.Show(addLang); };   // 浮窗跟着 + 号走
         var addCell = Line(addLang);
         Grid.SetRow(addCell, 0); Grid.SetColumn(addCell, 2 + langs.Count);
         _grid.Children.Add(addCell);
