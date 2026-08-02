@@ -653,9 +653,11 @@ public sealed class TranslationBar : UserControl
         //   常态就是画框 —— 点框选中/拖角标移动/拉边调大小靠命中判定分流,不用切工具。
 
         // ③ 撤回(没有可撤的就说,不装聋)
+        var curFt = _currentSession?.Invoke();
+        var curSid = curFt is { FileTrans: true, DeletedAt: null } ? curFt.SessionId : null;
         _fileToolsRow.Children.Add(ToolChip("撤回", false, () =>
         {
-            var sid = TheApp.Chat.Sessions.LastOrDefault(x => x.FileTrans && x.DeletedAt is null)?.SessionId;
+            var sid = curSid;
             if (sid is null || !ft.UndoBox(sid))
                 ConfirmDialog.Show("没有可撤回的", "还没画过标注框。", confirmText: "好", cancelText: "关闭");
         }));
@@ -665,7 +667,6 @@ public sealed class TranslationBar : UserControl
             on => ft.SetRealtimePreview(on), compact: true));
 
         // —— 选中了框就给【删除所选】;有框就给【清空】(用户选定:点选删除单个框)
-        var curSid = TheApp.Chat.Sessions.LastOrDefault(x => x.FileTrans && x.DeletedAt is null)?.SessionId;
         var curDoc = ft.DocOf(curSid);
         if (ft.SelectedBox is { } selIdx && curDoc is not null && selIdx < curDoc.Boxes.Count)
             _fileToolsRow.Children.Add(ToolChip($"清除所选(框 {selIdx + 1})", false, () =>

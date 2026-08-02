@@ -184,6 +184,7 @@ public sealed class FileTransPanel : UserControl
             return;
         }
         var sid = _sessionId;
+        var isNew = sid is null;
         if (sid is null)
         {
             var sess = TheApp.Chat.NewSession(null, "translation", ProjectScope.Personal,
@@ -191,9 +192,13 @@ public sealed class FileTransPanel : UserControl
             sid = sess.SessionId;
         }
         TheApp.FileTrans.SetFile(sid, path);
+        // 新建的会话请宿主选中 —— 本面板绑的还是 null,不选中的话导入完看着像没反应
+        if (isNew) TheApp.FileTrans.RequestFocus(sid);
     }
 
-    string? Sid => _sessionId ?? TheApp.Chat.Sessions.LastOrDefault(s => s.FileTrans && s.DeletedAt is null)?.SessionId;
+    // ★ 只认宿主递进来的会话(用户裁定 2026-08-03):原先回落到"最后一条文件翻译会话",
+    //   导致进场景永远显示上次的文件,即使根本没选中那条会话 —— 进来该是空态,选了会话才加载。
+    string? Sid => _sessionId;
 
     void Rebuild()
     {

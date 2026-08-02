@@ -107,7 +107,11 @@ public sealed class ChatView : UserControl
         TheApp.Chat.Changed += OnChatChanged;
         TheApp.Projects.Changed += UpdateContext;
         // 只有翻译空间要跟同传的进行态(开始选中新会话/被删即停)
-        if (_wsKey == "translation") TheApp.Interpret.Changed += OnInterpretChanged;
+        if (_wsKey == "translation")
+        {
+            TheApp.Interpret.Changed += OnInterpretChanged;
+            TheApp.FileTrans.FocusSession += OnFileTransFocus;
+        }
         // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
         TheApp.Translation.Changed += RefreshSendEnabled;
@@ -118,7 +122,11 @@ public sealed class ChatView : UserControl
             TheApp.Projects.Changed -= UpdateContext;
             TheApp.Translation.Changed -= RefreshSendEnabled;
             TheApp.History.JumpRequested -= OnJumpToHistory;
-            if (_wsKey == "translation") TheApp.Interpret.Changed -= OnInterpretChanged;
+            if (_wsKey == "translation")
+            {
+                TheApp.Interpret.Changed -= OnInterpretChanged;
+                TheApp.FileTrans.FocusSession -= OnFileTransFocus;
+            }
             // ★ 离开翻译空间 = 这一场同传结束(D58 的口径;审计 2026-08-02:
             //   原先只有空间内切模式会停,切去别的工作空间就留下一个看不见的进行中)。
             if (_wsKey == "translation" && TheApp.Interpret.Running) TheApp.Interpret.Stop();
@@ -134,6 +142,15 @@ public sealed class ChatView : UserControl
     ///   不选中的话,列表里多出来一条,面板却还挂在旧会话上(审计 2026-08-02)。
     /// ★ 会话在进行中被删掉 -> 当场结束这一场,不留一个指着回收站的"进行中"。
     /// </summary>
+    /// <summary>文件翻译面板导入时新建了会话 -> 选中它(面板自己够不到本视图的选中态)。</summary>
+    void OnFileTransFocus(string sid)
+    {
+        _sessionId = sid;
+        _projectId = null;
+        BuildSessions();
+        BuildConversation();
+    }
+
     void OnInterpretChanged()
     {
         var st = TheApp.Interpret;

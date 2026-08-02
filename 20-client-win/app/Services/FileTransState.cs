@@ -21,6 +21,9 @@ public sealed record FileDoc(string Path, List<MarkBox> Boxes, string? Cache = n
 public sealed class FileTransState
 {
     public event Action? Changed;
+    /// <summary>导入时新建了会话 -> 请界面选中它(面板自己够不到 ChatView 的选中态)。</summary>
+    public event Action<string>? FocusSession;
+    public void RequestFocus(string sessionId) => FocusSession?.Invoke(sessionId);
 
     /// <summary>支持的输入格式(用户裁定):PNG / JPG / PDF。</summary>
     public static readonly string[] Extensions = { ".png", ".jpg", ".jpeg", ".pdf" };
