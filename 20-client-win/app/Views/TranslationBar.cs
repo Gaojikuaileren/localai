@@ -136,6 +136,7 @@ public sealed class TranslationBar : UserControl
             TheApp.Translation.Changed += Refresh;
             TheApp.History.Changed += Refresh;
             TheApp.Interpret.Changed += Refresh;
+            TheApp.I18n.Changed += Refresh;   // ★ 漏订阅 = 源码按钮不翻转/抽屉不刷新的根因(2026-08-03)
         };
         // ★ 卸载时必须把拖拽善后掉:界面在拖到一半时被重建的话,鼠标捕获会跟着这个已经不在
         //   可视树上的控件走 —— 那之后整个窗口的点击都到不了别处(与"点不动"同一类事故)。
@@ -144,6 +145,7 @@ public sealed class TranslationBar : UserControl
             TheApp.Translation.Changed -= Refresh;
             TheApp.History.Changed -= Refresh;
             TheApp.Interpret.Changed -= Refresh;
+            TheApp.I18n.Changed -= Refresh;
             FinishDrag(null);
         };
     }
@@ -443,7 +445,6 @@ public sealed class TranslationBar : UserControl
         var langsCard = Card(langsBody, "多语言设置", scroll: false);
 
         // 抽屉:盖在左卡上,从底部展开;勾选目标语言,每种带全球使用者占比(静态)
-        _i18nDrawer.Visibility = Visibility.Collapsed;
         var drawerCard = new Border { Child = _i18nDrawer, Padding = new Thickness(10), BorderThickness = new Thickness(1) };
         drawerCard.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         drawerCard.SetResourceReference(Border.BorderBrushProperty, "Accent");
@@ -572,22 +573,7 @@ public sealed class TranslationBar : UserControl
 
         // ---- 工具卡
         _i18nTools.Children.Clear();
-        _i18nTools.Children.Add(ToolChip("导入 JSON", false, () =>
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "JSON|*.json" };
-            if (dlg.ShowDialog() != true) return;
-            var n = st.ImportJson(System.IO.File.ReadAllText(dlg.FileName));
-            st.SetStatus(n < 0 ? "解析失败:不是合法 JSON。" : $"读入 {n} 条词条。", n < 0);
-        }));
-        _i18nTools.Children.Add(ToolChip("导出(一源两出)", false, () =>
-        {
-            var dlg = new Microsoft.Win32.OpenFolderDialog();
-            if (dlg.ShowDialog() != true) return;
-            var (ok, msg) = st.Export(dlg.FolderName);
-            st.SetStatus(msg, !ok);
-        }));
-        // ★ flip-flop(用户裁定 2026-08-03):源码视图里按钮变「预览视图」且换成选中色 ——
-        //   名字永远写【按下会去哪】;按下即应用并返回,非法 JSON 拒绝并留在源码视图。
+        // 导入/导出已上移到会话框右上角(用户裁定 2026-08-03)—— 底条只留视图与协作工具
         _i18nTools.Children.Add(ToolChip(st.RawMode ? "预览视图" : "JSON 源码", st.RawMode, () =>
         {
             if (!st.RawMode) { st.RawText = st.ToTableJson(); st.SetRawMode(true); st.SetStatus("源码视图:改完点「预览视图」应用并返回 —— 非法 JSON 会被拒绝,不会吞掉半张表。"); return; }

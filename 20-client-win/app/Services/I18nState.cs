@@ -20,6 +20,8 @@ public sealed record I18nEntry(string Key, string Source, Dictionary<string, str
 public sealed class I18nDoc
 {
     public string SourceLang { get; set; } = "zh";
+    /// <summary>导入的 JSON 文件路径(界面顶部显示,可选中复制;手建的表为空)。</summary>
+    public string? SourcePath { get; set; }
     public List<string> TargetLangs { get; set; } = new();          // ★ 不限量
     public List<I18nEntry> Entries { get; set; } = new();
 }
@@ -70,18 +72,27 @@ public sealed class I18nState
     public static string PercentOf(string code)
         => _pct.TryGetValue(code, out var v) ? v.ToString("0.#") + "%" : "—";
 
-    /// <summary>给别的 AI 的格式说明(复制按钮用)—— 让对方产出我们能直接吃的对照 JSON。</summary>
+    /// <summary>
+    /// 「复制 Prompt」的用途(用户更正 2026-08-03):给【项目里的开发 AI】的建表指令 ——
+    /// "本项目开始多语言开发,请把需要翻译的字符提取成这个格式的 JSON 表"。
+    /// 不是"翻译这张表"(翻译是本地引擎/翻译缺失项的活)。已有词条时附上,要求增量不改旧键。
+    /// </summary>
     public string PromptText()
-        => "请把下面的多语言词条表补全/翻译,并按【完全相同的 JSON 结构】返回,不要输出任何解释文字:\n"
-         + "{ \"键名\": { \"@src\": \"" + Doc.SourceLang + "\", \"" + Doc.SourceLang + "\": \"源文\", \"en\": \"译文\", ... } }\n"
-         + "硬规则:\n"
-         + "1. 严格合法 JSON(UTF-8,双引号,无尾逗号,无注释);\n"
-         + "2. 键名与 @src 原样保留,不增删改任何键;\n"
-         + "3. 源文中的占位符({name}、{0}、%s、%1$s 等)必须在每种译文中【原样】出现;\n"
-         + "4. 没把握的语言留空字符串 \"\",不要编造。\n"
-         // ★ 源语言随下拉实时变(用户确认 2026-08-03):Prompt 点击时现生成,@src/源文键/下一行明示全跟 Doc.SourceLang 走。
-         + "源语言:" + Doc.SourceLang + "\n"
-         + "目标语言:" + string.Join("、", Doc.TargetLangs) + "\n以下是词条表:\n" + ToTableJson();
+    {
+        var head =
+            "本项目将开始多语言(i18n)开发。请扫描本项目,把所有【用户可见】的字符串(UI 文案、按钮、提示、错误信息等)提取出来,制作成一个 JSON 词条表。只输出 JSON,不要任何解释文字。格式:\n"
+          + "{ \"键名\": { \"@src\": \"" + Doc.SourceLang + "\", \"" + Doc.SourceLang + "\": \"源文\" } }\n"
+          + "硬规则:\n"
+          + "1. 严格合法 JSON(UTF-8,双引号,无尾逗号,无注释);\n"
+          + "2. 键名用稳定的语义命名(如 menu.start、error.network),不用序号,不重复;\n"
+          + "3. 源文里的变量一律写成占位符({name}、{0}、%s 等),原样保留;\n"
+          + "4. 只收用户可见的文案 —— 日志、代码常量、开发者注释不要收;\n"
+          + "5. 目标语言不用填,留给后续流程。\n"
+          + "源语言:" + Doc.SourceLang;
+        if (Doc.Entries.Count > 0)
+            head += "\n已有词条表如下 —— 【增量补充】,不要改动或删除已有键:\n" + ToTableJson();
+        return head;
+    }
 
     /// <summary>导入键值 JSON(平铺 {"key":"文案"} 或对照表)。返回读入条数,-1 = 解析失败。</summary>
     public int ImportJson(string json)
@@ -90,17 +101,17 @@ public sealed class I18nState
         {
             using var d = JsonDocument.Parse(json);
             var list = new List<I18nEntry>();
-            foreach (var p in d.RootElement.EnumerateObject())
+            foreach (var pj in d.RootElement.EnumerateObject())
             {
-                if (p.Value.ValueKind == JsonValueKind.String)
-                    list.Add(new I18nEntry(p.Name, p.Value.GetString() ?? "", new()));
-                else if (p.Value.ValueKind == JsonValueKind.Object)
+                if (pj.Value.ValueKind == JsonValueKind.String)
+                    list.Add(new I18nEntry(pj.Name, pj.Value.GetString() ?? "", new()));
+                else if (pj.Value.ValueKind == JsonValueKind.Object)
                 {
                     var src = ""; var tr = new Dictionary<string, string>();
-                    foreach (var q in p.Value.EnumerateObject())
+                    foreach (var q in pj.Value.EnumerateObject())
                         if (q.Name == "@src" || q.Name == Doc.SourceLang) src = q.Value.GetString() ?? src;
                         else if (q.Value.ValueKind == JsonValueKind.String) tr[q.Name] = q.Value.GetString() ?? "";
-                    list.Add(new I18nEntry(p.Name, src, tr));
+                    list.Add(new I18nEntry(pj.Name, src, tr));
                 }
             }
             if (list.Count == 0) return 0;
@@ -124,10 +135,7 @@ public sealed class I18nState
         => (Doc.TargetLangs.Count(l => e.Trans.TryGetValue(l, out var t) && t.Length > 0 && PlaceholdersOk(e.Source, t)),
             Doc.TargetLangs.Count);
 
-    /// <summary>
-    /// 导出「一源两出」到目录。占位符坏的【拒绝导出】并列出坏在哪(硬规则③)。
-    /// 返回 (成功, 消息)。
-    /// </summary>
+    /// <summary>导出「一源两出」。占位符坏的【拒绝导出】并列出坏在哪(硬规则③)。</summary>
     public (bool Ok, string Msg) Export(string dir)
     {
         var bad = new List<string>();
@@ -141,17 +149,7 @@ public sealed class I18nState
         {
             System.IO.Directory.CreateDirectory(dir);
             var opt = new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-            // ① 对照表(真相源)
-            var table = new SortedDictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
-            foreach (var e in Doc.Entries)
-            {
-                var row = new Dictionary<string, string> { ["@src"] = Doc.SourceLang, [Doc.SourceLang] = e.Source };
-                foreach (var l in Doc.TargetLangs) if (e.Trans.TryGetValue(l, out var t) && t.Length > 0) row[l] = t;
-                table[e.Key] = row;
-            }
-            // ★ UTF-8 无 BOM(硬规则①):File.WriteAllText 默认 UTF8 无 BOM
-            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "strings.i18n.json"), JsonSerializer.Serialize(table, opt));
-            // ② 每语言平铺(引擎直接吃);源语言也出一份
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "strings.i18n.json"), ToTableJson());
             foreach (var l in Doc.TargetLangs.Prepend(Doc.SourceLang).Distinct())
             {
                 var flat = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -167,10 +165,14 @@ public sealed class I18nState
         catch (Exception ex) { return (false, "导出失败:" + ex.Message); }
     }
 
-    /// <summary>源码视图(底条按钮开/应用,面板显示编辑器 —— 状态放这儿两边才对得上)。</summary>
+    /// <summary>源码视图(底条按钮开/应用,面板显示编辑器)。</summary>
     public bool RawMode { get; private set; }
     public string RawText { get; set; } = "";
     public void SetRawMode(bool on) { if (RawMode != on) { RawMode = on; Changed?.Invoke(); } }
+
+    /// <summary>本地引擎(P4)翻 UI 词条的用词纪律(给引擎,不进复制 Prompt):长度贴近源文,达意优先。</summary>
+    public const string UiLengthRule =
+        "译文长度尽量与源文相近(词条用于界面,过长会挤坏排版);但达意永远优先,宁可换更短说法,不生造词、不砍含义。";
 
     /// <summary>当前表序列化成对照 JSON(与导出①同形)—— 进源码视图时的种子。</summary>
     public string ToTableJson()
