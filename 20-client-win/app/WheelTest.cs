@@ -240,16 +240,28 @@ public static class WheelTest
             // ★★ 给天气塞一份【真实形状的】读数 —— 不塞的话渲染图里永远是空态,
             //   图标与气温曲线都看不到,等于没验。逐小时造 24 点,天气代码轮着变。
             {
-                var hrs = new List<Services.WeatherHour>();
-                var t0 = DateTime.Now.Date.AddHours(DateTime.Now.Hour);
                 int[] codes = { 0, 1, 2, 3, 45, 61, 71, 95, 80 };
-                for (int k = 0; k < 24; k++)
-                    hrs.Add(new Services.WeatherHour(t0.AddHours(k),
-                        18 + 8 * Math.Sin(k / 24.0 * Math.PI * 2), codes[k % codes.Length]));
                 var wxDemo = new Dictionary<string, Services.WeatherNow>();
-                foreach (var pl in Services.Places.Load(((App)Application.Current).Settings))
+                var places = Services.Places.Load(((App)Application.Current).Settings).ToList();
+                for (int pi = 0; pi < places.Count; pi++)
+                {
+                    var pl = places[pi];
+                    // ★ 逐小时的时刻要用【那座城自己的当地时间】—— 接口就是这么给的(timezone=auto)。
+                    //   拿本机时间造,渲染图里非本地城市看着永远是对的,正好把要验的那个 bug 藏掉。
+                    DateTime cityNow;
+                    try { cityNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(pl.TimeZoneId)).DateTime; }
+                    catch { cityNow = DateTime.Now; }
+                    var t0 = cityNow.Date.AddHours(cityNow.Hour);
+                    var hrs = new List<Services.WeatherHour>();
+                    for (int k = 0; k < 24; k++)
+                        // 第一座城的温度【横跨全部色带】(-4 ~ 38):五段颜色与两处过渡一次看全;
+                        // 其余城市给常温波动,免得每张图都花花绿绿看不出常态。
+                        hrs.Add(new Services.WeatherHour(t0.AddHours(k),
+                            pi == 0 ? -4 + 42.0 * k / 23.0 : 18 + 8 * Math.Sin(k / 24.0 * Math.PI * 2),
+                            codes[k % codes.Length]));
                     wxDemo[pl.City] = new Services.WeatherNow(22.8, 27.8, 19.3, 0.2,
                         codes[Math.Abs(pl.City.GetHashCode()) % codes.Length], DateTime.Now, hrs);
+                }
                 Services.Weather.Import(wxDemo);
             }
             var hv = new HomeView { Width = 1180, Height = 820 };

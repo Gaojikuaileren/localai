@@ -2093,6 +2093,51 @@ public static class Selftest
                 Assert(cm.SessionsOf(kept).Count() == 2, "★ 被合并项目的会话并到保留的那个项目下(不丢会话)");
                 Assert(pm.Items.Any(x => x.ProjectId == "keep-sub"), "子路径项目不参与合并");
             }
+            // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----
+            {
+                var cPurple = Views.HomeView.TempColor(-20);
+                var cBlue = Views.HomeView.TempColor(4);      // 落在 1.5~6.5 的纯色段里
+                var cGreen = Views.HomeView.TempColor(18);
+                var cAmber = Views.HomeView.TempColor(31);    // 29.5~32.5
+                var cRed = Views.HomeView.TempColor(50);
+                Assert(cPurple != cBlue && cBlue != cGreen && cGreen != cAmber && cAmber != cRed, "五个温度带各是各的颜色");
+                Assert(cBlue.B > cBlue.R && cGreen.G > cGreen.R && cGreen.G > cGreen.B && cAmber.R > cAmber.B && cRed.R > cRed.G,
+                       "蓝偏蓝 / 绿偏绿 / 黄偏暖 / 红偏红(别把色相调没了)");
+                // ★ 用户要的"灰调":每个颜色的最大与最小分量差不许太大 —— 那是饱和度的直接度量
+                foreach (var (nm, c) in new[] { ("紫", cPurple), ("蓝", cBlue), ("绿", cGreen), ("黄", cAmber), ("红", cRed) })
+                    Assert(Math.Max(c.R, Math.Max(c.G, c.B)) - Math.Min(c.R, Math.Min(c.G, c.B)) <= 0x90,
+                           $"★ {nm}是【灰调】不是大红大紫(用户裁定:饱和度压下来)");
+                // 纯色段:8–28 之间任取几点都得是同一个绿(否则"8-28 用绿线"不成立)
+                Assert(Views.HomeView.TempColor(10) == cGreen && Views.HomeView.TempColor(20) == cGreen && Views.HomeView.TempColor(26) == cGreen,
+                       "★ 8–28℃ 整段是同一个绿(过渡只发生在阈值附近的窄带里)");
+                // ★★ 过渡的【中点正好是阈值温度】—— 用户明确要求"在温度阈值处开始过渡,而不是顶点处"
+                foreach (var (thr, lowC, highC) in new[] { (0.0, cPurple, cBlue), (8.0, cBlue, cGreen), (28.0, cGreen, cAmber), (34.0, cAmber, cRed) })
+                {
+                    var mid = Views.HomeView.TempColor(thr);
+                    Assert(Math.Abs(mid.R - (lowC.R + highC.R) / 2.0) <= 1
+                        && Math.Abs(mid.G - (lowC.G + highC.G) / 2.0) <= 1
+                        && Math.Abs(mid.B - (lowC.B + highC.B) / 2.0) <= 1,
+                           $"★ {thr:0}℃ 正好是两色的中点(过渡钉在阈值上,不是钉在折线顶点上)");
+                }
+                // 单调:同一段内温度升高不会往回跳色
+                Assert(Views.HomeView.TempColor(-3) == cPurple && Views.HomeView.TempColor(36) == cRed, "带外是纯色,不会一直渐变下去");
+            }
+            var hvCurve = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+            if (hvCurve is not null)
+            {
+                Assert(hvCurve.Contains("var x = (0.5 + (p.At - t0).TotalHours / step) * cell;"),
+                       "★ 曲线的横轴照抄逐小时那排:第 k 格的时刻文字居中 = (k+0.5)×格宽,峰谷才对得上刻度");
+                Assert(hvCurve.Contains("var t0 = HourlyOrigin(place);") && hvCurve.Contains("var now = HourlyOrigin(place);"),
+                       "★ 曲线与逐小时同一个起点(那座城的当地整点)");
+                Assert(hvCurve.Contains("TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(p.TimeZoneId)).DateTime; }\r\n        catch { now = DateTime.Now; }")
+                    || hvCurve.Contains("catch { now = DateTime.Now; }"),
+                       "认不出时区就退回本机时间(不拿猜来的偏移去挪读数)");
+                Assert(!hvCurve.Contains("var now = DateTime.Now;\r\n        for (int k = 0; k < grid.Children.Count"),
+                       "★ 逐小时不再拿本机时间当所有城市的当前时间(时差有多少就错多少格)");
+                Assert(hvCurve.Contains("MappingMode = BrushMappingMode.Absolute"),
+                       "描边用竖直渐变(y 与温度线性,颜色分界因此正好是那条温度的水平线)");
+            }
+
             // ---- 工作空间是【标签】不是【归属】(2026-08-01 用户裁定)----
             //   起因:唯一性判据是 (机器, 路径) 且不看工作空间,于是同一个文件夹全局只有一个项目;
             //   可 WorkspaceKey 是单值的,导致"在 B 里选了 A 占用的文件夹"时人被送去那个项目,

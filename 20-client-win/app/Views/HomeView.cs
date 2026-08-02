@@ -979,14 +979,18 @@ public sealed class HomeView : UserControl
         noData.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         curve.Children.Add(noData);
         _cityCurve[i] = curve;
-        // ★ 尺寸变了重画 —— 只在这里挂一次(每座城各自一份,互不影响)
-        var curveCity = place.City;
-        curve.SizeChanged += (_, _) => DrawCurve(curve, Services.Weather.For(curveCity));
 
         // ★ 底部留白:来源那一行收起之后,逐小时这排就成了卡里最下面的东西,
         //   只靠 inner 那 10px 底边距显得贴底(用户反馈"太贴边了")。
         _cityHourly[i] = new UniformGrid { Rows = 1, Margin = new Thickness(0, 6, 0, 8) };
         SetHourly(_cityHourly[i], 6);
+
+        // ★ 尺寸变了重画 —— 只在这里挂一次(每座城各自一份,互不影响)。
+        //   ★ 要在逐小时那排建好【之后】挂:曲线的横轴是照它的格数算的(见 DrawCurve)。
+        var curveCity = place.City;
+        var curvePlace = place;
+        var curveSlots = _cityHourly[i];
+        curve.SizeChanged += (_, _) => DrawCurve(curve, Services.Weather.For(curveCity), curvePlace, curveSlots.Columns);
 
         var inner = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(topRow, Dock.Top); inner.Children.Add(topRow);
@@ -1093,7 +1097,8 @@ public sealed class HomeView : UserControl
                 smIcon.Content = Icons.Make(wx ?? IconName.Weather, 13, "FgSecondary");
 
             if (i < _cityHourly.Length && _cityHourly[i] is { } grid) FillHourly(grid, w, _places[i]);
-            if (i < _cityCurve.Length && _cityCurve[i] is { } cv) DrawCurve(cv, w);
+            if (i < _cityCurve.Length && _cityCurve[i] is { } cv)
+                DrawCurve(cv, w, _places[i], _cityHourly[i]?.Columns ?? 6);
         }
     }
 
@@ -1102,14 +1107,20 @@ public sealed class HomeView : UserControl
     ///   两三个点连出来的折线看着像模像样,却什么也说明不了。
     /// ★ 纵向自适应到这一段的真实最高/最低,并把两端标出来 —— 否则一条没有刻度的线读不出量级。
     /// </summary>
-    static void DrawCurve(Grid host, Services.WeatherNow? w)
+    static void DrawCurve(Grid host, Services.WeatherNow? w, Services.Place place, int slots)
     {
         // 只留那条虚线基线与"待接入"文字,其余(上一次画的线)清掉
         for (int k = host.Children.Count - 1; k >= 2; k--) host.Children.RemoveAt(k);
         var hint = host.Children.Count > 1 ? host.Children[1] as TextBlock : null;
 
-        var pts = w?.Hours?.Where(x => x.TempC is not null && x.At >= DateTime.Now.AddHours(-1))
-                          .Take(24).ToList();
+        // ★★ 与下面那排逐小时【共用同一根时间轴】:同一个起点(那座城的当地整点)、
+        //   同一个步长、同一个横向映射。原先曲线自己按"未来 24 小时铺满整宽"画,
+        //   下面那排却是 slots 个格子 × step 小时 —— 两根轴,峰谷自然对不上刻度
+        //   (用户反馈"气温曲线与下方时间不对齐")。
+        var step = Layout.HourlyStepHours(slots);
+        var t0 = HourlyOrigin(place);
+        var tEnd = t0.AddHours((slots - 1) * step);
+        var pts = w?.Hours?.Where(x => x.TempC is not null && x.At >= t0 && x.At <= tEnd).ToList();
         if (pts is null || pts.Count < 4)
         {
             if (hint is not null) { hint.Text = "今日气温曲线数据不足"; hint.Visibility = Visibility.Visible; }
@@ -1123,32 +1134,35 @@ public sealed class HomeView : UserControl
 
         var poly = new System.Windows.Shapes.Polyline
         {
-            StrokeThickness = 1.6,
+            StrokeThickness = 1.8,
             StrokeLineJoin = PenLineJoin.Round,
             IsHitTestVisible = false,
             Stretch = Stretch.None,
         };
-        poly.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Accent");
 
         void Rebuild(object? _, SizeChangedEventArgs? __)
         {
             var wpx = host.ActualWidth; var hpx = host.ActualHeight;
             if (wpx <= 0 || hpx <= 0) return;
-            // ★ 上下留足夹道:原来只留 3px,峰值就贴在格子上沿(看着就是"超了"),
-        //   而且正好与顶部那个最高温标注叠在一起。
-            const double padY = 9;
-            // ★ 左侧留出标注的位置 —— 线与字不再挤在同一块地方。
-            const double padL = 28;
-            var usableW = Math.Max(1, wpx - padL);
+            // ★ 上下留夹道:原来只留 3px,峰值就贴在格子上沿(看着就是"超了")。
+            const double padY = 7;
             var usableH = Math.Max(1, hpx - 2 * padY);
+            // ★ 横向映射【照抄下面那排的算法】:UniformGrid 均分成 slots 格,
+            //   每格的时刻文字水平居中 —— 所以第 k 个刻度在 (k + 0.5) × 格宽。
+            //   曲线上时刻 t 的位置由此推出,峰谷就正对着它自己那一格的时刻与读数。
+            var cell = wpx / Math.Max(1, slots);
             var pc = new PointCollection();
-            for (int k = 0; k < pts.Count; k++)
+            foreach (var p in pts)
             {
-                var x = padL + (pts.Count == 1 ? usableW / 2 : k * usableW / (pts.Count - 1));
-                var y = hpx - padY - (pts[k].TempC!.Value - lo) / span * usableH;
+                var x = (0.5 + (p.At - t0).TotalHours / step) * cell;
+                var y = hpx - padY - (p.TempC!.Value - lo) / span * usableH;
                 pc.Add(new Point(x, y));
             }
             poly.Points = pc;
+            // ★ 描边用【竖直渐变】。y 与温度是线性关系(就是上面这个式子),
+            //   所以颜色的分界正好落在"某个温度的那条水平线"上 ——
+            //   与折线的顶点落在哪儿完全无关(用户要求:过渡钉在温度阈值上,不是钉在顶点上)。
+            poly.Stroke = TempBrush(lo, hi, span, t => hpx - padY - (t - lo) / span * usableH);
         }
         // ★★ 这里【不】挂 SizeChanged。
         //   DrawCurve 每次刷新都会被调一次,在里面挂事件就是"挂一次多一个";
@@ -1156,16 +1170,86 @@ public sealed class HomeView : UserControl
         //   只加不减(WPF-PITFALLS 第 10 条同一形状)。尺寸变了重画的句柄在【构造时】挂一次(见 CityDetail)。
         Rebuild(null, null);
         host.Children.Add(poly);
+        // ★ 这里【不再】画两端的量级标注(原先左上/左下各一个)。
+        //   曲线跟下面那排共用同一根时间轴之后,每个刻度的读数就印在它正下方 ——
+        //   再在左边写一遍最高最低,既重复又正好压在曲线的起点上;
+        //   何况现在颜色本身就编码了绝对温度(见 TempAnchors),比两个端点数字说得更多。
+    }
 
-        // 两端的量级标注 —— 没有刻度的曲线读不出高低
-        var loT = new TextBlock { Text = $"{lo:0}°", VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
-        var hiT = new TextBlock { Text = $"{hi:0}°", VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
-        foreach (var t in new[] { loT, hiT })
+    // ---------------------------------------------------------------- 气温色带
+    // 用户裁定(2026-08-02):>34 红 / >28 黄 / 8–28 绿 / <8 蓝 / <0 紫,阈值处均匀过渡。
+    // ★ 全部压成【灰调】(用户:"大红大紫可能很不好看,或许可以灰调一些")——
+    //   饱和度压到中低、明度取中,一条细线在浅色和深色两种底上都读得出,又不会喊。
+    // ★ 过渡带 ±1.5℃:带外是纯色(所以"8–28 用绿线"成立),带内均匀过渡,
+    //   而且过渡的【中点正好是阈值温度】。
+    const double BandBlend = 1.5;
+    static readonly (double T, Color C)[] TempAnchors =
+    {
+        (0 - BandBlend,  Color.FromRgb(0x7B, 0x6A, 0xA6)),   // 灰紫:0℃ 以下
+        (0 + BandBlend,  Color.FromRgb(0x5C, 0x86, 0xA8)),   // 灰蓝
+        (8 - BandBlend,  Color.FromRgb(0x5C, 0x86, 0xA8)),
+        (8 + BandBlend,  Color.FromRgb(0x5F, 0x93, 0x70)),   // 灰绿:8–28℃
+        (28 - BandBlend, Color.FromRgb(0x5F, 0x93, 0x70)),
+        (28 + BandBlend, Color.FromRgb(0xC0, 0x91, 0x3F)),   // 赭黄(纯黄在浅色底上几乎看不见)
+        (34 - BandBlend, Color.FromRgb(0xC0, 0x91, 0x3F)),
+        (34 + BandBlend, Color.FromRgb(0xB4, 0x63, 0x5C)),   // 陶土红:34℃ 以上
+    };
+
+    static byte Mix(byte a, byte b, double f) => (byte)Math.Round(a + (b - a) * Math.Clamp(f, 0, 1));
+
+    internal static Color TempColor(double t)
+    {
+        if (t <= TempAnchors[0].T) return TempAnchors[0].C;
+        for (int i = 1; i < TempAnchors.Length; i++)
         {
-            t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            host.Children.Add(t);
+            if (t > TempAnchors[i].T) continue;
+            var (t0, c0) = TempAnchors[i - 1];
+            var (t1, c1) = TempAnchors[i];
+            var f = t1 - t0 <= 0 ? 0 : (t - t0) / (t1 - t0);
+            return Color.FromRgb(Mix(c0.R, c1.R, f), Mix(c0.G, c1.G, f), Mix(c0.B, c1.B, f));
         }
+        return TempAnchors[^1].C;
+    }
+
+    /// <summary>
+    /// 按温度上色的描边刷。<paramref name="y"/> 是"温度 -> 纵坐标",与画点用的是同一个式子 ——
+    /// 渐变的每一站因此都钉在它自己那个温度上。
+    /// </summary>
+    static Brush TempBrush(double lo, double hi, double span, Func<double, double> y)
+    {
+        // 这一段几乎是平的:分不出上下,给一个纯色就行(除以 hi-lo 还会炸)
+        if (hi - lo < 0.05) return new SolidColorBrush(TempColor(lo));
+        var g = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute,
+            StartPoint = new Point(0, y(hi)),
+            EndPoint = new Point(0, y(lo)),
+        };
+        g.GradientStops.Add(new GradientStop(TempColor(hi), 0));
+        foreach (var a in TempAnchors)
+            if (a.T > lo && a.T < hi) g.GradientStops.Add(new GradientStop(a.C, (hi - a.T) / (hi - lo)));
+        g.GradientStops.Add(new GradientStop(TempColor(lo), 1));
+        g.Freeze();
+        return g;
+    }
+
+    /// <summary>
+    /// 逐小时那一排的起点 —— 【那座城自己的当地时间】,并取到最接近的整点。
+    ///
+    /// ★ 天气接口是按 timezone=auto 取的,WeatherHour.At 已经是那座城的当地时间;
+    ///   拿本机的 DateTime.Now 去跟它比,时差有多少就错多少格
+    ///   (用户反馈:非本地城市的逐小时不是从当地当前时间开始的)。
+    /// ★ 取整点是为了跟"±30 分钟内取最近那条读数"的规则对上 ——
+    ///   14:37 实际显示的是 15:00 那条,标签就该写 15,写 14 是让数字和时刻对不上号。
+    /// ★ 认不出时区就退回本机时间:宁可只对本地准,也不拿一个猜来的偏移去挪别人的数。
+    /// </summary>
+    static DateTime HourlyOrigin(Services.Place p)
+    {
+        DateTime now;
+        try { now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(p.TimeZoneId)).DateTime; }
+        catch { now = DateTime.Now; }
+        var r = now.AddMinutes(30);
+        return new DateTime(r.Year, r.Month, r.Day, r.Hour, 0, 0);
     }
 
     /// <summary>
@@ -1198,7 +1282,8 @@ public sealed class HomeView : UserControl
     static void FillHourly(UniformGrid grid, Services.WeatherNow? w, Services.Place place)
     {
         var step = Layout.HourlyStepHours(grid.Columns);
-        var now = DateTime.Now;
+        // ★ 用【那座城自己的当地整点】起算,不是本机时间(理由见 HourlyOrigin)
+        var now = HourlyOrigin(place);
         for (int k = 0; k < grid.Children.Count; k++)
         {
             if (grid.Children[k] is not Panel cell || cell.Children.Count < 3) continue;
