@@ -26,7 +26,9 @@ public sealed class TranslationBar : UserControl
 {
     static App TheApp => (App)Application.Current;
 
-    public const double BarHeight = 176;
+    // ★ 190(2026-08-02):窄卡模式下设备列下移成一行之后,「进行中·暂时不会出字」那行
+    //   在 176 高里被挤出卡底 —— 那是 D58 的诚实口径,比 14px 的会话区高度重要。
+    public const double BarHeight = 190;
     /// <summary>目标池宽度 = 三个气泡刚好放满(气泡约 54 + 间距,再加卡片内边距)。</summary>
     /// <summary>
     /// 目标池 = 1 列 × 3 行语言标签;语言池 = 2 列 × 3 行,宽度正好是目标池的两倍(用户裁定)。
@@ -221,7 +223,10 @@ public sealed class TranslationBar : UserControl
     readonly WrapPanel _switchRow = new() { Orientation = Orientation.Horizontal };
     // 开始/结束是这一格的【主动作】,有自己的宿主、排最前 —— 主动作永远不许被裁掉。
     readonly ContentControl _startHost = new() { VerticalAlignment = VerticalAlignment.Center, Focusable = false };
-    readonly StackPanel _driverBadge = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+    // ★ DockPanel 而不是 StackPanel(用户截图 2026-08-02):状态文字很长,窄卡上
+    //   StackPanel 会按完整宽度硬占,把右上角的「未开始」读数怼得只剩两个字。
+    //   现在:灯 Dock.Left、按钮 Dock.Right、文字最后【吃剩余宽度并截断】—— 读数永远完整。
+    readonly DockPanel _driverBadge = new() { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
 
     /// <summary>
     /// 同传设置。★ 不给滚动条(用户裁定):一格能装下的东西不该滚 ——
@@ -230,21 +235,21 @@ public sealed class TranslationBar : UserControl
     /// 从左往右排,右侧【故意留空】给以后加的开关或滑条。
     /// </summary>
     // ★ 窗口缩到最小时这一格也得放得下:设备名很长,给下拉一个上限而不是让它把开关挤出去
-    readonly StackPanel _deviceCol = new() { VerticalAlignment = VerticalAlignment.Top, MinWidth = 150, MaxWidth = 210 };
+    readonly StackPanel _deviceCol = new() { VerticalAlignment = VerticalAlignment.Top };
     readonly TextBlock _latency = new() { VerticalAlignment = VerticalAlignment.Center };
 
     FrameworkElement InterpretSettingsCard()
     {
-        // 一行:左边是开关(从左往右排),右边是设备选择 —— 原来空着的那半边现在有活干了
-        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 6, 0, 0) };
+        // ★★ 结构是【静态】的(2026-08-02 第三版):
+        //   上行 = 开始/结束(主动作,最左)-> 音量仪表 -> 这一场的开关(WrapPanel,窄了换行)
+        //   下行 = 两个设备下拉【永远占一整行、并排均分】 -> 进行中的提示
+        //   此前设备列在宽卡靠右、窄卡用 SizeChanged 里 SetDock 换到底部 ——
+        //   布局途中换 Dock 的时序太脆(离屏渲染画的是换位前的旧布局,真窗口也会闪一帧),
+        //   而"设备一整行"在宽卡上同样好看。随尺寸变的只剩两件事:仪表显隐、下拉均分宽度。
+        var topRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 2, 0, 0) };
 
-        // ★ 布局与次序(用户反馈 2026-08-02 第二次:主动作被裁掉 + 顺序怪):
-        //   【开始/结束】排最前 —— 它是这一格唯一的主动作,原先夹在开关和设备列中间,
-        //   既难找,又因为排在开关行末尾而在窄窗口下第一个被裁掉。
-        //   然后是音量仪表(进行中才有意义的状态),再是这一场的开关(WrapPanel,窄了换行),
-        //   最右是设备列 —— 从"动作 -> 状态 -> 选项 -> 设备"从主到次一路排过去。
         DockPanel.SetDock(_startHost, Dock.Left);
-        row.Children.Add(_startHost);
+        topRow.Children.Add(_startHost);
 
         // 两条竖直音量(对方 / 我方)。★ 仍是空槽:没有数据源就不画会动的假动画 ——
         //   那正好会骗过"声音还在流动吗"这个我们最该诚实回答的问题。
@@ -253,22 +258,34 @@ public sealed class TranslationBar : UserControl
         meters.Children.Add(LevelColumn("对方"));
         meters.Children.Add(LevelColumn("我方"));
         DockPanel.SetDock(meters, Dock.Left);
-        row.Children.Add(meters);
+        topRow.Children.Add(meters);
 
-        DockPanel.SetDock(_deviceCol, Dock.Right);
-        row.Children.Add(_deviceCol);
         _switchRow.VerticalAlignment = VerticalAlignment.Top;
-        row.Children.Add(_switchRow);
+        topRow.Children.Add(_switchRow);
+
+        // 设备行:永远一整行,两个下拉并排,宽度按行宽均分(SizeChanged 只调数值,不换结构)
+        _deviceCol.Orientation = Orientation.Horizontal;
+        _deviceCol.Margin = new Thickness(0, 2, 0, 0);
 
         var body = new StackPanel();
-        body.Children.Add(row);
+        body.Children.Add(topRow);
+        body.Children.Add(_deviceCol);
         // ★★ 进行中的提示(2026-08-02):「开始」建的是这一场会话,引擎(P4)还没接 ——
         //   不当场写明"暂时不会出字",用户会对着一个安静的面板等半天,以为是坏了。
-        _runNote.Margin = new Thickness(0, 6, 0, 0);
+        _runNote.Margin = new Thickness(0, 3, 0, 0);
         _runNote.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
         _runNote.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         _runNote.TextWrapping = TextWrapping.Wrap;
         body.Children.Add(_runNote);
+
+        body.SizeChanged += (_, e2) =>
+        {
+            // ★ 窄卡时收起音量仪表:它现在是【空槽】(引擎 P4 未接,没有数据源)——
+            //   极窄下它把宽度吃光,两个开关被迫竖叠。引擎接入后这一条要重新权衡。
+            meters.Visibility = e2.NewSize.Width < 470 ? Visibility.Collapsed : Visibility.Visible;
+            _narrowPickerW = Math.Clamp((e2.NewSize.Width - 12) / 2, 110, 240);
+            ApplyDevicePickerWidths();
+        };
 
         // 标题右上角:延迟读数 + 声卡状态灯
         _latency.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -368,6 +385,18 @@ public sealed class TranslationBar : UserControl
 
     void StopInterpret() => TheApp.Interpret.Stop();
 
+    double _narrowPickerW = 200;   // 每个设备下拉分到的宽度(按行宽均分,不写死)
+
+    /// <summary>两个设备下拉并排、按行宽均分。</summary>
+    void ApplyDevicePickerWidths()
+    {
+        foreach (var c in _deviceCol.Children.OfType<FrameworkElement>())
+        {
+            c.Width = _narrowPickerW;
+            c.Margin = new Thickness(0, 0, 8, 0);
+        }
+    }
+
     /// <summary>一条竖直音量 + 底下的名字。空槽 —— 接入采集后才有数据。</summary>
     static FrameworkElement LevelColumn(string who)
     {
@@ -430,7 +459,9 @@ public sealed class TranslationBar : UserControl
         var st = TheApp.Interpret;
         _runNote.Visibility = st.Running ? Visibility.Visible : Visibility.Collapsed;
         if (st.Running)
-            _runNote.Text = $"进行中(自 {st.StartedAt:HH:mm})· 记录已建好。★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
+            // ★ 一行放得下的措辞(窄卡 310px 也不换行):关键主张是"暂时不会出字",一个字不能截
+            // 开始时刻不再重复 —— 右上角已经写着「已开始 HH:mm」;省下的宽度让这句在最窄的卡上也一行放完
+            _runNote.Text = "进行中 · 转写要等引擎接入(P4),暂时不会出字。";
         var drv = Services.AudioDriver.Detect();
 
         // —— 标题右边:绿 / 黄 / 红 三态灯(用户裁定)
@@ -448,19 +479,25 @@ public sealed class TranslationBar : UserControl
         //   「· VB-CABLE 声卡驱动状态:未找到」。点只是让状态一眼可扫,不承担表意。
         var dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };
         dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, dotKey);
+        DockPanel.SetDock(dot, Dock.Left);
         _driverBadge.Children.Add(dot);
-        var lab = Ui.Caption("VB-CABLE 声卡驱动状态:" + text);
-        lab.VerticalAlignment = VerticalAlignment.Center;
-        lab.Margin = new Thickness(6, 0, 0, 0);
-        lab.SetResourceReference(TextBlock.ForegroundProperty, drv.Installed ? "FgSecondary" : dotKey);
-        _driverBadge.Children.Add(lab);
 
         if (!drv.Installed)
         {
             var go = Chip("去设置", () => (Application.Current.MainWindow as MainWindow)?.OpenAudioDriverSettings());
             go.Margin = new Thickness(8, 0, 0, 0);
+            DockPanel.SetDock(go, Dock.Right);
             _driverBadge.Children.Add(go);
         }
+
+        // 文字最后加 = 吃剩余宽度;放不下就截断(灯的颜色仍在表意,读数不被牺牲)
+        var lab = Ui.Caption("VB-CABLE 声卡驱动状态:" + text);
+        lab.VerticalAlignment = VerticalAlignment.Center;
+        lab.Margin = new Thickness(6, 0, 0, 0);
+        lab.TextTrimming = TextTrimming.CharacterEllipsis;
+        lab.TextWrapping = TextWrapping.NoWrap;   // ★ 必须禁换行:Caption 默认可换行,截断只在单行时生效 —— 换行会吃掉下面两行的位置
+        lab.SetResourceReference(TextBlock.ForegroundProperty, drv.Installed ? "FgSecondary" : dotKey);
+        _driverBadge.Children.Add(lab);
         // ★ 原先这里还有一个「一键开启」chip —— 已删(2026-08-02):
         //   现在开始同传的入口是设置卡里那颗正经按钮(见 StartStopButton),
         //   同一件事不给两个入口;而且那个 chip 只在"装了声卡但引擎没接入"时才出现,
@@ -473,32 +510,28 @@ public sealed class TranslationBar : UserControl
         //   去安装的入口只在上面那个状态栏里 —— 同一件事不给两个入口。
         // ★ 只有【我这一侧】有语音输出 —— 对方那侧只出字幕(用户裁定 2026-07-31):
         //   对方的原声一直在响,再叠一层机器声等于两个人同时说话。
-        // ★★ 没开始就【整格灰掉】(用户裁定 2026-08-02):这些设置是给"正在进行的这一场"用的,
-        //   没开始时能拨只会让人以为已经在同传了 —— 那正是"没有边界感"的来源。
-        //   ★ 每一处灰都要有【自己】的解释:没开始 -> "先点开始同传";
-        //     开始之后"我方译文语音"仍然灰,那是【引擎未接入】造成的,是另一回事(见下面的 tooltip)。
+        // ★ 设置【随时可点】(用户改主意 2026-08-02,撤销同日"没开始全灰"):
+        //   开会前就该把字幕、设备这些调好 —— 边界感由「开始/结束」本身承担,不靠锁设置。
         _switchRow.Children.Add(new ToggleSwitch("我方译文语音", st.SpeakTranslation,
             // ★★ 装了声卡【也不能拨】(审计 2026-07-31):声卡只是必要条件,
             //   真正决定它生不生效的是语音链路(采集/ASR/合成/注入),而那一整套还没接。
             //   只看 drv.Installed 的话,装完 VB-CABLE 的用户会得到一个能拨、会亮、
             //   但什么都不会发生的开关 —— 那正是本项目最该避免的“假开关”。
             on => TheApp.Interpret.SetSpeakTranslation(on),
-            enabled: st.Running && drv.Installed && InterpretState.PipelineReady, compact: true));
+            // 这一个仍然灰:不是因为"没开始",是驱动/引擎的假开关纪律(见上方审计注释)
+            enabled: drv.Installed && InterpretState.PipelineReady, compact: true));
         _switchRow.Children.Add(new ToggleSwitch("对方实时字幕", st.Subtitles,
-            on => TheApp.Interpret.SetSubtitles(on), enabled: st.Running, compact: true));
+            on => TheApp.Interpret.SetSubtitles(on), compact: true));
         // ★ 主动作放自己的宿主(最左,见 InterpretSettingsCard 的布局说明)——
         //   不再挤在开关行末尾,窄窗口下被第一个裁掉的就是它(用户反馈 2026-08-02 第二次)。
         _startHost.Content = StartStopButton(st);
-        _switchRow.ToolTip = st.Running ? null : "同传还没开始 —— 这些设置要开始之后才能改。";
-        // 设备选择同理:没开始时不给改
-        _deviceCol.IsEnabled = st.Running;
-        _deviceCol.Opacity = st.Running ? 1 : 0.45;
         // —— 右侧:设备选择(原来空着的那半边)
         _deviceCol.Children.Clear();
         _deviceCol.Children.Add(DevicePicker("我方麦克风", Services.AudioDevices.Inputs(),
             st.InputDeviceId, id => TheApp.Interpret.SetInputDevice(id)));
         _deviceCol.Children.Add(DevicePicker("音频输出", Services.AudioDevices.Outputs(),
             st.OutputDeviceId, id => TheApp.Interpret.SetOutputDevice(id)));
+        ApplyDevicePickerWidths();
 
         // —— 右上角:实时延迟。★ 没在跑就显示"—",不显示 0.0s ——
         //    一个写着 0.0 的读数会让人以为"零延迟",那是这套系统里最不可能的事。
@@ -1162,21 +1195,15 @@ public sealed class TranslationBar : UserControl
     static Border Card(UIElement body, string title, Action? gear = null, FrameworkElement? action = null, bool scroll = true,
                        FrameworkElement? badge = null)
     {
-        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
+        // ★ LastChildFill 随有无 badge 而定(用户截图 2026-08-02):badge 的状态文字很长,
+        //   原先它按 Dock.Left 排在读数前面 —— DockPanel 按序分宽,窄卡上右侧的「未开始」
+        //   被怼得只剩两个字。现在右侧的 gear/action【先】占位,badge 最后吃剩余并截断。
+        var head = new DockPanel { LastChildFill = badge is not null, Margin = new Thickness(0, 0, 0, 6) };
         var t = new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         DockPanel.SetDock(t, Dock.Left);
         head.Children.Add(t);
-        // ★ badge 紧跟标题(用户裁定):状态灯属于"这个板块现在什么情况",
-        //   贴着标题读才连贯;最右边留给别的东西(同传那格留给延迟读数)。
-        if (badge is not null)
-        {
-            badge.Margin = new Thickness(8, 0, 0, 0);
-            badge.VerticalAlignment = VerticalAlignment.Center;
-            DockPanel.SetDock(badge, Dock.Left);
-            head.Children.Add(badge);
-        }
         if (gear is not null)
         {
             var g = Icons.Make(IconName.Settings, 14, "FgMuted");
@@ -1189,6 +1216,13 @@ public sealed class TranslationBar : UserControl
             head.Children.Add(gb);
         }
         if (action is not null) { DockPanel.SetDock(action, Dock.Right); head.Children.Add(action); }
+        // badge 最后加(吃剩余宽度):状态灯仍紧跟标题读,长文字放不下就截断,不牺牲右侧读数
+        if (badge is not null)
+        {
+            badge.Margin = new Thickness(8, 0, 8, 0);
+            badge.VerticalAlignment = VerticalAlignment.Center;
+            head.Children.Add(badge);
+        }
 
         var dock = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(head, Dock.Top);

@@ -1627,7 +1627,7 @@ public static class Selftest
                 //   同一件事不给两个入口 —— 何况那个 chip 的出现条件让人根本猜不到它就是"开始"。
                 Assert(badge is not null && !badge.Contains("Chip(\"一键开启\""),
                        "★ 不再有第二个【开始】入口(原来那个藏在状态灯旁边的 chip)");
-                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: st.Running && drv.Installed"),
+                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: drv.Installed && InterpretState.PipelineReady"),
                        "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
                 // ---- 「开始同传」按钮(2026-08-02)----
                 // ★ 位置改到【最左】(用户裁定 2026-08-02 第二次,推翻同日第一次的"字幕右边"):
@@ -1640,8 +1640,14 @@ public static class Selftest
                        "★ 开始 = 真的建一条同传会话(右侧列表当场多出一条),不是只改个布尔");
                 Assert(barMode.Contains("同传 · {mine}↔{theirs}"),
                        "会话标题带方向与时刻 —— 一场会开完,列表里要认得出这是哪一场");
-                Assert(barMode.Contains("enabled: st.Running, compact: true") && barMode.Contains("_deviceCol.IsEnabled = st.Running;"),
-                       "★ 没开始时设置全灰(字幕开关、设备选择)—— 开始之后才解锁");
+                // ★ 用户改主意(2026-08-02,撤销同日"没开始全灰"):设置随时可点,
+                //   边界感由「开始/结束」承担 —— 字幕开关与设备列不再看 Running。
+                Assert(!barMode.Contains("enabled: st.Running") && !barMode.Contains("_deviceCol.IsEnabled = st.Running"),
+                       "★ 设置随时可点(没开始也能调字幕/设备)—— 只有「我方译文语音」按假开关纪律灰");
+                Assert(barMode.Contains("body.Children.Add(_deviceCol);") && barMode.Contains("_narrowPickerW = Math.Clamp("),
+                       "★ 设备行【静态】占一整行、下拉按行宽均分 —— 不在布局途中换 Dock(时序脆,会画出换位前的旧布局)");
+                Assert(barMode.Contains("lab.TextTrimming = TextTrimming.CharacterEllipsis;"),
+                       "★ 状态灯长文字截断 —— 不把右上角的读数怼没");
                 Assert(barMode.Contains("这一场暂时不会出字"),
                        "★★ 进行中要当场写明【暂时不会出字】(引擎 P4 未接)—— 不写的话用户会对着安静的面板以为坏了");
                 Assert(barMode.Contains("_latency.Text = \"未开始\";"),
@@ -3562,8 +3568,8 @@ public static class Selftest
                 }
                 if (tb2 is not null)
                 {
-                    Assert(tb2.Contains("enabled: st.Running && drv.Installed && InterpretState.PipelineReady"),
-                           "★ 装了声卡也不能拨 —— 语音链路没接时那就是个假开关;而且这一场没开始时同样不能拨");
+                    Assert(tb2.Contains("enabled: drv.Installed && InterpretState.PipelineReady"),
+                           "★ 装了声卡也不能拨 —— 语音链路没接时那就是个假开关");
                     Assert(tb2.Contains("string? fromSlot = null") && tb2.Contains("_dragFromSlot"),
                            "★ 从方向坑里往外拖 ≠ 从目标池拖(否则会静默删掉文字翻译目标池里同一个语言)");
                 }

@@ -194,15 +194,20 @@ public static class WheelTest
             TranslationBar NarrowBar()
             {
                 var bx = new TranslationBar();
-                bx.Measure(new Size(940, TranslationBar.BarHeight));
-                bx.Arrange(new Rect(0, 0, 940, TranslationBar.BarHeight));
+                bx.Measure(new Size(700, TranslationBar.BarHeight));
+                bx.Arrange(new Rect(0, 0, 700, TranslationBar.BarHeight));
+                // ★ 再跑一轮布局:窄卡自适应靠 SizeChanged 里 SetDock 换位,
+                //   真实窗口会自动再排一轮,离屏渲染不加这一下画的就是换位前的旧布局。
+                bx.UpdateLayout();
                 return bx;
             }
-            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-idle-min.png"), 960, (int)TranslationBar.BarHeight + 48);
+            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-idle-min.png"), 720, (int)TranslationBar.BarHeight + 48);
             app.Interpret.SetMyLang("zh"); app.Interpret.SetTheirLang("en");
             app.Interpret.Start("wt-run");
-            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-run-min.png"), 960, (int)TranslationBar.BarHeight + 48);
-            Save(Themed(SizedBar()), Path.Combine(outDir, "interpret-run-wide.png"), 1000, (int)TranslationBar.BarHeight + 48);
+            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-run-min.png"), 720, (int)TranslationBar.BarHeight + 48);
+            var wideBar = SizedBar();
+            wideBar.UpdateLayout();   // 同上:让 SizeChanged 里的换位真的画出来
+            Save(Themed(wideBar), Path.Combine(outDir, "interpret-run-wide.png"), 1000, (int)TranslationBar.BarHeight + 48);
             app.Interpret.Stop();
         }
         app.Interpret.SetMode(TranslationMode.Text);
