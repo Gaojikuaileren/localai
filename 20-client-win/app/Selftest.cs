@@ -2228,7 +2228,8 @@ public static class Selftest
                 if (tbF is not null)
                 {
                     var iAuto = tbF.IndexOf("AI 自动标注", StringComparison.Ordinal);
-                    var iBox = tbF.IndexOf("\"创建标注框\"", StringComparison.Ordinal);
+                    // 「创建标注框」按钮已删(左键常态就是画框);撤回仍在自动标注之后
+                    var iBox = tbF.IndexOf("ToolChip(\"撤回\"", StringComparison.Ordinal);
                     Assert(iAuto >= 0 && iBox > iAuto, "★ 「AI 自动标注」排工具栏第一位(用户指定)");
                     Assert(tbF.Contains("start.IsEnabled = !ft.RealtimePreview;"),
                            "★ 实时预览开着时「开始翻译」灰掉(用户裁定:实时模式下没有\"开始\"这回事)");

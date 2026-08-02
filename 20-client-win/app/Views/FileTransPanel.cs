@@ -279,7 +279,6 @@ public sealed class FileTransPanel : UserControl
 
     void BeginBox(object s, MouseButtonEventArgs e)
     {
-        if (!TheApp.FileTrans.BoxTool)
         {
             var img1 = ImageRect();
             var pt1 = e.GetPosition(_overlay);
@@ -297,8 +296,7 @@ public sealed class FileTransPanel : UserControl
                 { _boxDrag = (i, false, pt1, d1.Boxes[i]); TheApp.FileTrans.SelectBox(i); _overlay.CaptureMouse(); return; }
                 if (r1.Contains(pt1)) { TheApp.FileTrans.SelectBox(i); return; }   // 框内 = 选中
             }
-            TheApp.FileTrans.SelectBox(null);                                 // 空白 = 清选
-            return;
+            TheApp.FileTrans.SelectBox(null);                                 // 空白 = 清选 -> 落到画框
         }
         if (Sid is null || ImageRect() is { IsEmpty: true }) return;
         _dragStart = e.GetPosition(_overlay);
@@ -311,6 +309,24 @@ public sealed class FileTransPanel : UserControl
 
     void DragBox(object s, MouseEventArgs e)
     {
+        if (_boxDrag is null && _dragStart is null && e.LeftButton != MouseButtonState.Pressed)
+        {
+            // 悬停反馈(用户裁定):角标 = 移动样式,边框带 = 拉伸样式,其余 = 画框十字
+            var imgH = ImageRect();
+            var ptH = e.GetPosition(_overlay);
+            var cur = Cursors.Cross;
+            if (!imgH.IsEmpty && Sid is { } hsid && TheApp.FileTrans.DocOf(hsid) is { } hd)
+                for (int i = hd.Boxes.Count - 1; i >= 0; i--)
+                {
+                    var b2 = hd.Boxes[i];
+                    var r2 = new Rect(imgH.X + b2.X * imgH.Width, imgH.Y + b2.Y * imgH.Height,
+                                      b2.W * imgH.Width, b2.H * imgH.Height);
+                    if (new Rect(r2.X, r2.Y, 16, 14).Contains(ptH)) { cur = Cursors.SizeAll; break; }
+                    if (r2.Contains(ptH) && !Rect.Inflate(r2, -5, -5).Contains(ptH)) { cur = Cursors.SizeNWSE; break; }
+                    if (r2.Contains(ptH)) { cur = Cursors.Hand; break; }
+                }
+            _overlay.Cursor = cur;
+        }
         if (_boxDrag is { } bd && e.LeftButton == MouseButtonState.Pressed)
         {
             _tempBox = (bd.Index, Adjusted(bd, e.GetPosition(_overlay)));

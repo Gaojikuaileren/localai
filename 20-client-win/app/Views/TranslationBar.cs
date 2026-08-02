@@ -429,8 +429,8 @@ public sealed class TranslationBar : UserControl
                 "自动找出该翻译的区域要用视觉模型 —— 翻译引擎(P4)接入后这里一键标完。\n先用「创建标注框」手动圈。",
                 confirmText: "知道了", cancelText: "关闭")));
 
-        // ② 创建标注框(开关型:开着才能在左侧画框)
-        _fileToolsRow.Children.Add(ToolChip("创建标注框", ft.BoxTool, () => ft.SetBoxTool(!ft.BoxTool)));
+        // ★「创建标注框」按钮已删(用户裁定 2026-08-02):左键在这个板块没有别的用途,
+        //   常态就是画框 —— 点框选中/拖角标移动/拉边调大小靠命中判定分流,不用切工具。
 
         // ③ 撤回(没有可撤的就说,不装聋)
         _fileToolsRow.Children.Add(ToolChip("撤回", false, () =>
@@ -448,7 +448,7 @@ public sealed class TranslationBar : UserControl
         var curSid = TheApp.Chat.Sessions.LastOrDefault(x => x.FileTrans && x.DeletedAt is null)?.SessionId;
         var curDoc = ft.DocOf(curSid);
         if (ft.SelectedBox is { } selIdx && curDoc is not null && selIdx < curDoc.Boxes.Count)
-            _fileToolsRow.Children.Add(ToolChip($"删除框 {selIdx + 1}", false, () =>
+            _fileToolsRow.Children.Add(ToolChip($"清除所选(框 {selIdx + 1})", false, () =>
             { if (curSid is not null) ft.RemoveBox(curSid, selIdx); }));
         if (curDoc is { Boxes.Count: > 0 })
             _fileToolsRow.Children.Add(ToolChip("清空全部", false, () =>
@@ -879,7 +879,7 @@ public sealed class TranslationBar : UserControl
         //   于是只要目标池满了 3 个,切到同传后语言池也是灰的,
         //   而同传的方向只能从语言池拖 —— 方向永远设不了,功能直接死掉。
         //   同传的"满"应该是【我说/对方说两个坑都填了】。
-        var poolDisabled = TheApp.Interpret.Mode == TranslationMode.Interpret
+        var poolDisabled = TheApp.Interpret.Mode is TranslationMode.Interpret or TranslationMode.FileTrans
             ? TheApp.Interpret.DirectionReady
             : st.IsFull;
         _poolBox.Opacity = poolDisabled ? 0.45 : 1;
@@ -893,7 +893,7 @@ public sealed class TranslationBar : UserControl
         // 第一个空坑放「+」当作进设置的入口。
         _poolWrap.Children.Clear();
         // 同传模式下,池里排掉已经放进"我说/对方说"的那两个;文字模式下排掉目标池里的
-        var interpreting = TheApp.Interpret.Mode == TranslationMode.Interpret;
+        var interpreting = TheApp.Interpret.Mode is TranslationMode.Interpret or TranslationMode.FileTrans;   // 文件翻译与同传同一套方向手势
         var used = interpreting
             ? new[] { TheApp.Interpret.MyLang, TheApp.Interpret.TheirLang }
             : st.Targets.ToArray();
@@ -1134,7 +1134,7 @@ public sealed class TranslationBar : UserControl
         //   · 落在语言池,或者落空 -> 回到语言池(= 不在目标池里,自然就在语言池里)。
         // 语言池是"目标池之外的全部",不需要显式塞回去 —— 清掉暂借标记就恢复了。
         var landed = false;
-        if (TheApp.Interpret.Mode == TranslationMode.Interpret)
+        if (TheApp.Interpret.Mode is TranslationMode.Interpret or TranslationMode.FileTrans)
         {
             // 同传:落进哪个坑就设哪个方向。被顶替的那个语言自动回到语言池(池 = 池减去已选的两个)。
             if (Hit(_mySlot, e)) { TheApp.Interpret.SetMyLang(lang.Code); landed = true; }
