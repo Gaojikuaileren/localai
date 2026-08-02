@@ -37,6 +37,16 @@ public sealed class FileTransPanel : UserControl
         var stage = new Grid();
         stage.Children.Add(_img);
         stage.Children.Add(_overlay);
+        // ★ 缩放与平移(用户选定):滚轮缩放(1x-5x),画框工具关着时左键拖动平移。
+        //   变换加在 stage 上,画框取的是 overlay 本地坐标 —— 命中与归一化不受缩放影响。
+        stage.RenderTransformOrigin = new Point(0.5, 0.5);
+        var zoomT = new ScaleTransform(1, 1);
+        var panT = new TranslateTransform();
+        var tg = new TransformGroup();
+        tg.Children.Add(zoomT); tg.Children.Add(panT);
+        stage.RenderTransform = tg;
+        _zoomT = zoomT; _panT = panT;
+        stage.ClipToBounds = true;
         var empty = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
         empty.Children.Add(_hint);
         empty.Children.Add(new Border { Height = 8 });
@@ -44,7 +54,14 @@ public sealed class FileTransPanel : UserControl
         stage.Children.Add(empty);
         _emptyHost = empty;
 
-        var left = new Border { Child = stage, Margin = new Thickness(0, 0, 6, 0), AllowDrop = true };
+        var left = new Border { Child = stage, Margin = new Thickness(0, 0, 6, 0), AllowDrop = true, ClipToBounds = true };
+        left.MouseWheel += (_, e) =>
+        {
+            var z = Math.Clamp(_zoomT.ScaleX * (e.Delta > 0 ? 1.15 : 1 / 1.15), 1, 5);
+            _zoomT.ScaleX = _zoomT.ScaleY = z;
+            if (z <= 1.001) { _panT.X = _panT.Y = 0; }   // 回到 1x 就归位,不留一个平移走的空画面
+            e.Handled = true;
+        };
         left.SetResourceReference(Border.BackgroundProperty, "BgSunken");
         left.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
         // ★ 拖拽导入(用户裁定):拖到左半即可,不必找按钮
@@ -102,6 +119,14 @@ public sealed class FileTransPanel : UserControl
         root.Children.Add(split);
         Content = root;
 
+        Focusable = true;
+        KeyDown += (_, e) =>
+        {
+            if (e.Key != System.Windows.Input.Key.Delete) return;
+            if (Sid is { } dsid && TheApp.FileTrans.SelectedBox is { } di)
+            { TheApp.FileTrans.RemoveBox(dsid, di); e.Handled = true; }
+        };
+        _overlay.MouseLeftButtonDown += (_, _) => Focus();   // 点了预览才吃 Del,不跟输入框抢键
         Loaded += (_, _) => { TheApp.FileTrans.Changed += Rebuild; Rebuild(); };
         Unloaded += (_, _) => TheApp.FileTrans.Changed -= Rebuild;
         _overlay.SizeChanged += (_, _) => RedrawBoxes();
@@ -154,7 +179,7 @@ public sealed class FileTransPanel : UserControl
             // ★ 如实:PDF 的渲染要 WinRT(随引擎一起接),现在不画一个假封面
             _img.Source = null;
             _emptyHost.Visibility = Visibility.Visible;
-            _hint.Text = $"已导入 PDF:{Path.GetFileName(doc.Path)}\n★ PDF 预览尚未接入(需要系统渲染组件,随翻译引擎 P4 一起接)。\n标注框要在预览上画,所以 PDF 暂时只能整页翻译。";
+            _hint.Text = $"已导入 PDF:{Path.GetFileName(doc.Path)}\n★ PDF 预览尚未接入(需要系统渲染组件,随翻译引擎 P4 一起接)。\n标注框要在预览上画,所以 PDF 暂时只能整页翻译。\n\n第 1 页 / —(页码导航随 PDF 渲染一起接入)";
         }
         else
         {
@@ -185,9 +210,22 @@ public sealed class FileTransPanel : UserControl
         return new Rect((_overlay.ActualWidth - w) / 2, (_overlay.ActualHeight - h) / 2, w, h);
     }
 
+    Point? _panStart;          // 平移起点(工具关着时的左键拖动)
+    (double X, double Y)? _panBase;
+    ScaleTransform _zoomT = null!;
+    TranslateTransform _panT = null!;
+
     void BeginBox(object s, MouseButtonEventArgs e)
     {
-        if (!TheApp.FileTrans.BoxTool || Sid is null || ImageRect() is { IsEmpty: true }) return;
+        if (!TheApp.FileTrans.BoxTool)
+        {
+            // 工具关着:按下先当【可能的平移】;松手没挪动就是【点选框】(见 EndBox)
+            _panStart = e.GetPosition(this);
+            _panBase = (_panT.X, _panT.Y);
+            _overlay.CaptureMouse();
+            return;
+        }
+        if (Sid is null || ImageRect() is { IsEmpty: true }) return;
         _dragStart = e.GetPosition(_overlay);
         _ghost = new System.Windows.Shapes.Rectangle { StrokeThickness = 1.6, IsHitTestVisible = false,
             StrokeDashArray = new DoubleCollection { 3, 2 } };
@@ -198,6 +236,13 @@ public sealed class FileTransPanel : UserControl
 
     void DragBox(object s, MouseEventArgs e)
     {
+        if (_panStart is { } ps && _panBase is { } pb && e.LeftButton == MouseButtonState.Pressed)
+        {
+            var p2 = e.GetPosition(this);
+            _panT.X = pb.X + (p2.X - ps.X);
+            _panT.Y = pb.Y + (p2.Y - ps.Y);
+            return;
+        }
         if (_dragStart is not { } p0 || _ghost is null) return;
         var p = e.GetPosition(_overlay);
         var r = new Rect(p0, p);
@@ -210,6 +255,28 @@ public sealed class FileTransPanel : UserControl
     void EndBox(object s, MouseButtonEventArgs e)
     {
         _overlay.ReleaseMouseCapture();
+        // 工具关着:没挪动 = 点选(选中点下的框,点空白清选);挪动了 = 平移,不选
+        if (_panStart is { } ps)
+        {
+            var pe = e.GetPosition(this);
+            var moved = Math.Abs(pe.X - ps.X) + Math.Abs(pe.Y - ps.Y) > 4;
+            _panStart = null; _panBase = null;
+            if (!moved && Sid is { } psid && TheApp.FileTrans.DocOf(psid) is { } pd)
+            {
+                var img0 = ImageRect();
+                var pt = e.GetPosition(_overlay);
+                int? hit = null;
+                for (int i = pd.Boxes.Count - 1; i >= 0; i--)   // 后画的在上层,先算它
+                {
+                    var b0 = pd.Boxes[i];
+                    var r0 = new Rect(img0.X + b0.X * img0.Width, img0.Y + b0.Y * img0.Height,
+                                      b0.W * img0.Width, b0.H * img0.Height);
+                    if (r0.Contains(pt)) { hit = i; break; }
+                }
+                TheApp.FileTrans.SelectBox(hit);
+            }
+            return;
+        }
         if (_dragStart is not { } p0) return;
         var p = e.GetPosition(_overlay);
         _dragStart = null;
@@ -230,17 +297,31 @@ public sealed class FileTransPanel : UserControl
         var img = ImageRect();
         var doc = TheApp.FileTrans.DocOf(Sid);
         if (img.IsEmpty || doc is null) return;
-        foreach (var b in doc.Boxes)
+        for (int i = 0; i < doc.Boxes.Count; i++)
         {
+            var b = doc.Boxes[i];
+            var sel = TheApp.FileTrans.SelectedBox == i;
             var rc = new System.Windows.Shapes.Rectangle
             {
                 Width = Math.Max(1, b.W * img.Width), Height = Math.Max(1, b.H * img.Height),
-                StrokeThickness = 1.6, IsHitTestVisible = false,
+                StrokeThickness = sel ? 2.6 : 1.6, IsHitTestVisible = false,
                 HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
                 Margin = new Thickness(img.X + b.X * img.Width, img.Y + b.Y * img.Height, 0, 0),
             };
-            rc.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Accent");
+            rc.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, sel ? "RiskDanger" : "Accent");
             _overlay.Children.Add(rc);
+            // 序号角标(用户选定):框多时清单里才对得上号
+            var tagT = new TextBlock { Text = (i + 1).ToString(), FontSize = 10, Margin = new Thickness(2, 0, 2, 0) };
+            tagT.SetResourceReference(TextBlock.ForegroundProperty, "FgOnAccent");
+            var tag = new Border
+            {
+                Child = tagT, IsHitTestVisible = false,
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(img.X + b.X * img.Width, img.Y + b.Y * img.Height, 0, 0),
+                CornerRadius = new CornerRadius(2),
+            };
+            tag.SetResourceReference(Border.BackgroundProperty, sel ? "RiskDanger" : "Accent");
+            _overlay.Children.Add(tag);
         }
     }
 }

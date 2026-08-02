@@ -57,6 +57,39 @@ public sealed class FileTransState
         Changed?.Invoke();
     }
 
+    /// <summary>当前选中的框(下标;不落盘)。点选删除、清单高亮都认它。</summary>
+    public int? SelectedBox { get; private set; }
+    public void SelectBox(int? i) { if (SelectedBox != i) { SelectedBox = i; Changed?.Invoke(); } }
+
+    /// <summary>删除指定框(点选删除/清单删除)。</summary>
+    public bool RemoveBox(string sessionId, int index)
+    {
+        if (!_docs.TryGetValue(sessionId, out var d) || index < 0 || index >= d.Boxes.Count) return false;
+        d.Boxes.RemoveAt(index);
+        SelectedBox = null;   // 下标已经变了,留着旧选中会删错框
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>清空全部框。</summary>
+    public void ClearBoxes(string sessionId)
+    {
+        if (!_docs.TryGetValue(sessionId, out var d) || d.Boxes.Count == 0) return;
+        d.Boxes.Clear();
+        SelectedBox = null;
+        Changed?.Invoke();
+    }
+
+    /// <summary>输出模式(用户裁定留位):替换原文排版 / 原文下加译文的双语对照。
+    /// ★ 引擎未接入,这只是【偏好】—— 界面如实标注"接入后生效"。</summary>
+    public bool BilingualOutput { get; private set; }
+    public void SetBilingualOutput(bool on) { if (BilingualOutput != on) { BilingualOutput = on; Changed?.Invoke(); } }
+
+    /// <summary>行政翻译(用户追加):证件/公文那种正式语体与固定套语;关 = 普通翻译。
+    /// ★ 同样只是【偏好】,引擎接入(P4)后生效。</summary>
+    public bool OfficialStyle { get; private set; }
+    public void SetOfficialStyle(bool on) { if (OfficialStyle != on) { OfficialStyle = on; Changed?.Invoke(); } }
+
     /// <summary>撤回:去掉最后一个框。没有可撤的返回 false(按钮据此说"没有可撤回的")。</summary>
     public bool UndoBox(string sessionId)
     {

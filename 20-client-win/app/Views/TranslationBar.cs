@@ -412,7 +412,7 @@ public sealed class TranslationBar : UserControl
     {
         var body = new StackPanel();
         body.Children.Add(_fileToolsRow);
-        var tip = Ui.Caption("在左侧原文件上圈出要翻译的部分;不圈 = 整页。");
+        var tip = Ui.Caption("在左侧原文件上圈出要翻译的部分;不圈 = 整页。工具关着时:滚轮缩放、拖动平移、点框选中(Del 删除)。「双语对照」= 原文下加译文,关 = 直接替换 —— 引擎接入(P4)后生效。");
         tip.Margin = new Thickness(0, 4, 0, 0);
         body.Children.Add(tip);
         return Card(body, "文件翻译工具", scroll: false);
@@ -443,6 +443,31 @@ public sealed class TranslationBar : UserControl
         // ④ 实时翻译预览(默认关,用户裁定)
         _fileToolsRow.Children.Add(new ToggleSwitch("实时预览", ft.RealtimePreview,
             on => ft.SetRealtimePreview(on), compact: true));
+
+        // —— 选中了框就给【删除所选】;有框就给【清空】(用户选定:点选删除单个框)
+        var curSid = TheApp.Chat.Sessions.LastOrDefault(x => x.FileTrans && x.DeletedAt is null)?.SessionId;
+        var curDoc = ft.DocOf(curSid);
+        if (ft.SelectedBox is { } selIdx && curDoc is not null && selIdx < curDoc.Boxes.Count)
+            _fileToolsRow.Children.Add(ToolChip($"删除框 {selIdx + 1}", false, () =>
+            { if (curSid is not null) ft.RemoveBox(curSid, selIdx); }));
+        if (curDoc is { Boxes.Count: > 0 })
+            _fileToolsRow.Children.Add(ToolChip("清空全部", false, () =>
+            {
+                if (curSid is not null && ConfirmDialog.Show("清空全部标注框",
+                        $"删掉这 {curDoc.Boxes.Count} 个框?", confirmText: "清空", danger: true))
+                    ft.ClearBoxes(curSid);
+            }));
+
+        // —— 留位(用户选定,如实标未接入):术语表 / 输出模式
+        _fileToolsRow.Children.Add(ToolChip("术语表", false, () =>
+            ConfirmDialog.Show("术语表还没接",
+                "术语表锁定专有名词的译法 —— 要和翻译引擎(P4)一起定型,现在先把位置留在这儿。",
+                confirmText: "知道了", cancelText: "关闭")));
+        _fileToolsRow.Children.Add(new ToggleSwitch("双语对照", ft.BilingualOutput,
+            on => ft.SetBilingualOutput(on), compact: true));
+        // 普通 vs 行政翻译(用户追加):开 = 公文/证件的正式语体与套语
+        _fileToolsRow.Children.Add(new ToggleSwitch("行政翻译", ft.OfficialStyle,
+            on => ft.SetOfficialStyle(on), compact: true));
 
         // ⑤ 开始翻译:实时预览开着就【灰】(用户裁定 —— 实时模式下没有"开始"这回事)
         var start = ToolChip("开始翻译", false, () =>
