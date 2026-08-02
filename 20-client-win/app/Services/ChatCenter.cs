@@ -116,6 +116,19 @@ public sealed class ChatCenter
                     .Where(Visible)
                     .OrderByDescending(s => s.Pinned).ThenByDescending(s => s.LastActive);
 
+    /// <summary>
+    /// 这个项目名下的会话散在哪些工作空间里(含已随项目软删的 —— 它们恢复后还要回去)。
+    /// ★ 给"摘掉项目的工作空间标签"当护栏用:那个空间里还有会话,标签就【不能摘】。
+    ///   会话只按 ProjectId 归属项目(见 SessionsOf),进不了任何一个按工作空间的清单;
+    ///   项目一旦在那个空间消失,那些会话就再没有任何入口 —— 数据还在,人却找不到。
+    /// </summary>
+    public IReadOnlyCollection<string> SessionSpacesOf(string projectId)
+        => _sessions.Where(s => s.ProjectId == projectId && !s.Ghost)
+                    .Select(s => s.WorkspaceKey)
+                    .Where(k => !string.IsNullOrWhiteSpace(k))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
     // ---------------------------------------------------------------- 提升为共享(单向,不可收回)
     // 用户裁定(2026-07-30):每台设备【各自独立】的会话列表;要让全家看到,必须显式"提升为共享"。
     //   ★ 提升时【整段对话一起上去】(否则对方看半截读不懂);
@@ -187,15 +200,11 @@ public sealed class ChatCenter
         Changed?.Invoke();
     }
 
-    /// <summary>项目被发送到别的工作空间时,它名下的会话跟着走。</summary>
-    public void SetSessionsWorkspace(string projectId, string workspaceKey)
-    {
-        var any = false;
-        for (int i = 0; i < _sessions.Count; i++)
-            if (_sessions[i].ProjectId == projectId && _sessions[i].WorkspaceKey != workspaceKey)
-            { _sessions[i] = _sessions[i] with { WorkspaceKey = workspaceKey }; any = true; }
-        if (any) Changed?.Invoke();
-    }
+    // ★ 这里【故意没有】"项目搬空间时把它名下会话一起搬"的方法(原 SetSessionsWorkspace,
+    //   2026-08-01 删除)。会话的 WorkspaceKey 是它自己的身份:决定它进不进翻译历史、
+    //   点开时按哪套界面渲染。项目换个标签就批量改写别人的身份,正好造出
+    //   "聊天内容混进翻译历史"这类污染 —— 那恰恰是这套规则要防的事。
+    //   要搬会话,走它自己的三点菜单「发送到工作空间」(MoveSessionToWorkspace),一条一条来。
 
     /// <summary>置顶 / 取消置顶(置顶排在会话列表最前)。</summary>
     public void TogglePin(string sessionId)

@@ -662,6 +662,22 @@ public partial class MainWindow : Window
         TheApp.Projects.Touch(projectId);
     }
 
+    /// <summary>
+    /// 跳到某条会话【自己所属的工作空间】并打开它(项目会话列表里点跨空间会话时走这里)。
+    ///
+    /// ★ 为什么不能复用 NavigateToProject:它只吃 projectId,会话是 SelectProject 自己
+    ///   `FirstOrDefault()` 替你挑的 —— 那样点 A 打开 B,静默错开,比不跳更坏。
+    /// ★ 认不出的 key(老存档里留着已删掉的空间)一律【不跳】,由调用方就地说明;
+    ///   在左栏藏起来的空间也不该闷头跳过去 —— 那两件事都在 ChatView 那边先问过了。
+    /// </summary>
+    public void NavigateToSession(string workspaceKey, string? projectId, string sessionId)
+    {
+        if (!Workspaces.Known(workspaceKey)) return;
+        Navigate(workspaceKey);
+        if (ContentHost.Content is ChatView cv) cv.OpenSession(projectId, sessionId);
+        if (projectId is not null) TheApp.Projects.Touch(projectId);
+    }
+
     /// <summary>右侧抽屉打开【项目编辑器】(新建/编辑重定向路径)。existing 为空 = 新建。</summary>
     public void OpenProjectEditor(Project? existing)
         => OpenSideDrawer(existing is null ? "新建项目" : "编辑项目", ProjectEditor.Build(existing, () => Overlay.CloseActive()), IconName.Folder);

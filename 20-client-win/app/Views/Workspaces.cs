@@ -42,6 +42,20 @@ public static class Workspaces
             if (seen.Add(d.Key)) result.Add(d);
         return result;
     }
+
+    /// <summary>
+    /// 左栏【真的显示着】的工作空间(顺序同左栏)。
+    /// ★ 凡是"送到哪个空间 / 跳到哪个空间"的【目的地清单】都得用这一份 ——
+    ///   在扩展里关掉,等于用户明说过"我不要这个空间";还把东西往那儿送、把人往那儿跳,
+    ///   是拿他关掉的东西当默认值。
+    /// ★ 反过来,【已经挂着的】标签照旧显示、照旧摘得掉(见 ProjectUi 的"从工作空间移除"),
+    ///   否则藏起来的空间会变成摘不掉的死标签。"不在左栏显示"和"这一页不存在"是两件事。
+    /// </summary>
+    public static List<Def> Visible(Services.AppSettings settings)
+        => Ordered(settings).Where(d => settings.IsWorkspaceVisible(d.Key)).ToList();
+
+    /// <summary>这个 key 是不是【认得出来的】工作空间(老存档里可能留着已删掉的 key)。</summary>
+    public static bool Known(string? key) => key is not null && All.Any(d => d.Key == key);
 }
 
 /// <summary>

@@ -417,22 +417,31 @@ public sealed class ProjectPickerView : UserControl
 
     static FrameworkElement OriginLabel(Project p, bool sel)
     {
-        // 已删除项目只标【主工作空间】—— 回收站要回答的是"它原本在哪",不是它挂过几个标签
-        var def = Workspaces.All.FirstOrDefault(w => w.Key == p.PrimarySpace);
+        // ★ 挂着几个空间就标几个(用户反馈 2026-08-01):原先只标主标签,
+        //   于是一个多空间项目被删之后,回收站里看着像只属于一个空间,恢复出来却又是多个 ——
+        //   同一个项目在两屏之间说了两套话。回收站要回答的是"它原本在哪",那就得说全。
         var fg = sel ? "FgOnSelected" : "FgMuted";
         var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        var ic = Icons.Make(def?.Icon ?? IconName.Chat, 12, fg);
-        ic.Margin = new Thickness(0, 0, 5, 0);
-        ic.VerticalAlignment = VerticalAlignment.Center;
-        row.Children.Add(ic);
-        var t = new TextBlock
+        for (int i = 0; i < p.Spaces.Count; i++)
         {
-            Text = def is null ? p.PrimarySpace : I18n.Strings.Get(def.TitleKey),
-            VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
-        };
-        t.SetResourceReference(TextBlock.ForegroundProperty, fg);
-        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        row.Children.Add(t);
+            var key = p.Spaces[i];
+            var def = Workspaces.All.FirstOrDefault(w => w.Key == key);
+            var ic = Icons.Make(def?.Icon ?? IconName.Chat, 12, fg);
+            ic.Margin = new Thickness(i == 0 ? 0 : 6, 0, 5, 0);
+            ic.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(ic);
+            // 名字只给第一个:方块窄,多个名字必然被截断成一排省略号,反而看不出有几个空间
+            if (i > 0) continue;
+            var t = new TextBlock
+            {
+                Text = def is null ? key : I18n.Strings.Get(def.TitleKey),
+                VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            t.SetResourceReference(TextBlock.ForegroundProperty, fg);
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            row.Children.Add(t);
+        }
+        if (p.Spaces.Count > 1) row.ToolTip = "原本挂在:" + ProjectUi.SpacesText(p);
         return row;
     }
 

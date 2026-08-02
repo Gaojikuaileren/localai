@@ -29,7 +29,9 @@ public sealed class ChatView : UserControl
     readonly StackPanel _backBtnHost = new() { Orientation = Orientation.Horizontal };
     readonly ContentControl _ghostHost = new();   // 幽灵按钮:仅普通会话显示,且随幽灵状态换实线/虚线
     readonly ContentControl _newBtnHost = new();  // 新建会话按钮:只读项目(已删/已完成)下隐藏
-    readonly DockPanel _actionsRow = new() { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6) };
+    // ★ MinHeight 固定成最高那颗按钮(幽灵 26 > 新建 24):这一行的高度【不许随有没有按钮而变】。
+    //   否则切工作空间/进出项目时,下面整个会话列表会跟着上下跳几像素(用户反馈)。
+    readonly DockPanel _actionsRow = new() { LastChildFill = false, Margin = new Thickness(0, 0, 0, 6), MinHeight = 26 };
     bool _trashOpen;      // 已删除会话【覆盖板块】开着(覆盖普通会话列表,可返回)
     bool _wasEmptyState;  // 上一次会话区是"空态居中输入框"—— 用于居中→底部的滑动动画
     readonly Dictionary<string, int> _seenMsgCount = new();   // 会话 -> 已经出现过的消息条数(只给新增的播动画)
@@ -228,6 +230,77 @@ public sealed class ChatView : UserControl
     }
 
     /// <summary>
+    /// 深链进来:打开【指定的那一条】会话(必要时先进它所在的项目上下文)。
+    /// ★ 与 SelectProject 的区别:那边是"进项目,第一条会话我替你挑";
+    ///   这边是"就打开你点的这条" —— 跨空间跳转必须用这个,否则点 A 打开 B,静默错开。
+    /// </summary>
+    public void OpenSession(string? projectId, string sessionId)
+    {
+        _trashOpen = false;
+        _projectId = projectId;
+        _sessionId = sessionId;
+        TheApp.Chat.PurgeGhosts();
+        ApplySessionScene(TheApp.Chat.Find(sessionId));
+        BuildSessions();
+        BuildConversation();
+    }
+
+    /// <summary>
+    /// 把界面切到这条会话【自己所属的场景】。
+    ///
+    /// ★ 同一个工作空间里也分模块:翻译空间有【文字翻译】和【同声传译】两套界面,
+    ///   会话自己记着是哪一种(ChatSession.Interpret)。点开就把界面切过去。
+    /// ★★ 两个方向都要切。原先只做了"点同传记录 -> 切到同传"这一半;
+    ///   反过来在同传界面点开一条文字会话时不切回去,fail-closed 那道闸会让同传面板
+    ///   拿不到这条会话(interpSid 为 null),于是你点了它、屏幕上却什么也没打开。
+    /// </summary>
+    void ApplySessionScene(ChatSession? s)
+    {
+        if (s is null || !SpecFor(_wsKey).ModeSwitch) return;
+        TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret : TranslationMode.Text);
+    }
+
+    /// <summary>
+    /// 跨空间会话:不在本空间打开,而是【转到它自己的工作空间】去。
+    ///
+    /// ★ 为什么不能就地打开:会话的 WorkspaceKey 就是它的身份 ——
+    ///   翻译历史按 WorkspaceKey 取、【不看 ProjectId】(ChatCenter.AllTranslationSessions),
+    ///   所以在聊天界面里打开一条翻译会话、往里打聊天内容,那段内容会进翻译历史。
+    ///   转过去之后,内容归属和界面/AI 行为就都对得上了。
+    /// </summary>
+    void JumpToOwnWorkspace(ChatSession s)
+    {
+        var name = ProjectUi.SpaceName(s.WorkspaceKey);
+
+        // 认不出的 key(老存档里留着已经删掉的空间):跳过去只会静默什么都不发生,不如就地说清楚
+        if (!Workspaces.Known(s.WorkspaceKey))
+        {
+            ConfirmDialog.Show("这条会话打不开",
+                $"它记着的工作空间「{s.WorkspaceKey}」现在不存在了(多半是老存档留下的)。\n" +
+                "可以在它的三点菜单里用「发送到工作空间」,把它挪到一个还在的空间。",
+                confirmText: "知道了", cancelText: "关闭");
+            return;
+        }
+
+        // 在扩展里关掉的空间:用户明说过"我不要这个",一次点击就把人送进去属于越权 —— 先问
+        if (!TheApp.Settings.IsWorkspaceVisible(s.WorkspaceKey))
+        {
+            if (!ConfirmDialog.Show($"「{name}」已经在扩展里隐藏了",
+                    $"这条会话属于「{name}」。要前往吗?前往会把它重新显示在左栏。",
+                    confirmText: "前往并显示", cancelText: "取消")) return;
+            TheApp.Settings.SetWorkspaceVisible(s.WorkspaceKey, true);
+            (Application.Current.MainWindow as MainWindow)?.RefreshNavRail();
+        }
+        // ★ 切走会重建整个页面,这边没发出去的草稿和待发附件【不会跟过去】—— 别默默丢
+        else if ((!string.IsNullOrWhiteSpace(_draft) || _pending.Count > 0)
+                 && !ConfirmDialog.Show("切到别的工作空间?",
+                        $"这条会话属于「{name}」,点开会切过去。\n这边还没发出去的内容不会带过去。",
+                        confirmText: "切过去", cancelText: "留在这里")) return;
+
+        (Application.Current.MainWindow as MainWindow)?.NavigateToSession(s.WorkspaceKey, s.ProjectId, s.SessionId);
+    }
+
+    /// <summary>
     /// 回到普通会话。★ 用户裁定:从项目/幽灵/垃圾篓等任何地方回来,都落在【空会话】
     /// (输入框居中的新会话态),而不是自动跳进排第一的那条旧对话 —— 那样很突兀,
     /// 像是替用户决定"你接着聊这个"。想继续旧会话,右侧列表点一下即可。
@@ -256,7 +329,11 @@ public sealed class ChatView : UserControl
         if (inProject) _backBtnHost.Children.Add(BackChip());
 
         // 幽灵按钮:★ 只在【普通会话】上下文显示(项目会话里不给);图标在幽灵中转【实线】,退出后回【虚线】。
-        _ghostHost.Content = (_wsKey == "chat" && !inProject) ? GhostButton(InGhost) : null;
+        // ★★ 每个工作空间都给(2026-08-01 用户裁定)—— 原先只有聊天有。
+        //   判据是"这个空间给不给新建会话",而幽灵本来就是"建一条不留痕的会话":
+        //   `+` 已经在所有空间都给了,幽灵不比它更假。少给的那些空间里,
+        //   这一行还会因为少了个 26px 的按钮而比聊天矮 2px,列表整体跟着上下跳。
+        _ghostHost.Content = inProject ? null : GhostButton(InGhost);
         // 只读项目(已删除 / 已完成)下不给"新建会话"(不能往里加会话)。
         _newBtnHost.Visibility = ReadOnly ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -312,6 +389,20 @@ public sealed class ChatView : UserControl
             mic.VerticalAlignment = VerticalAlignment.Center;
             titleRow.Children.Add(mic);
         }
+        // ★ 跨空间会话(只会出现在项目会话列表里 —— 项目能同时挂多个工作空间,会话各归各的空间)。
+        //   标记方式:第三个前缀图标,和置顶点、同传麦克风同一个位置,用该空间自己的图标。
+        //   ★★【一个像素都不降】—— 这个库里"降透明度/换灰键"已经各有主人:
+        //     只读浏览是 Opacity 0.7、禁用模板直接换 FgMuted、日历里的灰日明写着"点了不跳月"。
+        //     而这条会话恰恰是【能点、点了会带你走】,拿灰去标它等于说反话。
+        //     所以整行保持满不透明 + FgPrimary + 手型光标(本库里"能点"的唯一说法),只加图标。
+        var foreign = s.WorkspaceKey != _wsKey;
+        if (foreign)
+        {
+            var wsIcon = Icons.Make(ProjectUi.SpaceIcon(s.WorkspaceKey), 12, selected ? "FgOnSelected" : "Accent");
+            wsIcon.Margin = new Thickness(0, 0, 5, 0);
+            wsIcon.VerticalAlignment = VerticalAlignment.Center;
+            titleRow.Children.Add(wsIcon);
+        }
         var title = new TextBlock { Text = s.Title, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         // ★ 选中态字色跟着底色走(墨白的 BgSelected 近黑,用 FgOnSelected 才不会黑底黑字)
         title.SetResourceReference(TextBlock.ForegroundProperty, selected ? "FgOnSelected" : "FgPrimary");
@@ -338,13 +429,20 @@ public sealed class ChatView : UserControl
         host.Background = selected ? (Brush)FindResource("BgSelected") : Brushes.Transparent;
         host.MouseEnter += (_, _) => { if (!selected) host.SetResourceReference(Border.BackgroundProperty, "BgHover"); dots.Opacity = 1; };
         host.MouseLeave += (_, _) => { if (!selected) host.Background = Brushes.Transparent; if (!selected) dots.Opacity = 0; };
+        // ★ 不属于本空间的:说清楚点了会发生什么。措辞是【陈述 + 后果】,
+        //   不许出现"不可用/只读/无法打开"那类词 —— 那是灰化的语言,和实际行为相反。
+        if (foreign)
+            host.ToolTip = $"这条会话属于「{ProjectUi.SpaceName(s.WorkspaceKey)}」工作空间。\n"
+                         + "点开会切到那边打开 —— 内容和界面都按那边来。";
         host.MouseLeftButtonUp += (_, _) =>
         {
+            // 跨空间:转到它自己的空间去开,而不是在这儿打开(理由见 JumpToOwnWorkspace)
+            if (foreign) { JumpToOwnWorkspace(s); return; }
             _sessionId = s.SessionId;
             TheApp.Chat.PurgeGhosts();
-            // ★ 同传记录只有在同传界面里才讲得通 —— 在文字翻译界面点开它就自动切过去,
-            //   而不是把两方对话塞进一个"翻成目标池"的界面里(那看着就是坏的)。
-            if (s.Interpret) TheApp.Interpret.SetMode(TranslationMode.Interpret);
+            // ★ 同一空间内也分模块(文字翻译 / 同声传译):点开就把界面切到这条会话自己那一套,
+            //   两个方向都切 —— 详见 ApplySessionScene。
+            ApplySessionScene(s);
             BuildSessions();
             BuildConversation();
         };
@@ -375,7 +473,10 @@ public sealed class ChatView : UserControl
         var movable = ChatCenter.CanMove(s);
 
         var move = new MenuItem { Header = "移动到项目" };
-        foreach (var p in TheApp.Projects.Ongoing(_wsKey))   // 只列本工作空间的项目
+        // ★ 按【会话自己的空间】列,不是按当前视图的空间(审计 2026-08-01)——
+        //   项目会话列表里会出现跨空间的会话;拿视图的空间去列,等于把一条翻译会话
+        //   往聊天的项目里搬,而 MoveToProject 只改 ProjectId、不改 WorkspaceKey,搬完还是跨空间的。
+        foreach (var p in TheApp.Projects.Ongoing(s.WorkspaceKey))
         {
             var mi = new MenuItem { Header = p.Title, IsChecked = s.ProjectId == p.ProjectId };
             var pid = p.ProjectId;
@@ -394,11 +495,15 @@ public sealed class ChatView : UserControl
         }
         if (movable) m.Items.Add(move);
 
-        // 发送到其它工作空间(不含当前)
+        // 发送到其它工作空间。★ 两处修正(2026-08-01):
+        //   ① 排除的是【会话自己】所在的空间,不是当前视图 —— 否则对一条跨空间会话,
+        //      菜单里没有"送回本空间"(唯一想做的那个),却有一个送到它已经在的空间的死项(点了空转);
+        //   ② 只列左栏里【真的显示着】的空间 —— 在扩展里关掉等于用户说过"我不要这个",
+        //      往那儿送等于把东西塞进他看不见的地方。
         var toWs = new MenuItem { Header = "发送到工作空间" };
-        foreach (var w in Workspaces.All)
+        foreach (var w in Workspaces.Visible(TheApp.Settings))
         {
-            if (w.Key == _wsKey) continue;
+            if (w.Key == s.WorkspaceKey) continue;
             var mi = new MenuItem { Header = I18n.Strings.Get(w.TitleKey) };
             var key = w.Key;
             mi.Click += (_, _) => { if (_sessionId == s.SessionId) _sessionId = null; TheApp.Chat.MoveSessionToWorkspace(s.SessionId, key); };
@@ -1407,7 +1512,13 @@ public sealed class ChatView : UserControl
         // ★ 当前上下文里【已有空会话】就不重复建 —— 选中它并震荡提醒(用户裁定)。
         //   "上下文"按 _projectId 判定:普通会话/各项目各自算,互不影响。
         var inCtx = _projectId is { } pid ? TheApp.Chat.SessionsOf(pid) : TheApp.Chat.NormalSessions(_wsKey);
-        var empty = inCtx.FirstOrDefault(s => !TheApp.Chat.MessagesOf(s.SessionId).Any());
+        // ★★ 复用只在【本空间】的空会话上成立(审计 2026-08-01)。
+        //   SessionsOf 按 ProjectId 取、不看工作空间,而项目可以同时挂在多个空间下。
+        //   不加这一条,在翻译空间的项目里建了一条没打字的空会话之后,到聊天空间进同一个项目按 +,
+        //   会直接复用【那条翻译空会话】,你打的聊天内容就落进它 ——
+        //   翻译历史按 WorkspaceKey 取、不看 ProjectId,于是聊天内容成了翻译记录。
+        //   这条污染路径【一次都不经过会话行】,光靠列表上的标记拦不住它。
+        var empty = inCtx.FirstOrDefault(s => s.WorkspaceKey == _wsKey && !TheApp.Chat.MessagesOf(s.SessionId).Any());
         if (empty is not null)
         {
             _sessionId = empty.SessionId;
@@ -1881,6 +1992,8 @@ public sealed class ChatView : UserControl
         if (InGhost) { ToNormal(); FocusInputIfPresent(); return; }
         var g = TheApp.Chat.NewGhostSession(_wsKey);
         _sessionId = g.SessionId;
+        // 幽灵是一条普通(非同传)会话 —— 在同传界面按幽灵得先切回文字翻译,否则按了看不见它
+        ApplySessionScene(g);
         BuildSessions();
         BuildConversation();
         FocusInputIfPresent();

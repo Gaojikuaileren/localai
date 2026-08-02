@@ -142,6 +142,40 @@ public static class ProjectUi
 
     static ProjectCenter Projects => ((LocalAI.Client.App)Application.Current).Projects;
     static ChatCenter Chat => ((LocalAI.Client.App)Application.Current).Chat;
+    static AppSettings TheAppSettings => ((LocalAI.Client.App)Application.Current).Settings;
+
+    /// <summary>
+    /// 【移动】项目到某个工作空间 —— 换标签。
+    /// ★ 不再改写会话的 WorkspaceKey(原先会 SetSessionsWorkspace 全搬):
+    ///   会话所属的空间是它自己的身份,决定它进不进翻译历史、点开时按谁的界面来。
+    ///   项目换个标签就把别人的身份一起改了,正好造出"聊天内容混进翻译历史"那种污染。
+    /// ★ 还有会话待着的空间【摘不掉】—— 摘了那些会话在那儿就没有任何入口了。
+    ///   这不是偷偷保留:下面会如实说出哪几个空间被保留、为什么。
+    /// </summary>
+    static void MoveProjectTo(Project p, string key)
+    {
+        var withSessions = Chat.SessionSpacesOf(p.ProjectId);
+        var blocked = Projects.BlockedBySessions(p.ProjectId, p.Spaces.Where(k => k != key), withSessions);
+        if (blocked.Count > 0
+            && !ConfirmDialog.Show("有几个工作空间摘不掉",
+                   $"这个项目在 {string.Join("、", blocked.Select(SpaceName))} 里还有会话。\n"
+                 + "会话只能从项目进去,项目一旦在那儿消失,它们就再也找不到了 ——\n"
+                 + $"所以移动到「{SpaceName(key)}」之后,这几个标签会保留。",
+                   confirmText: "就这样移动", cancelText: "取消")) return;
+        Projects.MoveToWorkspace(p.ProjectId, key, withSessions);
+    }
+
+    /// <summary>【移除】某个工作空间标签。那儿还有会话就拒绝,并说清楚为什么 —— 不做点了没反应。</summary>
+    static void RemoveProjectFrom(Project p, string key)
+    {
+        var withSessions = Chat.SessionSpacesOf(p.ProjectId);
+        if (!Projects.RemoveFromWorkspace(p.ProjectId, key, withSessions))
+            ConfirmDialog.Show($"「{SpaceName(key)}」这个标签摘不掉",
+                $"这个项目在「{SpaceName(key)}」里还有会话。会话只能从项目进去,\n"
+              + "标签一摘,它们在那个空间就没有任何入口了。\n"
+              + "先把那些会话移走或删掉,再来摘标签。",
+                confirmText: "知道了", cancelText: "关闭");
+    }
 
     // ★ 菜单开着时点方块,应该【只关菜单】,不该顺势点进项目(用户反馈)。
     //   成因:关菜单发生在鼠标【按下】,而方块的动作挂在【松开】上 —— 松开那下就落到方块上了。
@@ -213,20 +247,24 @@ public static class ProjectUi
         // ---- 工作空间:移动(换标签) / 也放到(加标签) / 移除(减标签)----
         // ★ 三件事分开给,别塞进同一个菜单项:
         //   "移动"会把它从现在的空间拿走,"也放到"不会 —— 这两个后果差得太远,不能靠猜。
+        // ★ 目的地一律只列【左栏真的显示着】的空间(见 Workspaces.Visible):
+        //   在扩展里关掉 = 用户说过"我不要这个",把项目往那儿送等于塞进他看不见的地方。
+        //   ——【已经挂着的】标签不受此限,下面"从工作空间移除"照旧全列,否则藏起来的会变成死标签。
+        var visible = Workspaces.Visible(TheAppSettings);
+
         var toWs = new MenuItem { Header = "移动到工作空间(离开现有的)" };
-        foreach (var w in Workspaces.All)
+        foreach (var w in visible)
         {
             if (p.Spaces.Count == 1 && p.Spaces[0] == w.Key) continue;   // 已经只在这儿了,移过去是空操作
             var mi = new MenuItem { Header = SpaceName(w.Key) };
             var key = w.Key;
-            // 会话跟着走 —— 移动是"换地方",留在原空间的会话会变成找不到出处的孤儿
-            mi.Click += (_, _) => { Projects.MoveToWorkspace(p.ProjectId, key); Chat.SetSessionsWorkspace(p.ProjectId, key); };
+            mi.Click += (_, _) => MoveProjectTo(p, key);
             toWs.Items.Add(mi);
         }
-        m.Items.Add(toWs);
+        if (toWs.Items.Count > 0) m.Items.Add(toWs);
 
         var alsoWs = new MenuItem { Header = "也放到工作空间(保留现有的)" };
-        foreach (var w in Workspaces.All)
+        foreach (var w in visible)
         {
             if (p.InWorkspace(w.Key)) continue;
             var mi = new MenuItem { Header = SpaceName(w.Key) };
@@ -246,7 +284,7 @@ public static class ProjectUi
             {
                 var mi = new MenuItem { Header = SpaceName(k) };
                 var key = k;
-                mi.Click += (_, _) => Projects.RemoveFromWorkspace(p.ProjectId, key);
+                mi.Click += (_, _) => RemoveProjectFrom(p, key);
                 offWs.Items.Add(mi);
             }
             m.Items.Add(offWs);

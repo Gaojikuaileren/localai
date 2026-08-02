@@ -345,16 +345,32 @@ public sealed class ProjectCenter
     public static bool Visible(Project p) => MemberContext.CanSee(p.Scope, p.OwnerMemberId);
 
     /// <summary>
-    /// 把项目【移动】到另一个工作空间 —— 换标签:原来的标签全部去掉,只留这一个。
-    /// 它名下的会话由调用方一并迁移(SetSessionsWorkspace)。
+    /// 把项目【移动】到另一个工作空间 —— 换标签:原来的标签去掉,只留这一个。
+    ///
+    /// ★★ 例外(2026-08-01 用户裁定的直接后果):<paramref name="spacesWithSessions"/> 里的空间
+    ///   【摘不掉】—— 那儿还有这个项目的会话。会话只按 ProjectId 归属项目(ChatCenter.SessionsOf),
+    ///   它们进不了任何一个按工作空间的清单;项目在那个空间消失了,那些会话就再没有入口。
+    /// ★ 这里【不再改写会话的 WorkspaceKey】。会话所属的空间就是它自己的身份:
+    ///   决定它进不进翻译历史、点开时界面按谁来。项目换个标签就把别人的身份一起改了,
+    ///   正好制造出"聊天内容混进翻译历史"这类污染 —— 那恰恰是这套规则要防的事。
     /// </summary>
-    public void MoveToWorkspace(string projectId, string workspaceKey)
+    public void MoveToWorkspace(string projectId, string workspaceKey, IReadOnlyCollection<string>? spacesWithSessions = null)
     {
         var i = _items.FindIndex(x => x.ProjectId == projectId);
-        if (i < 0) return;
-        if (_items[i].WorkspaceKey == workspaceKey && _items[i].AlsoIn is not { Count: > 0 }) return;
-        _items[i] = _items[i] with { WorkspaceKey = workspaceKey, AlsoIn = null };
+        if (i < 0 || string.IsNullOrWhiteSpace(workspaceKey)) return;
+        var spaces = new List<string> { workspaceKey };
+        foreach (var k in spacesWithSessions ?? Array.Empty<string>())
+            if (!string.IsNullOrWhiteSpace(k) && !spaces.Contains(k, StringComparer.Ordinal)) spaces.Add(k);
+        if (_items[i].Spaces.SequenceEqual(spaces, StringComparer.Ordinal)) return;
+        _items[i] = _items[i] with { WorkspaceKey = spaces[0], AlsoIn = spaces.Skip(1).ToList() };
         Changed?.Invoke();
+    }
+
+    /// <summary>移动/摘标签会被哪些空间挡下来 —— 界面据此如实说明,而不是点了没反应。</summary>
+    public IReadOnlyList<string> BlockedBySessions(string projectId, IEnumerable<string> dropping, IReadOnlyCollection<string>? spacesWithSessions)
+    {
+        if (spacesWithSessions is null) return Array.Empty<string>();
+        return dropping.Where(k => spacesWithSessions.Contains(k, StringComparer.Ordinal)).Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>
@@ -375,9 +391,12 @@ public sealed class ProjectCenter
     /// ★ 不允许移到零个标签 —— 那样这个项目在任何工作空间里都看不见了,只能靠"全部"翻出来,
     ///   等于用一次误点把它藏起来。要真的不想要了,走删除(那条路有回收站)。
     /// ★ 去掉的若是主标签,把剩下的第一个提上来当主标签。
+    /// ★★ 那个空间里还有本项目的会话时也【不许摘】(见 MoveToWorkspace 的说明):
+    ///   摘了它们在那儿就没有任何入口了。
     /// </summary>
-    public bool RemoveFromWorkspace(string projectId, string workspaceKey)
+    public bool RemoveFromWorkspace(string projectId, string workspaceKey, IReadOnlyCollection<string>? spacesWithSessions = null)
     {
+        if (spacesWithSessions is not null && spacesWithSessions.Contains(workspaceKey, StringComparer.Ordinal)) return false;
         var i = _items.FindIndex(x => x.ProjectId == projectId);
         if (i < 0) return false;
         var p = _items[i];

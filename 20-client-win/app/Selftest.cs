@@ -386,7 +386,13 @@ public static class Selftest
                 // 幽灵会话可退出:按钮是开关,状态决定实线/虚线,且只在普通会话上下文出现
                 Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal();"), "幽灵按钮可【退出】(再按回普通会话的空态)");
                 Assert(chatSrc.Contains("GhostButton(bool active)") && chatSrc.Contains("if (!active) ring.StrokeDashArray"), "幽灵中=实线,未进入=虚线");
-                Assert(chatSrc.Contains("(_wsKey == \"chat\" && !inProject) ? GhostButton(InGhost) : null"), "项目会话下不显示幽灵按钮");
+                Assert(chatSrc.Contains("_ghostHost.Content = inProject ? null : GhostButton(InGhost)"), "项目会话下不显示幽灵按钮");
+                // ★ 幽灵按钮【每个工作空间都给】(2026-08-01 用户裁定)——
+                //   判据是"这个空间给不给新建会话",而 + 已经在所有空间都给了。
+                Assert(!chatSrc.Contains("_wsKey == \"chat\" && !inProject"),
+                       "★ 幽灵按钮不再只给聊天(少给的空间会因为少一颗 26px 按钮而整列跳 2px)");
+                Assert(chatSrc.Contains("Margin = new Thickness(0, 0, 0, 6), MinHeight = 26 }"),
+                       "★ 动作行高度固定 —— 列表位置不许随有没有按钮而上下跳");
                 Assert(chatSrc.Contains("_ctxTitle.MaxHeight = 42") && chatSrc.Contains("_ctxTitle.TextWrapping = TextWrapping.Wrap"), "长项目名可显示两排,交互按钮另起一行");
                 Assert(chatSrc.Contains("Width = 16,") && chatSrc.Contains("BorderThickness = new Thickness(1, 1, 0, 1)"), "项目把手:窄条 + 右缘不描边(像被截断的面板)");
             }
@@ -1490,8 +1496,10 @@ public static class Selftest
             var cvIS = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvIS is not null)
             {
-                Assert(cvIS.Contains("if (s.Interpret) TheApp.Interpret.SetMode(TranslationMode.Interpret);"),
-                       "★ 在文字翻译界面点开同传记录会自动切到同传界面");
+                Assert(cvIS.Contains("TheApp.Interpret.SetMode(s.Interpret ? TranslationMode.Interpret : TranslationMode.Text);"),
+                       "★ 点开会话就把界面切到它自己那套模块 —— 【两个方向都切】(在同传里点开文字会话要切回文字翻译,否则那条会话根本没被打开)");
+                Assert(cvIS.Contains("ApplySessionScene(s);") && cvIS.Contains("ApplySessionScene(TheApp.Chat.Find(sessionId));"),
+                       "列表点开与深链打开走同一条切场景的路(别一处切一处不切)");
                 Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
                        "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
                 Assert(cvIS.Contains("Icons.Make(IconName.Mic, 12"),
@@ -2146,6 +2154,99 @@ public static class Selftest
                              System.Text.Json.JsonSerializer.Serialize(pmu.Items))!;
                 Assert(rt.Count == 1 && rt[0].Spaces.Count == 2, "★ 标签能落盘也能读回(重启后不会退回单一空间)");
             }
+            // ---- 会话跟随【自己的】工作空间(2026-08-01 用户裁定 + 同日审计)----
+            //   项目可以同时挂多个空间,但会话各归各的空间:WorkspaceKey 决定它进不进翻译历史、
+            //   点开时按哪套界面渲染。跨空间的会话在项目列表里看得见,点开【转到它自己的空间】去。
+            {
+                var pw = new Services.ProjectCenter();
+                var cw = new Services.ChatCenter();
+                var proj = pw.Create("跨空间项目", null, null, Services.ProjectScope.Personal, "chat");
+                var sChat = cw.NewSession(proj.ProjectId, "chat");
+                var sTrans = cw.NewSession(proj.ProjectId, "translation");
+                pw.AddToWorkspace(proj.ProjectId, "translation");
+
+                Assert(cw.SessionsOf(proj.ProjectId).Count() == 2, "项目会话列表里两个空间的会话都在(不按空间过滤)");
+                var spaces = cw.SessionSpacesOf(proj.ProjectId);
+                Assert(spaces.Contains("chat") && spaces.Contains("translation") && spaces.Count == 2,
+                       "★ 数得出这个项目的会话散在哪些工作空间(给摘标签当护栏)");
+
+                // ★ 摘标签的护栏:那儿还有会话就摘不掉
+                Assert(!pw.RemoveFromWorkspace(proj.ProjectId, "translation", spaces),
+                       "★ 那个空间还有本项目的会话时,标签【摘不掉】—— 摘了那些会话在那儿就没有任何入口");
+                Assert(pw.Find(proj.ProjectId)!.InWorkspace("translation"), "被拦下之后标签原样还在");
+
+                // ★ 移动 = 换标签,但有会话的空间保留;而且【一个会话的 WorkspaceKey 都不许被改写】
+                pw.MoveToWorkspace(proj.ProjectId, "courses", spaces);
+                var moved = pw.Find(proj.ProjectId)!;
+                Assert(moved.PrimarySpace == "courses" && moved.InWorkspace("chat") && moved.InWorkspace("translation"),
+                       "★ 移动项目时,还有会话待着的空间标签保留(否则那些会话找不回来)");
+                Assert(cw.Find(sChat.SessionId)!.WorkspaceKey == "chat" && cw.Find(sTrans.SessionId)!.WorkspaceKey == "translation",
+                       "★★ 移动项目【不改写会话的所属空间】—— 那是会话自己的身份,改了正好制造翻译历史污染");
+
+                // 翻译历史按 WorkspaceKey 取、不看 ProjectId:所以那条翻译项目会话【本来就在历史里】,
+                // 而聊天那条【绝不能】混进去 —— 这正是"点开跨空间会话要转过去"要保护的东西。
+                var th = cw.AllTranslationSessions().Select(x => x.SessionId).ToList();
+                Assert(th.Contains(sTrans.SessionId) && !th.Contains(sChat.SessionId),
+                       "★ 翻译历史只收 WorkspaceKey=translation 的(含项目会话)—— 聊天那条不许混进来");
+
+                // 把会话搬走之后,标签才摘得掉
+                cw.MoveSessionToWorkspace(sTrans.SessionId, "courses");
+                Assert(pw.RemoveFromWorkspace(proj.ProjectId, "translation", cw.SessionSpacesOf(proj.ProjectId)),
+                       "把那些会话搬走之后,标签就摘得掉了(护栏不是死锁)");
+            }
+            var ccJump = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+            if (ccJump is not null)
+                Assert(!ccJump.Contains("public void SetSessionsWorkspace"),
+                       "★ 不再有【项目搬空间就批量改写会话所属空间】这个方法(它正好制造要防的污染)");
+            var mwJump = TryReadSource("MainWindow.xaml.cs");
+            if (mwJump is not null)
+            {
+                Assert(mwJump.Contains("public void NavigateToSession(string workspaceKey, string? projectId, string sessionId)"),
+                       "★ 有一条能带 sessionId 的跳转通路 —— 只有 NavigateToProject 的话,跳过去打开的是它替你挑的另一条会话");
+                Assert(mwJump.Contains("if (!Workspaces.Known(workspaceKey)) return;"),
+                       "认不出的工作空间 key 不跳(老存档里会留着已删掉的空间)");
+            }
+            var cvXws = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+            if (cvXws is not null)
+            {
+                Assert(cvXws.Contains("if (foreign) { JumpToOwnWorkspace(s); return; }"),
+                       "★ 点跨空间会话 = 转到它自己的空间打开,不在本空间就地打开");
+                Assert(cvXws.Contains("Icons.Make(ProjectUi.SpaceIcon(s.WorkspaceKey), 12"),
+                       "跨空间会话用【它那个空间的图标】做前缀标记(与置顶点、同传麦克风同一位置)");
+                // ★ 负向:不许拿"灰化"表示跨空间 —— 这个库里降透明度/换灰键已经表示【只读】或【不可用】,
+                //   而跨空间会话恰恰是能点、点了会带你走。两种灰两个意思,必然被读错。
+                //   只看每一处 if (foreign) 后面那一小段:降级样式只可能写在那里面
+                //   (整行别处的 Opacity 是三点按钮的 hover 显隐,与这条规则无关)。
+                var segs = new List<string>();
+                for (int at = 0; (at = cvXws.IndexOf("if (foreign)", at, StringComparison.Ordinal)) >= 0; at += 12)
+                    segs.Add(cvXws.Substring(at, Math.Min(300, cvXws.Length - at)));
+                Assert(segs.Count >= 2 && segs.All(x => !x.Contains("Opacity") && !x.Contains("FgMuted") && !x.Contains("IsEnabled")),
+                       "★ 跨空间会话【一个像素都不降】(不灰、不禁用)—— 那些样式在本库里表示【不可用】,与实际行为相反");
+                Assert(cvXws.Contains("s.WorkspaceKey == _wsKey && !TheApp.Chat.MessagesOf(s.SessionId).Any()"),
+                       "★★ 按 + 复用空会话只在【本空间】的会话上成立 —— 这条污染路径一次都不经过会话行,标记拦不住它");
+                Assert(cvXws.Contains("foreach (var w in Workspaces.Visible(TheApp.Settings))") && cvXws.Contains("if (w.Key == s.WorkspaceKey) continue;"),
+                       "★「发送到工作空间」按【会话自己】的空间排除,且只列左栏可见的空间");
+                Assert(cvXws.Contains("TheApp.Projects.Ongoing(s.WorkspaceKey)"),
+                       "「移动到项目」列的是会话自己那个空间的项目(拿视图的空间列,搬完还是跨空间的)");
+            }
+            var wsVis = TryReadSource(Path.Combine("Views", "Workspaces.cs"));
+            if (wsVis is not null)
+                Assert(wsVis.Contains("public static List<Def> Visible(Services.AppSettings settings)"),
+                       "有【左栏真的显示着】的工作空间清单(目的地菜单一律用它)");
+            var puVis = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
+            if (puVis is not null)
+            {
+                Assert(puVis.Contains("var visible = Workspaces.Visible(TheAppSettings);"),
+                       "★ 移动/也放到 的目的地只列左栏可见的空间(在扩展里关掉 = 用户说过不要它)");
+                Assert(puVis.Contains("foreach (var k in p.Spaces)") && puVis.Contains("RemoveProjectFrom(p, key)"),
+                       "「从工作空间移除」照旧列出全部已挂标签(含隐藏的),否则藏起来的会变成摘不掉的死标签");
+                Assert(!puVis.Contains("Chat.SetSessionsWorkspace"), "移动项目不再连带改写会话所属空间");
+            }
+            var ppOrigin = TryReadSource(Path.Combine("Views", "ProjectPickerView.cs"));
+            if (ppOrigin is not null)
+                Assert(ppOrigin.Contains("for (int i = 0; i < p.Spaces.Count; i++)"),
+                       "★ 已删除项目方块把【全部】工作空间标签都标出来(原先只标主标签,恢复后又变多个,前后不一致)");
+
             var pcTag = TryReadSource(Path.Combine("Services", "ProjectCenter.cs"));
             if (pcTag is not null)
             {
