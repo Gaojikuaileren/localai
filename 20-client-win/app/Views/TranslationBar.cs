@@ -407,11 +407,21 @@ public sealed class TranslationBar : UserControl
     // ---------------------------------------------------------------- 文件翻译:工具栏(D59)
     FrameworkElement _fileTools = null!;
     readonly WrapPanel _fileToolsRow = new() { Orientation = Orientation.Horizontal };
+    readonly ContentControl _fileStartHost = new() { Focusable = false };   // 主动作宿主(永不被裁)
 
     FrameworkElement FileToolsCard()
     {
+        // ★ 自适应与排序(裁定 2026-08-02,D59 四补,沿用 D58 的课):
+        //   「开始翻译」是这一格的主动作 -> 自己的宿主、Dock.Right 常驻,任何宽度都不被裁;
+        //   其余工具在 WrapPanel 里按【动作 -> 整理 -> 偏好】排,窄了换行:
+        //   AI 自动标注(用户定死第一位)· 撤回 · 清除所选 · 清空全部 | 实时预览 · 双语对照 · 行政翻译
+        var toolsRow = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(_fileStartHost, Dock.Right);
+        _fileStartHost.VerticalAlignment = VerticalAlignment.Center;
+        toolsRow.Children.Add(_fileStartHost);
+        toolsRow.Children.Add(_fileToolsRow);
         var body = new StackPanel();
-        body.Children.Add(_fileToolsRow);
+        body.Children.Add(toolsRow);
         var tip = Ui.Caption("左键:画框 / 点框选中 / 按住角标移动 / 拉边调大小(Del 删除,Ctrl+Z 撤回);右键拖拽平移,滚轮缩放。「双语对照」「行政翻译」引擎接入(P4)后生效。");
         tip.Margin = new Thickness(0, 4, 0, 0);
         body.Children.Add(tip);
@@ -466,14 +476,15 @@ public sealed class TranslationBar : UserControl
         _fileToolsRow.Children.Add(new ToggleSwitch("行政翻译", ft.OfficialStyle,
             on => ft.SetOfficialStyle(on), compact: true));
 
-        // ⑤ 开始翻译:实时预览开着就【灰】(用户裁定 —— 实时模式下没有"开始"这回事)
-        var start = ToolChip("开始翻译", false, () =>
+        // 主动作:开始翻译(右侧常驻;实时预览开着就灰 —— 实时模式下没有"开始"这回事)
+        var start = ToolChip("开始翻译", true, () =>
             ConfirmDialog.Show("还不能翻译",
                 "翻译引擎(P4)还没接入 —— 标注框和文件都会保留,接入后一键出结果。",
                 confirmText: "知道了", cancelText: "关闭"));
         start.IsEnabled = !ft.RealtimePreview;
         start.Opacity = ft.RealtimePreview ? 0.45 : 1;
-        _fileToolsRow.Children.Add(start);
+        start.Margin = new Thickness(10, 0, 0, 0);
+        _fileStartHost.Content = start;
     }
 
     /// <summary>工具栏的小胶囊(与 Chip 同族;on = 选中态,给"创建标注框"这类开关用)。</summary>

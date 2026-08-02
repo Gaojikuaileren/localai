@@ -167,6 +167,7 @@ public sealed class FileTransPanel : UserControl
     readonly TextBlock _pageTag = new() { Text = "" };
     Border _pageHost = null!;
     bool _isPdf;
+    bool _usingCache;   // 源没了、在用导入时的副本(角标里如实标注)
 
     void PickFile()
     {
@@ -197,21 +198,26 @@ public sealed class FileTransPanel : UserControl
     void Rebuild()
     {
         var doc = TheApp.FileTrans.DocOf(Sid);
-        if (doc is null || !File.Exists(doc.Path))
+        var readable = doc is null ? null : Services.FileTransState.ReadablePath(doc);
+        if (doc is null || readable is null)
         {
             _img.Source = null;
             if (_pageHost is not null) _pageHost.Visibility = Visibility.Collapsed;
             _emptyHost.Visibility = Visibility.Visible;
+            // ★ 源和副本都没有(老会话/副本复制失败):标注框还在数据里,但没有底图就没法画 ——
+            //   如实说清,而不是画一堆浮在空气上的框
             _hint.Text = doc is null
-                ? "把 PNG / JPG / PDF 拖到这里,或点下面导入。\n再用右下工具栏的「创建标注框」圈出要翻译的部分。"
-                : $"原文件不在了:{doc.Path}\n(移动或删除了的话,重新导入一次。)";
+                ? "把 PNG / JPG / PDF 拖到这里,或点下面导入。\n左键即可在预览上圈出要翻译的部分。"
+                : $"原文件不在了:{doc.Path}\n导入时的副本也不可用。标注框({doc.Boxes.Count} 个)还留着 —— 重新导入同一份文件即可继续。";
             RedrawBoxes();
             return;
         }
+        // 源没了、用的是副本 -> 页码角标旁如实标注
+        _usingCache = !File.Exists(doc.Path);
         _emptyHost.Visibility = Visibility.Collapsed;
-        _isPdf = Path.GetExtension(doc.Path).ToLowerInvariant() == ".pdf";
+        _isPdf = Path.GetExtension(readable).ToLowerInvariant() == ".pdf";
         _pageHost.Visibility = Visibility.Visible;
-        _pageTag.Text = _isPdf ? "第 1 页 / ?" : "第 1 页 / 1";
+        _pageTag.Text = (_isPdf ? "第 1 页 / ?" : "第 1 页 / 1") + (_usingCache ? " · 源文件已不在,用导入时的副本" : "");
         if (_isPdf)
         {
             // ★ 如实:PDF 的渲染要 WinRT(随引擎一起接),现在不画一个假封面
@@ -226,7 +232,7 @@ public sealed class FileTransPanel : UserControl
                 var bmp = new BitmapImage();
                 bmp.BeginInit();
                 bmp.CacheOption = BitmapCacheOption.OnLoad;   // 不锁文件
-                bmp.UriSource = new Uri(doc.Path);
+                bmp.UriSource = new Uri(readable);
                 bmp.EndInit();
                 _img.Source = bmp;
             }

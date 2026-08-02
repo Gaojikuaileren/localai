@@ -16,7 +16,7 @@ namespace LocalAI.Client.Services;
 public sealed record MarkBox(double X, double Y, double W, double H);
 
 /// <summary>一个文件翻译文档:原文件 + 标注框。译文输出等引擎(P4)。</summary>
-public sealed record FileDoc(string Path, List<MarkBox> Boxes);
+public sealed record FileDoc(string Path, List<MarkBox> Boxes, string? Cache = null);
 
 public sealed class FileTransState
 {
@@ -44,11 +44,31 @@ public sealed class FileTransState
     public FileDoc? DocOf(string? sessionId)
         => sessionId is not null && _docs.TryGetValue(sessionId, out var d) ? d : null;
 
+    /// <summary>缓存目录:导入时把源文件复制一份进来。</summary>
+    public static string CacheDir => System.IO.Path.Combine(AppPaths.StateDir, "filetrans");
+
+    // ★★ 导入即复制副本(裁定 2026-08-02,D59 四补):会话本身就是记录 ——
+    //   用户导入一张图、回头清理了下载文件夹,这个会话不该跟着死(框指着空气、译文成孤儿)。
+    //   剪贴板截图早已是同一条纪律(粘贴即落 clips\)。代价是占一份磁盘,如实认;
+    //   源文件还在就优先用源(用户改了源文件能看到最新的),源没了退回副本并在界面说明。
     public void SetFile(string sessionId, string path)
     {
-        _docs[sessionId] = new FileDoc(path, _docs.TryGetValue(sessionId, out var old) ? old.Boxes : new List<MarkBox>());
+        string? cache = null;
+        try
+        {
+            System.IO.Directory.CreateDirectory(CacheDir);
+            cache = System.IO.Path.Combine(CacheDir, sessionId + System.IO.Path.GetExtension(path).ToLowerInvariant());
+            System.IO.File.Copy(path, cache, overwrite: true);
+        }
+        catch { cache = null; }   // 复制失败就没有副本 —— 界面在源丢失时如实说"副本也没有"
+        _docs[sessionId] = new FileDoc(path, _docs.TryGetValue(sessionId, out var old) ? old.Boxes : new List<MarkBox>(), cache);
         Changed?.Invoke();
     }
+
+    /// <summary>真正可读的文件:源还在用源,没了退回导入时的副本;都没有返回 null。</summary>
+    public static string? ReadablePath(FileDoc d)
+        => System.IO.File.Exists(d.Path) ? d.Path
+         : d.Cache is not null && System.IO.File.Exists(d.Cache) ? d.Cache : null;
 
     public void AddBox(string sessionId, MarkBox box)
     {
@@ -107,8 +127,13 @@ public sealed class FileTransState
         return true;
     }
 
-    /// <summary>会话没了,它的文档也清掉(界面在会话删除时调)。</summary>
-    public void Drop(string sessionId) { if (_docs.Remove(sessionId)) Changed?.Invoke(); }
+    /// <summary>会话没了,它的文档【和缓存副本】一起清掉。</summary>
+    public void Drop(string sessionId)
+    {
+        if (_docs.TryGetValue(sessionId, out var d) && d.Cache is not null)
+            try { System.IO.File.Delete(d.Cache); } catch { }
+        if (_docs.Remove(sessionId)) Changed?.Invoke();
+    }
 
     // ---- 存档(文件路径 + 标注框;工具态/预览开关不落盘)----
     public Dictionary<string, FileDoc> Export() => new(_docs);
