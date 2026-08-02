@@ -32,6 +32,7 @@ public partial class App : Application
     /// <summary>「待办与家务」——主页待办板块的数据源(中枢自有数据,手动增删改当场生效)。</summary>
     public TodoCenter Todos { get; } = new();
     public FileTransState FileTrans { get; } = new();   // 文件翻译(D59)
+    public I18nState I18n { get; } = new();              // 多语言表(D60)
     /// <summary>聊天:普通会话 + 项目会话。AI 未接入,发送只记录不伪造回复。</summary>
     public ChatCenter Chat { get; } = new();
     /// <summary>记忆库:AI 生成的摘要/事实。★ AI 未接入(P4)前不会有任何内容,界面如实说明。</summary>
@@ -341,6 +342,7 @@ public partial class App : Application
         SafeImport(ClientStore.InterpretPath, () => Interpret.Import(ClientStore.Load<InterpretState.Snapshot>(ClientStore.InterpretPath)));
         SafeImport(ClientStore.TranslationPath, () => Translation.Import(ClientStore.Load<TranslationState.Snapshot>(ClientStore.TranslationPath)));
         SafeImport(ClientStore.FileTransPath, () => FileTrans.Import(ClientStore.Load<Dictionary<string, FileDoc>>(ClientStore.FileTransPath)));
+        SafeImport(ClientStore.I18nPath, () => I18n.Import(ClientStore.Load<I18nDoc>(ClientStore.I18nPath)));
         // ★ 旧存档可能有"同一路径两个项目"(那时还没唯一性约束):合并掉,会话并到保留的那个。
         //   只合并【完全相同的路径 + 同一台机器】—— 子路径不算重复(用户裁定)。
         var merged = Projects.MergeDuplicateFolders((fromId, toId) => Chat.ReassignSessions(fromId, toId)) > 0;
@@ -362,6 +364,7 @@ public partial class App : Application
         Projects.Changed += Touch;
         Todos.Changed += Touch;
         FileTrans.Changed += Touch;
+        I18n.Changed += Touch;
         Chat.Changed += Touch;
         Views.CalendarData.Changed += Touch;
         // ★ 天气缓存也要落盘 —— 不接这一行的话,缓存只活在内存里,
@@ -390,6 +393,7 @@ public partial class App : Application
         S(ClientStore.InterpretPath, Interpret.Export());
         S(ClientStore.TranslationPath, Translation.Export());
         S(ClientStore.FileTransPath, FileTrans.Export());
+        S(ClientStore.I18nPath, I18n.ExportDoc());
     }
 
     void RegisterCleanupSteps()

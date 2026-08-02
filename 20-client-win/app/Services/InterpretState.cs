@@ -28,6 +28,8 @@ public enum TranslationMode
     Reserved,
     /// <summary>文件翻译(第三场景,用户裁定 2026-08-02,D59):PDF/PNG/JPG 进,同排版出。</summary>
     FileTrans,
+    /// <summary>多语言表(第四场景,用户裁定 2026-08-02,D60):开发者的 i18n 键值表翻译与导出。</summary>
+    I18n,
 }
 
 public sealed class InterpretState

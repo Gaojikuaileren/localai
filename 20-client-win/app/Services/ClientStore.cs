@@ -27,6 +27,7 @@ public static class ClientStore
     public static string ProjectsPath => Path.Combine(AppPaths.StateDir, "projects.json");
     public static string TodosPath => Path.Combine(AppPaths.StateDir, "todos.json");
     public static string FileTransPath => Path.Combine(AppPaths.StateDir, "filetrans.json");
+    public static string I18nPath => Path.Combine(AppPaths.StateDir, "i18n.json");
     public static string CalendarPath => Path.Combine(AppPaths.StateDir, "calendar.json");
     /// <summary>天气缓存(只存读数与它的时间戳,不存坐标)。</summary>
     public static string WeatherPath => Path.Combine(AppPaths.StateDir, "weather.json");

@@ -1008,7 +1008,7 @@ public sealed class ChatView : UserControl
                      (TranslationMode.Text, IconName.Translation, "文字翻译"),
                      (TranslationMode.Interpret, IconName.Mic, "同声传译"),
                      (TranslationMode.FileTrans, IconName.File, "文件翻译"),
-                     (TranslationMode.Reserved, IconName.Dots, "未定"),
+                     (TranslationMode.I18n, IconName.Extensions, "多语言"),
                  })
         {
             var on = TheApp.Interpret.Mode == mode;
@@ -1074,7 +1074,10 @@ public sealed class ChatView : UserControl
                 var ftSid = _sessionId is { } fsid && TheApp.Chat.Find(fsid)?.FileTrans == true ? _sessionId : null;
                 body.Children.Add(mode == TranslationMode.Interpret ? new InterpretPanel(interpSid)
                     : mode == TranslationMode.FileTrans ? new FileTransPanel(ftSid)
+                    : mode == TranslationMode.I18n ? new I18nPanel()
                     : (FrameworkElement)ReservedScenePlaceholder());
+                // ★ 多语言场景不挂下面那条语言池/历史横条 —— 它的语言不限量,选择器长在面板顶栏
+                if (mode == TranslationMode.I18n) spec = spec with { BottomAccessory = null };
                 var only = ConvCard(body);
                 if (spec.BottomAccessory is null) return only;
                 var wrap = new DockPanel { LastChildFill = true };

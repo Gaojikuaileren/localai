@@ -2240,6 +2240,30 @@ public static class Selftest
                            "★ 所有会话的三点菜单都有【引用该会话】(复制 ID,发到别的会话让 AI 读;AI 未接入前如实说明)");
             }
 
+            // ---- 多语言表(D60,2026-08-02/03 用户裁定)----
+            {
+                var i18 = new Services.I18nState();
+                Assert(i18.ImportJson("{\"b\":\"你好 {name}\",\"a\":\"开始\"}") == 2, "平铺 JSON 能导入");
+                Assert(i18.Doc.Entries[0].Key == "a", "★ 键序排序(硬规则②:diff 干净)");
+                Assert(i18.ImportJson("{bad json") == -1, "★ 非法 JSON 拒绝导入 —— 不吞半张表");
+                Assert(Services.I18nState.Placeholders("你好 {name} %s 第{0}个").Length == 3, "占位符提取:{x}/%s/{0}");
+                Assert(!Services.I18nState.PlaceholdersOk("你好 {name}", "Hello name"), "★ 占位符丢了 = 坏译文");
+                Assert(Services.I18nState.PlaceholdersOk("你好 {name}", ""), "空译文是【缺】不是【错】");
+                i18.AddLang("en"); i18.AddLang("en"); i18.AddLang("ja"); i18.AddLang("pt-BR");
+                Assert(i18.Doc.TargetLangs.Count == 3, "★ 目标语言不限量且去重(pt-BR 这类自定义码也收)");
+                i18.Doc.Entries[1].Trans["en"] = "Hello name";   // 占位符坏
+                var (okA, msgA) = i18.Export(Path.Combine(Path.GetTempPath(), "localai-i18n-" + Guid.NewGuid().ToString("N")[..6]));
+                Assert(!okA && msgA.Contains("占位符"), "★★ 占位符校验不过【拒绝导出】(硬规则③:AI/引擎读了会炸)");
+                i18.Doc.Entries[1].Trans["en"] = "Hello {name}";
+                var dir2 = Path.Combine(Path.GetTempPath(), "localai-i18n-" + Guid.NewGuid().ToString("N")[..6]);
+                var (okB, _) = i18.Export(dir2);
+                Assert(okB && File.Exists(Path.Combine(dir2, "strings.i18n.json")) && File.Exists(Path.Combine(dir2, "en.json")),
+                       "★ 一源两出:对照表 + 每语言平铺文件");
+                var enBytes = File.ReadAllBytes(Path.Combine(dir2, "en.json"));
+                Assert(enBytes.Length > 0 && enBytes[0] != 0xEF, "★ UTF-8 无 BOM(硬规则①)");
+                try { Directory.Delete(dir2, true); } catch { }
+            }
+
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----
             {
                 var cPurple = Views.HomeView.TempColor(-20);
