@@ -39,6 +39,48 @@ public sealed class I18nState
     }
     public void RemoveLang(string code) { if (Doc.TargetLangs.Remove(code)) Changed?.Invoke(); }
 
+    /// <summary>手建词条(空表也能开工,用户裁定 2026-08-03):键非空且唯一;保持键序。</summary>
+    public bool AddEntry(string key)
+    {
+        key = key.Trim();
+        if (key.Length == 0 || Doc.Entries.Any(e => e.Key == key)) return false;
+        Doc.Entries.Add(new I18nEntry(key, "", new()));
+        Doc.Entries.Sort((a, b) => string.CompareOrdinal(a.Key, b.Key));
+        Changed?.Invoke();
+        return true;
+    }
+
+    public void SetSourceLang(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code) || Doc.SourceLang == code) return;
+        Doc.TargetLangs.Remove(code);   // 不能既是源又是目标
+        Doc.SourceLang = code;
+        Changed?.Invoke();
+    }
+
+    /// <summary>全球使用者占比(含二语,占全球人口,粗粒度)。★ 静态数据(用户裁定),不联网、不装实时。</summary>
+    static readonly Dictionary<string, double> _pct = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["en"] = 18.0, ["zh"] = 17.0, ["hi"] = 7.5, ["es"] = 7.0, ["ar"] = 5.0, ["fr"] = 4.0,
+        ["bn"] = 3.5, ["pt"] = 3.4, ["ru"] = 3.2, ["ur"] = 3.0, ["id"] = 2.5, ["de"] = 1.7,
+        ["ja"] = 1.5, ["vi"] = 1.1, ["tr"] = 1.1, ["ko"] = 1.0, ["it"] = 0.8, ["th"] = 0.8,
+        ["pl"] = 0.5, ["nl"] = 0.4, ["uk"] = 0.5, ["el"] = 0.2, ["sv"] = 0.2, ["cs"] = 0.2,
+    };
+    public static double PercentValue(string code) => _pct.TryGetValue(code, out var v) ? v : -1;
+    public static string PercentOf(string code)
+        => _pct.TryGetValue(code, out var v) ? v.ToString("0.#") + "%" : "—";
+
+    /// <summary>给别的 AI 的格式说明(复制按钮用)—— 让对方产出我们能直接吃的对照 JSON。</summary>
+    public string PromptText()
+        => "请把下面的多语言词条表补全/翻译,并按【完全相同的 JSON 结构】返回,不要输出任何解释文字:\n"
+         + "{ \"键名\": { \"@src\": \"" + Doc.SourceLang + "\", \"" + Doc.SourceLang + "\": \"源文\", \"en\": \"译文\", ... } }\n"
+         + "硬规则:\n"
+         + "1. 严格合法 JSON(UTF-8,双引号,无尾逗号,无注释);\n"
+         + "2. 键名与 @src 原样保留,不增删改任何键;\n"
+         + "3. 源文中的占位符({name}、{0}、%s、%1$s 等)必须在每种译文中【原样】出现;\n"
+         + "4. 没把握的语言留空字符串 \"\",不要编造。\n"
+         + "目标语言:" + string.Join("、", Doc.TargetLangs) + "\n以下是词条表:\n" + ToTableJson();
+
     /// <summary>导入键值 JSON(平铺 {"key":"文案"} 或对照表)。返回读入条数,-1 = 解析失败。</summary>
     public int ImportJson(string json)
     {

@@ -432,33 +432,138 @@ public sealed class TranslationBar : UserControl
 
     FrameworkElement I18nBarCard()
     {
-        // 版式与其他场景同构:左 = 语言(源 + 目标 chips,不限量),右 = 工具,主动作最右常驻
-        var row = new DockPanel { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
+        // ★ 两张卡分开(用户裁定 2026-08-03):左「多语言设置」只管语言,右「工具」管按钮 ——
+        //   目标语言抽屉从底部拉出,【只覆盖左卡】(宽度=左卡)。
+        var langsBody = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        var row1 = new WrapPanel { Orientation = Orientation.Horizontal };
+        row1.Children.Add(_i18nSrcBox);
+        row1.Children.Add(_i18nTargetsBtnHost);
+        langsBody.Children.Add(row1);
+        langsBody.Children.Add(_i18nTargetsSummary);
+        var langsCard = Card(langsBody, "多语言设置", scroll: false);
+
+        // 抽屉:盖在左卡上,从底部展开;勾选目标语言,每种带全球使用者占比(静态)
+        _i18nDrawer.Visibility = Visibility.Collapsed;
+        var drawerCard = new Border { Child = _i18nDrawer, Padding = new Thickness(10), BorderThickness = new Thickness(1) };
+        drawerCard.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+        drawerCard.SetResourceReference(Border.BorderBrushProperty, "Accent");
+        drawerCard.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        _i18nDrawerHost = drawerCard;
+        drawerCard.Visibility = Visibility.Collapsed;
+
+        var leftStack = new Grid();
+        leftStack.Children.Add(langsCard);
+        leftStack.Children.Add(drawerCard);   // 覆盖层:宽高都跟左卡走
+
+        var toolsBody = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        var row2 = new DockPanel { LastChildFill = true };
         DockPanel.SetDock(_i18nMainHost, Dock.Right);
-        row.Children.Add(_i18nMainHost);
-        DockPanel.SetDock(_i18nTools, Dock.Right);
-        _i18nTools.Margin = new Thickness(10, 0, 10, 0);
-        row.Children.Add(_i18nTools);
-        row.Children.Add(_i18nLangs);
-        var body = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        body.Children.Add(row);
-        var tip = Ui.Caption("目标语言不限量;键与译文在上方编辑,「JSON 源码」整表直编(粘外部 AI 产物的通道)。");
+        row2.Children.Add(_i18nMainHost);
+        _i18nTools.Margin = new Thickness(0, 0, 10, 0);
+        row2.Children.Add(_i18nTools);
+        toolsBody.Children.Add(row2);
+        var tip = Ui.Caption("键与译文在上方网格直接编辑;「JSON 源码」整表直编;「复制 Prompt」给别的 AI 产出同格式 JSON。");
         tip.Margin = new Thickness(0, 4, 0, 0);
-        body.Children.Add(tip);
-        return Card(body, "多语言设置", scroll: false);
+        toolsBody.Children.Add(tip);
+        var toolsCard = Card(toolsBody, "工具", scroll: false);
+        toolsCard.Margin = new Thickness(Gap, 0, 0, 0);
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.4, GridUnitType.Star) });
+        Grid.SetColumn(leftStack, 0); grid.Children.Add(leftStack);
+        Grid.SetColumn(toolsCard, 1); grid.Children.Add(toolsCard);
+        return grid;
     }
+
+    readonly ComboBox _i18nSrcBox = new() { Width = 150, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+    readonly ContentControl _i18nTargetsBtnHost = new() { Focusable = false, VerticalAlignment = VerticalAlignment.Center };
+    readonly TextBlock _i18nTargetsSummary = new() { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(2, 4, 0, 0) };
+    readonly StackPanel _i18nDrawer = new();
+    FrameworkElement _i18nDrawerHost = null!;
+    bool _i18nDrawerOpen;
+    bool _i18nSrcInit;
 
     void RefreshI18nBar()
     {
         var st = TheApp.I18n;
-        _i18nLangs.Children.Clear();
-        _i18nLangs.Children.Add(ToolChip($"源:{st.Doc.SourceLang}", true, () => { }));
-        foreach (var l in st.Doc.TargetLangs)
-        { var cap = l; _i18nLangs.Children.Add(ToolChip(cap + " ×", false, () => st.RemoveLang(cap))); }
-        _i18nLangs.Children.Add(_i18nAddBox);
-        _i18nLangs.Children.Add(ToolChip("+ 语言", false, () =>
-        { var c = _i18nAddBox.Text.Trim(); if (c.Length > 0) { st.AddLang(c); _i18nAddBox.Text = ""; } }));
 
+        // ---- 源语言下拉:母语默认、英语第二、其余按目录(用户裁定)
+        if (!_i18nSrcInit)
+        {
+            _i18nSrcInit = true;
+            var native = string.IsNullOrWhiteSpace(TheApp.Settings.NativeLangOverride)
+                ? (TheApp.Settings.Language?.StartsWith("en") == true ? "en" : TheApp.Settings.Language?.StartsWith("ja") == true ? "ja" : "zh")
+                : TheApp.Settings.NativeLangOverride!;
+            var ordered = new List<string> { native };
+            if (!ordered.Contains("en")) ordered.Add("en");
+            foreach (var l in Services.Languages.Catalog) if (!ordered.Contains(l.Code)) ordered.Add(l.Code);
+            foreach (var code in ordered)
+                _i18nSrcBox.Items.Add(new ComboBoxItem { Content = (Services.Languages.Find(code)?.Name ?? code) + " (" + code + ")", Tag = code });
+            // 第一次进来:源语言还是默认 zh 的话,按母语顶上(已有表就尊重表里存的)
+            if (st.Doc.Entries.Count == 0 && st.Doc.SourceLang == "zh") st.Doc.SourceLang = native;
+            _i18nSrcBox.SelectionChanged += (_, _) =>
+            { if (_i18nSrcBox.SelectedItem is ComboBoxItem { Tag: string c }) TheApp.I18n.SetSourceLang(c); };
+        }
+        for (int k = 0; k < _i18nSrcBox.Items.Count; k++)
+            if (_i18nSrcBox.Items[k] is ComboBoxItem { Tag: string cc } && cc == st.Doc.SourceLang && _i18nSrcBox.SelectedIndex != k)
+            { _i18nSrcBox.SelectionChanged -= null; _i18nSrcBox.SelectedIndex = k; break; }
+
+        // ---- 目标语言:按钮 + 摘要 + 抽屉勾选
+        _i18nTargetsBtnHost.Content = ToolChip($"目标语言({st.Doc.TargetLangs.Count}){(_i18nDrawerOpen ? " ▾" : " ▴")}", _i18nDrawerOpen, () =>
+        {
+            _i18nDrawerOpen = !_i18nDrawerOpen;
+            _i18nDrawerHost.Visibility = _i18nDrawerOpen ? Visibility.Visible : Visibility.Collapsed;
+            Refresh();
+        });
+        _i18nTargetsSummary.Text = st.Doc.TargetLangs.Count == 0
+            ? "还没选目标语言 —— 点上面的按钮勾选。"
+            : string.Join(" · ", st.Doc.TargetLangs);
+        _i18nTargetsSummary.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _i18nTargetsSummary.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+
+        if (_i18nDrawerOpen)
+        {
+            _i18nDrawer.Children.Clear();
+            var head = new DockPanel { LastChildFill = true };
+            var close = ToolChip("完成 ▾", true, () => { _i18nDrawerOpen = false; _i18nDrawerHost.Visibility = Visibility.Collapsed; Refresh(); });
+            DockPanel.SetDock(close, Dock.Right);
+            head.Children.Add(close);
+            var ttl = Ui.Caption("勾选目标语言(百分比 = 全球使用者占比,静态口径含二语):");
+            ttl.VerticalAlignment = VerticalAlignment.Center;
+            head.Children.Add(ttl);
+            _i18nDrawer.Children.Add(head);
+            var list = new StackPanel();
+            // ★ 按占比从高到低排(用户裁定):常用语言不用翻着找;没数据的沉底按目录序
+            var byPct = Services.Languages.Catalog
+                .Where(x => x.Code != st.Doc.SourceLang)
+                .OrderByDescending(x => Services.I18nState.PercentValue(x.Code))
+                .ToList();
+            foreach (var l in byPct)
+            {
+                var code = l.Code;
+                var rowD = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 1, 0, 1) };
+                var pct = Ui.Caption(Services.I18nState.PercentOf(code));
+                DockPanel.SetDock(pct, Dock.Right);
+                rowD.Children.Add(pct);
+                var cb = new CheckBox { Content = $"{l.Name} ({code})", IsChecked = st.Doc.TargetLangs.Contains(code) };
+                cb.Checked += (_, _) => TheApp.I18n.AddLang(code);
+                cb.Unchecked += (_, _) => TheApp.I18n.RemoveLang(code);
+                rowD.Children.Add(cb);
+                list.Children.Add(rowD);
+            }
+            // 自定义码(pt-BR 这类)仍然收:抽屉底部一行
+            var custom = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 4, 0, 0) };
+            var addBtn = ToolChip("+ 添加", false, () =>
+            { var c = _i18nAddBox.Text.Trim(); if (c.Length > 0) { TheApp.I18n.AddLang(c); _i18nAddBox.Text = ""; } });
+            DockPanel.SetDock(addBtn, Dock.Right);
+            custom.Children.Add(addBtn);
+            custom.Children.Add(_i18nAddBox);
+            _i18nDrawer.Children.Add(new ScrollViewer { Content = list, MaxHeight = 96, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            _i18nDrawer.Children.Add(custom);
+        }
+
+        // ---- 工具卡
         _i18nTools.Children.Clear();
         _i18nTools.Children.Add(ToolChip("导入 JSON", false, () =>
         {
@@ -474,18 +579,24 @@ public sealed class TranslationBar : UserControl
             var (ok, msg) = st.Export(dlg.FolderName);
             st.SetStatus(msg, !ok);
         }));
-        _i18nTools.Children.Add(ToolChip(st.RawMode ? "应用源码" : "JSON 源码", st.RawMode, () =>
+        // ★ flip-flop(用户裁定 2026-08-03):源码视图里按钮变「预览视图」且换成选中色 ——
+        //   名字永远写【按下会去哪】;按下即应用并返回,非法 JSON 拒绝并留在源码视图。
+        _i18nTools.Children.Add(ToolChip(st.RawMode ? "预览视图" : "JSON 源码", st.RawMode, () =>
         {
-            if (!st.RawMode) { st.RawText = st.ToTableJson(); st.SetRawMode(true); st.SetStatus("源码视图:改完点「应用源码」—— 非法 JSON 会被拒绝,不会吞掉半张表。"); return; }
+            if (!st.RawMode) { st.RawText = st.ToTableJson(); st.SetRawMode(true); st.SetStatus("源码视图:改完点「预览视图」应用并返回 —— 非法 JSON 会被拒绝,不会吞掉半张表。"); return; }
             var n = st.ImportJson(st.RawText);
-            if (n < 0) { st.SetStatus("改动没有应用:不是合法 JSON(检查逗号/引号/花括号)。", true); return; }
+            if (n < 0) { st.SetStatus("没有应用:不是合法 JSON(检查逗号/引号/花括号)—— 仍在源码视图。", true); return; }
             st.SetRawMode(false);
             st.SetStatus($"已应用:{n} 条词条。");
         }));
+        // ★ 复制 Prompt(用户裁定):给别的 AI 产出同格式 JSON —— 含硬规则与当前整表
+        _i18nTools.Children.Add(ToolChip("复制 Prompt", false, () =>
+        {
+            try { Clipboard.SetText(st.PromptText()); } catch { }
+            st.SetStatus("已复制 Prompt(含格式硬规则与当前整表)—— 粘给任何 AI,回来的 JSON 用「JSON 源码」直接贴回。");
+        }));
 
-        // 主动作两枚(用户裁定 2026-08-03):
-        //   翻译缺失项 = 只补空着的格子(不动已填的);翻译校准 = 把已填的整表过一遍 ——
-        //   术语一致性、语气统一、占位符,像审校而不是重翻。引擎(P4)未接,两个都如实说。
+        // 主动作两枚(用户裁定 2026-08-03):缺失项只补空格子;校准整表审校已填的
         var mains = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var calib = ToolChip("翻译校准", false, () =>
             ConfirmDialog.Show("还不能校准",
@@ -495,7 +606,7 @@ public sealed class TranslationBar : UserControl
         mains.Children.Add(calib);
         mains.Children.Add(ToolChip("翻译缺失项", true, () =>
             ConfirmDialog.Show("还不能自动翻译",
-                "「翻译缺失项」只补空着的格子,不动已填的。\n翻译引擎(P4)还没接入 —— 表、语言与已填的译文都会保留;先用「JSON 源码」粘外部 AI 的产物,或逐条手填。",
+                "「翻译缺失项」只补空着的格子,不动已填的。\n翻译引擎(P4)还没接入 —— 先「复制 Prompt」粘给别的 AI,回来的 JSON 用「JSON 源码」贴回。",
                 confirmText: "知道了", cancelText: "关闭")));
         _i18nMainHost.Content = mains;
     }

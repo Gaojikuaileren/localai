@@ -67,16 +67,8 @@ public sealed class I18nPanel : UserControl
         Header("键", 0); Header("源 · " + st.Doc.SourceLang, 1);
         for (int c = 0; c < langs.Count; c++) Header(langs[c], c + 2);
 
-        if (st.Doc.Entries.Count == 0)
-        {
-            _grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var empty = Ui.Caption("还没有词条 —— 底部「导入 JSON」,或「JSON 源码」整表粘贴。");
-            Grid.SetRow(empty, 1); Grid.SetColumn(empty, 0); Grid.SetColumnSpan(empty, 2 + Math.Max(1, langs.Count));
-            empty.Margin = new Thickness(6);
-            _grid.Children.Add(empty);
-            return;
-        }
-
+        // ★ 空表也照常显示表格(用户裁定 2026-08-03):没导入任何 JSON 时从下面那行直接开工,
+        //   填完点「导出」就得到一份相应内容的 JSON 文件 —— 从零建表和导入改表是同一条路。
         int r = 1;
         foreach (var e in st.Doc.Entries)
         {
@@ -104,6 +96,24 @@ public sealed class I18nPanel : UserControl
             }
             r++;
         }
+
+        // 末尾常驻【新词条】行:键列在这一行可编辑(手建的键当然人来起;已导入的键仍只读)
+        _grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var newKey = new TextBox { Margin = new Thickness(1), Padding = new Thickness(4, 2, 4, 2),
+                                   BorderThickness = new Thickness(1) };
+        newKey.SetResourceReference(TextBox.BorderBrushProperty, "Border");
+        var hint = Ui.Caption("+ 新词条:输入键名后回车");
+        void Commit()
+        {
+            if (TheApp.I18n.AddEntry(newKey.Text)) newKey.Text = "";
+        }
+        newKey.KeyDown += (_, e2) => { if (e2.Key == System.Windows.Input.Key.Enter) { Commit(); e2.Handled = true; } };
+        newKey.LostFocus += (_, _) => { if (newKey.Text.Trim().Length > 0) Commit(); };
+        Grid.SetRow(newKey, r); Grid.SetColumn(newKey, 0);
+        _grid.Children.Add(newKey);
+        Grid.SetRow(hint, r); Grid.SetColumn(hint, 1); Grid.SetColumnSpan(hint, 1 + Math.Max(1, langs.Count));
+        hint.VerticalAlignment = VerticalAlignment.Center; hint.Margin = new Thickness(6, 0, 0, 0);
+        _grid.Children.Add(hint);
     }
 
     void Header(string text, int col)
