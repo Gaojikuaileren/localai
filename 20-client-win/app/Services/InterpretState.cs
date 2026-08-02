@@ -79,7 +79,18 @@ public sealed class InterpretState
     public void SetOutputDevice(string? id) { if (OutputDeviceId != id) { OutputDeviceId = id; Changed?.Invoke(); } }
     public void ReportLatency(double? seconds) { LatencySeconds = seconds; Changed?.Invoke(); }
 
-    public void SetMode(TranslationMode m) { if (Mode != m) { Mode = m; Changed?.Invoke(); } }
+    public void SetMode(TranslationMode m)
+    {
+        if (Mode == m) return;
+        Mode = m;
+        // ★ 离开同传界面 = 这一场结束。否则会留下一个"还在进行中"却【看不见】的状态:
+        //   人已经在文字翻译那边了,同传却还标着进行中,回来才发现它一直挂着。
+        if (m != TranslationMode.Interpret && Running)
+        {
+            Running = false; StartedAt = null; RunningSessionId = null; LatencySeconds = null;
+        }
+        Changed?.Invoke();
+    }
 
     public void SetMyLang(string code) { if (MyLang != code && Languages.Find(code) is not null) { MyLang = code; Changed?.Invoke(); } }
     public void SetTheirLang(string code) { if (TheirLang != code && Languages.Find(code) is not null) { TheirLang = code; Changed?.Invoke(); } }
@@ -97,19 +108,60 @@ public sealed class InterpretState
     /// </summary>
     public static bool PipelineReady => false;
 
+    // ---------------------------------------------------------------- 一场同传的开始与结束
+    // ★★ 用户裁定 2026-08-02:进同传页面【不自动开始】。
+    //   原先一切进来就是同传界面,既不知道从哪儿开始,也没有边界感 ——
+    //   "我只是点进来看看"和"我现在要开会了"必须是两件事。
+    //
+    // ★★ 口径(这一条最容易做成假开关,写清楚):
+    //   「开始」指的是【这一场会话开始了】—— 建一条同传记录、锁定语言方向、解锁设置、开始计时。
+    //   这些都是真的。它【不等于】引擎在跑:采集/识别/翻译/合成那一整套要等 P4。
+    //   所以开始之后界面必须【当场写明】还没有转写(见 TranslationBar 的进行中提示),
+    //   否则用户会对着一个安静的面板等半天,以为是坏了。
+
+    /// <summary>这一场同传【已经开始】。★ 不进存档:重启之后不该还"在进行中"。</summary>
+    public bool Running { get; private set; }
+
+    /// <summary>这一场从什么时候开始(界面显示时长)。没在进行就是 null。</summary>
+    public DateTime? StartedAt { get; private set; }
+
+    /// <summary>这一场对应的同传会话 id —— 开始时建,结束后留成记录。</summary>
+    public string? RunningSessionId { get; private set; }
+
     /// <summary>
-    /// 试着把同传链路跑起来。★ 现在必然失败 —— 语音链路未接入(P4)。
-    /// 如实返回原因,而不是让按钮点下去毫无反应:一个按了没动静的按钮比没有按钮更让人困惑。
+    /// 现在能不能开始。返回空串 = 可以;否则是【不能开始的原因】(直接拿去给用户看)。
+    /// ★ 语言方向是【硬前置】:方向猜错就是整场翻反 —— 这是同传里最不能猜的东西。
+    /// ★ 引擎没接入【不拦】开始:那拦的是转写,不是这一场会话。混为一谈的话,
+    ///   在 P4 之前这个按钮永远按不动,用户连自己设定的流程都走不通。
     /// </summary>
-    public string TryStart()
+    public string WhyCannotStart()
+        => DirectionReady ? "" : "先把语言方向的两个坑填上 —— 从语言池拖进来。";
+
+    /// <summary>开始一场同传。返回空串 = 已开始;否则是不能开始的原因(此时什么也没变)。</summary>
+    public string Start(string? sessionId)
     {
-        if (!DirectionReady) return "先把语言方向的两个坑填上 —— 从语言池拖进来。";
-        if (!PipelineReady)
-            return "还差【翻译引擎】,不是差声卡。\n\n"
-                 + "VB-CABLE 只是把译文语音送进会议软件的“管子”,已经装好了;\n"
-                 + "但中间那套「麦克风采集 → 语音识别 → 翻译 → 语音合成」还没接 —— "
-                 + "这三步都要 AI 模型,得等 GPU Broker(P4)接入。接上之后这里就能一键开启。";
+        if (Running) return "";
+        // ★ 只能从同传界面开始 —— 在别的模式下"开始一场同传"没有意义,
+        //   而且会造出一个界面上根本看不见的进行中状态。
+        if (Mode != TranslationMode.Interpret) return "先切到同声传译界面再开始。";
+        var why = WhyCannotStart();
+        if (why.Length > 0) return why;
+        Running = true;
+        StartedAt = DateTime.Now;
+        RunningSessionId = sessionId;
+        Changed?.Invoke();
         return "";
+    }
+
+    /// <summary>结束这一场。会话记录保留 —— 结束的是"正在进行",不是把记录删掉。</summary>
+    public void Stop()
+    {
+        if (!Running) return;
+        Running = false;
+        StartedAt = null;
+        RunningSessionId = null;
+        LatencySeconds = null;   // 没在跑就不该还挂着上一场的读数
+        Changed?.Invoke();
     }
 
     /// <summary>同传模式需要的模型清单(切进来时由 GPU Broker 装卸,聊天模型明确不在内)。</summary>

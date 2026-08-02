@@ -238,6 +238,13 @@ public sealed class TranslationBar : UserControl
 
         var body = new StackPanel();
         body.Children.Add(row);
+        // ★★ 进行中的提示(2026-08-02):「开始」建的是这一场会话,引擎(P4)还没接 ——
+        //   不当场写明"暂时不会出字",用户会对着一个安静的面板等半天,以为是坏了。
+        _runNote.Margin = new Thickness(0, 6, 0, 0);
+        _runNote.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+        _runNote.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _runNote.TextWrapping = TextWrapping.Wrap;
+        body.Children.Add(_runNote);
 
         // 标题右上角:延迟读数 + 声卡状态灯
         _latency.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -245,6 +252,66 @@ public sealed class TranslationBar : UserControl
         // 状态灯紧跟标题;最右边是延迟读数
         return Card(body, "同传设置", action: _latency, scroll: false, badge: _driverBadge);
     }
+
+    /// <summary>
+    /// 【开始同传 / 结束同传】—— 这一格的主动作,摆在「对方实时字幕」右边(用户指定 2026-08-02)。
+    ///
+    /// ★★ 诚实口径:按下去【真的】会发生三件事 —— 建一条同传会话(会出现在右侧会话列表)、
+    ///   解锁这一格的设置、开始计时。它【不】启动引擎:采集/识别/翻译/合成要等 P4。
+    ///   所以进行中时旁边那行小字会当场写明"还不会有转写" —— 不写的话,
+    ///   用户会对着一个安静的面板等半天,以为是坏了。这条比按钮本身重要。
+    /// </summary>
+    FrameworkElement StartStopButton(InterpretState st)
+    {
+        var running = st.Running;
+        var t = new TextBlock
+        {
+            Text = running ? "结束同传" : "开始同传",
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        t.SetResourceReference(TextBlock.ForegroundProperty, running ? "RiskDanger" : "FgOnAccent");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        t.FontWeight = FontWeights.SemiBold;
+
+        var b = new Border
+        {
+            Child = t,
+            Padding = new Thickness(10, 4, 10, 4),
+            Margin = new Thickness(10, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.Hand,
+            BorderThickness = new Thickness(running ? 1 : 0),
+        };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        if (running)
+        {
+            b.Background = Brushes.Transparent;
+            b.SetResourceReference(Border.BorderBrushProperty, "RiskDanger");
+        }
+        else b.SetResourceReference(Border.BackgroundProperty, "Accent");
+
+        b.ToolTip = running
+            ? "结束这一场。已经建好的同传记录会保留在右侧会话列表里。"
+            : "开始一场同传:建一条同传记录、解锁下面的设置。\n★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
+        b.MouseLeftButtonUp += (_, _) => { if (running) StopInterpret(); else StartInterpret(); };
+        return b;
+    }
+
+    void StartInterpret()
+    {
+        var why = TheApp.Interpret.WhyCannotStart();
+        if (why.Length > 0) { ConfirmDialog.Show("还不能开始", why, confirmText: "知道了", cancelText: "关闭"); return; }
+
+        // ★ 会话标题带上【方向与时刻】—— 一场会开完,列表里要认得出这是哪一场。
+        var mine = Services.Languages.Find(TheApp.Interpret.MyLang)?.Name ?? TheApp.Interpret.MyLang;
+        var theirs = Services.Languages.Find(TheApp.Interpret.TheirLang)?.Name ?? TheApp.Interpret.TheirLang;
+        var title = $"同传 · {mine}↔{theirs} · {DateTime.Now:M月d日 HH:mm}";
+        var sess = TheApp.Chat.NewSession(null, "translation", Services.ProjectScope.Personal, title, interpret: true);
+        TheApp.Interpret.Start(sess.SessionId);
+    }
+
+    void StopInterpret() => TheApp.Interpret.Stop();
 
     /// <summary>一条竖直音量 + 底下的名字。空槽 —— 接入采集后才有数据。</summary>
     static FrameworkElement LevelColumn(string who)
@@ -301,9 +368,14 @@ public sealed class TranslationBar : UserControl
         return box;
     }
 
+    readonly TextBlock _runNote = new();
+
     void RefreshInterpretSettings()
     {
         var st = TheApp.Interpret;
+        _runNote.Visibility = st.Running ? Visibility.Visible : Visibility.Collapsed;
+        if (st.Running)
+            _runNote.Text = $"进行中(自 {st.StartedAt:HH:mm})· 记录已建好。★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
         var drv = Services.AudioDriver.Detect();
 
         // —— 标题右边:绿 / 黄 / 红 三态灯(用户裁定)
@@ -332,16 +404,10 @@ public sealed class TranslationBar : UserControl
             go.Margin = new Thickness(8, 0, 0, 0);
             _driverBadge.Children.Add(go);
         }
-        else if (!connected)
-        {
-            var open = Chip("一键开启", () =>
-            {
-                var why = TheApp.Interpret.TryStart();
-                if (why.Length > 0) ConfirmDialog.Show("还开不了", why, confirmText: "知道了", cancelText: "关闭");
-            });
-            open.Margin = new Thickness(8, 0, 0, 0);
-            _driverBadge.Children.Add(open);
-        }
+        // ★ 原先这里还有一个「一键开启」chip —— 已删(2026-08-02):
+        //   现在开始同传的入口是设置卡里那颗正经按钮(见 StartStopButton),
+        //   同一件事不给两个入口;而且那个 chip 只在"装了声卡但引擎没接入"时才出现,
+        //   位置和出现条件都让人猜不到它就是"开始"。
 
         // —— 开关:上下拨,名字在下面,从左往右排;右边留空给以后
         _switchRow.Children.Clear();
@@ -350,15 +416,25 @@ public sealed class TranslationBar : UserControl
         //   去安装的入口只在上面那个状态栏里 —— 同一件事不给两个入口。
         // ★ 只有【我这一侧】有语音输出 —— 对方那侧只出字幕(用户裁定 2026-07-31):
         //   对方的原声一直在响,再叠一层机器声等于两个人同时说话。
+        // ★★ 没开始就【整格灰掉】(用户裁定 2026-08-02):这些设置是给"正在进行的这一场"用的,
+        //   没开始时能拨只会让人以为已经在同传了 —— 那正是"没有边界感"的来源。
+        //   ★ 每一处灰都要有【自己】的解释:没开始 -> "先点开始同传";
+        //     开始之后"我方译文语音"仍然灰,那是【引擎未接入】造成的,是另一回事(见下面的 tooltip)。
         _switchRow.Children.Add(new ToggleSwitch("我方译文语音", st.SpeakTranslation,
             // ★★ 装了声卡【也不能拨】(审计 2026-07-31):声卡只是必要条件,
             //   真正决定它生不生效的是语音链路(采集/ASR/合成/注入),而那一整套还没接。
             //   只看 drv.Installed 的话,装完 VB-CABLE 的用户会得到一个能拨、会亮、
             //   但什么都不会发生的开关 —— 那正是本项目最该避免的“假开关”。
             on => TheApp.Interpret.SetSpeakTranslation(on),
-            enabled: drv.Installed && InterpretState.PipelineReady, compact: true));
+            enabled: st.Running && drv.Installed && InterpretState.PipelineReady, compact: true));
         _switchRow.Children.Add(new ToggleSwitch("对方实时字幕", st.Subtitles,
-            on => TheApp.Interpret.SetSubtitles(on), compact: true));
+            on => TheApp.Interpret.SetSubtitles(on), enabled: st.Running, compact: true));
+        // ★ 「开始同传」就放在【对方实时字幕右边】(用户指定的位置)
+        _switchRow.Children.Add(StartStopButton(st));
+        _switchRow.ToolTip = st.Running ? null : "同传还没开始 —— 这些设置要开始之后才能改。";
+        // 设备选择同理:没开始时不给改
+        _deviceCol.IsEnabled = st.Running;
+        _deviceCol.Opacity = st.Running ? 1 : 0.45;
         // —— 右侧:设备选择(原来空着的那半边)
         _deviceCol.Children.Clear();
         _deviceCol.Children.Add(DevicePicker("我方麦克风", Services.AudioDevices.Inputs(),
@@ -370,14 +446,21 @@ public sealed class TranslationBar : UserControl
         //    一个写着 0.0 的读数会让人以为"零延迟",那是这套系统里最不可能的事。
         // ★ 没装虚拟声卡时,这里不显示"延迟 —"而是直接说【实时翻译输出不可用】——
         //   延迟读数在那种情况下没有意义,而"为什么用不了"才是用户此刻要知道的。
-        if (!drv.Installed)
+        if (!st.Running)
+        {
+            // ★ 没开始时不显示"延迟 —" —— 那看着像"在跑但测不出来"。如实说它还没开始。
+            _latency.Text = "未开始";
+            _latency.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        }
+        else if (!drv.Installed)
         {
             _latency.Text = "我方译文语音不可用";
             _latency.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
         }
         else
         {
-            _latency.Text = st.LatencySeconds is { } sec ? $"延迟 {sec:0.0}s" : "延迟 —";
+            _latency.Text = st.LatencySeconds is { } sec ? $"延迟 {sec:0.0}s"
+                          : $"已开始 {st.StartedAt:HH:mm}";
             _latency.SetResourceReference(TextBlock.ForegroundProperty,
                 st.LatencySeconds is { } v ? (v > 6 ? "RiskWarning" : "FgSecondary") : "FgMuted");
         }

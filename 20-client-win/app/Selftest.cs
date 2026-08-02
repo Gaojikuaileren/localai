@@ -1516,9 +1516,36 @@ public static class Selftest
                 var fresh = new Services.InterpretState();
                 Assert(fresh.MyLang.Length == 0 && fresh.TheirLang.Length == 0, "★ 语言方向初始为空坑");
                 Assert(!fresh.DirectionReady, "两端没设好就不算就绪");
-                Assert(fresh.TryStart().Contains("语言方向"), "★ 没设方向时如实说要先设方向");
+                Assert(fresh.WhyCannotStart().Contains("语言方向"), "★ 没设方向时如实说要先设方向");
+                fresh.SetMode(Services.TranslationMode.Interpret);
+                Assert(fresh.Start(null).Contains("语言方向") && !fresh.Running,
+                       "★ 方向没填就开始不了 —— 而且【什么都没变】(不留一个半开的状态)");
+                fresh.SetMode(Services.TranslationMode.Text);
                 fresh.SetMyLang("zh"); fresh.SetTheirLang("en");
                 Assert(fresh.DirectionReady, "两端设好了才就绪");
+
+                // ---- 一场同传的开始与结束(用户裁定 2026-08-02:进页面不自动开始,要有边界感)----
+                Assert(!fresh.Running, "★ 进同传页面【不算开始】—— 看看和开会必须是两件事");
+                Assert(fresh.Start("sess-0").Contains("同声传译") && !fresh.Running,
+                       "★ 文字模式下开始不了 —— 否则会造出一个界面上看不见的进行中");
+                fresh.SetMode(Services.TranslationMode.Interpret);
+                Assert(fresh.Start("sess-1").Length == 0 && fresh.Running && fresh.RunningSessionId == "sess-1",
+                       "按【开始同传】才开始:标记进行中并挂上这一场的会话");
+                Assert(fresh.StartedAt is not null, "记下开始时刻(界面要显示这一场从几点开始)");
+                fresh.ReportLatency(3.2);
+                fresh.Stop();
+                Assert(!fresh.Running && fresh.StartedAt is null && fresh.RunningSessionId is null,
+                       "结束后回到未开始态(会话记录由 ChatCenter 保留,这里只清【正在进行】)");
+                Assert(fresh.LatencySeconds is null, "★ 结束后延迟读数清掉 —— 没在跑就不该挂着上一场的数");
+                fresh.SetMode(Services.TranslationMode.Interpret);
+                fresh.Start("sess-2");
+                fresh.SetMode(Services.TranslationMode.Text);
+                Assert(!fresh.Running, "★ 离开同传界面 = 这一场结束(不留一个看不见的进行中)");
+                fresh.SetMode(Services.TranslationMode.Interpret);
+                Assert(!fresh.Running, "切回来也不会自己复活 —— 开始永远是显式的");
+                // 快照不带进行态:重启之后不该还"在进行中"
+                Assert(!typeof(Services.InterpretState.Snapshot).GetProperties().Any(x => x.Name == "Running"),
+                       "★ Running 不进存档 —— 重启后不该还标着进行中");
                 // 拖一次就记住,下次沿用
                 var reopened = new Services.InterpretState();
                 reopened.Import(fresh.Export());
@@ -1594,10 +1621,27 @@ public static class Selftest
                        "★ 声卡状态是红/黄/绿三态灯");
                 Assert(badge is not null && badge.Contains("VB-CABLE 声卡驱动状态:"),
                        "★ 状态要【写全】—— 光一个彩点看不出它在说什么;点只负责一眼可扫,不承担表意");
-                Assert(badge is not null && badge.Contains("去设置") && badge.Contains("一键开启"),
-                       "红=去设置、黄=一键开启;绿的时候直接显示版本号,没有按钮");
-                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: drv.Installed"),
+                Assert(badge is not null && badge.Contains("去设置"),
+                       "红 = 去设置(绿的时候直接显示版本号,没有按钮)");
+                // ★ 「一键开启」chip 已删(2026-08-02):开始同传的入口只有设置卡里那颗按钮。
+                //   同一件事不给两个入口 —— 何况那个 chip 的出现条件让人根本猜不到它就是"开始"。
+                Assert(badge is not null && !badge.Contains("Chip(\"一键开启\""),
+                       "★ 不再有第二个【开始】入口(原来那个藏在状态灯旁边的 chip)");
+                Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: st.Running && drv.Installed"),
                        "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
+                // ---- 「开始同传」按钮(2026-08-02)----
+                Assert(barMode.Contains("FrameworkElement StartStopButton(") && barMode.Contains("_switchRow.Children.Add(StartStopButton(st));"),
+                       "★ 开始/结束按钮在【对方实时字幕右边】(用户指定的位置)");
+                Assert(barMode.Contains("interpret: true") && barMode.Contains("TheApp.Interpret.Start(sess.SessionId)"),
+                       "★ 开始 = 真的建一条同传会话(右侧列表当场多出一条),不是只改个布尔");
+                Assert(barMode.Contains("同传 · {mine}↔{theirs}"),
+                       "会话标题带方向与时刻 —— 一场会开完,列表里要认得出这是哪一场");
+                Assert(barMode.Contains("enabled: st.Running, compact: true") && barMode.Contains("_deviceCol.IsEnabled = st.Running;"),
+                       "★ 没开始时设置全灰(字幕开关、设备选择)—— 开始之后才解锁");
+                Assert(barMode.Contains("这一场暂时不会出字"),
+                       "★★ 进行中要当场写明【暂时不会出字】(引擎 P4 未接)—— 不写的话用户会对着安静的面板以为坏了");
+                Assert(barMode.Contains("_latency.Text = \"未开始\";"),
+                       "★ 没开始时右上角写「未开始」,不写「延迟 —」(那看着像在跑但测不出来)");
                 Assert(barMode.Contains("_notesCardHost.Visibility"), "翻译历史只在文字模式出现");
                 Assert(barMode.Contains("_textLayout.Visibility") && barMode.Contains("_interpretLayout.Visibility"),
                        "两套版面按模式切换,不是各建一份");
@@ -3458,8 +3502,8 @@ public static class Selftest
                 }
                 if (tb2 is not null)
                 {
-                    Assert(tb2.Contains("enabled: drv.Installed && InterpretState.PipelineReady"),
-                           "★ 装了声卡也不能拨 —— 语音链路没接时那就是个假开关");
+                    Assert(tb2.Contains("enabled: st.Running && drv.Installed && InterpretState.PipelineReady"),
+                           "★ 装了声卡也不能拨 —— 语音链路没接时那就是个假开关;而且这一场没开始时同样不能拨");
                     Assert(tb2.Contains("string? fromSlot = null") && tb2.Contains("_dragFromSlot"),
                            "★ 从方向坑里往外拖 ≠ 从目标池拖(否则会静默删掉文字翻译目标池里同一个语言)");
                 }

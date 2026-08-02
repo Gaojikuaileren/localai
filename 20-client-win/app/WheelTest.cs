@@ -188,6 +188,23 @@ public static class WheelTest
         //   结构断言看不见这种事:它只在【真的把界面建出来】时才现形。
         app.Interpret.SetMode(TranslationMode.Interpret);
         Save(Themed(SizedBar()), Path.Combine(outDir, "translation-bar-interpret.png"), 1000, (int)TranslationBar.BarHeight + 48);
+        // ★ 同传的【开始/结束】按钮要在最窄(最小窗宽 960)与宽版面下都验一遍(用户要求 2026-08-02):
+        //   按钮挤进开关那一排,窄的时候最容易和右侧设备列打架。三种态:未开始 / 进行中 / 方向未设。
+        {
+            TranslationBar NarrowBar()
+            {
+                var bx = new TranslationBar();
+                bx.Measure(new Size(940, TranslationBar.BarHeight));
+                bx.Arrange(new Rect(0, 0, 940, TranslationBar.BarHeight));
+                return bx;
+            }
+            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-idle-min.png"), 960, (int)TranslationBar.BarHeight + 48);
+            app.Interpret.SetMyLang("zh"); app.Interpret.SetTheirLang("en");
+            app.Interpret.Start("wt-run");
+            Save(Themed(NarrowBar()), Path.Combine(outDir, "interpret-run-min.png"), 960, (int)TranslationBar.BarHeight + 48);
+            Save(Themed(SizedBar()), Path.Combine(outDir, "interpret-run-wide.png"), 1000, (int)TranslationBar.BarHeight + 48);
+            app.Interpret.Stop();
+        }
         app.Interpret.SetMode(TranslationMode.Text);
 
         // ★ 消息气泡的【正文对比度】:三种皮肤各画一张。
