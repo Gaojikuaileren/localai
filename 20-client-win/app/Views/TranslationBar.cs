@@ -216,7 +216,11 @@ public sealed class TranslationBar : UserControl
     }
 
     // ---------------------------------------------------------------- 同传设置(取代翻译历史那一格)
-    readonly StackPanel _switchRow = new() { Orientation = Orientation.Horizontal };
+    // ★ WrapPanel(用户反馈 2026-08-02 第二次):窄窗口时开关【换行】而不是被裁掉 ——
+    //   StackPanel 会静默裁掉排在末尾的东西,谁排最后谁消失,那不叫自适应。
+    readonly WrapPanel _switchRow = new() { Orientation = Orientation.Horizontal };
+    // 开始/结束是这一格的【主动作】,有自己的宿主、排最前 —— 主动作永远不许被裁掉。
+    readonly ContentControl _startHost = new() { VerticalAlignment = VerticalAlignment.Center, Focusable = false };
     readonly StackPanel _driverBadge = new() { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
     /// <summary>
@@ -234,20 +238,23 @@ public sealed class TranslationBar : UserControl
         // 一行:左边是开关(从左往右排),右边是设备选择 —— 原来空着的那半边现在有活干了
         var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 6, 0, 0) };
 
-        // ★ 最左边是两条竖直音量(对方 / 我方)—— 从主会话板块挪过来的(用户裁定):
-        //   会议中要盯的是对话内容,仪表放在设置这一格里,需要时瞟一眼就够。
-        //   ★ 仍是空槽:没有数据源就不画会动的假动画 —— 那正好会骗过
-        //     "声音还在流动吗"这个我们最该诚实回答的问题。
+        // ★ 布局与次序(用户反馈 2026-08-02 第二次:主动作被裁掉 + 顺序怪):
+        //   【开始/结束】排最前 —— 它是这一格唯一的主动作,原先夹在开关和设备列中间,
+        //   既难找,又因为排在开关行末尾而在窄窗口下第一个被裁掉。
+        //   然后是音量仪表(进行中才有意义的状态),再是这一场的开关(WrapPanel,窄了换行),
+        //   最右是设备列 —— 从"动作 -> 状态 -> 选项 -> 设备"从主到次一路排过去。
+        DockPanel.SetDock(_startHost, Dock.Left);
+        row.Children.Add(_startHost);
+
+        // 两条竖直音量(对方 / 我方)。★ 仍是空槽:没有数据源就不画会动的假动画 ——
+        //   那正好会骗过"声音还在流动吗"这个我们最该诚实回答的问题。
         var meters = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Stretch,
-                                      Margin = new Thickness(0, 0, 16, 0) };
+                                      Margin = new Thickness(0, 0, 14, 0) };
         meters.Children.Add(LevelColumn("对方"));
         meters.Children.Add(LevelColumn("我方"));
         DockPanel.SetDock(meters, Dock.Left);
         row.Children.Add(meters);
 
-        // ★ 布局次序(用户反馈 2026-08-02:最小窗宽时按钮顶到"我方麦克风"):
-        //   设备列【先】按 Dock.Right 占住自己的宽度,开关行【最后】吃剩余空间(LastChildFill)。
-        //   原先开关行先占,窄窗口时设备列被挤到按钮底下。
         DockPanel.SetDock(_deviceCol, Dock.Right);
         row.Children.Add(_deviceCol);
         _switchRow.VerticalAlignment = VerticalAlignment.Top;
@@ -281,50 +288,52 @@ public sealed class TranslationBar : UserControl
     FrameworkElement StartStopButton(InterpretState st)
     {
         var running = st.Running;
-        // ★ 录音式(用户裁定 2026-08-02):没开始 = 红色圆饼(和录音键同一语义);
-        //   进行中 = 红圈套红方块(通用的"停止")。圆在上、名字在下 —— 与旁边开关同一套视觉语法。
-        var face = new Border
-        {
-            Width = 24, Height = 24, CornerRadius = new CornerRadius(12),
-            HorizontalAlignment = HorizontalAlignment.Center, IsHitTestVisible = false,
-        };
+        // ★ 视觉语言收敛到本库自己的按钮语法(用户反馈 2026-08-02 第二次:大红圆饼与周围不统一):
+        //   胶囊按钮(RadiusMd,与 Ui.Primary/Danger 同族)+ 左侧一个小字形表达录音语义 ——
+        //   未开始 = 描边胶囊 + 红色小圆点(「会录下来」的暗示,但不喧哗);
+        //   进行中 = 红色实心胶囊 + 白色小方块(通用的"停止",进行中要一眼找得到怎么停)。
+        FrameworkElement glyph;
         if (running)
         {
-            face.Background = Brushes.Transparent;
-            face.BorderThickness = new Thickness(1.6);
-            face.SetResourceReference(Border.BorderBrushProperty, "RiskDanger");
-            var square = new Border { Width = 9, Height = 9, CornerRadius = new CornerRadius(1.5),
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            square.SetResourceReference(Border.BackgroundProperty, "RiskDanger");
-            face.Child = square;
+            var sq = new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(1.5), VerticalAlignment = VerticalAlignment.Center };
+            sq.SetResourceReference(Border.BackgroundProperty, "FgOnAccent");
+            glyph = sq;
         }
-        else face.SetResourceReference(Border.BackgroundProperty, "RiskDanger");
+        else
+        {
+            var dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };
+            dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "RiskDanger");
+            glyph = dot;
+        }
 
         var t = new TextBlock
         {
             Text = running ? "结束同传" : "开始同传",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 5, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(7, 0, 0, 0),
+            FontWeight = FontWeights.SemiBold,
         };
-        t.SetResourceReference(TextBlock.ForegroundProperty, running ? "RiskDanger" : "FgSecondary");
-        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        t.SetResourceReference(TextBlock.ForegroundProperty, running ? "FgOnAccent" : "FgPrimary");
 
-        var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
-        stack.Children.Add(face);
-        stack.Children.Add(t);
+        var inner = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+        inner.Children.Add(glyph);
+        inner.Children.Add(t);
 
         var b = new Border
         {
-            Child = stack,
-            Padding = new Thickness(6, 2, 6, 2),
-            Margin = new Thickness(10, 0, 8, 0),
-            VerticalAlignment = VerticalAlignment.Top,
+            Child = inner,
+            Padding = new Thickness(13, 7, 13, 7),
+            Margin = new Thickness(0, 0, 14, 0),
+            VerticalAlignment = VerticalAlignment.Center,
             Cursor = Cursors.Hand,
-            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(1.2),
         };
-        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
-        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        b.SetResourceReference(Border.BorderBrushProperty, "RiskDanger");
+        if (running) b.SetResourceReference(Border.BackgroundProperty, "RiskDanger");
+        else b.Background = Brushes.Transparent;
+        b.MouseEnter += (_, _) => { if (!running) b.SetResourceReference(Border.BackgroundProperty, "BgHover"); };
+        b.MouseLeave += (_, _) => { if (!running) b.Background = Brushes.Transparent; };
         b.ToolTip = running
             ? "结束这一场。已经建好的同传记录会保留在右侧会话列表里。"
             : "开始一场同传。\n★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
@@ -477,8 +486,9 @@ public sealed class TranslationBar : UserControl
             enabled: st.Running && drv.Installed && InterpretState.PipelineReady, compact: true));
         _switchRow.Children.Add(new ToggleSwitch("对方实时字幕", st.Subtitles,
             on => TheApp.Interpret.SetSubtitles(on), enabled: st.Running, compact: true));
-        // ★ 「开始同传」就放在【对方实时字幕右边】(用户指定的位置)
-        _switchRow.Children.Add(StartStopButton(st));
+        // ★ 主动作放自己的宿主(最左,见 InterpretSettingsCard 的布局说明)——
+        //   不再挤在开关行末尾,窄窗口下被第一个裁掉的就是它(用户反馈 2026-08-02 第二次)。
+        _startHost.Content = StartStopButton(st);
         _switchRow.ToolTip = st.Running ? null : "同传还没开始 —— 这些设置要开始之后才能改。";
         // 设备选择同理:没开始时不给改
         _deviceCol.IsEnabled = st.Running;

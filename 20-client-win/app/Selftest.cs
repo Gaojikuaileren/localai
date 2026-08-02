@@ -1630,8 +1630,12 @@ public static class Selftest
                 Assert(barMode.Contains("new ToggleSwitch(\"我方译文语音\"") && barMode.Contains("enabled: st.Running && drv.Installed"),
                        "★ 没装虚拟声卡时,语音输出开关灰掉禁用(译文根本送不进会议,能拨就是骗人)");
                 // ---- 「开始同传」按钮(2026-08-02)----
-                Assert(barMode.Contains("FrameworkElement StartStopButton(") && barMode.Contains("_switchRow.Children.Add(StartStopButton(st));"),
-                       "★ 开始/结束按钮在【对方实时字幕右边】(用户指定的位置)");
+                // ★ 位置改到【最左】(用户裁定 2026-08-02 第二次,推翻同日第一次的"字幕右边"):
+                //   它是这一格唯一的主动作,排在开关行末尾的话,窄窗口下第一个被裁掉的就是它。
+                Assert(barMode.Contains("FrameworkElement StartStopButton(") && barMode.Contains("_startHost.Content = StartStopButton(st);"),
+                       "★ 开始/结束按钮有自己的宿主、排在整行【最前】—— 主动作永远不许被裁掉");
+                Assert(barMode.Contains("readonly WrapPanel _switchRow"),
+                       "★ 开关行是 WrapPanel:窄窗口【换行】而不是静默裁掉末尾的控件");
                 Assert(barMode.Contains("interpret: true") && barMode.Contains("TheApp.Interpret.Start(sess.SessionId)"),
                        "★ 开始 = 真的建一条同传会话(右侧列表当场多出一条),不是只改个布尔");
                 Assert(barMode.Contains("同传 · {mine}↔{theirs}"),
