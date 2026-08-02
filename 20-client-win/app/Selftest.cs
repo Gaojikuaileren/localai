@@ -1790,7 +1790,7 @@ public static class Selftest
                        "★ 翻译空间输入框始终在底部,不居中(用户裁定)");
                 Assert(spec is not null && spec.Contains("SearchIcon = true"),
                        "★ 翻译的发送按钮是放大镜(查翻译)");
-                Assert(spec is not null && spec.Contains("BottomAccessory = () => new TranslationBar()"),
+                Assert(spec is not null && spec.Contains("BottomAccessory = () => new TranslationBar("),
                        "翻译空间下方挂语言池那一条");
                 Assert(cvTrans.Contains("IconName.Search"), "放大镜图标还在");
                 // 发送键【长什么样】与【能不能按】必须是两件事

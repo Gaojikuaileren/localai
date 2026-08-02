@@ -58,8 +58,13 @@ public sealed class TranslationBar : UserControl
     readonly List<(TranslationLevel Level, TextBlock Label)> _levelLabels = new();
     Border? _tipBubble;
 
-    public TranslationBar()
+    // 当前选中的会话由宿主(ChatView)提供 —— 选中的是同传会话时,「开始」在它里面继续,
+    //   而不是再建一条(用户裁定 2026-08-02)。null = 宿主没给/没选中。
+    readonly Func<ChatSession?>? _currentSession;
+
+    public TranslationBar(Func<ChatSession?>? currentSession = null)
     {
+        _currentSession = currentSession;
         Height = BarHeight;
 
         // ★ 版面:[ 会随模式切换的左半 ][ 翻译历史(两种模式都要,占剩下的) ]
@@ -227,7 +232,7 @@ public sealed class TranslationBar : UserControl
     FrameworkElement InterpretSettingsCard()
     {
         // 一行:左边是开关(从左往右排),右边是设备选择 —— 原来空着的那半边现在有活干了
-        var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 6, 0, 0) };
+        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 6, 0, 0) };
 
         // ★ 最左边是两条竖直音量(对方 / 我方)—— 从主会话板块挪过来的(用户裁定):
         //   会议中要盯的是对话内容,仪表放在设置这一格里,需要时瞟一眼就够。
@@ -240,11 +245,13 @@ public sealed class TranslationBar : UserControl
         DockPanel.SetDock(meters, Dock.Left);
         row.Children.Add(meters);
 
-        _switchRow.VerticalAlignment = VerticalAlignment.Top;
-        DockPanel.SetDock(_switchRow, Dock.Left);
-        row.Children.Add(_switchRow);
+        // ★ 布局次序(用户反馈 2026-08-02:最小窗宽时按钮顶到"我方麦克风"):
+        //   设备列【先】按 Dock.Right 占住自己的宽度,开关行【最后】吃剩余空间(LastChildFill)。
+        //   原先开关行先占,窄窗口时设备列被挤到按钮底下。
         DockPanel.SetDock(_deviceCol, Dock.Right);
         row.Children.Add(_deviceCol);
+        _switchRow.VerticalAlignment = VerticalAlignment.Top;
+        row.Children.Add(_switchRow);
 
         var body = new StackPanel();
         body.Children.Add(row);
@@ -274,36 +281,53 @@ public sealed class TranslationBar : UserControl
     FrameworkElement StartStopButton(InterpretState st)
     {
         var running = st.Running;
+        // ★ 录音式(用户裁定 2026-08-02):没开始 = 红色圆饼(和录音键同一语义);
+        //   进行中 = 红圈套红方块(通用的"停止")。圆在上、名字在下 —— 与旁边开关同一套视觉语法。
+        var face = new Border
+        {
+            Width = 24, Height = 24, CornerRadius = new CornerRadius(12),
+            HorizontalAlignment = HorizontalAlignment.Center, IsHitTestVisible = false,
+        };
+        if (running)
+        {
+            face.Background = Brushes.Transparent;
+            face.BorderThickness = new Thickness(1.6);
+            face.SetResourceReference(Border.BorderBrushProperty, "RiskDanger");
+            var square = new Border { Width = 9, Height = 9, CornerRadius = new CornerRadius(1.5),
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            square.SetResourceReference(Border.BackgroundProperty, "RiskDanger");
+            face.Child = square;
+        }
+        else face.SetResourceReference(Border.BackgroundProperty, "RiskDanger");
+
         var t = new TextBlock
         {
             Text = running ? "结束同传" : "开始同传",
-            VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 5, 0, 0),
         };
-        t.SetResourceReference(TextBlock.ForegroundProperty, running ? "RiskDanger" : "FgOnAccent");
+        t.SetResourceReference(TextBlock.ForegroundProperty, running ? "RiskDanger" : "FgSecondary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        t.FontWeight = FontWeights.SemiBold;
+
+        var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
+        stack.Children.Add(face);
+        stack.Children.Add(t);
 
         var b = new Border
         {
-            Child = t,
-            Padding = new Thickness(10, 4, 10, 4),
-            Margin = new Thickness(10, 0, 0, 0),
-            VerticalAlignment = VerticalAlignment.Center,
+            Child = stack,
+            Padding = new Thickness(6, 2, 6, 2),
+            Margin = new Thickness(10, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Top,
             Cursor = Cursors.Hand,
-            BorderThickness = new Thickness(running ? 1 : 0),
+            Background = Brushes.Transparent,
         };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
-        if (running)
-        {
-            b.Background = Brushes.Transparent;
-            b.SetResourceReference(Border.BorderBrushProperty, "RiskDanger");
-        }
-        else b.SetResourceReference(Border.BackgroundProperty, "Accent");
-
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
         b.ToolTip = running
             ? "结束这一场。已经建好的同传记录会保留在右侧会话列表里。"
-            : "开始一场同传:建一条同传记录、解锁下面的设置。\n★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
+            : "开始一场同传。\n★ 转写与语音要等引擎接入(P4),这一场暂时不会出字。";
         b.MouseLeftButtonUp += (_, _) => { if (running) StopInterpret(); else StartInterpret(); };
         return b;
     }
@@ -315,6 +339,15 @@ public sealed class TranslationBar : UserControl
         if (TheApp.Interpret.Running) return;
         var why = TheApp.Interpret.WhyCannotStart();
         if (why.Length > 0) { ConfirmDialog.Show("还不能开始", why, confirmText: "知道了", cancelText: "关闭"); return; }
+
+        // ★ 当前选中的就是一条同传会话 -> 在【它】里面继续(用户裁定 2026-08-02):
+        //   一场会常常中途停一下再继续,每按一次就多一条记录的话,列表里全是碎片。
+        //   已删除/幽灵的不算 —— 往回收站里的会话续写等于写进看不见的地方。
+        if (_currentSession?.Invoke() is { Interpret: true, DeletedAt: null, Ghost: false } cur)
+        {
+            TheApp.Interpret.Start(cur.SessionId);
+            return;
+        }
 
         // ★ 会话标题带上【方向与时刻】—— 一场会开完,列表里要认得出这是哪一场。
         var mine = Services.Languages.Find(TheApp.Interpret.MyLang)?.Name ?? TheApp.Interpret.MyLang;

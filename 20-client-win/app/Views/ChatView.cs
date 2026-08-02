@@ -955,7 +955,8 @@ public sealed class ChatView : UserControl
     }
 
     /// <summary>_wsKey -> ConvSpec 的【唯一】映射点。别处不再拿 _wsKey 和字面量比。</summary>
-    static ConvSpec SpecFor(string wsKey) => wsKey switch
+    // ★ 不再 static:BottomAccessory 要捕获本视图的 _sessionId
+    ConvSpec SpecFor(string wsKey) => wsKey switch
     {
         "translation" => new ConvSpec
         {
@@ -969,7 +970,9 @@ public sealed class ChatView : UserControl
             SearchIcon = true,
             ModeSwitch = true,
             CanSend = () => ((App)Application.Current).Translation.Targets.Count > 0,
-            BottomAccessory = () => new TranslationBar(),
+            BottomAccessory = () => new TranslationBar(
+                // 选中的是同传会话时,「开始同传」在它里面继续而不是再建一条(用户裁定 2026-08-02)
+                () => _sessionId is { } sid ? TheApp.Chat.Find(sid) : null),
             BlockReason = TranslationBlockReason,
             OnDraftChanged = (draft, hasFileAttachment) =>
                 ((App)Application.Current).Translation.SetShape(TextShapes.Classify(draft, hasFileAttachment)),
