@@ -621,23 +621,16 @@ public sealed class SettingsView : UserControl
                     _appleBody.Children.Add(cb);
                 }
             }
+            // ★★ 【提醒事项】那一组勾选框已【整体移除】(2026-08-02 用户裁定,见 D56)。
+            //   Apple 从 iOS 13 / macOS Catalina 起把 iCloud 提醒事项升级进 CloudKit,
+            //   CalDAV 上只剩一个名字带 ⚠ 的占位清单 —— 这条路对 iCloud 账号【永远拉不到东西】,
+            //   而且升级是账号级、不可逆的。留着一排勾了也没用的清单,是在卖一个坏掉的开关。
+            //   ★ 这里仍然【说一句为什么】:一个字不提的话,用户只会以为是我们做坏了,
+            //     而真相是 Apple 关掉了这条路 —— 同一个账号的【日历】照旧能拉,不对称本身就需要解释。
             if (remList.Count > 0)
-            {
-                _appleBody.Children.Add(Ui.Caption("勾选要拉取的【提醒事项】(拉进「待办与家务」):"));
-                foreach (var rem in remList)
-                {
-                    var url = rem.Url;
-                    var cb = new CheckBox
-                    {
-                        Content = rem.DisplayName,
-                        IsChecked = s.AppleReminderUrls.Contains(url),
-                        Margin = new Thickness(0, 2, 0, 2),
-                    };
-                    cb.Checked += (_, _) => { if (!s.AppleReminderUrls.Contains(url)) { s.AppleReminderUrls.Add(url); s.Save(); } };
-                    cb.Unchecked += (_, _) => { s.AppleReminderUrls.Remove(url); s.Save(); };
-                    _appleBody.Children.Add(cb);
-                }
-            }
+                _appleBody.Children.Add(Ui.Caption(
+                    "你的 iCloud 里有提醒事项清单,但它们【拉不进来】—— Apple 从 2019 年起不再通过 "
+                    + "CalDAV 提供提醒事项(账号级、不可逆),这条路对任何第三方都是关的。日历不受影响。"));
         }
 
         // ---- 自动拉取(用户要求 2026-07-31)----
@@ -712,7 +705,6 @@ public sealed class SettingsView : UserControl
             AppleCredentials.Clear();
             TheApp.Settings.AppleAutoPull = false;
             TheApp.Settings.AppleCalendarUrls.Clear();
-            TheApp.Settings.AppleReminderUrls.Clear();
             TheApp.Settings.AppleCalendarList.Clear();
             PushGroups(new List<AppleCalendar>());   // 断开 -> 分类表退回本地占位
             TheApp.Settings.AppleReminderList.Clear();

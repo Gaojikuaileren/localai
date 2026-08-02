@@ -41,8 +41,8 @@ public static class AppleCalendarSync
                 "读不出已保存的专用密码 —— 多半是换了 Windows 用户或把配置拷来的(密码按当前用户加密)。请重新填一次。",
                 AuthFailed: true);
 
-        if (settings.AppleCalendarUrls.Count == 0 && settings.AppleReminderUrls.Count == 0)
-            return new AppleSyncResult(false, 0, 0, 0, "还没有选择要同步的日历或提醒事项。");
+        if (settings.AppleCalendarUrls.Count == 0)
+            return new AppleSyncResult(false, 0, 0, 0, "还没有选择要同步的日历。");
 
         Busy = true;
         try
@@ -63,8 +63,7 @@ public static class AppleCalendarSync
                 .ToList();
 
             var wanted = cals.Where(c => settings.AppleCalendarUrls.Contains(c.Url)).ToList();
-            var wantedTodos = rems.Where(c => settings.AppleReminderUrls.Contains(c.Url)).ToList();
-            if (wanted.Count == 0 && wantedTodos.Count == 0)
+            if (wanted.Count == 0)
                 return new AppleSyncResult(false, 0, 0, 0,
                     "选中的日历/清单在 Apple 那边找不到了(可能被改名或删除)。请重新选择。");
 
@@ -86,27 +85,18 @@ public static class AppleCalendarSync
                 skipped += sk;
             }
 
-            // —— 提醒事项(VTODO)—— 与日历同一趟、同一套合并规则
-            var allTodos = new List<TodoItem>();
-            foreach (var lst in wantedTodos)
-            {
-                ct.ThrowIfCancellationRequested();
-                var (ok, msg, ts, sk, _) = await AppleCalDav.FetchTodosAsync(
-                    acct.AppleId, pwd, lst, TodoKind.Personal, ct);
-                if (!ok) { failures.Add(msg); continue; }
-                allTodos.AddRange(ts);
-                fetched += ts.Count;
-                skipped += sk;
-            }
+            // ★★ 【提醒事项(VTODO)】这一段已删除(2026-08-02 用户裁定,见 D56):
+            //   Apple 2019 起把 iCloud 提醒事项升级进 CloudKit,CalDAV 上再也拿不到,
+            //   这段代码对 iCloud 账号跑起来只会返回 0 条 + 一句解释。
+            //   ★ 连同 settings.AppleReminderUrls 一起不再读 —— 界面上的勾选框已经移除,
+            //     要是这里还照着旧存档里的 URL 继续拉,就成了一个【用户关不掉的开关】。
 
             // ★ 一条都没成功 -> 如实说失败,不要因为"没报错"就显示成功
-            if (all.Count == 0 && allTodos.Count == 0 && failures.Count > 0)
+            if (all.Count == 0 && failures.Count > 0)
                 return new AppleSyncResult(false, 0, 0, skipped, string.Join(" ", failures));
 
             // 交给已被钉死的合并层:不重复、不覆盖、不并入空条目
             var added = Views.CalendarData.MergeIn(all, out var refreshedCount);
-            var addedTodos = ((App)System.Windows.Application.Current).Todos.MergeIn(allTodos);
-            added += addedTodos;
 
             settings.AppleLastSync = DateTime.Now;
             settings.Save();
@@ -114,7 +104,7 @@ public static class AppleCalendarSync
             var extra = failures.Count > 0 ? $" 有 {failures.Count} 个日历没取成功。" : "";
             var skipNote = skipped > 0 ? $" 跳过 {skipped} 条读不懂的。" : "";
             return new AppleSyncResult(true, added, fetched, skipped,
-                $"取到 {fetched} 条(日程 {all.Count} + 待办 {allTodos.Count}),新增 {added} 条"
+                $"取到 {fetched} 条日程,新增 {added} 条"
                 + (refreshedCount > 0 ? $"、更新 {refreshedCount} 条" : "") +
                 $"(其余是本机已有的,未重复添加)。{skipNote}{extra}");
         }

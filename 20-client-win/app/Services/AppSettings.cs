@@ -43,7 +43,9 @@ public sealed class AppSettings
     public bool AppleAutoPull { get; set; }
 
     /// <summary>待办(提醒事项)要拉取的清单 URL。与日历分开选 —— 它们在 iCloud 里就是两类集合。</summary>
-    public List<string> AppleReminderUrls { get; set; } = new();
+    // ★ 原 AppleReminderUrls 已删除(2026-08-02,D56)。界面上的勾选框移除之后,
+    //   若这里还留着并被同步读,旧存档里存过的 URL 会继续被拉 —— 那就是一个
+    //   【用户关不掉的开关】。字段删掉,旧存档里多出来的这个键反序列化时自然被忽略。
     /// <summary>已发现的提醒事项清单(URL|名字),落盘。</summary>
     public List<string> AppleReminderList { get; set; } = new();
     /// <summary>自动拉取间隔(分钟)。下限 15 —— 日历不是秒级数据,拉太勤只会更容易撞上节流。</summary>

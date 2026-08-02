@@ -4066,6 +4066,28 @@ public static class Selftest
                        && new Services.AppSettings().AppleReminderList is not null,
                        "★ 日历/提醒清单落盘保存 —— 连上后一直在,不必每次先点刷新");
 
+                // ---- 提醒事项的【勾选入口整体移除】(2026-08-02 用户裁定,D56)----
+                //   Apple 2019 起把 iCloud 提醒事项升级进 CloudKit,CalDAV 上永远拉不到;
+                //   留一排勾了也没用的清单,在售卖产品里就是一个坏掉的开关。
+                {
+                    var svApple = TryReadSource(Path.Combine("Views", "SettingsView.cs"));
+                    if (svApple is not null)
+                    {
+                        Assert(!svApple.Contains("勾选要拉取的【提醒事项】"),
+                               "★ 设置页不再有【勾选提醒事项】那一组(它对 iCloud 账号永远拉不到东西)");
+                        Assert(svApple.Contains("Apple 从 2019 年起不再通过"),
+                               "★ 但要说清【为什么】没有 —— 同一个账号的日历照旧能拉,不解释的话用户只会以为是我们坏了");
+                    }
+                    // ★★ 不许留【看不见的开关】:界面上的勾选框没了,同步却照着旧存档里的 URL 继续拉,
+                    //   用户就再也关不掉它。字段与读取一起去掉,旧存档里那个键反序列化时自然被忽略。
+                    Assert(typeof(Services.AppSettings).GetProperty("AppleReminderUrls") is null,
+                           "★ AppleReminderUrls 已删除 —— 移除界面却留着后台在读,等于一个关不掉的开关");
+                    var syncSrc = TryReadSource(Path.Combine("Services", "AppleCalendarSync.cs"));
+                    if (syncSrc is not null)
+                        Assert(!syncSrc.Contains("FetchTodosAsync"),
+                               "★ 同步这一趟不再拉 VTODO(这条路对 iCloud 账号只会返回 0 条)");
+                }
+
                 // 月视图点日期 = 查看当天(不再直接开新增抽屉)
                 var cv4 = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
                 if (cv4 is not null)

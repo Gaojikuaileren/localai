@@ -123,7 +123,7 @@ public static class AppleAutoSync
         if (AppleCalendarSync.Busy) return;                 // 手动同步正在跑 -> 这一轮跳过
 
         // 没选任何东西 -> 无事可做(不算失败,也不报错)
-        if (s.AppleCalendarUrls.Count == 0 && s.AppleReminderUrls.Count == 0) return;
+        if (s.AppleCalendarUrls.Count == 0) return;
 
         // ★ ② 没网就【连试都不试】—— 断网时发注定失败的请求毫无意义
         if (!NetworkUp)
