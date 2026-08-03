@@ -23,7 +23,10 @@ public sealed class ReplyDoc
     public string TheirName { get; set; } = "";
     public string TheirAddress { get; set; } = "";
     public string TheirContact { get; set; } = "";
-    public string SignDate { get; set; } = "";       // 只用于纸质信件;空 = 生成当天
+    /// <summary>署名日期:只用于纸质信件,空 = 生成当天。
+    /// ★ UI 摆在【我方信息】卡里(署名是我方的事,用户裁定 2026-08-03),
+    ///   但数据仍随【这封信】走 —— 日期是每封信各自的,不能做成跨信共享的模板值。</summary>
+    public string SignDate { get; set; } = "";
     public int GreetingIndex { get; set; }
     public int ClosingIndex { get; set; }
     public string Incoming { get; set; } = "";       // 来信(可空)
@@ -102,13 +105,16 @@ public sealed class ReplyState
     /// 把设置 + 想说的内容装配成【复制即用】的成品格式。
     /// ★ 这不是 AI:正文就是用户写的原文,只负责把称呼/结尾/署名/日期/地址排对位置。
     /// </summary>
+    /// <summary>空值一律换成 [方括号] 占位 —— 产出是可直接找替换的模板,而不是悄悄少一行。</summary>
+    static string Or(string? v, string slot) => string.IsNullOrWhiteSpace(v) ? slot : v!.Trim();
+
     public static string Compose(ReplyDoc d, ReplyProfile me)
     {
         var greet0 = GreetingsFor(d.Tone).ElementAtOrDefault(d.GreetingIndex) ?? "";
         var close0 = ClosingsFor(d.Tone).ElementAtOrDefault(d.ClosingIndex) ?? "";
         var greet = greet0.StartsWith("(") ? "" : greet0;
         var close = close0.StartsWith("(") ? "" : close0;
-        var call = d.TheirName.Trim().Length > 0 ? d.TheirName.Trim() + ":" : "";
+        var call = Or(d.TheirName, "[对方称呼]") + ":";
         var body = d.Draft.Trim();
         var sb = new System.Text.StringBuilder();
 
@@ -119,7 +125,7 @@ public sealed class ReplyState
                 if (greet.Length > 0) sb.Append(greet).Append(' ');
                 sb.AppendLine(body);
                 if (close.Length > 0) sb.AppendLine(close);
-                if (me.MyName.Trim().Length > 0) sb.Append("—— ").Append(me.MyName.Trim());
+                sb.Append("—— ").Append(Or(me.MyName, "[我的署名]"));
                 break;
 
             case ReplyMedium.Email:
@@ -130,13 +136,13 @@ public sealed class ReplyState
                 sb.AppendLine();
                 if (close.Length > 0) sb.AppendLine(close);
                 sb.AppendLine();
-                if (me.MyName.Trim().Length > 0) sb.AppendLine(me.MyName.Trim());
-                if (me.MyContact.Trim().Length > 0) sb.AppendLine(me.MyContact.Trim());
+                sb.AppendLine(Or(me.MyName, "[我的署名]"));
+                sb.AppendLine(Or(me.MyContact, "[我的联系方式]"));
                 break;
 
             default:   // Paper:完整信件格式 —— 地址块 / 称呼 / 正文(段首缩进)/ 祝福 / 右对齐署名+日期
-                if (d.TheirAddress.Trim().Length > 0) sb.AppendLine(d.TheirAddress.Trim());
-                if (d.TheirAddress.Trim().Length > 0) sb.AppendLine();
+                sb.AppendLine(Or(d.TheirAddress, "[对方地址]"));
+                sb.AppendLine();
                 if (call.Length > 0) sb.AppendLine(call);
                 if (greet.Length > 0) sb.AppendLine("    " + greet);
                 sb.AppendLine();
@@ -145,15 +151,12 @@ public sealed class ReplyState
                 sb.AppendLine();
                 if (close.Length > 0) sb.AppendLine(close);
                 sb.AppendLine();
-                var sign = me.MyName.Trim().Length > 0 ? me.MyName.Trim() : "";
+                var sign = Or(me.MyName, "[我的署名]");
                 var date = d.SignDate.Trim().Length > 0 ? d.SignDate.Trim() : DateTime.Now.ToString("yyyy年M月d日");
                 sb.AppendLine((sign + "  " + date).PadLeft(36));   // 右侧署名 + 日期(纸质专属)
-                if (me.MyAddress.Trim().Length > 0 || me.MyContact.Trim().Length > 0)
-                {
-                    sb.AppendLine();
-                    if (me.MyAddress.Trim().Length > 0) sb.AppendLine(me.MyAddress.Trim());
-                    if (me.MyContact.Trim().Length > 0) sb.AppendLine(me.MyContact.Trim());
-                }
+                sb.AppendLine();
+                sb.AppendLine(Or(me.MyAddress, "[我的地址]"));
+                sb.AppendLine(Or(me.MyContact, "[我的联系方式]"));
                 break;
         }
         return sb.ToString().TrimEnd() + "\n";

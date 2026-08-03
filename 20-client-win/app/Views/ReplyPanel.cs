@@ -1,6 +1,7 @@
-// P3c -- 回信会话区(D61 重设计,用户裁定 2026-08-03):
-//   左列上下两块(来信 / 我想回复),右侧整高一块(生成结果)——
-//   生成按钮在结果板块头部;推送/PDF/复制全部图标化(按下如实说明各自现状)。
+// P3c -- 回信会话区(D61 二次重设计,用户裁定 2026-08-03):【四板块】2×2
+//   左上 我想回复的内容 | 右上 生成结果(生成按钮 + 推送/PDF/复制 图标)
+//   左下 来信(可留空)   | 右下 对话记录(这条回信会话的真实往复;AI 未接入前为空,如实说)
+// ★ 来信与我的回复上下对调(用户裁定):先写你要说的,来信是参考,放下面。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -12,41 +13,47 @@ namespace LocalAI.Client.Views;
 public sealed class ReplyPanel : UserControl
 {
     static App TheApp => (App)Application.Current;
-    readonly TextBox _incoming = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                                         BorderThickness = new Thickness(0), Background = Brushes.Transparent };
-    readonly TextBox _draft = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                                      BorderThickness = new Thickness(0), Background = Brushes.Transparent };
-    readonly TextBox _result = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, IsReadOnly = true,
-                                       VerticalScrollBarVisibility = ScrollBarVisibility.Auto, FontFamily = new FontFamily("Consolas"),
-                                       BorderThickness = new Thickness(0), Background = Brushes.Transparent };
+
+    static TextBox Area(bool readOnly = false) => new()
+    {
+        AcceptsReturn = true,
+        TextWrapping = TextWrapping.Wrap,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        IsReadOnly = readOnly,
+        BorderThickness = new Thickness(0),
+        Background = Brushes.Transparent,
+    };
+
+    readonly TextBox _draft = Area();
+    readonly TextBox _incoming = Area();
+    readonly TextBox _result = Area(readOnly: true);
+    readonly StackPanel _log = new();
     readonly StackPanel _resultBtns = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
     bool _editing;
 
     public ReplyPanel()
     {
-        // 左列:来信(上,可空)+ 我想回复(下);右:生成结果整高 —— 视线从左往右就是工作流
-        var leftCol = new Grid();
-        leftCol.RowDefinitions.Add(new RowDefinition());
-        leftCol.RowDefinitions.Add(new RowDefinition { Height = new GridLength(12) });
-        leftCol.RowDefinitions.Add(new RowDefinition());
-        var sIn = Sect("来信(可留空)", _incoming, null);
-        Grid.SetRow(sIn, 0); leftCol.Children.Add(sIn);
-        var sDraft = Sect("我想回复的内容", _draft, null);
-        Grid.SetRow(sDraft, 2); leftCol.Children.Add(sDraft);
+        _result.FontFamily = new FontFamily("Consolas");
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition());
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.15, GridUnitType.Star) });
-        Grid.SetColumn(leftCol, 0); grid.Children.Add(leftCol);
-        var sOut = Sect("生成结果", _result, _resultBtns);
-        Grid.SetColumn(sOut, 2); grid.Children.Add(sOut);
+        grid.RowDefinitions.Add(new RowDefinition());
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10) });
+        grid.RowDefinitions.Add(new RowDefinition());
+
+        void Put(FrameworkElement el, int col, int row) { Grid.SetColumn(el, col); Grid.SetRow(el, row); grid.Children.Add(el); }
+        Put(Sect("我想回复的内容", _draft, null), 0, 0);
+        Put(Sect("来信(可留空)", _incoming, null), 0, 2);
+        Put(Sect("生成结果", _result, _resultBtns), 2, 0);
+        Put(Sect("对话记录", new ScrollViewer { Content = _log, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, null), 2, 2);
         Content = grid;
 
-        _incoming.TextChanged += (_, _) => Save(d => d.Incoming = _incoming.Text);
         _draft.TextChanged += (_, _) => Save(d => d.Draft = _draft.Text);
-        Loaded += (_, _) => { TheApp.Reply.Changed += Rebuild; Rebuild(); };
-        Unloaded += (_, _) => TheApp.Reply.Changed -= Rebuild;
+        _incoming.TextChanged += (_, _) => Save(d => d.Incoming = _incoming.Text);
+        Loaded += (_, _) => { TheApp.Reply.Changed += Rebuild; TheApp.Chat.Changed += Rebuild; Rebuild(); };
+        Unloaded += (_, _) => { TheApp.Reply.Changed -= Rebuild; TheApp.Chat.Changed -= Rebuild; };
     }
 
     void Save(Action<ReplyDoc> set)
@@ -76,7 +83,6 @@ public sealed class ReplyPanel : UserControl
         return card;
     }
 
-    /// <summary>结果头部的小图标按钮(推送/PDF/复制 —— 用户裁定图标化)。</summary>
     static FrameworkElement IconBtn(Theme.IconName icon, string tip, Action click)
     {
         var b = new Border { Child = Theme.Icons.Make(icon, 15, "FgSecondary"), Padding = new Thickness(6),
@@ -94,20 +100,42 @@ public sealed class ReplyPanel : UserControl
         var d = TheApp.Reply.Doc;
         if (!_editing)
         {
-            if (_incoming.Text != d.Incoming) _incoming.Text = d.Incoming;
             if (_draft.Text != d.Draft) _draft.Text = d.Draft;
+            if (_incoming.Text != d.Incoming) _incoming.Text = d.Incoming;
         }
         if (_result.Text != d.Result) _result.Text = d.Result;
 
+        // ---- 对话记录:这条回信会话的真实往复 —— 没有就如实说没有,不摆假对话
+        _log.Children.Clear();
+        var msgs = TheApp.Reply.SessionId is { } sid
+            ? TheApp.Chat.MessagesOf(sid).ToList()
+            : new List<ChatMessage>();
+        if (msgs.Count == 0)
+        {
+            var empty = Ui.Caption("这封信与 AI 的往复会记录在这里。\n★ AI 尚未接入(P4)——现在还没有对话,这里不摆假记录。");
+            empty.TextWrapping = TextWrapping.Wrap;
+            _log.Children.Add(empty);
+        }
+        else
+            foreach (var m in msgs)
+            {
+                var who = Ui.Caption(m.Role == ChatRole.User ? "我" : m.Role == ChatRole.Assistant ? "AI" : "系统");
+                who.Margin = new Thickness(0, 4, 0, 0);
+                var body = new TextBlock { Text = m.Text, TextWrapping = TextWrapping.Wrap };
+                body.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                _log.Children.Add(who);
+                _log.Children.Add(body);
+            }
+
+        // ---- 结果头部:生成(主动作,用户裁定放这儿)+ 载体相关的图标按钮
         _resultBtns.Children.Clear();
-        // 生成 = 主动作,在结果板块头部(用户裁定);格式装配是真的,AI 润色随引擎
         var gen = Ui.Primary("生成", (_, _) =>
         {
             var st = TheApp.Reply;
             st.EnsureSession();
             var doc = st.Doc;
             if (doc.Draft.Trim().Length == 0)
-            { ConfirmDialog.Show("还没有内容", "先在左下写你想回复的内容。", confirmText: "好", cancelText: "关闭"); return; }
+            { ConfirmDialog.Show("还没有内容", "先在左上写你想回复的内容。", confirmText: "好", cancelText: "关闭"); return; }
             doc.Result = ReplyState.Compose(doc, st.Profile);
             st.Touch();
         });

@@ -2322,6 +2322,30 @@ public static class Selftest
                 Assert(rs.Doc.TheirName == "甲", "★ 设置跟随会话:回到旧会话设置还在");
                 rs.SetSession(null);
                 Assert(rs.Doc.TheirName == "", "新进来 = 全默认(草稿态)");
+                // ★ 空值 -> [方括号] 模板占位(用户裁定 2026-08-03):产出是填空模板,不是悄悄少一行
+                var blank = Services.ReplyState.Compose(
+                    new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Draft = "正文" }, new Services.ReplyProfile());
+                Assert(blank.Contains("[对方称呼]") && blank.Contains("[我的署名]") && blank.Contains("[我的地址]"),
+                       "★ 信息为空时装配成 [方括号] 占位,复制出去就是可找替换的模板");
+                var rbSrc = TryReadSource(Path.Combine("Views", "ReplyBar.cs"));
+                if (rbSrc is not null)
+                {
+                    // 载体 = 指针(等分轨 + 圆点),不是进度滑条 —— 它三种方式没有高低之分
+                    Assert(rbSrc.Contains("PointerRow(\"载体\"") && !rbSrc.Contains("_medium.Value"),
+                           "★ 载体用指针式选择器,不用带填充的滑条(没有进度语义)");
+                    Assert(!rbSrc.Contains("new ScrollViewer"),
+                           "★ 设置卡里不许【构造】滚动条 —— 内容按最小窗口算好,装得下(注释里提它不算)");
+                    Assert(rbSrc.Contains("Field(\"署名日期(纸质)\"") && rbSrc.Contains("CardOf(\"我方信息"),
+                           "★ 署名日期归【我方信息】卡(署名是我方的事)");
+                }
+                var rpSrc = TryReadSource(Path.Combine("Views", "ReplyPanel.cs"));
+                if (rpSrc is not null)
+                {
+                    var iDraft = rpSrc.IndexOf("Sect(\"我想回复的内容\"", StringComparison.Ordinal);
+                    var iIn = rpSrc.IndexOf("Sect(\"来信(可留空)\"", StringComparison.Ordinal);
+                    Assert(iDraft >= 0 && iIn > iDraft, "★ 我想回复的内容在上、来信在下(用户裁定对调)");
+                    Assert(rpSrc.Contains("Sect(\"对话记录\""), "★ 生成结果下方多一块【对话记录】(四板块)");
+                }
                 var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
                 Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");
             }
