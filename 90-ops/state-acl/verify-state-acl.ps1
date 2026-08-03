@@ -125,7 +125,44 @@ if (Test-Path -LiteralPath $p) {
 }
 
 Write-Host ''
-Write-Host '⑤ 诚实边界:本套件【验不了】什么' -ForegroundColor DarkYellow
+Write-Host '⑤ ★★ 隔离区里的条目必须【继承】隔离区的 ACL,不得自带显式宽泛 ACE'
+<#
+  ★★ 这一节的由来(2026-08-03 实测,值得记住):
+    把 {state}\openwebui 归档进 quarantine 之后,发现它 `Protected=True` 且 DACL 里
+    赫然还有 `Authenticated Users : Modify` —— 宽泛权限**跟着数据一起搬过去了**。
+
+    原因:**同卷 Move 是重命名**,NTFS 为了让对象在新位置保持相同的有效访问,
+    会把它原先【继承来的】ACE **转成显式**带过去,并置上 Protected 位。
+    ⇒ 「移进一个加固过的目录」**不等于**「变成加固过的」。
+
+    这条对 §6.5「隔离区 = delete 的替代品,永不 delete」是直接的设计影响:
+    P6 的执行器把一个人人可写的文件移进隔离区之后,它**还是人人可写** ——
+    隔离区看着把东西关起来了,实际只是换了个位置。
+    入区时必须 `icacls <目标> /reset /T`(丢掉显式 DACL、改回从隔离区继承)。
+#>
+$qRoot = $Paths['state.quarantine']
+if ($qRoot -and (Test-Path -LiteralPath $qRoot)) {
+    $entries = @(Get-ChildItem -LiteralPath $qRoot -Force -EA SilentlyContinue)
+    if (-not $entries) {
+        Write-Host '  SKIP  隔离区为空' -ForegroundColor DarkGray
+    }
+    foreach ($e in $entries) {
+        $acl = Get-Acl -LiteralPath $e.FullName
+        Test-It "★ 隔离区条目 $($e.Name) 继承隔离区 ACL(未自带显式 DACL)" `
+            (-not $acl.AreAccessRulesProtected) `
+            '(同卷 Move 会把原目录的 ACE 转成显式带过来 —— 入区时须 icacls /reset /T)'
+        foreach ($who in $STRIP) {
+            $w = Get-EffectiveWrite $e.FullName $who
+            if ($null -eq $w) { continue }
+            Test-It "  $($e.Name) :: $who 写不了" (-not $w) '(宽泛权限跟着数据搬进了隔离区)'
+        }
+    }
+} else {
+    Write-Host '  SKIP  paths.toml 无 state.quarantine 或目录不存在' -ForegroundColor DarkGray
+}
+
+Write-Host ''
+Write-Host '⑥ 诚实边界:本套件【验不了】什么' -ForegroundColor DarkYellow
 Write-Host '  · 审计文件与服务日志仍在同一目录 —— 能写服务日志的账户仍能改审计。' -ForegroundColor DarkGray
 Write-Host '    真正的修法是独立的 append-only 审计目录(D71),不在本脚本范围内。' -ForegroundColor DarkGray
 Write-Host '  · 本机管理员可以改回任何 ACL —— 对管理员,这一层不构成边界。' -ForegroundColor DarkGray

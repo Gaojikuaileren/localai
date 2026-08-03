@@ -64,6 +64,26 @@ powershell -ExecutionPolicy Bypass -File .\harden-state-acl.ps1 -Revert
 2. **对本机管理员，这一层不构成边界。** 管理员随时能改回任何 ACL。与 `DEC:1822` 把「主机时钟篡改 = 本机管理员」判为 out-of-scope 是同一条边界。
 3. **`quarantine` 与 `tickets` 目前是空的。** 加固它们是为了「将来往里写东西时不必再想一遍」，不是因为现在有东西要保护。
 
+## ★★ 一条对 §6.5 隔离区设计有直接影响的实测
+
+把 `{state}\openwebui` 归档进 `quarantine` 之后，发现它 `Protected=True`、DACL 里赫然还有 `Authenticated Users : Modify` —— **宽泛权限跟着数据一起搬过去了**。
+
+原因：**同卷 Move 是重命名**。NTFS 为了让对象在新位置保持相同的有效访问，会把它原先*继承来的* ACE **转成显式**带过去，并置上 Protected 位。
+
+> **「移进一个加固过的目录」不等于「变成加固过的」。**
+
+这条对 §6.5「隔离区 = delete 的替代品，永不 delete」是直接的设计影响：**P6 的执行器把一个人人可写的文件移进隔离区之后，它还是人人可写** —— 隔离区看着把东西关起来了，实际只是换了个位置。
+
+**入区时必须**：
+
+```bash
+icacls "<隔离区目标>" /reset /T
+```
+
+`/reset` 丢掉显式 DACL、改回从隔离区继承；`/T` 递归到每个子项。
+
+已立成断言：`verify-state-acl.ps1` ⑤ 段逐个检查隔离区条目 `AreAccessRulesProtected -eq $false` 且三个宽泛主体无写权限。
+
 ## 复核脚本的一个坑（留个记号）
 
 `verify-state-acl.ps1` 第一版的 `Get-EffectiveWrite` **只比对账户自己的 SID**，于是「`ai-asset` 写不了 `logs`」报 **PASS —— 假 PASS**。`ai-asset` 没有具名 ACE 不代表它写不了：它在 `Authenticated Users` 里，而那条组 ACE 有 Modify。
