@@ -4897,6 +4897,23 @@ public static class Selftest
                 }
                 Assert(Services.Elevation.LastProbeNote.Length > 0 && Services.Elevation.LastProbeNote != "(还没判过)",
                        "★ 判过之后要留下依据 —— 「没判出来所以放行」和「确认是普通用户」不能看起来一样");
+                // ★★ 降权重开【只许试一次】。实机上炸过:重开出来的进程仍然是 High,
+                //   于是它又去重开自己 —— 无限重开,窗口不停地闪。
+                //   根因是"以为重开就一定降权"这个假设从没被验证过,而失败不留痕迹。
+                var pgSrc = TryReadSource("Program.cs");
+                if (pgSrc is not null)
+                {
+                    var pg = Body(pgSrc);
+                    Assert(pg.Contains("--relaunched-as-user"),
+                           "★★ 降权重开要带一次性标记 —— 没有它,重开失败就是无限重开");
+                    var iFlag = pg.IndexOf("alreadyTried", StringComparison.Ordinal);
+                    var iCall = pg.IndexOf("TryRelaunchAtMediumIntegrity", StringComparison.Ordinal);
+                    Assert(iFlag >= 0 && iCall >= 0 && iFlag < iCall,
+                           "★★ 先查标记再决定要不要重开 —— 顺序反了等于没有这道闸");
+                    Assert(pg.Contains("!alreadyTried &&"),
+                           "★ 带着标记就【不再重开】,直接回落到如实拒绝");
+                }
+
                 var elSrc = TryReadSource(Path.Combine("Services", "Elevation.cs"));
                 if (elSrc is not null)
                     Assert(!Body(elSrc).Contains("id.Groups"),

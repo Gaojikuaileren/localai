@@ -42,10 +42,21 @@ public static class Program
         //   重开不成才回落到拒绝 —— 绝不"假装重开了"然后继续在 High 上跑。
         if (Elevation.IsElevated())
         {
-            if (Elevation.TryRelaunchAtMediumIntegrity(args)) return 0;
+            // ★★ 只许试一次。2026-08-03 实机上炸过:降权重开出来的进程【仍然是 High】,
+            //   于是它又去重开自己 —— 无限重开,用户屏幕上窗口不停地闪。
+            //   根因是"以为重开就一定降权"这个假设没有被验证过,而失败又没有留下任何痕迹。
+            //   ⇒ 子进程带上这个标记;带着标记还是 High,就说明这条路在这台机器上不通,
+            //     立刻回落到如实拒绝,绝不再试第二次。
+            const string relaunchedFlag = "--relaunched-as-user";
+            var alreadyTried = Array.IndexOf(args, relaunchedFlag) >= 0;
+            if (!alreadyTried && Elevation.TryRelaunchAtMediumIntegrity(
+                    args.Append(relaunchedFlag).ToArray())) return 0;
             System.Windows.MessageBox.Show(
                 Elevation.RefuseMessage + Environment.NewLine + Environment.NewLine
-                    + "(试过自动以普通身份重开,没成功:" + Elevation.RelaunchNote + ")",
+                    + (alreadyTried
+                        ? "(已经自动以普通身份重开过一次,结果仍然是管理员身份 —— 这台机器上这条路不通,"
+                          + "请直接双击图标打开。)"
+                        : "(试过自动以普通身份重开,没成功:" + Elevation.RelaunchNote + ")"),
                 "本地 AI 中枢", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Stop);
             return 3;   // 与 lan-edge 的护栏同一退出码
         }
