@@ -308,16 +308,31 @@ public sealed class ReplyState
     /// <summary>删掉一条自定义问候/祝福(内置的删不掉 —— 那不是用户加的)。</summary>
     public bool RemoveCustom(bool greeting, string text)
     {
-        var ok = (greeting ? Profile.CustomGreetings : Profile.CustomClosings).Remove(text);
-        if (ok)
+        var list = greeting ? Profile.CustomGreetings : Profile.CustomClosings;
+        var j = list.IndexOf(text);
+        if (j < 0) return false;      // 内置的删不掉 —— 那不是用户加的
+        list.RemoveAt(j);
+
+        // ★★ 存档里存的是【下标】而不是文字,所以删掉一条就必须把【所有会话】的下标重新对齐 ——
+        //   不这么做,下标排在它后面的那些信会静默地换成另一句问候/祝福:
+        //   内容被改了,却没有任何地方说一声。这是"诚实"那条纪律管得着的事。
+        //   绝对下标 = 1(不加)+ 3(内置:每个语言×语气恒为三条)+ 它在自定义清单里的位置;
+        //   自定义清单是跨语言共用的一份,所以这个换算与当前语言无关。
+        var gone = CustomBase + j;
+        foreach (var doc in _docs.Values.Append(_scratch))
         {
-            // 下标可能已经越界 —— 退回"不加",不要指着一条被删掉的
-            var d = Doc;
-            if (greeting) d.GreetingIndex = 0; else d.ClosingIndex = 0;
-            Changed?.Invoke();
+            var idx = greeting ? doc.GreetingIndex : doc.ClosingIndex;
+            if (idx == gone) idx = 0;          // 正指着被删的那条 -> 退回「不加」
+            else if (idx > gone) idx--;        // 排在它后面的整体前移一格
+            else continue;
+            if (greeting) doc.GreetingIndex = idx; else doc.ClosingIndex = idx;
         }
-        return ok;
+        Changed?.Invoke();
+        return true;
     }
+
+    /// <summary>自定义条目在清单里的起始绝对下标:1 个「不加」+ 3 条内置。</summary>
+    public const int CustomBase = 4;
 
     public bool IsCustom(bool greeting, string text)
         => (greeting ? Profile.CustomGreetings : Profile.CustomClosings).Contains(text);

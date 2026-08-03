@@ -2401,6 +2401,30 @@ public static class Selftest
                 rst.Doc.GreetingIndex = rst.Greetings("zh", Services.ReplyTone.Polite).Length - 1;
                 Assert(rst.IsCustom(true, "见信如晤") && !rst.IsCustom(true, rst.Greetings("zh", Services.ReplyTone.Polite)[1]),
                        "★ 分得清哪条是用户自己加的(内置的不给删)");
+                // ★★ 删一条自定义 = 【所有会话】的下标都得跟着对齐 —— 存档存的是下标不是文字,
+                //   不对齐的话,下标排在它后面的信会静默换成另一句祝福(内容被改却没人说一声)。
+                {
+                    var rr = new Services.ReplyState();
+                    rr.SetSession("cust-a");
+                    var i1 = rr.AddCustom(true, "自定义一", "zh", Services.ReplyTone.Polite);
+                    var i2 = rr.AddCustom(true, "自定义二", "zh", Services.ReplyTone.Polite);
+                    Assert(i1 == Services.ReplyState.CustomBase && i2 == Services.ReplyState.CustomBase + 1,
+                           "★ 自定义从固定下标起排(1 个「不加」+ 3 条内置)—— 换算靠内置恒为三条");
+                    rr.Doc.GreetingIndex = i2;                       // A 会话指着【第二条】自定义
+                    rr.SetSession("cust-b"); rr.Doc.GreetingIndex = i1;   // B 会话指着第一条
+                    rr.RemoveCustom(true, "自定义一");                 // 删掉第一条
+                    rr.SetSession("cust-a");
+                    Assert(rr.Greetings("zh", Services.ReplyTone.Polite)[rr.Doc.GreetingIndex] == "自定义二",
+                           "★★ 删掉前面那条之后,A 会话指的还是【自定义二】,没有被静默换成别的");
+                    rr.SetSession("cust-b");
+                    Assert(rr.Doc.GreetingIndex == 0,
+                           "★ 正指着被删那条的会话退回「不加」,不指着一条不存在的");
+                }
+                foreach (var lg in new[] { "zh", "ja", "de", "fr", "en", "xx" })
+                    foreach (var tn in new[] { Services.ReplyTone.Casual, Services.ReplyTone.Polite, Services.ReplyTone.Official })
+                        Assert(new Services.ReplyState().Greetings(lg, tn).Length == Services.ReplyState.CustomBase
+                            && new Services.ReplyState().Closings(lg, tn).Length == Services.ReplyState.CustomBase,
+                               $"★ {lg}/{tn}:内置恒为三条 —— CustomBase 这个换算就建立在这上面");
                 Assert(rst.RemoveCustom(true, "见信如晤") && rst.Profile.CustomGreetings.Count == 0,
                        "★ 自定义问候语删得掉");
                 Assert(rst.Doc.GreetingIndex == 0, "★ 删掉选中项后下标退回【不加】,不能指着一条不存在的");
