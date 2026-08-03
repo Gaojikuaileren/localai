@@ -2297,30 +2297,31 @@ public static class Selftest
             // ---- 回信(D61,2026-08-03 用户裁定)----
             {
                 var rd = new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Tone = Services.ReplyTone.Formal,
-                    TheirName = "王先生", MyName = "李四", MyAddress = "上海市某路 1 号", TheirAddress = "北京市某街 2 号",
-                    MyContact = "13800000000", SignDate = "2026年8月3日", GreetingIndex = 1, ClosingIndex = 1,
+                    TheirName = "王先生", TheirAddress = "北京市某街 2 号",
+                    SignDate = "2026年8月3日", GreetingIndex = 1, ClosingIndex = 1,
                     Draft = "感谢来信。\n事情已办妥。" };
-                var paper = Services.ReplyState.Compose(rd);
+                var me = new Services.ReplyProfile { MyName = "李四", MyAddress = "上海市某路 1 号", MyContact = "13800000000" };
+                var paper = Services.ReplyState.Compose(rd, me);
                 Assert(paper.Contains("王先生:") && paper.Contains("    您好!") && paper.Contains("此致敬礼!"),
                        "★ 纸质:称呼/缩进问候/祝福各就各位(格式装配是真的,不等引擎)");
                 Assert(paper.Contains("李四  2026年8月3日") && paper.Contains("北京市某街 2 号"),
                        "★ 纸质:右侧署名+日期、对方地址排入(日期只进纸质)");
                 rd.Medium = Services.ReplyMedium.Message;
-                var msg = Services.ReplyState.Compose(rd);
+                var msg = Services.ReplyState.Compose(rd, me);
                 Assert(!msg.Contains("2026年8月3日") && !msg.Contains("某街"),
                        "★ 短消息:不排日期不排地址(紧凑)");
                 rd.Medium = Services.ReplyMedium.Email;
-                var mail = Services.ReplyState.Compose(rd);
+                var mail = Services.ReplyState.Compose(rd, me);
                 Assert(mail.Contains("13800000000") && !mail.Contains("某路"),
                        "★ 邮件:带签名联系方式;地址只进纸质");
                 // 设置跟随会话:两个会话各自的 Doc 互不串
                 var rs = new Services.ReplyState();
-                rs.SetSession("r-1"); rs.Doc.MyName = "甲";
-                rs.SetSession("r-2"); rs.Doc.MyName = "乙";
+                rs.SetSession("r-1"); rs.Doc.TheirName = "甲";
+                rs.SetSession("r-2"); rs.Doc.TheirName = "乙";
                 rs.SetSession("r-1");
-                Assert(rs.Doc.MyName == "甲", "★ 设置跟随会话:回到旧会话设置还在");
+                Assert(rs.Doc.TheirName == "甲", "★ 设置跟随会话:回到旧会话设置还在");
                 rs.SetSession(null);
-                Assert(rs.Doc.MyName == "", "新进来 = 全默认(草稿态)");
+                Assert(rs.Doc.TheirName == "", "新进来 = 全默认(草稿态)");
                 var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
                 Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");
             }

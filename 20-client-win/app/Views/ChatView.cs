@@ -1141,20 +1141,20 @@ public sealed class ChatView : UserControl
         {
             _replyScene = TheApp.Reply.SceneReply;
             var chatHead = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
-            void SceneChip(string text, bool on, Action click)
+            // ★ 图标切换(用户裁定 2026-08-03):与翻译工作区的场景切换同一语法同一位置
+            void SceneChip(IconName icon, string tip, bool on, Action click)
             {
-                var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
-                t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
-                var c = new Border { Child = t, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 8, 0),
-                                     Cursor = Cursors.Hand, BorderThickness = new Thickness(1) };
+                var c = new Border { Child = Icons.Make(icon, 15, on ? "FgOnAccent" : "FgSecondary"),
+                                     Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 8, 0),
+                                     Cursor = Cursors.Hand, BorderThickness = new Thickness(1), ToolTip = tip };
                 c.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
                 if (on) { c.SetResourceReference(Border.BackgroundProperty, "Accent"); c.SetResourceReference(Border.BorderBrushProperty, "Accent"); }
                 else { c.Background = Brushes.Transparent; c.SetResourceReference(Border.BorderBrushProperty, "Border"); }
                 c.MouseLeftButtonUp += (_, e) => { e.Handled = true; click(); };
                 chatHead.Children.Add(c);
             }
-            SceneChip("聊天", !_replyScene, () => TheApp.Reply.SetScene(false));
-            SceneChip("回信", _replyScene, () => TheApp.Reply.SetScene(true));
+            SceneChip(IconName.Chat, "聊天", !_replyScene, () => TheApp.Reply.SetScene(false));
+            SceneChip(IconName.Pdf, "回信", _replyScene, () => TheApp.Reply.SetScene(true));
             if (_replyScene)
             {
                 // 绑定当前选中的回信会话(没选中 = 草稿态,首笔编辑自建会话并选中)

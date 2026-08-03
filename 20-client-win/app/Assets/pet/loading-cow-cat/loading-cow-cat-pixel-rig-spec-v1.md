@@ -1,4 +1,6 @@
-# Loading Cow Cat · 像素角色与 2D 骨骼规范 v1
+# Loading Cow Cat · 像素角色与 2D 骨骼规范 v1（已废止）
+
+> **2026-08-03 决策：不再使用骨骼动画。** 本文件仅保留为历史设计记录，禁止据此实现。当前规范见 `loading-cow-cat-pixel-frame-animation-spec-v1.md`，角色改用固定 6 fps 的纯像素逐帧动画。
 
 ## 0. 当前边界
 

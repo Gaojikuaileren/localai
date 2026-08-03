@@ -21,10 +21,7 @@ public sealed class ReplyDoc
     public ReplyTone Tone { get; set; } = ReplyTone.Normal;
     public string Language { get; set; } = "zh";
     public string TheirName { get; set; } = "";
-    public string MyName { get; set; } = "";
-    public string MyAddress { get; set; } = "";      // 只在纸质信件排进正文;邮件/消息仅供 AI 参考
     public string TheirAddress { get; set; } = "";
-    public string MyContact { get; set; } = "";      // 邮箱或手机
     public string TheirContact { get; set; } = "";
     public string SignDate { get; set; } = "";       // 只用于纸质信件;空 = 生成当天
     public int GreetingIndex { get; set; }
@@ -34,9 +31,24 @@ public sealed class ReplyDoc
     public string Result { get; set; } = "";         // 生成结果(装配产物)
 }
 
+/// <summary>我方信息 —— 【常驻模板】(用户裁定 2026-08-03):很少改,跨会话共享,不随会话走。</summary>
+public sealed class ReplyProfile
+{
+    public string MyName { get; set; } = "";
+    public string MyAddress { get; set; } = "";
+    public string MyContact { get; set; } = "";
+}
+
+public sealed class ReplySave
+{
+    public ReplyProfile Profile { get; set; } = new();
+    public Dictionary<string, ReplyDoc> Docs { get; set; } = new();
+}
+
 public sealed class ReplyState
 {
     public event Action? Changed;
+    public ReplyProfile Profile { get; private set; } = new();
     public event Action<string>? FocusSession;
 
     /// <summary>聊天工作空间当前是不是在【回信】场景(切换器/点开回信会话驱动)。</summary>
@@ -90,7 +102,7 @@ public sealed class ReplyState
     /// 把设置 + 想说的内容装配成【复制即用】的成品格式。
     /// ★ 这不是 AI:正文就是用户写的原文,只负责把称呼/结尾/署名/日期/地址排对位置。
     /// </summary>
-    public static string Compose(ReplyDoc d)
+    public static string Compose(ReplyDoc d, ReplyProfile me)
     {
         var greet0 = GreetingsFor(d.Tone).ElementAtOrDefault(d.GreetingIndex) ?? "";
         var close0 = ClosingsFor(d.Tone).ElementAtOrDefault(d.ClosingIndex) ?? "";
@@ -107,7 +119,7 @@ public sealed class ReplyState
                 if (greet.Length > 0) sb.Append(greet).Append(' ');
                 sb.AppendLine(body);
                 if (close.Length > 0) sb.AppendLine(close);
-                if (d.MyName.Trim().Length > 0) sb.Append("—— ").Append(d.MyName.Trim());
+                if (me.MyName.Trim().Length > 0) sb.Append("—— ").Append(me.MyName.Trim());
                 break;
 
             case ReplyMedium.Email:
@@ -118,8 +130,8 @@ public sealed class ReplyState
                 sb.AppendLine();
                 if (close.Length > 0) sb.AppendLine(close);
                 sb.AppendLine();
-                if (d.MyName.Trim().Length > 0) sb.AppendLine(d.MyName.Trim());
-                if (d.MyContact.Trim().Length > 0) sb.AppendLine(d.MyContact.Trim());
+                if (me.MyName.Trim().Length > 0) sb.AppendLine(me.MyName.Trim());
+                if (me.MyContact.Trim().Length > 0) sb.AppendLine(me.MyContact.Trim());
                 break;
 
             default:   // Paper:完整信件格式 —— 地址块 / 称呼 / 正文(段首缩进)/ 祝福 / 右对齐署名+日期
@@ -133,14 +145,14 @@ public sealed class ReplyState
                 sb.AppendLine();
                 if (close.Length > 0) sb.AppendLine(close);
                 sb.AppendLine();
-                var sign = d.MyName.Trim().Length > 0 ? d.MyName.Trim() : "";
+                var sign = me.MyName.Trim().Length > 0 ? me.MyName.Trim() : "";
                 var date = d.SignDate.Trim().Length > 0 ? d.SignDate.Trim() : DateTime.Now.ToString("yyyy年M月d日");
                 sb.AppendLine((sign + "  " + date).PadLeft(36));   // 右侧署名 + 日期(纸质专属)
-                if (d.MyAddress.Trim().Length > 0 || d.MyContact.Trim().Length > 0)
+                if (me.MyAddress.Trim().Length > 0 || me.MyContact.Trim().Length > 0)
                 {
                     sb.AppendLine();
-                    if (d.MyAddress.Trim().Length > 0) sb.AppendLine(d.MyAddress.Trim());
-                    if (d.MyContact.Trim().Length > 0) sb.AppendLine(d.MyContact.Trim());
+                    if (me.MyAddress.Trim().Length > 0) sb.AppendLine(me.MyAddress.Trim());
+                    if (me.MyContact.Trim().Length > 0) sb.AppendLine(me.MyContact.Trim());
                 }
                 break;
         }
@@ -148,12 +160,13 @@ public sealed class ReplyState
     }
 
     // ---------------------------------------------------------------- 存档
-    public Dictionary<string, ReplyDoc> Export() => new(_docs);
-    public void Import(Dictionary<string, ReplyDoc>? d)
+    public ReplySave Export() => new() { Profile = Profile, Docs = new(_docs) };
+    public void Import(ReplySave? d)
     {
         if (d is null) return;
+        Profile = d.Profile ?? new();
         _docs.Clear();
-        foreach (var kv in d) if (kv.Value is not null) _docs[kv.Key] = kv.Value;
+        foreach (var kv in d.Docs ?? new()) if (kv.Value is not null) _docs[kv.Key] = kv.Value;
         Changed?.Invoke();
     }
 }
