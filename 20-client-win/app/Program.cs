@@ -40,7 +40,10 @@ public static class Program
         // ★ 用户裁定(2026-08-03):「以管理员启动也要能直接用」—— 所以【不拒绝,先自己降权重开】。
         //   密钥模型一点没动:进程只是落到它本来就该在的那个 Medium 上下文里。
         //   重开不成才回落到拒绝 —— 绝不"假装重开了"然后继续在 High 上跑。
-        if (Elevation.IsElevated())
+        // ★★ 先问真问题:设备密钥打不打得开。打得开就放行 —— 无论完整性等级是什么。
+        //   UAC 关掉的机器(EnableLUA=0)上一切进程都是 High、密钥也是在 High 下铸的,
+        //   拿"是不是管理员"当判据会把一台完全健康的机器判成不能用,理由还是假的。
+        if (Elevation.IsElevated() && !Elevation.DeviceKeyUsable(out var keyNote))
         {
             // ★★ 只许试一次。2026-08-03 实机上炸过:降权重开出来的进程【仍然是 High】,
             //   于是它又去重开自己 —— 无限重开,用户屏幕上窗口不停地闪。
@@ -56,7 +59,8 @@ public static class Program
                     + (alreadyTried
                         ? "(已经自动以普通身份重开过一次,结果仍然是管理员身份 —— 这台机器上这条路不通,"
                           + "请直接双击图标打开。)"
-                        : "(试过自动以普通身份重开,没成功:" + Elevation.RelaunchNote + ")"),
+                        : "(试过自动以普通身份重开,没成功:" + Elevation.RelaunchNote + ")")
+                    + Environment.NewLine + "(设备密钥:" + keyNote + ")",
                 "本地 AI 中枢", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Stop);
             return 3;   // 与 lan-edge 的护栏同一退出码
         }

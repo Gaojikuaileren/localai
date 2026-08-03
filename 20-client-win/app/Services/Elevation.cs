@@ -179,6 +179,50 @@ public static class Elevation
     /// <summary>上一次降权重开的结果说明 —— 失败时要让人看得到为什么。</summary>
     public static string RelaunchNote { get; private set; } = "(没试过)";
 
+    // ================================================================ 问真问题,别问代理指标
+    // ★★ 2026-08-03 实机查明:这道护栏一直在问【错的问题】。
+    //   它关心的其实只有一件事:**本机的设备密钥打不打得开**。
+    //   而它一直在问"我是不是管理员 / 是不是 High 完整性" —— 那只是个代理指标,
+    //   在 UAC 关掉的机器上(EnableLUA=0)永远为真:那种机器上连桌面 explorer 都跑在 High,
+    //   **根本不存在**普通身份的进程,密钥当初也就是在 High 下铸的、在 High 下能正常打开。
+    //   于是护栏把一台完全健康的机器judge成"不能用",而且给的理由(密钥集不存在)还是假的。
+    //   实测:该机 EnableLUA=0,explorer 完整性 = S-1-16-12288,
+    //   CA 与 server 两把密钥在 High 进程里都 CngKey.Open 成功。
+    //
+    // ⇒ 改成直接试着打开设备密钥。打得开就放行(无论什么完整性等级),
+    //   打不开【而且】当前是 High,才是那个真正要拦的情形,这时理由也是真的。
+
+    /// <summary>
+    /// 本机设备密钥能不能打开。★ 还没配对(没有 KeyName)时返回 true —— 没有密钥就没有"打不开"这回事,
+    /// 而且新配对会把密钥铸在当前这个完整性等级上,之后一直对得上。
+    /// </summary>
+    public static bool DeviceKeyUsable(out string note)
+    {
+        try
+        {
+            var path = AppPaths.ProfilePath;
+            if (!File.Exists(path)) { note = "还没配对,没有设备密钥要打开"; return true; }
+            var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)).RootElement;
+            var keyName = json.TryGetProperty("KeyName", out var k) ? k.GetString() : null;
+            if (string.IsNullOrWhiteSpace(keyName)) { note = "档案里没有密钥名"; return true; }
+
+            var prov = new System.Security.Cryptography.CngProvider(LocalAI.Identity.Ca.TlsKeyProvider);
+            if (!System.Security.Cryptography.CngKey.Exists(keyName, prov))
+            {
+                note = $"在当前身份下看不到设备密钥「{keyName}」";
+                return false;
+            }
+            using var key = System.Security.Cryptography.CngKey.Open(keyName, prov);
+            note = "设备密钥打得开";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            note = "打开设备密钥失败:" + ex.Message;
+            return false;
+        }
+    }
+
     public const string RefuseMessage =
         "本程序不能以管理员身份运行。\n\n" +
         "本机的设备密钥绑定在你的普通用户身份上,提权运行会打不开它(症状是「密钥集不存在」)。\n" +
