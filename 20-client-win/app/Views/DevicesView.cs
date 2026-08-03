@@ -184,9 +184,19 @@ public sealed class DevicesView : UserControl
             Ui.Subtitle("中枢没在这台机器上运行"),
             Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"));
 
+        // ★ 用户定的目标:用户不跑任何命令栏 —— 程序来跑。这一条按顺序做完
+        //   铸身份 → 放行防火墙(唯一需要 UAC 的一步)→ 起 Edge,每一步都如实报结果。
+        var setupHost = new StackPanel();
+        stack.Children.Add(new Border { Height = 10 });
+        stack.Children.Add(Ui.Primary("一次装好这台主机", (_, _) => BuildNicPicker(setupHost, st)));
+        stack.Children.Add(setupHost);
+        stack.Children.Add(Ui.Caption("做三件事:铸中枢身份(已有就跳过、绝不覆盖)、放行防火墙 8443"
+                                      + "(★ 这一步会弹一次系统的管理员授权框 —— 只有这一步需要)、启动中枢。"));
+
         if (cmd is not null)
         {
             stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(Ui.Body("或者只做其中一步:", muted: true));
             stack.Children.Add(Ui.Primary("启动中枢(Edge)", async (_, _) => await StartEdgeAsync(cmd, st)));
             stack.Children.Add(st);
             // ★ 说清它凭什么能替你点:这不是"绕过"了那条护栏,而是本来就满足它。
@@ -205,6 +215,74 @@ public sealed class DevicesView : UserControl
         stack.Children.Add(new Border { Height = 10 });
         stack.Children.Add(RecheckRow());
         return Ui.Card(stack);
+    }
+
+    /// <summary>
+    /// 防火墙规则要绑在【某一张网卡】上,所以先让人选一张 —— ★ 不替他挑:
+    /// 本机常有虚拟机的仅主机网卡(如 192.168.56.x),放行在那上面等于没放行,而且看起来是成功的。
+    /// 只有一张时不啰嗦,直接用。
+    /// </summary>
+    void BuildNicPicker(StackPanel host, TextBlock status)
+    {
+        host.Children.Clear();
+        var nics = Services.HostSetup.LocalNics();
+        if (nics.Count == 0)
+        {
+            host.Children.Add(Ui.Caption("没找到启用中的网卡 —— 先把网络连上。"));
+            return;
+        }
+        if (nics.Count == 1)
+        {
+            _ = SetupHostAsync(nics[0].Alias, status);
+            return;
+        }
+        host.Children.Add(Ui.Body("这台有多张网卡,防火墙规则要放在【副机能看见的那一张】上,请选一张:"));
+        host.Children.Add(Ui.Caption("★ 192.168.56.x 之类通常是虚拟机的仅主机网卡 —— 放在那上面副机看不见,"
+                                     + "而且界面会显示成功,那是最难查的一种失败。"));
+        foreach (var (alias, ip) in nics)
+        {
+            var b = Ui.Secondary($"{alias} · {ip}", (_, _) => { host.Children.Clear(); _ = SetupHostAsync(alias, status); });
+            b.Margin = new Thickness(0, 4, 0, 0);
+            b.HorizontalAlignment = HorizontalAlignment.Left;
+            host.Children.Add(b);
+        }
+    }
+
+    /// <summary>
+    /// 按顺序把这台装成主机。★ 一步失败就停 —— 后面几步在前一步没成的前提下做了也白做,
+    /// 而且会用一串新错误盖住真正的原因。
+    /// </summary>
+    async Task SetupHostAsync(string nicAlias, TextBlock status)
+    {
+        void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
+        string Mark(Services.SetupStep st) => st.Outcome switch
+        {
+            Services.SetupOutcome.Ok => "完成",
+            Services.SetupOutcome.Skipped => "本来就好的",
+            _ => "没成",
+        };
+
+        Say("① 中枢身份:正在检查/铸造…");
+        var id = await Services.HostSetup.EnsureIdentityAsync();
+        Say($"① 中枢身份:{Mark(id)} —— {id.Detail}");
+        if (id.Outcome == Services.SetupOutcome.Failed) return;
+
+        var script = Services.HostSetup.FirewallScript();
+        var dir = Services.HubAdmin.HostToolsDir();
+        if (script is null || dir is null)
+        {
+            Say($"① 中枢身份:{Mark(id)}。② 防火墙:找不到 lan-firewall.ps1 —— "
+                + "请手动放行 8443(用管理员 PowerShell 跑 90-ops/lan/lan-firewall.ps1),或先跳过、只在本机用。");
+            return;
+        }
+        Say($"① 中枢身份:{Mark(id)}。② 防火墙:马上会弹一次管理员授权框…");
+        var fw = await Services.HostSetup.EnsureFirewallAsync(nicAlias, script, Path.Combine(dir, "localai-lan-edge.exe"));
+        Say($"① 身份:{Mark(id)}。② 防火墙:{Mark(fw)} —— {fw.Detail}");
+        // ★ 防火墙没成也【继续】起 Edge:本机自己用是通的,只是副机连不上。
+        //   直接中止会让人以为整套都废了 —— 那不是实情。
+        var cmd = Services.HubAdmin.StartEdgeCmd();
+        if (cmd is null) { Say($"① 身份:{Mark(id)}。② 防火墙:{Mark(fw)}。③ 找不到 启动Edge.cmd。"); return; }
+        await StartEdgeAsync(cmd, status);
     }
 
     /// <summary>

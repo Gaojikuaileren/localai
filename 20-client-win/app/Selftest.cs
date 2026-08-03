@@ -4943,7 +4943,38 @@ public static class Selftest
                     Assert(recheck is not null && !recheck.Contains("Process.Start") && !recheck.Contains("StartEdgeAsync"),
                            "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
 
-                    // ⑦ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
+                    // ⑦ 「一次装好这台主机」:三条不可让步的边界
+                    var hs = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
+                    if (hs is not null)
+                    {
+                        var hsBody = Body(hs);
+                        // ★★ 绝不调那个会先 del 掉身份的重置脚本 —— 它会让所有已配对设备失效
+                        Assert(!hsBody.Contains("重置并铸身份"),
+                               "★★ 客户端绝不调 重置并铸身份.cmd —— 它开头就删掉 identity 目录,"
+                               + "那是破坏性的;只调 localai-identity init(它自己 fail-closed,已存在就拒绝覆盖)");
+                        Assert(hsBody.Contains("\"init\""),
+                               "★ 铸身份走 localai-identity init");
+                        // ★★ 只有防火墙那一步提权,而且提的是 powershell 跑那个脚本
+                        var runas = hsBody.Split("Verb = \"runas\"").Length - 1;
+                        Assert(runas == 1,
+                               $"★★ 全文件只允许【一处】提权(实得 {runas} 处)—— identity / Edge / 网关"
+                               + "一旦继承 High 完整性,身份就毁了");
+                        var fw = Slice(hs, "public static async Task<SetupStep> EnsureFirewallAsync", "/// <summary>查规则在不在");
+                        Assert(fw is not null && fw.LastIndexOf("FirewallRuleExistsAsync", StringComparison.Ordinal)
+                               > fw.IndexOf("Verb = \"runas\"", StringComparison.Ordinal),
+                               "★★ 提权跑完【要回来验规则在不在】—— 只凭「UAC 点过了 / 退出码是 0」就宣布成功,"
+                               + "是在替用户假设一件没看过的事");
+                        Assert(hsBody.Contains("Win32Exception"),
+                               "★ 用户在 UAC 上点「否」是【正常路径】,要如实说没放行会怎样,不是抛个异常了事");
+                        Assert(hsBody.Contains("Elevation.IsElevated()"),
+                               "★★ 铸身份前先查本进程有没有提权 —— 提权铸出来的 CA 普通用户永远打不开,且不可回退");
+                    }
+                    var nicPick = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
+                    Assert(nicPick is not null && nicPick.Contains("nics.Count == 1") && nicPick.Contains("请选一张"),
+                           "★★ 多张网卡时让人自己选 —— 放行在虚拟机的仅主机网卡上等于没放行,"
+                           + "而界面会显示成功,那是最难查的一种失败");
+
+                    // ⑧ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
                     Assert(!body4.Contains("Edge 窗口里输入 open"),
                            "★★ 「去 Edge 窗口里敲 open」是命令行时代的说法 —— 留着会把人支到黑框里");
                     Assert(body4.Contains("展开「＋ 添加一台新电脑」"),
