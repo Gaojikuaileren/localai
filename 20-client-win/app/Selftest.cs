@@ -5149,6 +5149,35 @@ public static class Selftest
                            + "第二个会撞 address already in use,在黑窗口里吐一整屏异常栈,"
                            + "而人根本读不出「你已经开着一个了」");
 
+                    // ㉒ 用户终版规格(decision-packets/pairing-ux-final-spec-2026-08-04.md)
+                    //   主机未连接就【自动连自己】,不给按钮;角色检测只在【还没配好】时出现;
+                    //   已配对列表里自己那条【不给移除】。
+                    Assert(!body4.Contains("\"完成本机配对\""),
+                           "★★ 主机自配对是内部步骤,不该摆成按钮 —— 用户裁定:开客户端就自动连自己");
+                    Assert(body4.Contains("_selfPairStarted"),
+                           "★ 自动自配对只跑一次 —— 每次 Build() 都启一遍会叠出好几条 enroll");
+                    var hostCard2 = Slice(dv4, "UIElement HostSelfCard", "async Task SelfPairAsync");
+                    Assert(hostCard2 is not null && hostCard2.Contains("if (!TheApp.Hub.IsPaired)")
+                           && hostCard2.Contains("RecheckRow()"),
+                           "★★ 角色检测只在还没配好时出现 —— 配好了角色已被一次成功连接证明过,再问只是噪音");
+                    var devRow = Slice(dv4, "UIElement DeviceRow", "bool IsThisMachine");
+                    Assert(devRow is not null && devRow.Contains("if (!isSelf)"),
+                           "★★ 已配对列表里【看得到自己但不能移除自己】—— 自己就是主机,"
+                           + "解除自己等于让这台机器把自己踢出去");
+                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "void RenderDevices");
+                    Assert(isSelfFn is not null && isSelfFn.Contains("CertShort") && isSelfFn.Contains("SHA256"),
+                           "★★ 认「是不是自己」要按证书指纹,不按名字 —— 同名设备很常见,而名字还是自报的");
+                    // ㉓ 副机侧:只允许「开始寻找主机」+ 网络选择(仅多网)+ 角色检测
+                    var cpc = Slice(dv4, "UIElement ClientPairCard", "string? _pickedNic");
+                    Assert(cpc is not null && cpc.Contains("开始寻找主机"),
+                           "★ 副机未配对时的唯一主按钮");
+                    Assert(cpc is not null && cpc.Contains("nics.Count > 1") && cpc.Contains("nics.Count == 1"),
+                           "★★ 网络选择【仅多网时出现】;只有一个就自动用它、不显示按钮(用户裁定)");
+                    var knock = Slice(dv4, "async Task KnockAsync", "string? _pickedDial");
+                    Assert(knock is not null && knock.Contains("还没上线"),
+                           "★★ 敲门协议要中枢配合、现在还没有 —— 必须【如实降级】,"
+                           + "绝不假装敲门已经发出去了(那会让人在副机这边干等一个不会来的响应)");
+
                     // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
                     Assert(body4.Contains("rst == 409") && body4.Contains("重新点一次「开始配对」"),
                            "★★ 请求过期时 Approve 回 409,以前两处都丢掉返回值 —— "

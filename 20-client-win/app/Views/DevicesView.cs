@@ -43,6 +43,9 @@ public sealed class DevicesView : UserControl
     /// <summary>配对在途 —— 防止连点发出两条 enroll(两组六个词会互相盖掉)。</summary>
     bool _pairing;
 
+    /// <summary>本机自配对只自动跑一次 —— 每次 Build() 都启一遍会叠出好几条 enroll。</summary>
+    bool _selfPairStarted;
+
     StackPanel? _devList;
     StackPanel? _addPanel;
     TextBlock? _addStatus;
@@ -174,6 +177,10 @@ public sealed class DevicesView : UserControl
     }
 
     /// <summary>手动重探一次(换了状态 —— 比如刚把 Edge 起起来 —— 用它,不用重开客户端)。</summary>
+    /// <summary>
+    /// 角色检测。★ 用户裁定:**只在还没配好时出现**。配好了就不该再问"我是谁" ——
+    /// 那时角色已经由一次成功的连接证明过了,再摆一个按钮只是噪音。
+    /// </summary>
     UIElement RecheckRow() => Ui.Secondary("角色检测", (_, _) => { _role = HostRole.Unknown; Build(); });
 
     /// <summary>
@@ -751,21 +758,20 @@ public sealed class DevicesView : UserControl
         }
         else
         {
-            var st = Ui.Body("");
+            // ★★ 用户裁定:主机开客户端时若还没连上自己,就【自动连接自己】—— 不问、不给按钮。
+            //   自配对对主机来说是内部步骤(同机走回环,没有中间人可防),没有让人做选择的余地。
+            var st = Ui.Body("正在把本机连上自己的中枢…");
             stack.Children.Add(new Border { Height = 10 });
-            stack.Children.Add(Ui.Body("本机客户端还没有配对 —— 主机自己这台也需要成员证书才能用中枢。"));
-            stack.Children.Add(Ui.Caption("★ 这一步不需要你填地址、也不需要比六个词 —— 理由见下面那行。"));
-            stack.Children.Add(Ui.Primary("完成本机配对", async (_, _) => await SelfPairAsync(st)));
             stack.Children.Add(st);
-            stack.Children.Add(Ui.Caption("★ 为什么本机不用比六个词:六个词防的是【两台机器之间】的中间人。"
-                                          + "本机走的是回环管理面 —— 能连上回环的人已经在这台机器上了,没有中间人可防。"));
-            stack.Children.Add(Ui.Caption("★ 代价说清楚:这一步会把配对窗口开【几秒】,那几秒局域网上的 8443 也接受请求;"
-                                          + "拿到本机自己那条请求后立刻关掉。(更好的做法是走一条只在回环上的通道,"
-                                          + "那要中枢侧加,已写进决议包。)"));
+            if (!_selfPairStarted) { _selfPairStarted = true; _ = SelfPairAsync(st); }
         }
 
-        stack.Children.Add(new Border { Height = 10 });
-        stack.Children.Add(RecheckRow());
+        // ★ 角色检测只在【还没配好】时出现(用户裁定):连上了就不该再问"我是谁"。
+        if (!TheApp.Hub.IsPaired)
+        {
+            stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(RecheckRow());
+        }
         return Ui.Card(stack);
     }
 
@@ -1059,59 +1065,100 @@ public sealed class DevicesView : UserControl
     /// ★ 主机没开配对窗口时【也列得出来】—— 发现走的是 TLS 握手读证书名,和窗口开不开无关。
     ///   那时点开始配对会拿到 403,照实说"那台的配对窗口没开",并告诉他去主机上做哪一步。
     /// </summary>
+    /// <summary>
+    /// 副机 · 未配对。★ 用户终版规格:这一屏**只允许有**「开始寻找主机」+ 网络选择(仅多网)+ 角色检测。
+    ///   按下按钮 → 发一次敲门广播(按需,不是每 5 秒一次)→ 等主机在它那边按「接受」。
+    /// ★ 敲门协议要中枢侧配合(UDP 监听 + 敲门列表 + accept/reject),core 还没落地 ——
+    ///   所以这里【如实降级】:发不出去就说"这台中枢还不支持敲门",并给出旧的手动路径,
+    ///   绝不假装功能已经有了。
+    /// </summary>
     UIElement ClientPairCard()
     {
-        var name = new TextBox { Width = 320, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 12), Text = Environment.MachineName };
-        name.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
         var status = Ui.Body("");
-        var list = new StackPanel();
-        var note = Ui.Caption("正在找同一网络下的中枢…");
-        string? picked = null;
+        var extra = new StackPanel();
 
-        // ★★ 在途闸:连点两次会发【两条】enroll,各带一把新密钥、各有一组六个词。
-        //   而六词卡是共用的,后返回的那条会把先返回的盖掉 ⇒ 主机弹窗上那六个词
-        //   在副机屏幕上根本不存在,人就没得可比 —— 唯一能证明"这条请求是我发的"的东西没了。
-        //   副机侧还会留下一把无人引用的孤儿 CNG 密钥(配对没走完就没写档案,下次清理不到它)。
-        Button? goRef = null;
-        var go = Ui.Primary(Strings.Get("pairing.start"), async (_, _) =>
+        var find = Ui.Primary("开始寻找主机", async (_, _) =>
         {
-            if (_pairing) return;                       // 忽略重复点击,不排队
-            if (picked is null) { status.Text = "请先在上面选一个中枢。"; return; }
+            if (_pairing) return;
             _pairing = true;
-            if (goRef is not null) goRef.IsEnabled = false;
-            try
+            try { await KnockAsync(status, extra); }
+            finally { _pairing = false; }
+        });
+
+        var stack = Ui.Stack(
+            Ui.Subtitle("连接到家里的中枢"),
+            Ui.Body("这台还没有配对。点一下「开始寻找主机」,然后到主机那台上按「接受」。", muted: true),
+            find,
+            status,
+            extra);
+
+        // ★ 网络选择只在【多网】时出现;只有一个就自动用它、不显示按钮(用户裁定)
+        var nics = Services.HostSetup.LocalNics();
+        if (nics.Count > 1)
+        {
+            stack.Children.Add(new Border { Height = 8 });
+            stack.Children.Add(Ui.Body("从哪个网络找:", muted: true));
+            foreach (var (alias, ip) in nics)
             {
-                status.Text = Strings.Get("status.connecting");
-                await StartPairing(picked, name.Text.Trim(), status);
+                var a = alias; var i = ip;
+                var b = Ui.Secondary($"{a} · {i}" + (_pickedNic == i ? "  ✓" : ""), (_, _) => { _pickedNic = i; Build(); });
+                b.Margin = new Thickness(0, 4, 0, 0);
+                b.HorizontalAlignment = HorizontalAlignment.Left;
+                stack.Children.Add(b);
             }
-            finally
+        }
+        else if (nics.Count == 1) _pickedNic = nics[0].Ip;
+
+        stack.Children.Add(new Border { Height = 10 });
+        stack.Children.Add(RecheckRow());   // ★ 未配对时才有
+        return Ui.Card(stack);
+    }
+
+    /// <summary>选中的网卡 IP(单网卡时自动落定,界面上不出现选择按钮)。</summary>
+    string? _pickedNic;
+
+    /// <summary>
+    /// 敲一次门。★ 中枢侧协议(UDP 广播 + /admin/pairing/knocks + accept/reject)还没落地,
+    /// 所以这里先做【如实降级】:扫一遍局域网,找到中枢就告诉用户"去主机上按接受";
+    /// 一台都找不到就把真实原因说清楚(四种情形由 ScanExplain 分开说)。
+    /// ★ 绝不假装敲门已经发出去了 —— 那会让人在副机这边干等一个不会来的响应。
+    /// </summary>
+    async Task KnockAsync(TextBlock status, StackPanel extra)
+    {
+        Dispatcher.Invoke(() => { status.Text = "正在找同一网络下的中枢…"; extra.Children.Clear(); });
+        Services.ScanResult scan;
+        try { scan = await Services.HubDiscovery.ScanAsync(); }
+        catch (Exception ex) { Dispatcher.Invoke(() => status.Text = "查找失败(" + ex.GetType().Name + ")"); return; }
+
+        Dispatcher.Invoke(() =>
+        {
+            if (scan.Hits.Count == 0)
             {
-                _pairing = false;
-                if (goRef is not null) goRef.IsEnabled = true;
+                status.Text = Services.HubClient.ScanExplain(scan, "中枢");
+                if (!scan.NoUsableV4) extra.Children.Add(ManualDialRow(d => { _pickedDial = d; Build(); }));
+                return;
+            }
+            // ★ 敲门协议未落地时的实情:我们只能"找到"它,没法让它在主机屏幕上冒出来。
+            //   说清楚现在要人做什么,而不是显示一个假的"已通知主机"。
+            status.Text = $"找到 {scan.Hits.Count} 个中枢。";
+            extra.Children.Add(Ui.Caption("★ 敲门广播需要中枢侧配合(还没上线)—— 现在请先选一个中枢开始配对,"
+                                          + "并在主机那台上按接受。"));
+            foreach (var h in scan.Hits)
+            {
+                var hit = h;
+                var b = Ui.Secondary($"{hit.HubId} · {hit.Dial}", async (_, _) =>
+                {
+                    status.Text = Strings.Get("status.connecting");
+                    await StartPairing(hit.Dial, Environment.MachineName, status);
+                });
+                b.Margin = new Thickness(0, 4, 0, 0);
+                b.HorizontalAlignment = HorizontalAlignment.Left;
+                extra.Children.Add(b);
             }
         });
-        goRef = go;
-
-        _ = ScanForHubsAsync(list, note, d => { picked = d; status.Text = "已选:" + d; });
-
-        return Ui.Card(Ui.Stack(
-            Ui.Subtitle("连接到家里的中枢"),
-            Ui.Body("没探到本机在当中枢 —— 下面是同一网络下找到的中枢。选一个,点「开始配对」。", muted: true),
-            // ★ 措辞是「没探到」而不是那句更顺口的断言 —— 手里只有两条线索叠加(没有中枢应答、
-            //   也没装主机端程序),不是证明。断言那句话正是 2026-08-03 坑到人的写法。
-            Ui.Caption("★ 这是【没探到】,不是证明:本机既没有中枢在应答、也没装主机端程序。"
-                       + "如果中枢其实就跑在这台上,点下面「重新检测」。"),
-            note,
-            list,
-            new Border { Height = 8 },
-            Ui.Body(Strings.Get("pairing.device_name")), name,
-            go,
-            new Border { Height = 8 },
-            status,
-            Ui.Caption("★ 找到它不等于信任它:接下来两边屏幕上的六个词必须逐字一致,再由主机批准。"),
-            new Border { Height = 8 },
-            RecheckRow()));
     }
+
+    string? _pickedDial;
 
     async Task ScanForHubsAsync(StackPanel list, TextBlock note, Action<string> onPick)
     {
@@ -1241,23 +1288,50 @@ public sealed class DevicesView : UserControl
     UIElement DeviceRow(AdminDevice d)
     {
         var row = new DockPanel { Margin = new Thickness(0, 6, 0, 6), LastChildFill = true };
-        var revoke = Ui.Danger(Strings.Get("devices.revoke"), async (_, _) =>
+        // ★★ 用户裁定:列表里【能看到自己,但不能移除自己】—— 自己就是主机,
+        //   把主机自己那条解除掉,等于让这台机器自己把自己踢出去。
+        var isSelf = IsThisMachine(d);
+        if (!isSelf)
         {
-            if (!ConfirmDialog.Show(Strings.Get("devices.revoke"),
-                    Strings.Get("devices.revoke_confirm", ("device", d.DisplayName)),
-                    confirmText: Strings.Get("devices.revoke"), danger: true)) return;
-            await TheApp.HubAdmin.RevokeAsync(d.DeviceId);
-            Build();
-        });
-        DockPanel.SetDock(revoke, Dock.Right);
-        row.Children.Add(revoke);
+            var revoke = Ui.Danger(Strings.Get("devices.revoke"), async (_, _) =>
+            {
+                if (!ConfirmDialog.Show(Strings.Get("devices.revoke"),
+                        Strings.Get("devices.revoke_confirm", ("device", SafeDisplayName(d.DisplayName))),
+                        confirmText: Strings.Get("devices.revoke"), danger: true)) return;
+                var (rs, rb) = await TheApp.HubAdmin.RevokeAsync(d.DeviceId);
+                if (rs != 200) ConfirmDialog.Show("没能解除", $"中枢回了 {rs}:{rb}", confirmText: "知道了", cancelText: "关闭");
+                Build();
+            });
+            DockPanel.SetDock(revoke, Dock.Right);
+            row.Children.Add(revoke);
+        }
         // 自报名可能含恶意内容:只作显示(WPF 文本节点已转义),永不进 prompt。
         // ★ 同名设备很常见(实机就有两条 SENIORBIRDS)—— 必须带上证书指纹短码,只按名字分不开。
         var col = new StackPanel();
-        col.Children.Add(Ui.Body($"{d.DisplayName}   ·   {d.Status}"));
+        col.Children.Add(Ui.Body($"{SafeDisplayName(d.DisplayName)}   ·   {d.Status}"
+                                 + (isSelf ? "   ·   这台(主机)" : "")));
         col.Children.Add(Ui.Caption("指纹 " + (d.CertShort ?? "(无活动证书)") + "   ·   " + d.DeviceId));
+        if (isSelf) col.Children.Add(Ui.Caption("★ 自己是主机,不能在这里把自己解除。"));
         row.Children.Add(col);
         return row;
+    }
+
+    /// <summary>
+    /// 这一条是不是【本机】。★ 按证书指纹认,不按名字 —— 同名设备很常见,
+    /// 而名字还是自报的。中枢给的是 SHA256 短码,拿本机设备证书算一遍前缀比对。
+    /// </summary>
+    bool IsThisMachine(AdminDevice d)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(d.CertShort)) return false;
+            var b64 = TheApp.Hub.Profile?.DeviceCertB64;
+            if (string.IsNullOrWhiteSpace(b64)) return false;
+            var raw = Convert.FromBase64String(b64);
+            var hex = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(raw));
+            return hex.StartsWith(d.CertShort.Replace(":", "").Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }   // 认不出就当不是自己 —— 宁可多给一个解除按钮,也不误判成"这是主机"
     }
 
     void RenderDevices(StackPanel list, string json)
