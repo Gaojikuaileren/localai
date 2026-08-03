@@ -40,15 +40,7 @@ public sealed class I18nPanel : UserControl
         // ---- 顶行:左 = 导入文件路径(只读 TextBox,可选中复制),右 = 导入/导出(用户裁定 2026-08-03)
         var topBar = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 4) };
         var btns = new StackPanel { Orientation = Orientation.Horizontal };
-        btns.Children.Add(Ui.Secondary("导入 JSON", (_, _) =>
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "JSON|*.json" };
-            if (dlg.ShowDialog() != true) return;
-            var st0 = TheApp.I18n;
-            var n = st0.ImportJson(System.IO.File.ReadAllText(dlg.FileName));
-            if (n >= 0) st0.Doc.SourcePath = dlg.FileName;
-            st0.SetStatus(n < 0 ? "解析失败:不是合法 JSON。" : $"读入 {n} 条词条。", n < 0);
-        }));
+        btns.Children.Add(Ui.Secondary("导入 JSON", (_, _) => ImportDialog()));
         var exp = Ui.Secondary("导出 JSON", (_, _) =>
         {
             // ★ 单文件导出(用户裁定 2026-08-03,推翻一源两出):一个完整对照 JSON,AI 直接读
@@ -73,8 +65,25 @@ public sealed class I18nPanel : UserControl
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto };   // 语言不限量 -> 横向可滚
 
+        // ★ 空态引导(用户裁定 2026-08-03):会话还没指向任何 JSON 时,编辑面【灰掉不开放】,
+        //   中央给两条路:① 复制 Prompt 找 AI 生成(着重色 + 箭头指向下方工具卡)② 直接导入。
+        _gridScroll = gridScroll;
+        var g1 = new TextBlock { Text = "这条会话还没有词条表", FontWeight = FontWeights.SemiBold,
+                                 HorizontalAlignment = HorizontalAlignment.Center };
+        g1.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+        var g2 = new TextBlock { Text = "① 点下方工具卡的「复制 Prompt」→ 丢给你的 AI,让它把项目字符生成 JSON 表  ↘",
+                                 HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 10, 0, 0), TextWrapping = TextWrapping.Wrap };
+        g2.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        var g3 = new TextBlock { Text = "② 或者已有文件,直接导入:", HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 6) };
+        g3.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        var gBtn = Ui.Primary("导入 JSON", (_, _) => ImportDialog());
+        gBtn.HorizontalAlignment = HorizontalAlignment.Center;
+        _emptyGuide = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Visibility = Visibility.Collapsed };
+        _emptyGuide.Children.Add(g1); _emptyGuide.Children.Add(g2); _emptyGuide.Children.Add(g3); _emptyGuide.Children.Add(gBtn);
+
         var stage = new Grid();
         stage.Children.Add(gridScroll);
+        stage.Children.Add(_emptyGuide);
         stage.Children.Add(_raw);
 
         _status.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -91,6 +100,19 @@ public sealed class I18nPanel : UserControl
         Unloaded += (_, _) => TheApp.I18n.Changed -= Rebuild;
     }
 
+    ScrollViewer _gridScroll = null!;
+    StackPanel _emptyGuide = null!;
+
+    void ImportDialog()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "JSON|*.json" };
+        if (dlg.ShowDialog() != true) return;
+        var st0 = TheApp.I18n;
+        var n = st0.ImportJson(System.IO.File.ReadAllText(dlg.FileName));
+        if (n >= 0) st0.Doc.SourcePath = dlg.FileName;
+        st0.SetStatus(n < 0 ? "解析失败:不是合法 JSON。" : $"读入 {n} 条词条。", n < 0);
+    }
+
     void Rebuild()
     {
         if (_editing) { RefreshStatus(); return; }   // 打字中的 Touch 不重建 —— 否则每敲一键焦点就没了
@@ -100,6 +122,12 @@ public sealed class I18nPanel : UserControl
         { _raw.Text = st.RawText; _raw.Visibility = Visibility.Visible; }
         else if (!st.RawMode && _raw.Visibility == Visibility.Visible)
             _raw.Visibility = Visibility.Collapsed;
+
+        // 空态 = 既没词条也没指过文件:编辑面灰掉不开放,中央给引导(见构造)
+        var blank = st.Doc.Entries.Count == 0 && string.IsNullOrEmpty(st.Doc.SourcePath);
+        _emptyGuide.Visibility = blank && !st.RawMode ? Visibility.Visible : Visibility.Collapsed;
+        _gridScroll.IsEnabled = !blank;
+        _gridScroll.Opacity = blank ? 0.35 : 1;
 
         _grid.Children.Clear();
         _grid.ColumnDefinitions.Clear();
