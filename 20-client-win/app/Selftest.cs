@@ -1503,7 +1503,7 @@ public static class Selftest
                        "列表点开与深链打开走同一条切场景的路(别一处切一处不切)");
                 Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
                        "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
-                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : IconName.Extensions"),
+                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Pdf"),
                        "同传/文件翻译/JSON译表会话在列表里各用自己的图标区分(列表窄,一个图标够用)");
                 // 顶部场景切换只要图标 + 透明命中块
                 var modeSw = Slice(cvIS, "FrameworkElement ModeSwitcher()", "return row;");
@@ -2292,6 +2292,37 @@ public static class Selftest
                 var tbP = TryReadSource(Path.Combine("Views", "TranslationBar.cs"));
                 if (tbP is not null)
                     Assert(!tbP.Contains("_i18nDrawer"), "★ 抽屉已拆干净,不留死结构");
+            }
+
+            // ---- 回信(D61,2026-08-03 用户裁定)----
+            {
+                var rd = new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Tone = Services.ReplyTone.Formal,
+                    TheirName = "王先生", MyName = "李四", MyAddress = "上海市某路 1 号", TheirAddress = "北京市某街 2 号",
+                    MyContact = "13800000000", SignDate = "2026年8月3日", GreetingIndex = 1, ClosingIndex = 1,
+                    Draft = "感谢来信。\n事情已办妥。" };
+                var paper = Services.ReplyState.Compose(rd);
+                Assert(paper.Contains("王先生:") && paper.Contains("    您好!") && paper.Contains("此致敬礼!"),
+                       "★ 纸质:称呼/缩进问候/祝福各就各位(格式装配是真的,不等引擎)");
+                Assert(paper.Contains("李四  2026年8月3日") && paper.Contains("北京市某街 2 号"),
+                       "★ 纸质:右侧署名+日期、对方地址排入(日期只进纸质)");
+                rd.Medium = Services.ReplyMedium.Message;
+                var msg = Services.ReplyState.Compose(rd);
+                Assert(!msg.Contains("2026年8月3日") && !msg.Contains("某街"),
+                       "★ 短消息:不排日期不排地址(紧凑)");
+                rd.Medium = Services.ReplyMedium.Email;
+                var mail = Services.ReplyState.Compose(rd);
+                Assert(mail.Contains("13800000000") && !mail.Contains("某路"),
+                       "★ 邮件:带签名联系方式;地址只进纸质");
+                // 设置跟随会话:两个会话各自的 Doc 互不串
+                var rs = new Services.ReplyState();
+                rs.SetSession("r-1"); rs.Doc.MyName = "甲";
+                rs.SetSession("r-2"); rs.Doc.MyName = "乙";
+                rs.SetSession("r-1");
+                Assert(rs.Doc.MyName == "甲", "★ 设置跟随会话:回到旧会话设置还在");
+                rs.SetSession(null);
+                Assert(rs.Doc.MyName == "", "新进来 = 全默认(草稿态)");
+                var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
+                Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");
             }
 
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----

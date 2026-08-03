@@ -113,6 +113,11 @@ public sealed class ChatView : UserControl
             TheApp.FileTrans.FocusSession += OnFileTransFocus;
             TheApp.I18n.FocusSession += OnFileTransFocus;   // 同一个动作:选中新建的场景会话
         }
+        if (_wsKey == "chat")
+        {
+            TheApp.Reply.Changed += OnReplyChanged;
+            TheApp.Reply.FocusSession += OnFileTransFocus;   // 回信会话建了就选中(D61)
+        }
         // ★ 目标池一变,发送键就要跟着变(拖进第一个语言时按钮必须当场亮起来)。
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
         TheApp.Translation.Changed += RefreshSendEnabled;
@@ -123,6 +128,11 @@ public sealed class ChatView : UserControl
             TheApp.Projects.Changed -= UpdateContext;
             TheApp.Translation.Changed -= RefreshSendEnabled;
             TheApp.History.JumpRequested -= OnJumpToHistory;
+            if (_wsKey == "chat")
+            {
+                TheApp.Reply.Changed -= OnReplyChanged;
+                TheApp.Reply.FocusSession -= OnFileTransFocus;
+            }
             if (_wsKey == "translation")
             {
                 TheApp.Interpret.Changed -= OnInterpretChanged;
@@ -158,6 +168,14 @@ public sealed class ChatView : UserControl
     {
         TheApp.I18n.SetSession(_sessionId is { } sid && TheApp.Chat.Find(sid)?.I18nTable == true ? sid : null);
         return new I18nPanel();
+    }
+
+    StackPanel? _chatSceneHead;   // 聊天空间顶部的「聊天/回信」切换条(回信场景里单独装配)
+    bool _replyScene;   // 上一次画的是不是回信场景(场景没变就不整区重建,别打断打字)
+    void OnReplyChanged()
+    {
+        if (TheApp.Reply.SceneReply == _replyScene) return;
+        BuildConversation();
     }
 
     void OnInterpretChanged()
@@ -443,9 +461,9 @@ public sealed class ChatView : UserControl
         }
         // ★ 同传记录和普通会话排在同一个列表里(用户裁定),所以要有个标记告诉用户"这条不一样" ——
         //   用麦克风图标而不是加一行字:列表本来就窄,一个图标就够分辨,也不挤掉标题。
-        if (s.Interpret || s.FileTrans || s.I18nTable)
+        if (s.Interpret || s.FileTrans || s.I18nTable || s.ReplyLetter)
         {
-            var mk = Icons.Make(s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : IconName.Extensions, 12, selected ? "FgOnSelected" : "Accent");
+            var mk = Icons.Make(s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Pdf, 12, selected ? "FgOnSelected" : "Accent");
             mk.Margin = new Thickness(0, 0, 5, 0);
             mk.VerticalAlignment = VerticalAlignment.Center;
             titleRow.Children.Add(mk);
@@ -517,6 +535,8 @@ public sealed class ChatView : UserControl
             // ★ 同一空间内也分模块(文字翻译 / 同声传译):点开就把界面切到这条会话自己那一套,
             //   两个方向都切 —— 详见 ApplySessionScene。
             ApplySessionScene(s);
+            // 聊天空间同规:回信会话 <-> 普通聊天,点开双向切场景(D61)
+            if (_wsKey == "chat") TheApp.Reply.SetScene(s.ReplyLetter);
             BuildSessions();
             BuildConversation();
         };
@@ -1115,6 +1135,42 @@ public sealed class ChatView : UserControl
             }
         }
 
+        // ★ 聊天空间的第二功能【回信】(D61):场景开着就整区换成 回信面板 + 回信设置条,
+        //   顶部给「聊天 / 回信」两枚切换 chip(与翻译空间的场景切换同一语法)。
+        if (_wsKey == "chat")
+        {
+            _replyScene = TheApp.Reply.SceneReply;
+            var chatHead = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            void SceneChip(string text, bool on, Action click)
+            {
+                var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
+                t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
+                var c = new Border { Child = t, Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(0, 0, 8, 0),
+                                     Cursor = Cursors.Hand, BorderThickness = new Thickness(1) };
+                c.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+                if (on) { c.SetResourceReference(Border.BackgroundProperty, "Accent"); c.SetResourceReference(Border.BorderBrushProperty, "Accent"); }
+                else { c.Background = Brushes.Transparent; c.SetResourceReference(Border.BorderBrushProperty, "Border"); }
+                c.MouseLeftButtonUp += (_, e) => { e.Handled = true; click(); };
+                chatHead.Children.Add(c);
+            }
+            SceneChip("聊天", !_replyScene, () => TheApp.Reply.SetScene(false));
+            SceneChip("回信", _replyScene, () => TheApp.Reply.SetScene(true));
+            if (_replyScene)
+            {
+                // 绑定当前选中的回信会话(没选中 = 草稿态,首笔编辑自建会话并选中)
+                TheApp.Reply.SetSession(_sessionId is { } rsid2 && TheApp.Chat.Find(rsid2)?.ReplyLetter == true ? _sessionId : null);
+                var rBody = new DockPanel { LastChildFill = true };
+                DockPanel.SetDock(chatHead, Dock.Top);
+                rBody.Children.Add(chatHead);
+                var rBar = new ReplyBar { Margin = new Thickness(0, 10, 0, 0) };
+                DockPanel.SetDock(rBar, Dock.Bottom);
+                rBody.Children.Add(rBar);
+                rBody.Children.Add(new ReplyPanel());
+                return ConvCard(rBody);
+            }
+            _chatSceneHead = chatHead;   // 聊天场景:切换条交给下面的常规装配挂在顶部
+        }
+
         var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
         // ★ 居中态 = 【这个空间要居中】且【确实没有消息】。附件放哪、横幅浮不浮、
@@ -1190,6 +1246,16 @@ public sealed class ChatView : UserControl
             withModes.Children.Add(head);
             withModes.Children.Add(inner);
             inner = withModes;
+        }
+        // 聊天空间:顶部挂「聊天/回信」切换条(D61,与翻译的场景切换同一位置同一语法)
+        if (_chatSceneHead is { } sceneHead)
+        {
+            _chatSceneHead = null;
+            var withScene = new DockPanel { LastChildFill = true };
+            DockPanel.SetDock(sceneHead, Dock.Top);
+            withScene.Children.Add(sceneHead);
+            withScene.Children.Add(inner);
+            inner = withScene;
         }
 
         _wasEmptyState = heroNow;   // ★ 不是 !hasMsgs:贴底态永远没有"从居中滑下来"这一说
