@@ -442,6 +442,22 @@ public sealed class DevicesView : UserControl
     {
         void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
 
+        // ★★ 先看中枢是不是【已经在跑了】。不看的话会去起第二个,而第二个必然撞 "address already in use",
+        //   在黑窗口里吐一整屏 Kestrel 异常栈 —— 用户看到那一堆,根本读不出"你已经开着一个了"。
+        //   (2026-08-04 实测:用户屏幕上就是这么两个窗口,一个好的、一个一屏堆栈。)
+        var admin0 = TheApp.HubAdmin;
+        if (await admin0.ProbeAsync(TheApp.Hub.Profile?.HubId) && admin0.LastProbe == Services.AdminProbeResult.Ok)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                status.Text = "中枢已经在这台机器上跑着了 —— 不用再起一个。";
+                _role = HostRole.Host;
+                Build();
+                (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
+            });
+            return;
+        }
+
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo

@@ -5130,6 +5130,13 @@ public static class Selftest
                     Assert(auto is not null && auto.Contains("_role = HostRole.Client"),
                            "★ 出口要真的把角色改过去,不是只弹句话");
 
+                    // ㉑ 起中枢之前先看它是不是已经在跑 —— 否则第二个必然撞端口,吐一屏 Kestrel 异常栈
+                    Assert(se is not null && se.IndexOf("admin0.ProbeAsync", StringComparison.Ordinal) >= 0
+                           && se.IndexOf("admin0.ProbeAsync", StringComparison.Ordinal) < iSpawn,
+                           "★★ 拉起中枢前先探一次:已经在跑就别起第二个 —— "
+                           + "第二个会撞 address already in use,在黑窗口里吐一整屏异常栈,"
+                           + "而人根本读不出「你已经开着一个了」");
+
                     // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
                     Assert(body4.Contains("rst == 409") && body4.Contains("重新点一次「开始配对」"),
                            "★★ 请求过期时 Approve 回 409,以前两处都丢掉返回值 —— "

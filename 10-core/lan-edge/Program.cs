@@ -284,7 +284,20 @@ static async Task<int> RunLan(string[] a)
     var app = Edge.Build(new EdgeConfig(idDir, secDir, "http://127.0.0.1:8080", 8443, ip, OnEnroll,
                                         AdminPort: AdminPort, OpenPairingWindowOnStart: false),
                          pairingOverride: pairing);
-    await app.StartAsync();
+    // ★★ 端口被占是【最常见】的一种启动失败(多半是中枢已经在跑了),
+    //   而它本来会抛一整屏 Kestrel 的未捕获异常栈 —— 人在黑窗口里看到那一堆,
+    //   根本读不出"你已经开着一个了"。用一句话说清楚,并给可执行的下一步。
+    try
+    {
+        await app.StartAsync();
+    }
+    catch (IOException ex) when (ex.InnerException is Microsoft.AspNetCore.Connections.AddressInUseException)
+    {
+        Console.WriteLine($"✗ {ip}:8443 已经被占用 —— 中枢无法启动。");
+        Console.WriteLine("  ★ 最常见的原因:中枢已经在跑了(另一个黑窗口)。那就不用再开一个。");
+        Console.WriteLine("  否则:看看是谁占着 ——  netstat -ano | findstr :8443");
+        return 4;
+    }
 
     var expiry = Identity.ServerCertExpiry(idDir);
     var daysLeft = (expiry - DateTimeOffset.UtcNow).TotalDays;
