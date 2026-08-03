@@ -9,8 +9,13 @@
 //
 // ★ 「本机是不是主机」不靠猜(HubClient.ThisMachineIsHub 那个启发式只用于状态显示):
 //   这里直接 **ping 一下回环管理面**,并核对它自报的 hubId 与本机配对档案里的 HubId 一致。
-//   拿到肯定证据才认 —— 否则(端口不通 / hubId 对不上)就如实说"这台不是主机"。
-//   这比"拨号地址看着像本机"强:同一台机器上可能跑着另一个中枢,那时 hubId 就对不上。
+//   拿到肯定证据才认。这比"拨号地址看着像本机"强:同一台机器上可能跑着另一个中枢,那时 hubId 就对不上。
+//
+// ★★ 但探测失败【不等于】"这台不是主机" —— 这条曾经写反,并且真的坑到人了(2026-08-03):
+//   主机那台本身持有中枢身份,只是 lan-edge 没启动,8442 上自然没人听。当时界面直接说
+//   「这台不是主机」,人就去怀疑"我是不是配错机器了",而唯一要做的只是把 Edge 起起来。
+//   ⇒ 所以这里把失败**分类**(AdminProbeResult),由界面去说【实际观察到的是什么】,
+//     绝不替它塌缩成一个证明不了的结论。
 //
 // ★ 不做 mTLS:管理面的门禁是**端口 + 回环**,不是证书。在回环上再套一层客户端证书
 //   既不增加安全性(能连回环就已经在这台机器上了),又会把"主机自己管自己"绑死在
@@ -21,6 +26,26 @@ using System.Text;
 using System.Text.Json;
 
 namespace LocalAI.Client.Services;
+
+/// <summary>
+/// 探测回环管理面的结果分类。★ 存在的理由:界面必须说【观察到的事】,
+/// 而"没应答"有好几种完全不同的处置办法,塌缩成一句话就会把人支去做无用功。
+/// </summary>
+public enum AdminProbeResult
+{
+    /// <summary>连上了,而且 hubId 对得上 —— 本机确实正在当主机。</summary>
+    Ok,
+    /// <summary>没人在回环管理口上听。中枢没在这台机器上跑 —— ★ 这【不等于】这台不是主机。</summary>
+    NotListening,
+    /// <summary>连上了但没在超时内答复。</summary>
+    Timeout,
+    /// <summary>连上了,但它自报的 hubId 不是本机配对的那个(同机跑着另一个中枢)。</summary>
+    WrongHub,
+    /// <summary>连上了,但答了个错误码 —— 多半是两边版本对不上或路由变了。</summary>
+    HttpError,
+    /// <summary>其它(异常已记在 LastError 里)。</summary>
+    Unknown,
+}
 
 /// <summary>一条待批准的配对请求(六个词要与对方屏幕上逐字一致才批)。</summary>
 public sealed record PendingPair(string RequestId, string DisplayName, string[] Sas, int SecondsLeft);
@@ -52,6 +77,9 @@ public sealed class HubAdmin
 
     /// <summary>上一次探测的结果 —— 界面据此决定显示"管理面"还是"这台不是主机"。</summary>
     public bool Available { get; private set; }
+
+    /// <summary>上一次探测的**分类**。界面据此决定说哪一句 —— 见 AdminProbeResult 的说明。</summary>
+    public AdminProbeResult LastProbe { get; private set; } = AdminProbeResult.Unknown;
     public string? HubId { get; private set; }
     public bool PairingWindowOpen { get; private set; }
     public string? LastError { get; private set; }
@@ -62,26 +90,52 @@ public sealed class HubAdmin
     /// </summary>
     public async Task<bool> ProbeAsync(string? expectHubId)
     {
-        Available = false; HubId = null; LastError = null;
+        Available = false; HubId = null; LastError = null; LastProbe = AdminProbeResult.Unknown;
         try
         {
             using var r = await Http.GetAsync(Base + "/admin/ping");
-            if (!r.IsSuccessStatusCode) { LastError = $"管理面回了 {(int)r.StatusCode}"; return false; }
+            if (!r.IsSuccessStatusCode)
+            {
+                LastProbe = AdminProbeResult.HttpError;
+                LastError = $"管理面回了 {(int)r.StatusCode}";
+                return false;
+            }
             var j = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
             HubId = j.TryGetProperty("hubId", out var h) ? h.GetString() : null;
             PairingWindowOpen = j.TryGetProperty("pairingWindowOpen", out var w) && w.GetBoolean();
             if (!string.IsNullOrWhiteSpace(expectHubId) && !string.Equals(HubId, expectHubId, StringComparison.Ordinal))
             {
                 // 连得上但不是【我们这个】中枢 —— 同机跑着另一个中枢时会这样。如实说,不糊弄过去。
+                LastProbe = AdminProbeResult.WrongHub;
                 LastError = $"这台机器上的管理面属于另一个中枢({HubId}),不是本机配对的那个";
                 return false;
             }
             Available = true;
+            LastProbe = AdminProbeResult.Ok;
             return true;
         }
         catch (Exception ex)
         {
-            LastError = ex is TaskCanceledException ? "管理面没响应(这台多半不是主机)" : ex.Message;
+            // ★ 只说观察到的:连接被拒 = 没人在听。这句话【到此为止】——
+            //   是不是主机、要不要去启动 Edge,由界面结合别的线索去说,这里不下结论。
+            var refused = ex is HttpRequestException
+                          && ex.InnerException is System.Net.Sockets.SocketException se
+                          && se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused;
+            if (refused)
+            {
+                LastProbe = AdminProbeResult.NotListening;
+                LastError = $"127.0.0.1:{AdminPort} 上没有人听 —— 中枢没在这台机器上运行";
+            }
+            else if (ex is TaskCanceledException or OperationCanceledException)
+            {
+                LastProbe = AdminProbeResult.Timeout;
+                LastError = $"127.0.0.1:{AdminPort} 在 {(int)Http.Timeout.TotalSeconds} 秒内没有答复";
+            }
+            else
+            {
+                LastProbe = AdminProbeResult.Unknown;
+                LastError = ex.Message;
+            }
             return false;
         }
     }
@@ -180,6 +234,40 @@ public sealed class HubAdmin
             catch { /* 这张网卡不通就换下一张 —— 探测失败不是错误 */ }
         }
         return null;
+    }
+
+    // ---------------------------------------------------------------- 本机【能不能】当主机(线索,不是判据)
+    /// <summary>
+    /// 本机上有没有主机端程序。★ 这是一条**线索**,不是判据 ——
+    /// 它回答的是「这台**能不能**当主机」,不是「这台**是不是正在**当主机」;
+    /// 后者只有回环管理面答话才算数(见 ProbeAsync)。
+    ///
+    /// 依据出包布局:`dist\client\localai-client.exe` 与 `dist\host\localai-lan-edge.exe` 并排。
+    /// 副机上只装 client-pack、没有 host 目录 ⇒ 找不到就说明这台多半真的不是主机。
+    /// 开发树里跑(bin\Debug\…)也找不到 —— 那时就当没有这条线索,界面照样能说清楚。
+    /// </summary>
+    public static string? HostToolsDir()
+    {
+        try
+        {
+            // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(BaseDirectory 可能指向解包目录)
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(exe)) return null;
+            var dir = Path.GetDirectoryName(exe);
+            if (dir is null) return null;
+            var host = Path.GetFullPath(Path.Combine(dir, "..", "host"));
+            return File.Exists(Path.Combine(host, "localai-lan-edge.exe")) ? host : null;
+        }
+        catch { return null; }   // 路径拿不到就是没这条线索,不是错误
+    }
+
+    /// <summary>主机端的启动脚本(存在才返回)。界面用它把"去点哪个文件"直接说出来。</summary>
+    public static string? StartEdgeCmd()
+    {
+        var d = HostToolsDir();
+        if (d is null) return null;
+        var p = Path.Combine(d, "启动Edge.cmd");
+        return File.Exists(p) ? p : null;
     }
 
     /// <summary>本机的 IPv4(跳过回环与未启用的网卡)。</summary>

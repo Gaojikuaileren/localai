@@ -160,8 +160,12 @@ public sealed class DevicesView : UserControl
         {
             if (hits.Count == 0)
             {
-                note.Text = "没找到中枢。请确认主机上的 Edge 起着、两台在同一个网段、防火墙放行了 8443;"
-                          + "或照主机窗口里那行「拨号 …:8443」手填。";
+                // ★ 本机装着主机端程序却又扫不到 —— 那多半就是"这台是主机,但 Edge 没启动",直说。
+                note.Text = Services.HubAdmin.HostToolsDir() is not null
+                    ? "没找到中枢 —— 而本机装着主机端程序,所以多半是这台的 Edge 还没启动。"
+                      + "去主机端目录双击 启动Edge.cmd(用普通用户,别用管理员)。"
+                    : "没找到中枢。请确认主机上的 Edge 起着、两台在同一个网段、防火墙放行了 8443;"
+                      + "或照主机窗口里那行「拨号 …:8443」手填。";
                 return;
             }
             if (hits.Count == 1)
@@ -370,11 +374,31 @@ public sealed class DevicesView : UserControl
             list.Children.Clear();
             if (!ok)
             {
-                // ★ 结构性走不通,说清楚 ——「管理接口只开在主机本地的回环口」是 D37/D48 的设计,
-                //   不是"主机还没升级"。把结构性的走不通说成"暂时还没有",会让人一直等。
-                list.Children.Add(Ui.Body("这台不是主机 —— 配对审批与设备管理只能在主机上操作。", muted: true));
-                list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口(127.0.0.1:"
-                                             + Services.HubAdmin.AdminPort + "),局域网那条路结构上就到不了 —— 不是版本问题。"));
+                // ★★ 这一段以前直接断言「这台不是主机」—— 而代码观察到的只有"回环管理面没应答"。
+                //   2026-08-03 真的坑到人了:主机那台自己持有中枢身份,只是 lan-edge 没启动,
+                //   于是主机上也显示"这台不是主机",人就去怀疑配错了机器,而唯一要做的是把 Edge 起起来。
+                //   现在:先说观察到的,再按【本机有没有主机端程序】这条线索给出对应的下一步。
+                var hostDir = Services.HubAdmin.HostToolsDir();
+                if (hostDir is not null)
+                {
+                    list.Children.Add(Ui.Body("中枢没在这台机器上运行。"));
+                    list.Children.Add(Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"));
+                    var cmd = Services.HubAdmin.StartEdgeCmd();
+                    list.Children.Add(Ui.Caption(cmd is not null
+                        ? "去双击:" + cmd
+                        : "去主机端目录里双击 启动Edge.cmd:" + hostDir));
+                    // ★ 这条坑极容易踩,而且报出来的错("密钥集不存在")完全指不到真正的原因,必须先说在前面
+                    list.Children.Add(Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
+                                                 + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"));
+                }
+                else
+                {
+                    list.Children.Add(Ui.Body("没探到本机在当中枢 —— 配对审批与设备管理只能在主机那台上操作。", muted: true));
+                    list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口(127.0.0.1:"
+                                                 + Services.HubAdmin.AdminPort + "),局域网那条路结构上就到不了 —— 不是版本问题。"));
+                    list.Children.Add(Ui.Caption("★ 如果这台【就是】主机:那就是中枢没启动 —— 去主机端目录双击 启动Edge.cmd"
+                                                 + "(用普通用户,别用管理员)。"));
+                }
                 if (admin.LastError is { Length: > 0 } why) list.Children.Add(Ui.Caption("探测结果:" + why));
                 return;
             }

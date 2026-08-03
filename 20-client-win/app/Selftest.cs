@@ -4832,9 +4832,23 @@ public static class Selftest
                        "★ 没探测过之前一律【不可用】—— 管理面的可达性是探出来的,不是假设出来的");
                 // ★ 探一个必定连不上的端口:必须【如实说不可用】,不许 fail-open 成"可用"
                 Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", "1");
-                var probed = System.Threading.Tasks.Task.Run(async () => await new Services.HubAdmin().ProbeAsync("whatever")).GetAwaiter().GetResult();
+                var ha1 = new Services.HubAdmin();
+                var probed = System.Threading.Tasks.Task.Run(async () => await ha1.ProbeAsync("whatever")).GetAwaiter().GetResult();
                 Assert(!probed, "★★ 连不上就是连不上 —— 管理面探测 fail-closed(连不上却说可用 = 界面给出根本点不动的按钮)");
+                // ★★ 失败要被【分类】。2026-08-03 的真事:主机那台自己没启动 lan-edge,
+                //   界面把"回环没人听"直接说成「这台不是主机」,人就去怀疑配错了机器。
+                //   分类存在的全部意义就是让界面能说【观察到的事】,而不是替它下一个证明不了的结论。
+                Assert(ha1.LastProbe == Services.AdminProbeResult.NotListening,
+                       "★★ 回环端口没人听要归成 NotListening —— 它只说明"
+                       + "「中枢没在这台机器上跑」,【不等于】这台不是主机(主机没启动 Edge 时也是这个结果)");
+                Assert(ha1.LastError is { Length: > 0 } e1 && e1.Contains("没有人听"),
+                       "★ 探测结果要说人话且只说观察到的 —— 不下「这台不是主机」这种结论");
                 Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", null);
+
+                // ★ "本机有没有主机端程序"是【线索】不是判据:开发树里没有 dist\host,应当如实返回 null 且不抛
+                Assert(Services.HubAdmin.HostToolsDir() is null,
+                       "★ 开发树里找不到主机端程序就返回 null —— 线索拿不到不是错误,界面照样要能说清楚");
+                Assert(Services.HubAdmin.StartEdgeCmd() is null, "★ 没有主机端目录时启动脚本路径也返回 null,不编一个路径出来");
 
                 var haSrc = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
                 if (haSrc is not null)
@@ -4862,6 +4876,16 @@ public static class Selftest
                            "★ 主机上要说清为什么不能填回环 —— 业务口只绑网卡 IP,回环上只有管理面");
                     Assert(dvSrc.Contains("ProbeAsync(TheApp.Hub.Profile?.HubId)"),
                            "★ 界面拿【肯定证据】判断这台是不是主机,不拿 ThisMachineIsHub 那个启发式当权限判定");
+                    // ★★ 这三条钉的是 2026-08-03 那个真实事故:主机那台显示「这台不是主机」。
+                    Assert(!Body(dvSrc).Contains("这台不是主机"),
+                           "★★ 探测失败【不等于】这台不是主机 —— 代码只观察到"
+                           + "「回环管理面没应答」,不许把它塌缩成一个证明不了的结论");
+                    Assert(Body(dvSrc).Contains("中枢没在这台机器上运行"),
+                           "★★ 要说【观察到的事】:中枢没在这台机器上运行");
+                    // ★ 钉到【那句报错原文】上 —— 只钉"普通用户"/"管理员"这两个词会被别处的文案蒙混过关
+                    Assert(Body(dvSrc).Contains("密钥集不存在") && Body(dvSrc).Contains("【普通用户】双击"),
+                           "★★ 必须先说管理员这条坑 —— Edge 一检测到管理员就退出,"
+                           + "而它报的「密钥集不存在」完全指不到真正的原因(我自己也踩了)");
                     Assert(dvSrc.Contains("逐字一致") && dvSrc.Contains("这时候必须点取消"),
                            "★★ 六个词【不代人比对】:界面只把词摆出来并要求人确认逐字一致,不提供跳过");
                     // ★ 看【去注释后的正文】—— 解释“为什么不能这么写”的注释里就带着这个词,不脱注释会自己撞自己
