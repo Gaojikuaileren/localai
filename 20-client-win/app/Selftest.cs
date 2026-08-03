@@ -4828,6 +4828,65 @@ public static class Selftest
                     Assert(Services.HubDiscovery.Network("192.168.178.61", 22) == "192.168.176.0",
                            "★ 网段号按真实掩码算 —— 界面要把「扫了哪个网段」如实说出来");
 
+                    // ---- ★★ 真的握手一次:ProbeOneAsync 能不能读出证书名 ----
+                    // 这条是 2026-08-04 审计抓出来的教训:原来只有一句
+                    // `haSrc2.Contains("HubDiscovery.ProbeOneAsync")` 的搜字符串 —— 全绿,而功能**全废**:
+                    // SslStream 的证书回调被设了两遍(构造函数一个、AuthenticateAsClientAsync 的 options 里又一个),
+                    // .NET 在握手【开始之前】就抛 InvalidOperationException,被空 catch 吞掉,cert 恒为 null。
+                    // 于是局域网发现、「在局域网里找回它」、主机自配对探业务口 —— 三条路径统统恒失败。
+                    // ⇒ 搜字符串看不见语义错误。这里起一个**真的** TLS 监听让它去握手。
+                    {
+                        var hubShort = "abcdefgh23456789";           // 16 位小写 base32,合法形状
+                        var dns = "localai-" + hubShort + ".local";
+                        using var ecdsa = System.Security.Cryptography.ECDsa.Create(
+                            System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+                        var req = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                            "CN=" + dns, ecdsa, System.Security.Cryptography.HashAlgorithmName.SHA256);
+                        var san = new System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder();
+                        san.AddDnsName(dns);
+                        req.CertificateExtensions.Add(san.Build());
+                        using var selfSigned = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),
+                                                                    DateTimeOffset.UtcNow.AddMinutes(30));
+                        // ★ SChannel 要能拿到私钥 —— 临时密钥要过一遍 PFX 才行
+                        var pfx = selfSigned.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx, "x");
+                        using var serverCert = System.Security.Cryptography.X509Certificates
+                            .X509CertificateLoader.LoadPkcs12(pfx, "x");
+
+                        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                        listener.Start();
+                        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+                        var serverTask = System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            try
+                            {
+                                using var c = await listener.AcceptTcpClientAsync();
+                                using var ss = new System.Net.Security.SslStream(c.GetStream(), false);
+                                await ss.AuthenticateAsServerAsync(serverCert, false,
+                                    System.Security.Authentication.SslProtocols.Tls12
+                                    | System.Security.Authentication.SslProtocols.Tls13, false);
+                            }
+                            catch { /* 客户端读完名字就走人,这里抛是正常的 */ }
+                        });
+
+                        Services.FoundHub? probed = null;
+                        try
+                        {
+                            probed = System.Threading.Tasks.Task.Run(async () =>
+                                await Services.HubDiscovery.ProbeOneAsync("127.0.0.1", port, 3000))
+                                .GetAwaiter().GetResult();
+                        }
+                        catch { }
+                        try { listener.Stop(); } catch { }
+
+                        Assert(probed is not null,
+                               "★★ 对着一台真的 TLS 服务器握手,ProbeOneAsync 必须读到证书 —— "
+                               + "恒返回 null 就是整个局域网发现结构性失效(而搜字符串看不出来)");
+                        Assert(probed is null || probed.HubId == hubShort,
+                               $"★★ 要从证书名里取出 hub_id(期望 {hubShort},实得 {probed?.HubId})");
+                        Assert(probed is null || probed.ServerName == dns, "★ 证书名原样带回来");
+                        Assert(probed is null || probed.CertSha256.Length == 64, "★ 指纹是 SHA256 的十六进制");
+                    }
+
                     // ---- hub_id 的两种形状 ----
                     // ★★ 这条是审计没抓到、核源码时自己发现的:配对档案存的是 hub_id(UUID),
                     //   而证书名里是 hub_id_short(UUID 前 80 位的小写 base32,16 字符)。

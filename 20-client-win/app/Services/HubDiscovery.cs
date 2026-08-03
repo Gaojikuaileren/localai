@@ -152,20 +152,21 @@ public static class HubDiscovery
         X509Certificate2? cert = null;
         try
         {
-            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false,
-                // ★★ 恒 true —— 这里【不做信任判断】,只为把对方证书拿到手读个名字。
-                //   真正的信任在两处:配对的六个词、以及之后 mTLS 对钉住的 CA 的校验。
-                userCertificateValidationCallback: (_, c, _, _) =>
-                {
-                    if (c is not null) cert = new X509Certificate2(c);
-                    return true;
-                });
+            // ★★ 证书回调**只能设一处**。这里曾经构造函数里设一个、options 里又设一个 ——
+            //   .NET 会在握手【开始之前】抛 InvalidOperationException
+            //   ("The 'RemoteCertificateValidationCallback' option was already set in the SslStream constructor."),
+            //   被下面那个空 catch 吞掉,cert 恒为 null ⇒ **整个局域网发现结构性失效**,
+            //   而三处失败文案却把人支去查防火墙/网线/路由器。2026-08-04 审计抓到,
+            //   自检里那条只搜函数名的断言全程是绿的 —— 所以现在有一条【真的握手一次】的测试钉着它。
+            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false);
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeoutMs * 3);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
             {
                 TargetHost = ip,
                 // 不带客户端证书:发现阶段我们可能还没有身份(第一次配对就是这种情形)
+                // ★★ 恒 true —— 这里【不做信任判断】,只为把对方证书拿到手读个名字。
+                //   真正的信任在两处:配对的六个词、以及之后 mTLS 对钉住的 CA 的校验。
                 RemoteCertificateValidationCallback = (_, c, _, _) =>
                 {
                     if (c is not null) cert = new X509Certificate2(c);
