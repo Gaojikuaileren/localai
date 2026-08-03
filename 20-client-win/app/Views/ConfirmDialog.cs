@@ -32,6 +32,9 @@ public static class ConfirmDialog
             Background = Brushes.Transparent,
             SizeToContent = SizeToContent.Height,
             Width = 400,
+            // ★★ 内容有可能来自网络(配对请求的自报显示名)。没有上限的话,一个超长名字
+            //   就能把窗口撑到屏幕外,按钮点不到 —— 那是一个由对方决定的"界面拒绝服务"。
+            MaxHeight = SystemParameters.PrimaryScreenHeight * 0.7,
             ShowInTaskbar = false,
             ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
@@ -44,6 +47,14 @@ public static class ConfirmDialog
 
         var body = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
         body.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        // ★ 撑不下就滚动,而不是把按钮顶出屏幕
+        var bodyScroll = new ScrollViewer
+        {
+            Content = body,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            MaxHeight = SystemParameters.PrimaryScreenHeight * 0.45,
+        };
 
         var ok = danger
             ? Ui.DangerFilled(confirmText, (_, _) => { result = true; win.Close(); })
@@ -56,7 +67,7 @@ public static class ConfirmDialog
 
         var stack = new StackPanel();
         stack.Children.Add(t);
-        stack.Children.Add(body);
+        stack.Children.Add(bodyScroll);
         stack.Children.Add(buttons);
 
         var card = new Border { Child = stack, Padding = new Thickness(20), BorderThickness = new Thickness(1) };

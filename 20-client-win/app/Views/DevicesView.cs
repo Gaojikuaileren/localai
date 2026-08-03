@@ -34,19 +34,20 @@ public sealed class DevicesView : UserControl
     /// <summary>拉起 Edge 后等它应答多久(秒)。★ 到点就如实说"没等到",不无限转圈。</summary>
     public const int StartEdgeWaitSeconds = 30;
 
-    /// <summary>收起/换页时的宽限秒数上限。★ 必须【有上限】:
-    /// 写成"只要队列非空就不关"的话,局域网上任何人塞一条(或一条卡住的请求)就能把窗口按住。</summary>
-    public const int GraceSeconds = 90;
+    // ★ 这里原来有个 GraceSeconds(收起时的宽限)。审计之后删掉了:它存在的前提是
+    //   "客户端替中枢记账、所以要小心别掐断对方",而现在账只有一份、在中枢那边,
+    //   窗口的寿命由中枢的分钟上限兜底 —— 宽限这一层没有存在的理由了。
 
     HostRole _role = HostRole.Unknown;
+
+    /// <summary>配对在途 —— 防止连点发出两条 enroll(两组六个词会互相盖掉)。</summary>
+    bool _pairing;
 
     StackPanel? _devList;
     StackPanel? _addPanel;
     TextBlock? _addStatus;
     Button? _addToggle;
-    bool _addExpanded;
     System.Windows.Threading.DispatcherTimer? _pendTimer;
-    DateTime _graceUntil = DateTime.MinValue;
     readonly HashSet<string> _popped = new(StringComparer.Ordinal);
     bool _dialogOpen;
 
@@ -100,10 +101,11 @@ public sealed class DevicesView : UserControl
 
         // ★ 第 ① 道闸的另一半:离开这一页(切到别的设置分节、关窗口、重建界面)也要关掉配对窗口。
         //   不挂这个的话,"展开着就走人"会把窗口一直留到中枢侧的分钟上限才关。
-        Unloaded += (_, _) => { if (_addExpanded || _graceUntil != DateTime.MinValue) _ = HardCloseWindowAsync(quiet: true); };
+        // ★ 第二道真闸:离开这一页就关窗。判据用【中枢自报的】那一位,不用本地布尔。
+        Unloaded += (_, _) => { if (TheApp.HubAdmin.PairingWindowOpen) _ = CloseWindowAsync(quiet: true); };
         IsVisibleChanged += (_, e) =>
         {
-            if (!(bool)e.NewValue && (_addExpanded || _graceUntil != DateTime.MinValue)) _ = CollapseAddAsync(leavingPage: true);
+            if (!(bool)e.NewValue && TheApp.HubAdmin.PairingWindowOpen) _ = CloseWindowAsync(quiet: true);
         };
 
         Build();
@@ -577,6 +579,7 @@ public sealed class DevicesView : UserControl
                 HubState.Unauthorized => "status.unauthorized",
                 HubState.HubServerError => "status.hub_error",       // ★ 中枢在,是它内部出错 —— 别读成"连不上"
                 HubState.ProtocolMismatch => "status.proto_mismatch",
+                HubState.HubIdentityChanged => "status.hub_changed",
                 _ => "status.offline" })}"),
             // ★ 状态行只有一个词,处置办法在 LastError 里 —— 不显示出来等于没说
             TheApp.Hub.LastError is { Length: > 0 } lastWhy ? Ui.Caption(lastWhy) : new Border { Height = 0 },
@@ -677,6 +680,11 @@ public sealed class DevicesView : UserControl
         {
             stack.Children.Add(new Border { Height = 10 });
             stack.Children.Add(Ui.Body("本机客户端:已配对(" + (TheApp.Hub.Profile?.Dial ?? "?") + ")"));
+            // ★ 主机换了 IP(换租约/以太网改 Wi-Fi/换了绑定网卡)时,它自己那台的 Dial 就失效了。
+            //   以前这张卡上没有输入框、没有「找回它」、连解除都没有 ——
+            //   最会用这套东西的那台电脑反而最没救,只能去手改 profile.json。
+            //   ChangeDialRow 只依赖 Profile,和角色无关,直接复用。
+            if (TheApp.Hub.Profile is { } hp) stack.Children.Add(ChangeDialRow(hp));
             stack.Children.Add(Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",
@@ -829,6 +837,8 @@ public sealed class DevicesView : UserControl
                                                  + ")—— 这【不等于】没有别的电脑在册,别据此重复配对。"));
                 return;
             }
+            // ★ provisioning = 批准了但对方没来领证(常见于两边截止时间不一致那一档)。
+            //   混在"已配对"里会让人以为配好了,而它其实是个没走完的半截 —— 要标出来。
             var live = devices.Where(d => d.Status != "revoked").ToList();
             if (live.Count == 0)
             {
@@ -844,67 +854,59 @@ public sealed class DevicesView : UserControl
     }
 
 
-    // ================================================================ 配对窗口的三道闸
-    // ★ 用户的顾虑:「只有主机没有副机,岂不是窗口永远开着关不了?」—— 对,所以闸必须【互相独立】,
-    //   谁先到谁生效,没有任何一道依赖"用户记得关"或"客户端还活着":
-    //     ① 收起这一块 / 离开这一页 / 关掉窗口 → 关;
-    //     ② 宽限【有上限】(GraceSeconds),而且只护"已经开始、还没走完"的那一条,
-    //        不是"队列非空就不关" —— 否则局域网上任何人塞一条就能把窗口按住;
-    //     ③ 中枢侧的分钟上限(WindowMinutes)自己到点失效 —— 和客户端在不在、页面在哪全无关。
-    //   ★ 而且这一块【默认收起】:只有主机、没有副机的人根本不会走到开窗这一步。
+    // ================================================================ 配对窗口:只有一个所有者
+    // ★ 用户的顾虑:「只有主机没有副机,岂不是窗口永远开着关不了?」
+    //   原来的答案是三道闸(收起关 / 宽限 90 秒 / 中枢分钟上限)。审计指出那是**替中枢记账**:
+    //   `_addExpanded` 与 `_graceUntil` 是客户端自己编的一份状态,而中枢早就在
+    //   /admin/ping 与 /admin/pairing/pending 里自报 pairingWindowOpen —— HubAdmin 一直解析并存着它,
+    //   全仓从没读过。两份账一定会对不上,而且真的对不上了:
+    //     · 批准/拒绝/解除任一按钮触发 Build() 重建控件,而 _addExpanded 不复位
+    //       ⇒ 窗口还开着,界面却显示收起,按钮说的和做的相反;
+    //     · 窗口到点被中枢自己关了,界面还写着"已打开",两台屏幕互相指着对方。
+    //   ⇒ 删掉本地那份账。渲染只读 admin.PairingWindowOpen,Build() 重建就没有状态可对不上。
+    //   剩下的是**两道真闸**:中枢自己的分钟上限(与客户端死活无关)+ 离开这一页时关窗。
+    //   「收起就关」退化成一个动作,不再需要本地布尔去记它。
 
     async Task ToggleAddAsync()
     {
-        if (_addExpanded) { await CollapseAddAsync(); return; }
+        var admin = TheApp.HubAdmin;
+        if (admin.PairingWindowOpen) { await CloseWindowAsync(); return; }
 
-        _addExpanded = true;
-        if (_addPanel is not null) _addPanel.Visibility = Visibility.Visible;
-        if (_addToggle is not null) _addToggle.Content = "－ 收起(收起就关掉配对窗口)";
-        var (st, body) = await TheApp.HubAdmin.WindowAsync(true, WindowMinutes);
+        var (st, body) = await admin.WindowAsync(true, WindowMinutes);
+        if (st == 200) await admin.PendingAsync();      // 立刻回读一次,让 PairingWindowOpen 是真的
         Dispatcher.Invoke(() =>
         {
-            if (_addStatus is null) return;
-            _addStatus.Text = st == 200
-                ? $"配对窗口已打开,最多 {WindowMinutes} 分钟后由中枢自己关掉;收起这一块或离开本页也会关。"
-                : $"没能打开配对窗口({st} {body})—— 副机现在配不进来。";
+            if (_addStatus is not null)
+                _addStatus.Text = st == 200
+                    ? $"配对窗口已打开,最多 {WindowMinutes} 分钟后由中枢自己关掉;收起这一块或离开本页也会关。"
+                    : $"没能打开配对窗口({st} {body})—— 副机现在配不进来。";
+            RenderAddSection();
         });
         StartPendPolling();
     }
 
-    async Task CollapseAddAsync(bool leavingPage = false)
+    async Task CloseWindowAsync(bool quiet = false)
     {
-        if (!_addExpanded) return;
-        _addExpanded = false;
-        Dispatcher.Invoke(() =>
-        {
-            if (_addPanel is not null) _addPanel.Visibility = Visibility.Collapsed;
-            if (_addToggle is not null) _addToggle.Content = "＋ 添加一台新电脑";
-        });
-
-        // ★ 宽限:有正在进行的请求就别当场掐断 —— 副机可能正卡在 enroll 那几秒。
-        //   但宽限【有上限】,到点无条件关。
-        var (ok, pend) = await TheApp.HubAdmin.PendingAsync();
-        if (ok && pend.Count > 0)
-        {
-            _graceUntil = DateTime.UtcNow.AddSeconds(GraceSeconds);
-            Dispatcher.Invoke(() =>
-            {
-                if (_addStatus is not null)
-                    _addStatus.Text = $"有 {pend.Count} 条请求正在进行,配对窗口再留最多 {GraceSeconds} 秒,然后自动关。";
-            });
-            StartPendPolling();   // 让计时器去收尾
-            return;
-        }
-        await HardCloseWindowAsync(leavingPage);
-    }
-
-    async Task HardCloseWindowAsync(bool quiet = false)
-    {
-        _graceUntil = DateTime.MinValue;
         StopPendPolling();
         try { await TheApp.HubAdmin.WindowAsync(false); } catch { /* 关不掉也有中枢侧的分钟上限兜底 */ }
+        try { await TheApp.HubAdmin.PendingAsync(); } catch { }   // 回读真实状态
         if (quiet) return;
-        Dispatcher.Invoke(() => { if (_addStatus is not null) _addStatus.Text = "配对窗口已关闭。"; });
+        Dispatcher.Invoke(() =>
+        {
+            if (_addStatus is not null) _addStatus.Text = "配对窗口已关闭。";
+            RenderAddSection();
+        });
+    }
+
+    /// <summary>
+    /// 按【中枢自报的】窗口状态渲染这一块。★ 不看任何本地布尔 ——
+    /// 这就是"两份账对不上"这一类 bug 的根治办法:只有一份账,而且在中枢那边。
+    /// </summary>
+    void RenderAddSection()
+    {
+        var open = TheApp.HubAdmin.PairingWindowOpen;
+        if (_addToggle is not null) _addToggle.Content = open ? "－ 收起(收起就关掉配对窗口)" : "＋ 添加一台新电脑";
+        if (_addPanel is not null) _addPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void StartPendPolling()
@@ -922,16 +924,11 @@ public sealed class DevicesView : UserControl
         var admin = TheApp.HubAdmin;
         var (ok, pend) = await admin.PendingAsync();
 
-        // 宽限到点:无条件关
-        if (!_addExpanded && _graceUntil != DateTime.MinValue
-            && (DateTime.UtcNow >= _graceUntil || (ok && pend.Count == 0)))
-        {
-            await HardCloseWindowAsync();
-            return;
-        }
-
         Dispatcher.Invoke(() =>
         {
+            // ★ 每一轮都按中枢自报的状态重画开关 —— 窗口被中枢到点关掉时,界面立刻跟上,
+            //   不会再出现"界面写着已打开、其实早关了"这种两台屏幕互相指着对方的情形。
+            RenderAddSection();
             if (_addPanel is null) return;
             _addPanel.Children.Clear();
             _addPanel.Children.Add(Ui.Body("等待副机来配对"));
@@ -950,9 +947,10 @@ public sealed class DevicesView : UserControl
             foreach (var p in pend) _addPanel.Children.Add(PendingRow(p));
         });
 
-        if (ok && !_dialogOpen)
-            foreach (var p in pend)
-                if (_popped.Add(p.RequestId)) { await ShowApprovalDialogAsync(p); break; }
+        // ★★ 这里原来是"新请求一到就自动弹框"。审计指出:enroll 是**匿名**的,
+        //   弹窗因此变成一个【局域网上任何人都能触发的动作】,由对方的到达时机决定你屏幕上跳出什么。
+        //   ⇒ 改成不自动弹:待批准的只进列表(PendingRow 上本来就有批准/拒绝),
+        //     由你主动点某一条才弹确认。准入的节奏归你,不归发起方。
     }
 
     /// <summary>
@@ -970,8 +968,11 @@ public sealed class DevicesView : UserControl
         _dialogOpen = true;
         try
         {
+            // ★ displayName 是**自报**的,而且服务端目前不限长(core 那半已写进决议包)。
+            //   客户端这一侧先自保:截断 + 剔掉控制字符 —— 任何来自网络的文本都不该能决定窗口尺寸。
+            var safeName = SafeDisplayName(p.DisplayName);
             var yes = ConfirmDialog.Show(
-                $"「{p.DisplayName}」请求配对",
+                $"「{safeName}」请求配对",
                 "这台请求配对的电脑上应该显示着同样的六个词:\n\n"
                 + "    " + string.Join("   ", p.Sas) + "\n\n"
                 + "请走到那台电脑前,把六个词【逐字】对一遍。\n"
@@ -980,8 +981,20 @@ public sealed class DevicesView : UserControl
                 confirmText: "六个词逐字一样 —— 批准",
                 cancelText: "不一样 / 先不批",
                 danger: false);
-            if (yes) await TheApp.HubAdmin.ApproveAsync(p.RequestId);
-            else await TheApp.HubAdmin.DenyAsync(p.RequestId);
+            // ★★ 要读返回值。以前两处都是 `await ApproveAsync(...)` 丢掉结果:
+            //   请求过期(主机侧 5 分钟)时 Approve 回 409,而界面一个字都不说,那一行只是悄悄消失 ——
+            //   人点了批准、什么反馈都没有,连失败都不知道。
+            var (rst, rbody) = yes
+                ? await TheApp.HubAdmin.ApproveAsync(p.RequestId)
+                : await TheApp.HubAdmin.DenyAsync(p.RequestId);
+            if (rst != 200)
+                Dispatcher.Invoke(() => ConfirmDialog.Show(
+                    yes ? "没能批准" : "没能拒绝",
+                    rst == 409
+                        ? "这条请求已经过期或已被处理了。请让对方在那台电脑上重新点一次「开始配对」。"
+                          + Environment.NewLine + Environment.NewLine + "(中枢原话:" + rbody + ")"
+                        : $"中枢回了 {rst}。" + Environment.NewLine + Environment.NewLine + rbody,
+                    confirmText: "知道了", cancelText: "关闭"));
         }
         finally { _dialogOpen = false; }
         await PollPendingAsync();
@@ -1002,12 +1015,29 @@ public sealed class DevicesView : UserControl
         var note = Ui.Caption("正在找同一网络下的中枢…");
         string? picked = null;
 
+        // ★★ 在途闸:连点两次会发【两条】enroll,各带一把新密钥、各有一组六个词。
+        //   而六词卡是共用的,后返回的那条会把先返回的盖掉 ⇒ 主机弹窗上那六个词
+        //   在副机屏幕上根本不存在,人就没得可比 —— 唯一能证明"这条请求是我发的"的东西没了。
+        //   副机侧还会留下一把无人引用的孤儿 CNG 密钥(配对没走完就没写档案,下次清理不到它)。
+        Button? goRef = null;
         var go = Ui.Primary(Strings.Get("pairing.start"), async (_, _) =>
         {
+            if (_pairing) return;                       // 忽略重复点击,不排队
             if (picked is null) { status.Text = "请先在上面选一个中枢。"; return; }
-            status.Text = Strings.Get("status.connecting");
-            await StartPairing(picked, name.Text.Trim(), status);
+            _pairing = true;
+            if (goRef is not null) goRef.IsEnabled = false;
+            try
+            {
+                status.Text = Strings.Get("status.connecting");
+                await StartPairing(picked, name.Text.Trim(), status);
+            }
+            finally
+            {
+                _pairing = false;
+                if (goRef is not null) goRef.IsEnabled = true;
+            }
         });
+        goRef = go;
 
         _ = ScanForHubsAsync(list, note, d => { picked = d; status.Text = "已选:" + d; });
 
@@ -1040,19 +1070,18 @@ public sealed class DevicesView : UserControl
                 list.Children.Clear();
                 if (scan.Hits.Count == 0)
                 {
-                    // ★ 「一个网段都没扫」与「扫了没找到」是两件事,下一步完全不同
-                    note.Text = scan.Scanned.Count == 0
-                        ? $"一个网段都没扫 —— 本机网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),"
-                          + "自动查找结构上覆盖不到。请照主机 Edge 窗口里那行「拨号 …:8443」手填(下面有手填入口)。"
-                        : $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢。请确认主机那台的 Edge 起着、"
-                          + "两台在同一个网段、防火墙放行了 8443。";
-                    list.Children.Add(ManualDialRow(onPick));
+                    // ★ 「没找到」有四种,下一步完全不同 —— 由 ScanExplain 统一说清楚。
+                    //   尤其"本机没有可用 IPv4"那一种:出路是【去接网线】,不是手填(手填也连不上);
+                    //   以前它和"掩码太宽"混成一句,界面会印出一个空括号的假结论。
+                    note.Text = Services.HubClient.ScanExplain(scan, "中枢");
+                    if (!scan.NoUsableV4) list.Children.Add(ManualDialRow(onPick));
                     return;
                 }
                 // ★ 全仓规矩:找到多个绝不替用户挑(合租、邻居、自己装了两台都是正常情况)
-                note.Text = $"找到 {scan.Hits.Count} 个中枢 —— 请自己挑一个"
-                          + (scan.SkippedTooWide.Count > 0 ? $"(另有 {string.Join("、", scan.SkippedTooWide)} 因掩码宽于 /24 没扫)" : "")
-                          + ":";
+                var skipTail = "";
+                if (scan.TooWide.Count > 0) skipTail += $"(另有 {string.Join("、", scan.TooWide)} 因掩码宽于 /24 没扫)";
+                if (scan.TinySubnet.Count > 0) skipTail += $"({string.Join("、", scan.TinySubnet)} 是 /31、/32,没有别的主机可扫)";
+                note.Text = $"找到 {scan.Hits.Count} 个中枢 —— 请自己挑一个" + skipTail + ":";
                 foreach (var h in scan.Hits)
                 {
                     var b = Ui.Secondary($"{h.HubId} · {h.Dial}", (_, _) => onPick(h.Dial));
@@ -1068,6 +1097,18 @@ public sealed class DevicesView : UserControl
             // ★ fire-and-forget:不兜住的话提示行会永远停在"正在找…"
             Dispatcher.Invoke(() => note.Text = "查找失败(" + ex.GetType().Name + ")—— 请手填地址。");
         }
+    }
+
+    /// <summary>
+    /// 把自报的显示名收拾干净再往界面上放:剔掉控制字符与换行,截到 48 字。
+    /// ★ 理由不是好看:~32 KB 的名字能把批准框撑到屏幕外,按钮就点不到了。
+    ///   任何来自网络的文本都不该能决定窗口尺寸。
+    /// </summary>
+    static string SafeDisplayName(string? raw)
+    {
+        var t = new string((raw ?? "").Where(c => !char.IsControl(c)).ToArray()).Trim();
+        if (t.Length == 0) return "(没有名字)";
+        return t.Length <= 48 ? t : t[..48] + "…";
     }
 
     /// <summary>手填入口 —— 自动查找覆盖不到的网络(跨网段、掩码宽于 /24)只能靠它。</summary>
@@ -1111,14 +1152,26 @@ public sealed class DevicesView : UserControl
         box.Children.Add(Ui.Caption($"这六个词必须与那台电脑屏幕上显示的【逐字一致】。剩余 {Math.Max(0, p.SecondsLeft)} 秒。"));
 
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
-        var deny = Ui.Danger("拒绝", async (_, _) => { await TheApp.HubAdmin.DenyAsync(p.RequestId); Build(); });
+        var deny = Ui.Danger("拒绝", async (_, _) =>
+        {
+            var (dst, dbody) = await TheApp.HubAdmin.DenyAsync(p.RequestId);
+            if (dst != 200) ConfirmDialog.Show("没能拒绝", $"中枢回了 {dst}:{dbody}", confirmText: "知道了", cancelText: "关闭");
+            Build();
+        });
         var ok = Ui.Primary("词一致,批准", async (_, _) =>
         {
             if (!ConfirmDialog.Show("批准这台电脑",
                     "确认那台电脑屏幕上显示的六个词与这里【逐字一致】吗?\n\n" + string.Join("  ", p.Sas)
                     + "\n\n★ 不一致就意味着中间有人 —— 这时候必须点取消。",
                     confirmText: "逐字核对过了,批准", cancelText: "取消")) return;
-            await TheApp.HubAdmin.ApproveAsync(p.RequestId);
+            var (ast2, abody2) = await TheApp.HubAdmin.ApproveAsync(p.RequestId);
+            if (ast2 != 200)
+                ConfirmDialog.Show("没能批准",
+                    ast2 == 409
+                        ? "这条请求已经过期或已被处理了。请让对方重新点一次「开始配对」。"
+                          + Environment.NewLine + Environment.NewLine + "(中枢原话:" + abody2 + ")"
+                        : $"中枢回了 {ast2}。" + Environment.NewLine + Environment.NewLine + abody2,
+                    confirmText: "知道了", cancelText: "关闭");
             Build();
         });
         ok.Margin = new Thickness(0, 0, 8, 0);

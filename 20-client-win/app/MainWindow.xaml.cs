@@ -850,6 +850,8 @@ public partial class MainWindow : Window
             //   显示成"未连接"会把人支去重启 Edge / 查防火墙 / 改地址,整整一趟无用功。
             HubState.HubServerError => ("status.hub_error", "RiskDanger"),
             HubState.ProtocolMismatch => ("status.proto_mismatch", "RiskWarning"),
+            // ★ 链不到钉住的 CA:处置与"过期"正好相反(那边不必重配,这边必须重配)
+            HubState.HubIdentityChanged => ("status.hub_changed", "RiskDanger"),
             _ => ("status.offline", "FgMuted"),
         };
         StatusText.Text = Strings.Get(key);

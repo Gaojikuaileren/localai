@@ -139,7 +139,14 @@ public static class Transport
 
         using var cli = Trusted(dial, caPublic, null);
         // 3 min: enough for the operator to compare the six words across two screens and type `approve`.
-        JsonElement st; var deadline = Environment.TickCount64 + 180_000;
+        // ★★ 这里原来是 180 秒,而主机侧 Pairing 的 ExpiresAt 是 **5 分钟**(identity/Pairing.cs)。
+        //   两个截止时间各说各话的后果实测会发生:界面要求人"走到那台电脑前把六个词逐字对一遍",
+        //   操作员在第 3~5 分钟之间回来点批准 —— 主机 200 成功、建了设备记录和候选证书,
+        //   而副机早已抛 TimeoutException 退出、永远不会去 claim ⇒ 主机的设备列表里多一条
+        //   provisioning 幽灵,两台机器对同一件事的说法相反。
+        //   ⇒ 对齐到主机侧的过期时间(略多一点点,让主机先判过期,由它给出权威结论)。
+        const long ApprovalWaitMs = 5 * 60_000 + 10_000;
+        JsonElement st; var deadline = Environment.TickCount64 + ApprovalWaitMs;
         while (true)
         {
             st = await Post(cli, edgeUrl + "/pair/status", new { requestId = reqId, claimSecret = Convert.ToBase64String(claimSecret) });

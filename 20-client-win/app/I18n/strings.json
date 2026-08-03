@@ -64,6 +64,7 @@
   "status.unauthorized":  { "zh-CN": "中枢拒绝了请求",      "en-US": "Hub refused the request",  "ja-JP": "ハブがリクエストを拒否しました" },
   "status.hub_error":     { "zh-CN": "中枢报错(它在)",     "en-US": "Hub error (it is up)",     "ja-JP": "ハブのエラー(起動中)" },
   "status.proto_mismatch":{ "zh-CN": "协议对不上",          "en-US": "Protocol mismatch",        "ja-JP": "プロトコル不一致" },
+  "status.hub_changed":   { "zh-CN": "不是你配对的那台",    "en-US": "Not the hub you paired",   "ja-JP": "ペアリング済みのハブではありません" },
 
   "pairing.title":        { "zh-CN": "与中枢配对",          "en-US": "Pair with the hub",       "ja-JP": "ハブとペアリング" },
   "pairing.start":        { "zh-CN": "开始配对",            "en-US": "Start pairing",           "ja-JP": "ペアリングを開始" },

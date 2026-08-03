@@ -73,6 +73,35 @@ public sealed class HubAdmin
 
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(3) };
 
+    /// <summary>
+    /// 管理面的令牌。★ 现在的门禁只有"端口 + 回环",而【能连回环】的不止"坐在主机前的人" ——
+    /// 浏览器里的一个网页、沙箱应用、同机的其它用户会话都满足。所以那句
+    /// 「结构上只有坐在主机前的人能批准」并不成立(审计发现,已写进决议包请 core 补令牌)。
+    /// ★ 这一侧先做好:令牌文件存在就带上自定义头(自定义头跨源发不出去,预检必失败)。
+    ///   文件不存在就不带 —— 中枢还没升级时照常能用,不假装有一层不存在的保护。
+    /// </summary>
+    static string? AdminToken()
+    {
+        try
+        {
+            var p = Environment.GetEnvironmentVariable("LOCALAI_ADMIN_TOKEN_FILE");
+            if (string.IsNullOrWhiteSpace(p))
+            {
+                var st = Environment.GetEnvironmentVariable("LOCALAI_STATE_DIR");
+                if (string.IsNullOrWhiteSpace(st)) return null;
+                p = Path.Combine(st, "secrets", "admin-token");
+            }
+            return File.Exists(p) ? File.ReadAllText(p).Trim() : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>给一个请求带上管理面令牌(有才带)。</summary>
+    static void Stamp(HttpRequestMessage req)
+    {
+        if (AdminToken() is { Length: > 0 } t) req.Headers.TryAddWithoutValidation("X-LocalAI-Admin", t);
+    }
+
     static string Base => $"http://127.0.0.1:{AdminPort}";
 
     /// <summary>上一次探测的结果 —— 界面据此决定显示"管理面"还是"这台不是主机"。</summary>
@@ -93,7 +122,9 @@ public sealed class HubAdmin
         Available = false; HubId = null; LastError = null; LastProbe = AdminProbeResult.Unknown;
         try
         {
-            using var r = await Http.GetAsync(Base + "/admin/ping");
+            using var ping = new HttpRequestMessage(HttpMethod.Get, Base + "/admin/ping");
+            Stamp(ping);
+            using var r = await Http.SendAsync(ping);
             if (!r.IsSuccessStatusCode)
             {
                 LastProbe = AdminProbeResult.HttpError;
@@ -143,6 +174,7 @@ public sealed class HubAdmin
     async Task<(int status, string body)> Call(HttpMethod m, string path, object? body = null)
     {
         using var req = new HttpRequestMessage(m, Base + path);
+        Stamp(req);
         if (body is not null)
             req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         using var r = await Http.SendAsync(req);

@@ -4806,8 +4806,11 @@ public static class Selftest
                     Assert(hdSrc.Contains("发现不建立信任"),
                            "★★ 文件头必须写明【发现不建立信任】—— 这里故意不校验证书,"
                            + "不写清楚就会被后人读成「我们接受任意证书」");
-                    Assert(hdSrc.Contains("skipped.Add($\"{ip}/{mask}\")"),
-                           "★★ 掩码宽于 /24 的网卡【跳过了要说】—— 静默跳过时界面会给出一串根本不是原因的原因");
+                    Assert(hdSrc.Contains("tooWide.Add($\"{ip}/{mask}\")") && hdSrc.Contains("tiny.Add($\"{ip}/{mask}\")"),
+                           "★★ 跳过了要说,而且要【分清是哪一种】—— 掩码太宽 / /31/32 / 根本没有 IPv4,"
+                           + "三种的下一步完全不同,混成一句就会把人支错方向");
+                    Assert(hdSrc.Contains("NoUsableV4"),
+                           "★★ 「本机根本没有可用 IPv4」要单独报 —— 那时出路是去接网线,不是手填(手填也连不上)");
 
                     // ---- 扫描范围:逐个地址核,不满足于搜字符串 ----
                     var h24 = Services.HubDiscovery.HostsOf("192.168.178.61", 24).ToList();
@@ -5016,17 +5019,28 @@ public static class Selftest
                            "★ 本机有多个地址在应答时不替他挑 —— 选错会把只有本机看得见的地址写进配对档案");
 
                     // ④ 配对窗口的三道闸,各自独立(用户问:「只有主机没副机岂不是永远关不了」)
-                    Assert(Views.DevicesView.GraceSeconds > 0 && Views.DevicesView.GraceSeconds <= 300,
-                           "★★ 宽限必须【有上限】—— 写成「队列非空就不关」的话,局域网上任何人塞一条就能把窗口按住");
+                    // ★★ 这条断言【退役】:宽限本身没了。它存在的前提是"客户端替中枢记账",
+                    //   而审计指出那正是 bug 的根 —— 两份账一定对不上(批准后 Build() 重建、
+                    //   窗口被中枢到点关掉,界面都会和真实状态说反)。现在只有一份账,在中枢那边。
+                    //   ⇒ 反过来钉:不许再出现替中枢记账的本地状态。
+                    Assert(!body4.Contains("_addExpanded") && !body4.Contains("_graceUntil"),
+                           "★★ 不许用本地布尔替中枢记「配对窗口开没开」—— 中枢在 /admin/ping 与 pending 里"
+                           + "自报 pairingWindowOpen,两份账一定会对不上,而且真的对不上过");
+                    Assert(body4.Contains("TheApp.HubAdmin.PairingWindowOpen"),
+                           "★★ 渲染要读【中枢自报的】那一位");
+                    var render = Slice(dv4, "void RenderAddSection", "async Task PollPendingAsync");
+                    Assert(render is not null && render.Contains("PairingWindowOpen"),
+                           "★ 开关的文字与面板的显隐都由中枢那一位决定");
+                    var pollSlice = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
+                    Assert(pollSlice is not null && pollSlice.Contains("RenderAddSection()"),
+                           "★★ 每轮轮询都重画一次 —— 窗口被中枢到点关掉时界面要立刻跟上,"
+                           + "不能出现「界面写着已打开、其实早关了」");
                     Assert(Views.DevicesView.WindowMinutes > 0 && Views.DevicesView.WindowMinutes <= 30,
                            "★ 中枢侧的分钟上限是最后一道闸:客户端崩了窗口也会自己关");
-                    var poll = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
-                    Assert(poll is not null && poll.Contains("DateTime.UtcNow >= _graceUntil"),
-                           "★★ 宽限到点【无条件】关 —— 这一条是「永远关不了」的正解");
-                    Assert(body4.Contains("Unloaded +=") && body4.Contains("HardCloseWindowAsync"),
+                    Assert(body4.Contains("Unloaded +=") && body4.Contains("CloseWindowAsync(quiet: true)"),
                            "★★ 离开这一页也要关窗 —— 「展开着就走人」不能把窗口留到分钟上限");
-                    Assert(body4.Contains("IsVisibleChanged +=") && body4.Contains("CollapseAddAsync"),
-                           "★ 页面不可见时按收起处理(带宽限)");
+                    Assert(body4.Contains("IsVisibleChanged +="),
+                           "★ 页面不可见时同样关窗");
                     Assert(body4.Contains("_addPanel = new StackPanel { Visibility = Visibility.Collapsed }"),
                            "★★ 「添加一台新电脑」默认收起 —— 只有主机没有副机的人才不会无意中开窗;"
                            + "展开这个动作本身就是明确意图");
@@ -5115,6 +5129,68 @@ public static class Selftest
                            + "没有出口这台电脑【结构上】再也走不到配对,而界面从头到尾不会提「删掉那个 host 目录」");
                     Assert(auto is not null && auto.Contains("_role = HostRole.Client"),
                            "★ 出口要真的把角色改过去,不是只弹句话");
+
+                    // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
+                    Assert(body4.Contains("rst == 409") && body4.Contains("重新点一次「开始配对」"),
+                           "★★ 请求过期时 Approve 回 409,以前两处都丢掉返回值 —— "
+                           + "人点了批准、什么反馈都没有,那一行只是悄悄消失");
+                    // ⑰ 不许"一有请求就自动弹窗" —— enroll 是匿名的,那等于把弹窗交给局域网上任何人触发
+                    Assert(!body4.Contains("_popped.Add(p.RequestId)"),
+                           "★★ 待批准的只进列表,由人主动点某一条才弹确认 —— "
+                           + "自动弹框 = 你屏幕上跳出什么由对方的到达时机决定");
+                    // ⑱ 自报显示名不许决定窗口尺寸
+                    Assert(body4.Contains("SafeDisplayName("),
+                           "★ 自报的显示名要截断 + 剔控制字符再上界面");
+                    var safeFn = Slice(dv4, "static string SafeDisplayName", "/// <summary>手填入口");
+                    Assert(safeFn is not null && safeFn.Contains("char.IsControl") && safeFn.Contains("48"),
+                           "★ 剔控制字符并截断");
+                    var cd = TryReadSource(Path.Combine("Views", "ConfirmDialog.cs"));
+                    if (cd is not null)
+                        Assert(Body(cd).Contains("MaxHeight") && Body(cd).Contains("ScrollViewer"),
+                               "★★ 确认框要有高度上限并能滚动 —— 否则一个超长的自报名字就能把按钮顶出屏幕,"
+                               + "那是一个由对方决定的界面拒绝服务");
+                    // ⑲ 两边的批准截止时间要对齐
+                    var ctDl = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
+                    if (ctDl is not null)
+                    {
+                        Assert(!Body(ctDl).Contains("180_000"),
+                               "★★ 副机不能只等 180 秒而主机给 5 分钟 —— 人在 3~5 分钟之间回来点批准时,"
+                               + "主机成功建了记录、副机早已超时退出,列表里就多一条 provisioning 幽灵");
+                        Assert(Body(ctDl).Contains("ApprovalWaitMs"),
+                               "★ 等待上限对齐到主机侧的过期时间");
+                    }
+                    // ⑳ 管理面令牌:有就带(中枢还没升级时不假装有这层保护)
+                    var haTok = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
+                    if (haTok is not null)
+                    {
+                        Assert(Body(haTok).Contains("X-LocalAI-Admin"),
+                               "★★ 管理面请求要带令牌头 —— 「能连回环」的不止坐在主机前的人,"
+                               + "浏览器里的网页也能;自定义头跨源发不出去");
+                        Assert(Body(haTok).Contains("File.Exists(p) ? File.ReadAllText(p).Trim() : null"),
+                               "★ 令牌文件不存在就不带 —— 不假装有一层不存在的保护");
+                    }
+
+                    // ⑬ 「开始配对」要有在途闸(连点两次会发两条 enroll,两组六词互相盖掉)
+                    Assert(body4.Contains("if (_pairing) return;"),
+                           "★★ 连点两次不能发出两条 enroll —— 六词卡是共用的,后一条会盖掉前一条,"
+                           + "主机弹窗上那六个词在副机屏幕上就不存在了,人没得可比");
+                    // ⑭ 主机卡也要有改地址/找回它 —— 主机换了 IP 时它自己那台最没救
+                    var hostCard = Slice(dv4, "UIElement HostSelfCard", "async Task SelfPairAsync");
+                    Assert(hostCard is not null && hostCard.Contains("ChangeDialRow("),
+                           "★★ 主机自己那台换了 IP 也要有出路 —— 以前这张卡上连输入框都没有,"
+                           + "只能去手改 profile.json,而界面从没说过它在哪");
+                    // ⑮ 链不通 ≠ 过期:处置正好相反,而旧文案加粗否掉了唯一的出路
+                    var hcCls = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                    if (hcCls is not null)
+                    {
+                        Assert(Body(hcCls).Contains("HubIdentityChanged"),
+                               "★★ 链不到钉住的 CA 要单列一态 —— 那是「换了中枢」,必须重新配对;"
+                               + "而「过期」不必重配。旧代码把所有 TLS 失败都判成过期,界面还加粗说不必重配");
+                        Assert(!Body(hcCls).Contains("static bool IsCertExpiry"),
+                               "★ 那个把所有 AuthenticationException 判成过期的旧函数不许再存在");
+                        Assert(Body(hcCls).Contains("必须重新配对"),
+                               "★ 换了中枢时要说清唯一出路就是重新配对");
+                    }
 
                     // ⑫ UI 侧不许 sync-over-async —— 2026-08-04 实机卡死就是一行 .GetAwaiter().GetResult()
                     //   在 UI 线程上等一个 async 方法:里面 await 的续体要回 UI 线程,而 UI 线程正卡着。
@@ -5239,8 +5315,24 @@ public static class Selftest
                         var re = Slice(hcRe, "public async Task<bool> RediscoverAsync", "public void UnpairLocal");
                         Assert(re is not null && re.Contains("HubDiscovery.ShortHubId(Profile.HubId)"),
                                "★★ 「在局域网里找回它」也要先换算 hub_id 形状 —— 不换算这个按钮永远失败");
-                        Assert(re is not null && re.Contains("scan.Scanned.Count == 0"),
-                               "★★ 一个网段都没扫 ≠ 没找到 —— 前者是结构性走不通,只能手填,说成「没找到」会让人一直重试");
+                        Assert(re is not null && re.Contains("ScanExplain(scan"),
+                               "★★ 「为什么没找到」四种情形统一由 ScanExplain 说 —— 两处文案各写一份必然漂");
+                    }
+                    {
+                        // ★ 行为测试:四种情形各说各的话,不能混
+                        var noV4 = new Services.ScanResult(new(), new(), new(), new(), NoUsableV4: true);
+                        Assert(Services.HubClient.ScanExplain(noV4, "中枢").Contains("手填地址也连不上"),
+                               "★★ 没有可用 IPv4 时要说清【手填也没用】—— 出路是去接网线");
+                        var wide = new Services.ScanResult(new(), new(), new() { "10.1.2.3/22" }, new(), false);
+                        Assert(Services.HubClient.ScanExplain(wide, "中枢").Contains("结构上覆盖不到"),
+                               "★ 掩码太宽是结构性走不通");
+                        var tiny = new Services.ScanResult(new(), new(), new(), new() { "100.1.2.3/32" }, false);
+                        var tinyMsg = Services.HubClient.ScanExplain(tiny, "中枢");
+                        Assert(tinyMsg.Contains("没有别的主机可扫") && !tinyMsg.Contains("宽于 /24"),
+                               "★★ /32 不能说成「掩码宽于 /24」—— 方向正好说反");
+                        var scanned = new Services.ScanResult(new(), new() { "192.168.1.0/24" }, new(), new(), false);
+                        Assert(Services.HubClient.ScanExplain(scanned, "中枢").Contains("扫过 192.168.1.0/24"),
+                               "★ 扫过了没找到,就说扫过哪些");
                     }
                     Assert(haSrc2.Contains("169.254."),
                            "★ 跳过 APIPA 自封地址 —— 没拿到 DHCP 的网卡上探不出业务口");

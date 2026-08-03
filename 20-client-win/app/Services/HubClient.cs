@@ -19,7 +19,11 @@ namespace LocalAI.Client.Services;
 // 与"中枢没开机"和"证书过期"都不同。混进 Offline 会让人一直去重启中枢。
 // HubServerError 也单列:症状是"用不了",但中枢明明在 —— 处置是【看中枢日志】,
 // 不是重启 Edge / 查防火墙 / 重新配对。混进 Offline 会把人支去做整整一趟无用功。
-public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch, HubServerError }
+// HubIdentityChanged:链不到【配对时钉住的那个 CA】。症状和"证书过期"一样(都是 TLS 握手失败),
+// 但处置**正好相反**:过期要在主机上续签、不必重配;链不通则意味着对面不是你配对的那个中枢
+// (主机重铸了身份、或你拨到了别人家),那时**重新配对才是唯一出路**。
+// 以前这两种全塌进 CertExpired,而界面还加粗写着"不需要重新配对" —— 把唯一的出路否掉了。
+public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch, HubServerError, HubIdentityChanged }
 
 /// <summary>主机成员库里的一台设备。DisplayName 是设备**自报**的,只作显示、永不进 prompt。</summary>
 public sealed record HubDevice(string DeviceId, string DisplayName, string Status);
@@ -198,10 +202,16 @@ public sealed class HubClient
         catch (Exception ex)
         {
             // 证书过期与"中枢没开机"症状相同、处置不同 -> 必须分开报,否则用户会瞎折腾。
-            State = IsCertExpiry(ex) ? HubState.CertExpired : HubState.Offline;
-            LastError = State == HubState.CertExpired
-                ? "主机证书已过期,请在主机上续签(localai-identity renew-server);**不需要**重新配对。"
-                : ex.Message;
+            State = ClassifyTlsFailure(ex) ?? HubState.Offline;
+            LastError = State switch
+            {
+                HubState.CertExpired =>
+                    "主机证书已过期 —— 在主机上续签(localai-identity renew-server)即可,不必重新配对。",
+                HubState.HubIdentityChanged =>
+                    "连上了,但对面的证书链不到你配对时钉住的那个中枢 —— "
+                    + "可能是主机重铸了身份,或者这个地址上是另一台机器。这种情况【必须重新配对】。",
+                _ => ex.Message,
+            };
             throw;
         }
     }
@@ -229,17 +239,36 @@ public sealed class HubClient
         body.Contains("revoked", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>异常链里是否有"证书过期/链无效"的痕迹。</summary>
-    static bool IsCertExpiry(Exception ex)
+    /// <summary>
+    /// TLS 失败分两类,处置正好相反,所以必须分开:
+    ///   · CertExpired        —— 服务器证书过期:在主机上续签即可,**不必**重新配对;
+    ///   · HubIdentityChanged —— 链不到配对时钉住的那个 CA:对面不是你配对的那个中枢
+    ///     (主机重铸了身份、或拨错了地方),这时**重新配对是唯一出路**。
+    ///
+    /// ★★ 以前这里是 `e is AuthenticationException → true`,把**所有** TLS 失败都判成"过期",
+    ///   而界面加粗写着"不需要重新配对" —— 恰好把唯一的出路否掉了。
+    ///   而且拿异常 Message 里的英文单词当判据本身就不可靠(随 .NET 版本和语言变)。
+    /// ★ 判不出来时【不猜过期】:返回 null,由调用方归到普通的连不上,别给一个假的结论。
+    /// </summary>
+    static HubState? ClassifyTlsFailure(Exception ex)
     {
         for (var e = ex; e is not null; e = e.InnerException)
         {
-            if (e is System.Security.Authentication.AuthenticationException) return true;
-            var m = e.Message;
+            if (e is System.Security.Cryptography.X509Certificates.X509ChainStatusFlags) break;
+            var m = e.Message ?? "";
+            // 链不到钉住的 CA:这是"换了中枢",不是"过期"
+            if (m.Contains("UntrustedRoot", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("PartialChain", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("RevocationStatusUnknown", StringComparison.OrdinalIgnoreCase))
+                return HubState.HubIdentityChanged;
             if (m.Contains("expired", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("NotTimeValid", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("PartialChain", StringComparison.OrdinalIgnoreCase)) return true;
+                m.Contains("NotTimeValid", StringComparison.OrdinalIgnoreCase))
+                return HubState.CertExpired;
         }
-        return false;
+        // ★ 只知道"TLS 没握成",但不知道是哪一种 —— 那就【别下结论】
+        for (var e = ex; e is not null; e = e.InnerException)
+            if (e is System.Security.Authentication.AuthenticationException) return HubState.HubIdentityChanged;
+        return null;
     }
 
     /// <summary>轻量连通性探测:启动时用,判断中枢在不在线 / 本机是否仍是成员。</summary>
@@ -357,14 +386,33 @@ public sealed class HubClient
         {
             LastError = mine.Count > 1
                 ? "找到多台同 id 的中枢,请手动选"
-                : scan.Scanned.Count == 0
-                    // ★ 一个网段都没扫 = 这条路【结构上】走不通,不是"没找到" —— 说成没找到会让人一直重试
-                    ? $"本机的网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),自动查找覆盖不到 —— 只能手填地址"
-                    : $"扫过 {string.Join("、", scan.Scanned)} 都没找到这个中枢"
-                      + (scan.SkippedTooWide.Count > 0 ? $";另有 {string.Join("、", scan.SkippedTooWide)} 因掩码太宽没扫" : "");
+                : ScanExplain(scan, "这个中枢");
             return false;
         }
         return SetDial(mine[0].Dial);
+    }
+
+    /// <summary>
+    /// 把一次扫描【为什么没找到】说清楚。★ 四种情形的下一步完全不同,混着说就会把人支错方向。
+    /// </summary>
+    public static string ScanExplain(ScanResult scan, string what)
+    {
+        if (scan.NoUsableV4)
+            // ★ 这一种的出路是【去接网线】,不是手填 —— 手填也连不上
+            return "本机现在没有可用的局域网地址(网卡没连上 / 没拿到 DHCP / 只有 IPv6)—— "
+                 + "先把网络连上;这种情况手填地址也连不上。";
+        if (scan.ScannedNothing)
+        {
+            var why = new List<string>();
+            if (scan.TooWide.Count > 0) why.Add($"网卡掩码宽于 /24({string.Join("、", scan.TooWide)}),自动查找结构上覆盖不到");
+            if (scan.TinySubnet.Count > 0) why.Add($"网卡是 {string.Join("、", scan.TinySubnet)}(VPN 常见),这个子网里没有别的主机可扫");
+            return "一个网段都没扫 —— " + (why.Count > 0 ? string.Join(";", why) : "本机没有可扫的网段")
+                 + "。请照主机 Edge 窗口里那行「拨号 …:8443」手填。";
+        }
+        var tail = "";
+        if (scan.TooWide.Count > 0) tail += $";另有 {string.Join("、", scan.TooWide)} 因掩码宽于 /24 没扫";
+        if (scan.TinySubnet.Count > 0) tail += $";{string.Join("、", scan.TinySubnet)} 是 /31、/32,没有别的主机可扫";
+        return $"扫过 {string.Join("、", scan.Scanned)} 都没找到{what}{tail}。";
     }
 
     public void UnpairLocal()

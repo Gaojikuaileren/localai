@@ -40,11 +40,26 @@ public sealed record FoundHub(string Ip, int Port, string HubId, string ServerNa
 }
 
 /// <summary>
-/// 一次扫描的完整结果。★ 带上 Scanned/SkippedTooWide 是因为「没找到」有两种,
-/// 而它们的下一步完全不同:扫过了没找到 → 查 Edge / 网段 / 防火墙;
-/// 压根没扫 → 这条路结构上就走不通,只能手填。不回报就只能瞎猜。
+/// 一次扫描的完整结果。★ 「没找到」不止两种,而每一种的下一步都不同,混着说就会把人支错方向:
+///   · Scanned 非空、Hits 空          → 扫过了没找到:查主机的 Edge / 网段 / 防火墙;
+///   · TooWide 非空                   → 那张网卡掩码宽于 /24,结构性覆盖不到:只能手填地址;
+///   · NoUsableV4                     → **本机现在根本没有可用的 IPv4**(网卡没连 / 没拿到 DHCP / 只有 IPv6)。
+///     ★ 这一种最要命:出路是【去接网线】,不是手填 —— 手填也连不上。
+///     以前它和 TooWide 混在一起,界面会印出「掩码都宽于 /24()」,括号是空的,
+///     一条它没有任何证据的结构性结论。
+///   · TinySubnet 非空                → /31、/32(VPN 常见)。子网里没有别的主机可扫,
+///     说成"掩码宽于 /24"方向正好说反。
 /// </summary>
-public sealed record ScanResult(List<FoundHub> Hits, List<string> Scanned, List<string> SkippedTooWide);
+public sealed record ScanResult(
+    List<FoundHub> Hits,
+    List<string> Scanned,
+    List<string> TooWide,
+    List<string> TinySubnet,
+    bool NoUsableV4)
+{
+    /// <summary>一个网段都没扫到。</summary>
+    public bool ScannedNothing => Scanned.Count == 0;
+}
 
 public static class HubDiscovery
 {
@@ -82,14 +97,18 @@ public static class HubDiscovery
         var targets = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var scanned = new List<string>();
-        var skipped = new List<string>();
+        var tooWide = new List<string>();
+        var tiny = new List<string>();
+        var anyV4 = false;
         foreach (var (ip, mask) in LocalV4WithMask())
         {
+            anyV4 = true;
             // ★ 只处理 /24 及更窄的:再宽就是几万个地址,扫它既慢又像在做端口扫描。
-            //   ★★ 但【跳过了要说】—— 静默跳过时界面会给出一串根本不是原因的原因。
-            if (mask < 24) { skipped.Add($"{ip}/{mask}"); continue; }
+            //   ★★ 但【跳过了要说】,而且要分清是哪一种 —— 静默跳过、或者混成一句,
+            //     界面就会给出一串根本不是原因的原因。
+            if (mask < 24) { tooWide.Add($"{ip}/{mask}"); continue; }
             var hosts = HostsOf(ip, mask).ToList();
-            if (hosts.Count == 0) { skipped.Add($"{ip}/{mask}"); continue; }   // /31、/32 上没有别的主机
+            if (hosts.Count == 0) { tiny.Add($"{ip}/{mask}"); continue; }   // /31、/32:子网里没有别的主机
             scanned.Add($"{Network(ip, mask)}/{mask}");
             foreach (var t in hosts) if (seen.Add(t)) targets.Add(t);
         }
@@ -108,7 +127,8 @@ public static class HubDiscovery
             finally { gate.Release(); }
         });
         await Task.WhenAll(tasks);
-        return new ScanResult(found.OrderBy(h => h.Ip, StringComparer.Ordinal).ToList(), scanned, skipped);
+        return new ScanResult(found.OrderBy(h => h.Ip, StringComparer.Ordinal).ToList(),
+                              scanned, tooWide, tiny, NoUsableV4: !anyV4);
     }
 
     /// <summary>
