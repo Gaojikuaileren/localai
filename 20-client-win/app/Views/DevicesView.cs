@@ -175,7 +175,11 @@ public sealed class DevicesView : UserControl
             Ui.Body($"已连主机:{(string.IsNullOrWhiteSpace(p.HubId) ? "(旧档案未记录)" : p.HubId)}"),
             Ui.Caption("一台客户端只属于一个主机;要换主机得先解除配对再重新配对。"),
             Ui.Body($"中枢:{p.EdgeUrl}"),
-            Ui.Body($"连接地址:{(string.IsNullOrWhiteSpace(p.Dial) ? "(旧档案未记录,建议重新配对)" : p.Dial)}", muted: true),
+            Ui.Body($"连接地址:{(string.IsNullOrWhiteSpace(p.Dial) ? "(旧档案未记录)" : p.Dial)}", muted: true),
+            // ★ 换网段就能改地址,不必重新配对(重新配对会删掉本机私钥,把有效身份亲手销毁)。
+            //   自动发现随 P3b.2 的 DNS-SD 补上 —— 到时候它填的也是这一个字段。
+            ChangeDialRow(p),
+            Ui.Body($"协议:{TheApp.Hub.ProtocolNote}", muted: true),
             Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",
@@ -188,6 +192,33 @@ public sealed class DevicesView : UserControl
             new Border { Height = 12 },
             unpair
         ));
+    }
+
+    /// <summary>改连接地址的一行:一个输入框 + 一个保存。改完立刻探测一次,别让人自己猜通没通。</summary>
+    UIElement ChangeDialRow(LocalAI.ClientTransport.ClientProfile p)
+    {
+        var box = new TextBox { Text = p.Dial, MinWidth = 180, Padding = new Thickness(6, 4, 6, 4),
+                                VerticalAlignment = VerticalAlignment.Center };
+        var save = Ui.Secondary("改地址", async (_, _) =>
+        {
+            if (!TheApp.Hub.SetDial(box.Text))
+            {
+                ConfirmDialog.Show("这个地址不对", TheApp.Hub.LastError ?? "地址要写成 ip:port。",
+                                   confirmText: "好", cancelText: "关闭");
+                return;
+            }
+            await TheApp.Hub.ProbeAsync();     // 立刻验一次,免得人以为改完就好了
+            Build();
+            (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
+        });
+        save.Margin = new Thickness(8, 0, 0, 0);
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        row.Children.Add(box);
+        row.Children.Add(save);
+        var wrap = new StackPanel();
+        wrap.Children.Add(row);
+        wrap.Children.Add(Ui.Caption("换了路由器/网段就在这里改 —— 证书与配对原样保留,不用重新配对。"));
+        return wrap;
     }
 
     // ---------------------------------------------------------------- 其它已配对的电脑(需主机管理 API)

@@ -15,7 +15,9 @@ namespace LocalAI.Client.Services;
 
 // CertExpired 单列一态:证书过期的症状与"连不上"完全一样,但处置办法南辕北辙
 // (一个要在主机上续签,一个是等中枢开机)。混为一谈会让用户去点「重新配对」而销毁有效身份。
-public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized }
+// ProtocolMismatch 也单列一态:症状是"连不上",但处置是【去更新某一端】,
+// 与"中枢没开机"和"证书过期"都不同。混进 Offline 会让人一直去重启中枢。
+public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch }
 
 /// <summary>主机成员库里的一台设备。DisplayName 是设备**自报**的,只作显示、永不进 prompt。</summary>
 public sealed record HubDevice(string DeviceId, string DisplayName, string Status);
@@ -37,6 +39,46 @@ public sealed class HubClient
     public event Action? Changed;
 
     public string? LastError { get; private set; }
+
+    // ---------------------------------------------------------------- 协议版本协商(D45,P3c 判据项)
+    /// <summary>本客户端说的协议版本。改动线上格式(会话/配对/管理接口的形状)时 +1。</summary>
+    public const int ClientProtocol = 1;
+
+    /// <summary>响应头名:两边都用它报自己的版本。请求头同名 —— 中枢想按版本分流时不必再猜。</summary>
+    public const string ProtocolHeader = "X-LocalAI-Protocol";
+
+    /// <summary>
+    /// 中枢自报的协议版本。null = 【它没报】。
+    ///
+    /// ★ 「没报」与「报了但对不上」是两件事,界面必须分开说:
+    ///   · 对不上 → 明确拒绝,并说清该更新哪一端(D45:「主机 v5,你 v3,请更新」);
+    ///   · 没报   → 现役中枢还没加这个头(网关侧那半行改动归网关那条线),
+    ///     这时【不假装协商过】,状态栏如实写「中枢未声明协议版本」。
+    ///     不因此拒连:那会把今天能用的装置直接停掉,而我们并没有证据说它不兼容。
+    /// </summary>
+    public int? HubProtocol { get; private set; }
+
+    /// <summary>协商结论。给界面用一句话说清楚现在是哪种情形。</summary>
+    public string ProtocolNote => HubProtocol is null
+        ? $"中枢未声明协议版本(本机 v{ClientProtocol})—— 未协商"
+        : HubProtocol == ClientProtocol
+            ? $"协议 v{ClientProtocol} 一致"
+            : HubProtocol > ClientProtocol
+                ? $"主机 v{HubProtocol},你 v{ClientProtocol} —— 请更新【客户端】"
+                : $"你 v{ClientProtocol},主机 v{HubProtocol} —— 请更新【中枢】";
+
+    /// <summary>记下中枢自报的版本;不一致就置 ProtocolMismatch(拒绝当作正常在线)。</summary>
+    void NoteProtocol(IReadOnlyDictionary<string, string>? headers)
+    {
+        int? v = null;
+        if (headers is not null && headers.TryGetValue(ProtocolHeader, out var raw) && int.TryParse(raw, out var n)) v = n;
+        HubProtocol = v;
+        if (v is { } got && got != ClientProtocol)
+        {
+            LastError = ProtocolNote;
+            State = HubState.ProtocolMismatch;
+        }
+    }
 
     public bool IsPaired => Profile is not null;
 
@@ -108,7 +150,11 @@ public sealed class HubClient
         if (Profile is null) throw new InvalidOperationException("尚未配对");
         try
         {
-            var r = await Transport.Call(Profile, Dial(), path);
+            var r = await Transport.SendWithHeaders(Profile, Dial(), HttpMethod.Get, path, null);
+            NoteProtocol(r.headers);
+            // ★ 协议对不上就到此为止:不能先把它当成 Online 再去解读正文 ——
+            //   两边对格式的理解不一致时,解出来的东西本身就不可信。
+            if (State == HubState.ProtocolMismatch) return (r.status, r.body);
             // ★ 401 有至少四种来源(未带客户端证书 / 非 active 成员 / 网关 remote-unauthenticated /
             //   网关 lan_device_unknown)。**不能**一律判成"已被解除" —— 那会引导用户去"重新配对",
             //   而重新配对会删掉本机私钥,把一个本来有效的身份亲手销毁,主机侧还留下幽灵条目。
@@ -125,7 +171,7 @@ public sealed class HubClient
                 State = r.status is >= 200 and < 500 ? HubState.Online : HubState.Offline;
                 if (State == HubState.Online) LastError = null;
             }
-            return r;
+            return (r.status, r.body);
         }
         catch (Exception ex)
         {
@@ -239,6 +285,34 @@ public sealed class HubClient
     /// 解除本机与中枢的配对(本地侧)。删档案 + **删掉设备私钥**(留着就是一份无用但敏感的凭据)。
     /// 注意:这只解除本地;主机侧的成员条目要由主机端「解除」按钮吊销(两侧都做才干净)。
     /// </summary>
+    /// <summary>
+    /// 改【连接地址】(ip:port),不动身份。
+    ///
+    /// ★ 为什么必须有这个入口(P3c 判据③ 的可落地版本):
+    ///   判据原话是「换路由器后自动重新发现且无需重新配对」,而 D43 把 DNS-SD 自动发现推迟到了 P3b.2
+    ///   ——「自动发现」这半句在本阶段结构上不可能达成。但它真正要保护的东西是
+    ///   **换网段不该逼人重新配对**:重新配对会删掉本机私钥,把一个完全有效的身份亲手销毁。
+    ///   所以本阶段交付的是【手改地址】:证书、CA、密钥、hub_id 全部原样,只换拨号目标。
+    ///   自动发现随 P3b.2 补上时,它填的也是这一个字段。
+    /// ★ 只认 ip:port,不认主机名 —— 拨号要用 IPEndPoint,收主机名会在"连不上"时多出一层
+    ///   "是解析失败还是对方没开机"的歧义。
+    /// </summary>
+    public bool SetDial(string dial)
+    {
+        if (Profile is null) return false;
+        dial = (dial ?? "").Trim();
+        if (dial.Length == 0) return false;
+        try { ParseDial(dial); } catch { LastError = "地址要写成 ip:port,例如 192.168.1.20:8443"; return false; }
+        if (Profile.Dial == dial) return true;
+        Profile.Dial = dial;
+        try { File.WriteAllText(AppPaths.ProfilePath, JsonSerializer.Serialize(Profile, J)); }
+        catch (Exception ex) { LastError = "写配对档案失败: " + ex.Message; return false; }
+        State = HubState.Offline;      // 换了目标 -> 状态待重新探测,不许沿用上一处的"在线"
+        LastError = null;
+        Changed?.Invoke();
+        return true;
+    }
+
     public void UnpairLocal()
     {
         var keyName = Profile?.KeyName;

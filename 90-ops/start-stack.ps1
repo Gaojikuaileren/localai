@@ -123,7 +123,10 @@ Write-Host "    OK 127.0.0.1:8080"
 
 Write-Host ""
 Write-Host "=== 栈已就绪 ===" -ForegroundColor Green
-Write-Host "  Open WebUI  http://127.0.0.1:8081   (若已开着,刷新页面即可看到模型)"
+# ★ Open WebUI 已退役(P3c 判据项,2026-08-03)—— 日常入口只剩统一客户端。
+#   不再印它的地址,也不再把它算作栈的一部分。安装脚本暂留(卸载归运维),
+#   但任何文档/提示都不得再把它当日常用法推给人。
+Write-Host "  客户端      dist\client\localai-client.exe   (唯一入口;Open WebUI 已退役)"
 Write-Host "  可用别名:"
 try {
   (Invoke-RestMethod 'http://127.0.0.1:8080/v1/models').data |

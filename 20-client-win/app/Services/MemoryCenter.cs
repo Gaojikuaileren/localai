@@ -29,7 +29,9 @@ public sealed record MemoryEntry(
     DateTime CreatedAt,
     DateTime? LastUsedAt = null,       // 最近被 AI 用到(用于"长期没用到就清理")
     bool Pinned = false,               // ★ 置顶的永不自动清理
-    bool SourceOriginalsDeleted = false);  // 原文已被用户删除 —— 界面据此说明,避免点回去是死链
+    bool SourceOriginalsDeleted = false,   // 原文已被用户删除 —— 界面据此说明,避免点回去是死链
+    bool EditedByHuman = false,            // ★ 被人手改过 —— 它不再是 AI 写的那份,下游要知道
+    DateTime? EditedAt = null);
 
 public sealed class MemoryCenter
 {
@@ -55,6 +57,28 @@ public sealed class MemoryCenter
     }
 
     public void Remove(string id) { if (_items.RemoveAll(x => x.Id == id) > 0) Changed?.Invoke(); }
+
+    /// <summary>
+    /// 改一条记忆的标题与正文(P3c 判据里的「编辑」)。
+    ///
+    /// ★ 只让改【标题与正文】,不让改类型/范围/来源:
+    ///   · 范围(家庭/个人/仅本人)改了等于改可见性,那是权限动作,不该混在编辑框里悄悄发生;
+    ///   · 来源是溯源链的锚,改了就再也说不清这条摘要是从哪儿来的 —— 而「每条可溯源」是 P3a 的验收硬线。
+    /// ★ 改过就【打上人工修改的标记】:AI 之后拿这条去用时,得知道它已经不是自己写的那份。
+    ///   不做这个标记的话,人改完的内容会以"AI 摘要"的身份进 prompt —— 那是在骗下游。
+    /// </summary>
+    public bool EditText(string id, string title, string body)
+    {
+        var i = _items.FindIndex(x => x.Id == id);
+        if (i < 0) return false;
+        title = (title ?? "").Trim();
+        if (title.Length == 0) return false;              // 标题空了列表里就成了一条没名字的东西
+        var old = _items[i];
+        if (old.Title == title && old.Body == (body ?? "")) return false;   // 没变就不写、不广播
+        _items[i] = old with { Title = title, Body = body ?? "", EditedByHuman = true, EditedAt = DateTime.Now };
+        Changed?.Invoke();
+        return true;
+    }
 
     public void RemoveMany(IEnumerable<string> ids)
     {

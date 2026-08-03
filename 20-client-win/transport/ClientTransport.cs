@@ -174,5 +174,29 @@ public static class Transport
         return ((int)r.StatusCode, await r.Content.ReadAsStringAsync(ct));
     }
 
+    /// <summary>
+    /// 同 Send,但把【响应头】也带回来 —— 协议版本协商要读 X-LocalAI-Protocol(D45 / P3c 判据项)。
+    /// ★ 另开一个重载而不是改 Send 的返回类型:改了所有调用方都得跟着改,
+    ///   而它们大多数根本不关心头。
+    /// </summary>
+    public static async Task<(int status, string body, Dictionary<string, string> headers)> SendWithHeaders(
+        ClientProfile p, IPEndPoint dial, HttpMethod method, string path, object? body, CancellationToken ct = default)
+    {
+        var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
+        var candidate = Cert(Convert.FromBase64String(p.DeviceCertB64));
+        using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
+        using var clientCert = candidate.CopyWithPrivateKey(key);
+        using var cli = Trusted(dial, caPublic, clientCert);
+        using var req = new HttpRequestMessage(method, p.EdgeUrl + path);
+        // 本机也报自己的版本:中枢将来想按版本分流时不必再猜
+        req.Headers.TryAddWithoutValidation("X-LocalAI-Protocol", "1");
+        if (body is not null)
+            req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        using var r = await cli.SendAsync(req, ct);
+        var hs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var h in r.Headers) hs[h.Key] = string.Join(",", h.Value);
+        return ((int)r.StatusCode, await r.Content.ReadAsStringAsync(ct), hs);
+    }
+
     public static void DeleteKey(string keyName) { try { if (CngKey.Exists(keyName, SwProv)) CngKey.Open(keyName, SwProv).Delete(); } catch { } }
 }

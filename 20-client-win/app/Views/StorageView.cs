@@ -290,6 +290,97 @@ public sealed class StorageView : UserControl
         }
     }
 
+    // 就地展开的两种状态(按条目 id 记)。放在视图里而不是数据里 —— 它是"我正在看什么",不是记忆本身。
+    readonly HashSet<string> _traced = new(StringComparer.Ordinal);
+    readonly HashSet<string> _editing = new(StringComparer.Ordinal);
+
+    void Toggle(HashSet<string> set, string id)
+    {
+        if (!set.Remove(id)) set.Add(id);
+        RefreshMemory();
+    }
+
+    /// <summary>
+    /// 溯源展开:这条摘要是【从哪来的】。
+    /// ★ 如实分四种情况说,不含糊:有原文可点回去 / 原文被删了 / 压根没记来源(老条目)/ 项目归属。
+    ///   含糊的溯源比没有溯源更坏 —— P3a 的验收硬线是「每条可溯源」,含糊等于把这条线悄悄放过。
+    /// </summary>
+    FrameworkElement TraceBlock(MemoryEntry m)
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 6, 0, 2) };
+        var proj = m.SourceProjectId is null ? "普通会话(不属于任何项目)"
+                 : "项目「" + (TheApp.Projects.Find(m.SourceProjectId)?.Title ?? m.SourceProjectId) + "」";
+        box.Children.Add(Ui.Caption("来自:" + proj));
+
+        var ids = m.SourceSessionIds ?? Array.Empty<string>();
+        if (ids.Count == 0)
+        {
+            box.Children.Add(Ui.Caption("★ 这条没有记来源会话 —— 无法回到原文。"));
+        }
+        else if (m.SourceOriginalsDeleted)
+        {
+            box.Children.Add(Ui.Caption($"覆盖 {ids.Count} 条会话,但原文已被删除 —— 点不回去了,只剩这段摘要。"));
+        }
+        else
+        {
+            box.Children.Add(Ui.Caption($"覆盖 {ids.Count} 条会话,点一条跳回原位:"));
+            foreach (var sid in ids.Take(8))
+            {
+                var s = TheApp.Chat.Find(sid);
+                var name = s?.Title ?? "(这条会话已经不在了)";
+                var link = new TextBlock { Text = "· " + name, Margin = new Thickness(6, 1, 0, 1),
+                                           TextTrimming = TextTrimming.CharacterEllipsis };
+                link.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+                if (s is null) link.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                else
+                {
+                    link.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+                    link.Cursor = System.Windows.Input.Cursors.Hand;
+                    var captured = sid;
+                    var ws = s.WorkspaceKey ?? "chat";
+                    link.MouseLeftButtonUp += (_, e) =>
+                    {
+                        e.Handled = true;
+                        (Application.Current.MainWindow as MainWindow)?.NavigateToSession(ws, s.ProjectId, captured);
+                    };
+                }
+                box.Children.Add(link);
+            }
+            if (ids.Count > 8) box.Children.Add(Ui.Caption($"…另有 {ids.Count - 8} 条"));
+        }
+        return box;
+    }
+
+    /// <summary>编辑:只改标题与正文(为什么只改这两样,见 MemoryCenter.EditText 的说明)。</summary>
+    FrameworkElement EditBlock(MemoryEntry m)
+    {
+        var title = new TextBox { Text = m.Title, Margin = new Thickness(0, 6, 0, 4), Padding = new Thickness(6, 4, 6, 4) };
+        var body = new TextBox { Text = m.Body, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+                                 MinHeight = 64, MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                                 Padding = new Thickness(6, 4, 6, 4) };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
+                                   Margin = new Thickness(0, 6, 0, 0) };
+        var cancel = Ui.Secondary("取消", (_, _) => Toggle(_editing, m.Id));
+        cancel.Margin = new Thickness(0, 0, 8, 0);
+        var save = Ui.Primary("保存", (_, _) =>
+        {
+            if (title.Text.Trim().Length == 0)
+            { ConfirmDialog.Show("标题不能为空", "记忆条目要有个名字,否则列表里认不出它。", confirmText: "好", cancelText: "关闭"); return; }
+            TheApp.Memory.EditText(m.Id, title.Text, body.Text);
+            _editing.Remove(m.Id);
+            RefreshMemory();
+        });
+        row.Children.Add(cancel);
+        row.Children.Add(save);
+
+        var box = new StackPanel();
+        box.Children.Add(Ui.Caption("改标题与正文。范围与来源不在这儿改 —— 改范围是权限动作,改来源会断掉溯源链。"));
+        box.Children.Add(title);
+        box.Children.Add(body);
+        box.Children.Add(row);
+        return box;
+    }
+
     void RefreshMemory()
     {
         _memList.Children.Clear();
@@ -318,22 +409,32 @@ public sealed class StorageView : UserControl
         preview.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
         var meta = Ui.Caption($"{m.Kind} · {ProjectUi.ScopeLabel(m.Scope)} · {m.CreatedAt:M月d日}"
-                              + (m.SourceOriginalsDeleted ? " · 原文已删除(只剩摘要)" : ""));
+                              + (m.SourceOriginalsDeleted ? " · 原文已删除(只剩摘要)" : "")
+                              // ★ 人手改过的要写在脸上:它已经不是 AI 写的那份了
+                              + (m.EditedByHuman ? $" · 已人工修改({m.EditedAt:M月d日})" : ""));
 
         var col = new StackPanel();
         col.Children.Add(title);
         col.Children.Add(preview);
         col.Children.Add(meta);
 
+        // ★ P3c 判据的四项是【浏览 · 编辑 · 删除 · 溯源展开】—— 此前只有浏览与删除。
+        //   编辑与溯源都做成【就地展开】而不是弹窗:记忆条目是一段文字,为改一行字换一个窗口太重。
+        var acts = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top };
+        acts.Children.Add(SegChip("溯源", _traced.Contains(m.Id), () => Toggle(_traced, m.Id)));
+        acts.Children.Add(SegChip("编辑", _editing.Contains(m.Id), () => Toggle(_editing, m.Id)));
         var pin = SegChip(m.Pinned ? "已置顶" : "置顶", m.Pinned, () => TheApp.Memory.TogglePin(m.Id));
-        pin.VerticalAlignment = VerticalAlignment.Top;
+        acts.Children.Add(pin);
 
         var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 6, 0, 6) };
         DockPanel.SetDock(cb, Dock.Left);
-        DockPanel.SetDock(pin, Dock.Right);
+        DockPanel.SetDock(acts, Dock.Right);
         row.Children.Add(cb);
-        row.Children.Add(pin);
+        row.Children.Add(acts);
         row.Children.Add(col);
+
+        if (_traced.Contains(m.Id)) col.Children.Add(TraceBlock(m));
+        if (_editing.Contains(m.Id)) col.Children.Add(EditBlock(m));
         return row;
     }
 
