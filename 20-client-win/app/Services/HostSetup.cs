@@ -38,6 +38,25 @@ public static class HostSetup
 
     // ---------------------------------------------------------------- 身份
     /// <summary>
+    /// 本机已经有中枢身份了吗。★ 用来把"静默继续"和"要先问一句"分开 ——
+    /// 铸身份不可回退,不能因为"旁边有个 host 目录"这条线索就替人做了。
+    /// 判据用 `localai-identity status` 的退出码:0 = 有,非 0 = 没有。
+    /// </summary>
+    public static bool IdentityExists()
+    {
+        var dir = HubAdmin.HostToolsDir();
+        if (dir is null) return false;
+        var exe = Path.Combine(dir, "localai-identity.exe");
+        if (!File.Exists(exe)) return false;
+        try
+        {
+            var (code, _) = RunCapturedAsync(exe, "status", dir).GetAwaiter().GetResult();
+            return code == 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
     /// 确保本机有中枢身份。已经有就是 Skipped(**不是**错误,更不去覆盖)。
     /// ★ 调的是 `localai-identity.exe init`,不是 `重置并铸身份.cmd`(后者会先删掉身份)。
     /// </summary>

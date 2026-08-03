@@ -224,8 +224,28 @@ public sealed class DevicesView : UserControl
         ResetLines();
         try
         {
-            // ---- ① 身份(不需要任何授权,直接做)----
+            // ---- ① 身份 ----
+            // ★★ 铸身份【不是内部步骤】—— 它会在这台机器上新建一个中枢,而且不可回退
+            //   (要撤只能跑破坏性的 重置并铸身份.cmd,所有已配对设备全部失效)。
+            //   而走到这张卡的判据只是【旁边有个 host 目录】—— 那是线索不是判据:
+            //   把主机上整个 dist 拷到第二台电脑就会满足它。不问就铸 = 网段里悄悄多出一个中枢。
+            //   ⇒ 已经有身份就静默继续(那才是真·内部步骤);没有就停下来问。
             Line("① 中枢身份:正在检查…", muted: true);
+            if (!Services.HostSetup.IdentityExists())
+            {
+                ResetLines();
+                Line("这台机器还没有中枢身份。");
+                Line("★ 建一个中枢是【不可回退】的:之后要撤只能把身份删掉重铸,那会让所有已配对的电脑全部失效。"
+                     + "所以这一步要你点一下,我不替你决定。", muted: true);
+                Action(Ui.Primary("在这台上建中枢(我确认这台是主机)", async (_, _) => await MintThenContinueAsync()));
+                Action(Ui.Secondary("这台其实是副机", (_, _) =>
+                {
+                    // ★ 出口:否则 Build() 在 HostHubDown 下只渲染这张卡,这台电脑【结构上】再也走不到配对
+                    _role = HostRole.Client;
+                    Build();
+                }));
+                return;
+            }
             var id = await Services.HostSetup.EnsureIdentityAsync();
             ResetLines();
             Line(id.Outcome == Services.SetupOutcome.Failed
@@ -233,6 +253,22 @@ public sealed class DevicesView : UserControl
                 : "① 中枢身份:" + (id.Outcome == Services.SetupOutcome.Skipped ? "本来就有" : "已铸好"));
             if (id.Outcome == Services.SetupOutcome.Failed) { Retry(); return; }
 
+            await ContinueAfterIdentityAsync();
+        }
+        catch (Exception ex)
+        {
+            // ★ 这是 fire-and-forget 调的 —— 不兜住的话界面就停在"正在…",而没人知道为什么
+            ResetLines();
+            Line("准备过程出错(" + ex.GetType().Name + "):" + ex.Message);
+            Retry();
+        }
+    }
+
+    /// <summary>身份就绪之后的两步:防火墙(只在缺的时候才问)→ 起中枢。</summary>
+    async Task ContinueAfterIdentityAsync()
+    {
+        try
+        {
             // ---- ② 防火墙:★ 只在【规则不在】时才出按钮,因为它要弹系统授权框 ----
             if (await Services.HostSetup.FirewallRuleExistsAsync())
             {
@@ -297,6 +333,20 @@ public sealed class DevicesView : UserControl
         Line("★ 没拿到本机网卡地址,只能跑 启动Edge.cmd —— 它绑的是脚本里写死的那个地址,"
              + "换过网段/换过机器的话会绑不上。", muted: true);
         await StartEdgeAsync(cmd, NewStatus());
+    }
+
+    /// <summary>用户明确确认之后才铸身份,然后接着往下走。</summary>
+    async Task MintThenContinueAsync()
+    {
+        ResetLines();
+        Line("① 中枢身份:正在铸造…", muted: true);
+        var id = await Services.HostSetup.EnsureIdentityAsync();
+        ResetLines();
+        Line(id.Outcome == Services.SetupOutcome.Failed
+            ? "① 中枢身份:没弄成 —— " + id.Detail
+            : "① 中枢身份:已铸好");
+        if (id.Outcome == Services.SetupOutcome.Failed) { Retry(); return; }
+        await ContinueAfterIdentityAsync();
     }
 
     /// <summary>失败之后给一次重试 —— 而且只有一个按钮,别让人在一堆选项里猜。</summary>
