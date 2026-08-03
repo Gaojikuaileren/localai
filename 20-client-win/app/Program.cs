@@ -36,12 +36,17 @@ public static class Program
             return WheelTest.Run(outDir);
         }
 
-        // D46 护栏:提权运行会打不开设备密钥,与其让人踩到「密钥集不存在」那种隐晦报错,
-        // 不如启动时就拒绝并说清楚。放在最前面 —— 建窗口之前。
+        // D46 护栏:提权运行会打不开设备密钥(TPM/CNG 用户密钥绑定创建时的完整性等级)。
+        // ★ 用户裁定(2026-08-03):「以管理员启动也要能直接用」—— 所以【不拒绝,先自己降权重开】。
+        //   密钥模型一点没动:进程只是落到它本来就该在的那个 Medium 上下文里。
+        //   重开不成才回落到拒绝 —— 绝不"假装重开了"然后继续在 High 上跑。
         if (Elevation.IsElevated())
         {
-            System.Windows.MessageBox.Show(Elevation.RefuseMessage, "本地 AI 中枢",
-                System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Stop);
+            if (Elevation.TryRelaunchAtMediumIntegrity(args)) return 0;
+            System.Windows.MessageBox.Show(
+                Elevation.RefuseMessage + Environment.NewLine + Environment.NewLine
+                    + "(试过自动以普通身份重开,没成功:" + Elevation.RelaunchNote + ")",
+                "本地 AI 中枢", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Stop);
             return 3;   // 与 lan-edge 的护栏同一退出码
         }
 
