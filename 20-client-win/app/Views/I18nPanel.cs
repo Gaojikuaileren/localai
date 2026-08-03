@@ -138,7 +138,9 @@ public sealed class I18nPanel : UserControl
         // ★ 表头末尾「+」= 加语言(用户裁定):开底部的目标语言抽屉,勾选即加列
         // ★ 「+」用字段(锚点要稳定):浮窗开着时表格重建,锚点若是新建控件,浮窗就跟着"飞了"。
         //   重挂前先断旧父(WPF 两父节点)。
-        (_addLangBtn.Parent as Panel)?.Children.Remove(_addLangBtn);
+        // ★ 旧父可能是 Panel 也可能是 Line() 包的 Border —— 两种都要断,断不干净就是两父节点崩溃
+        if (_addLangBtn.Parent is Border ob) ob.Child = null;
+        else (_addLangBtn.Parent as Panel)?.Children.Remove(_addLangBtn);
         var addCell = Line(_addLangBtn);
         Grid.SetRow(addCell, 0); Grid.SetColumn(addCell, 2 + langs.Count);
         _grid.Children.Add(addCell);
