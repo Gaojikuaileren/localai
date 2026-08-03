@@ -4857,6 +4857,52 @@ public static class Selftest
             }
 
 
+            // ---- D46 完整性等级护栏:这道护栏【曾经从来没生效过】(2026-08-03 实测抓到)----
+            {
+                // 旧实现遍历 WindowsIdentity.Groups 找 S-1-16-12288 —— 而完整性 SID 根本不在 TokenGroups 里,
+                // 它在 TokenIntegrityLevel。于是提权拉起的客户端一声不吭就跑起来了,
+                // 而 Program.cs、文件头、D46 都写着"会拒绝"。
+                // ★★ 旧断言只搜到了"代码里有 IsElevated 这个调用",没有任何一条去核【它算得对不对】——
+                //   结构性断言看不见语义错误。所以这里拿一条**独立的外部证据**来核。
+                var rid = Services.Elevation.IntegrityRid();
+                Assert(rid is not null, "★★ 读得到本进程的完整性等级 —— 读不到就等于这道护栏形同虚设");
+                Assert(rid is null || rid == Services.Elevation.RidMedium || rid == Services.Elevation.RidHigh
+                       || rid == 0x1000 || rid == 0x4000,
+                       $"★ 完整性 RID 是已知取值之一(实得 0x{rid:X})");
+
+                // ★★ 独立佐证:whoami /groups 会把完整性 SID 原样打出来,与我们的 P/Invoke 完全不同路。
+                //   两条路对不上就说明我们算错了 —— 这正是旧版漏掉的那一类断言。
+                string groups = "";
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "whoami", Arguments = "/groups",
+                        UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true,
+                    };
+                    using var wp = System.Diagnostics.Process.Start(psi);
+                    if (wp is not null) { groups = wp.StandardOutput.ReadToEnd(); wp.WaitForExit(); }
+                }
+                catch { /* 拿不到外部证据就跳过这一条 —— 但绝不因此就说"通过" */ }
+                if (groups.Length > 0)
+                {
+                    var oracleHigh = groups.Contains("S-1-16-12288", StringComparison.Ordinal)
+                                     || groups.Contains("S-1-16-16384", StringComparison.Ordinal);
+                    Assert(Services.Elevation.IsElevated() == oracleHigh,
+                           $"★★ IsElevated() 必须与 whoami /groups 报的完整性等级一致 "
+                           + $"(我们说 {Services.Elevation.IsElevated()},whoami 说 High={oracleHigh})—— "
+                           + "对不上就是 D46 护栏在装样子");
+                    Assert(rid is null || (rid >= Services.Elevation.RidHigh) == oracleHigh,
+                           "★ RID 与外部证据同向");
+                }
+                Assert(Services.Elevation.LastProbeNote.Length > 0 && Services.Elevation.LastProbeNote != "(还没判过)",
+                       "★ 判过之后要留下依据 —— 「没判出来所以放行」和「确认是普通用户」不能看起来一样");
+                var elSrc = TryReadSource(Path.Combine("Services", "Elevation.cs"));
+                if (elSrc is not null)
+                    Assert(!Body(elSrc).Contains("id.Groups"),
+                           "★★ 不许再回到遍历 TokenGroups 找完整性 SID 那条路 —— 它在那里根本不存在");
+            }
+
             // ---- 一键配对:按角色分流 + 配对窗口的三道闸 ----
             {
                 var dv4 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
