@@ -4919,7 +4919,31 @@ public static class Selftest
                     Assert(approveDlg is not null && !approveDlg.Contains("跳过"),
                            "★★ 不提供任何「跳过比对」的快捷方式");
 
-                    // ⑥ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
+                    // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
+                    var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
+                    // ★★ 两个下标都要【先确认存在】再比大小:IndexOf 找不到返回 -1,而 -1 恒小于任何下标 ——
+                    //   照着写 a < b 的话,把提权检查【整段删掉】断言反而是绿的。
+                    //   (这条本轮就先犯了一次:删掉检查后它没红,是证红那一步把它抓出来的。)
+                    var iElev = se?.IndexOf("Elevation.IsElevated()", StringComparison.Ordinal) ?? -1;
+                    var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
+                    Assert(iElev >= 0 && iSpawn >= 0 && iElev < iSpawn,
+                           "★★ 拉起 Edge 之前先查本进程有没有提权 —— 子进程继承完整性等级,"
+                           + "提权的客户端拉起的 Edge 会立刻 exit 3 并报「密钥集不存在」,那句话指不到真正的原因");
+                    Assert(se is not null && se.Contains("UseShellExecute = true"),
+                           "★ 让 .cmd 开自己的控制台窗口 —— 出问题时那个窗口是唯一的现场,藏起来等于把证据丢掉");
+                    var iWait = se?.IndexOf("admin.ProbeAsync", StringComparison.Ordinal) ?? -1;
+                    Assert(iSpawn >= 0 && iWait >= 0 && iSpawn < iWait
+                           && se!.Contains("LastProbe == Services.AdminProbeResult.Ok"),
+                           "★★ 拉起 ≠ 起来了:只有回环管理面真的答话才算数,"
+                           + "不许因为 Process.Start 没抛异常就宣布成功");
+                    Assert(se is not null && se.Contains("秒内没等到中枢应答"),
+                           "★ 到点没等到就如实说,并指向刚弹出来的那个窗口 —— 不无限转圈");
+                    // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
+                    var recheck = Slice(dv4, "UIElement RecheckRow()", "UIElement HubDownCard()");
+                    Assert(recheck is not null && !recheck.Contains("Process.Start") && !recheck.Contains("StartEdgeAsync"),
+                           "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
+
+                    // ⑦ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
                     Assert(!body4.Contains("Edge 窗口里输入 open"),
                            "★★ 「去 Edge 窗口里敲 open」是命令行时代的说法 —— 留着会把人支到黑框里");
                     Assert(body4.Contains("展开「＋ 添加一台新电脑」"),

@@ -31,6 +31,9 @@ public sealed class DevicesView : UserControl
     /// 和客户端在不在、页面在哪、进程有没有崩,全都无关。这是最后一道闸。</summary>
     public const int WindowMinutes = 10;
 
+    /// <summary>拉起 Edge 后等它应答多久(秒)。★ 到点就如实说"没等到",不无限转圈。</summary>
+    public const int StartEdgeWaitSeconds = 30;
+
     /// <summary>收起/换页时的宽限秒数上限。★ 必须【有上限】:
     /// 写成"只要队列非空就不关"的话,局域网上任何人塞一条(或一条卡住的请求)就能把窗口按住。</summary>
     public const int GraceSeconds = 90;
@@ -171,20 +174,101 @@ public sealed class DevicesView : UserControl
     /// <summary>手动重探一次(换了状态 —— 比如刚把 Edge 起起来 —— 用它,不用重开客户端)。</summary>
     UIElement RecheckRow() => Ui.Secondary("重新检测这台的角色", (_, _) => { _role = HostRole.Unknown; Build(); });
 
-    /// <summary>本机多半就是主机,但中枢没起来。★ 只给唯一有用的那一步。</summary>
+    /// <summary>本机多半就是主机,但中枢没起来。★ 只给唯一有用的那一步 —— 而且这一步能直接点。</summary>
     UIElement HubDownCard()
     {
         var dir = Services.HubAdmin.HostToolsDir();
         var cmd = Services.HubAdmin.StartEdgeCmd();
-        return Ui.Card(Ui.Stack(
+        var st = Ui.Body("");
+        var stack = Ui.Stack(
             Ui.Subtitle("中枢没在这台机器上运行"),
-            Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"),
-            Ui.Caption(cmd is not null ? "去双击:" + cmd : "去主机端目录里双击 启动Edge.cmd:" + (dir ?? "")),
-            Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
-                       + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"),
-            Ui.Caption(TheApp.HubAdmin.LastError is { Length: > 0 } w ? "探测结果:" + w : ""),
-            new Border { Height = 10 },
-            RecheckRow()));
+            Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"));
+
+        if (cmd is not null)
+        {
+            stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(Ui.Primary("启动中枢(Edge)", async (_, _) => await StartEdgeAsync(cmd, st)));
+            stack.Children.Add(st);
+            // ★ 说清它凭什么能替你点:这不是"绕过"了那条护栏,而是本来就满足它。
+            stack.Children.Add(Ui.Caption("★ 客户端本身就以【普通用户】运行(D46 强制),它拉起的 Edge 继承同一个身份 —— "
+                                          + "正是 CA 私钥所在的那个上下文。所以这里点得动,而从提权的终端里拉就不行。"));
+            stack.Children.Add(Ui.Caption("也可以自己去双击:" + cmd));
+        }
+        else
+        {
+            stack.Children.Add(Ui.Caption("去主机端目录里双击 启动Edge.cmd:" + (dir ?? "(没找到主机端目录)")));
+            stack.Children.Add(Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
+                                          + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"));
+        }
+
+        if (TheApp.HubAdmin.LastError is { Length: > 0 } w) stack.Children.Add(Ui.Caption("探测结果:" + w));
+        stack.Children.Add(new Border { Height = 10 });
+        stack.Children.Add(RecheckRow());
+        return Ui.Card(stack);
+    }
+
+    /// <summary>
+    /// 替用户把中枢启起来。
+    ///
+    /// ★★ 前提必须先查:客户端自己【不能】是提权的。
+    ///   子进程继承父进程的完整性等级 —— 提权的客户端拉起的 Edge 同样是 High,
+    ///   它会立刻 exit 3 并报「密钥集不存在」,而那句话完全指不到真正的原因。
+    ///   与其把一个注定失败的进程扔出去,不如当场说清楚。
+    ///   (D46 本来就要求客户端始终普通用户运行,这里是**再确认一次**,不是替代那条护栏。)
+    /// ★★ 拉起 ≠ 起来了:只有【回环管理面真的答话】才算数。在那之前一律说"正在等它应答",
+    ///   绝不因为 Process.Start 没抛异常就宣布成功 —— 那是今天反复在修的那类谎。
+    /// </summary>
+    async Task StartEdgeAsync(string cmd, TextBlock status)
+    {
+        void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
+
+        if (Services.Elevation.IsElevated())
+        {
+            Say("这个客户端正以【管理员】身份运行,拉起来的 Edge 会继承同一个身份并立刻退出"
+                + "(它会报「密钥集不存在」)。请用普通方式重开客户端,或自己双击:" + cmd);
+            return;
+        }
+
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = cmd,
+                // ★ UseShellExecute:让 .cmd 开自己的控制台窗口 —— Edge 会把「拨号 …:8443」那行打在里面,
+                //   出问题时那个窗口就是唯一的现场。藏起来等于把证据丢掉。
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(cmd) ?? "",
+            });
+        }
+        catch (Exception ex)
+        {
+            Say("没能拉起启动脚本(" + ex.GetType().Name + ":" + ex.Message + ")—— 请自己双击:" + cmd);
+            return;
+        }
+
+        Say("已经拉起启动脚本,正在等中枢应答…");
+        var admin = TheApp.HubAdmin;
+        for (int i = 0; i < StartEdgeWaitSeconds; i++)
+        {
+            await Task.Delay(1000);
+            bool ok;
+            try { ok = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId); } catch { ok = false; }
+            if (ok && admin.LastProbe == Services.AdminProbeResult.Ok)
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    _role = HostRole.Host;
+                    Build();
+                    (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
+                });
+                return;
+            }
+            Say($"已经拉起启动脚本,正在等中枢应答…({i + 1}/{StartEdgeWaitSeconds} 秒)");
+        }
+        // ★ 到点还没应答:如实说"没等到",并指向刚刚弹出来的那个窗口 —— 那里有真正的原因
+        Say($"{StartEdgeWaitSeconds} 秒内没等到中枢应答。请看刚弹出来的那个黑色窗口 —— "
+            + "它里面就是失败原因(常见:身份是用管理员铸的、端口被占、或绑的网卡地址不存在了)。"
+            + "处理完点「重新检测这台的角色」。");
     }
 
 
