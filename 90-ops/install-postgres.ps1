@@ -208,8 +208,26 @@ $endm
 Write-NoBom $conf ($confText.TrimEnd() + "`r`n" + $confAdd + "`r`n")
 # ★ 重跑安全:pg_hba / pg_ident 只在【首次】写入基线。无条件覆写会抹掉 apply-schema.ps1
 #   追加的 ai_mem_local / ai_mem_remote 映射 —— 重跑一次 PG 安装,记忆库的两个角色就连不上了。
-if (Select-String -Path $hba -Pattern 'LocalAI Hub' -Quiet -EA SilentlyContinue) {
+# ★★ 守卫必须同时看两个文件(2026-08-03 修)。
+#   原来只 Select-String 检查 $hba,else 分支却**同时覆写 $hba 与 $ident**。
+#   于是有两条静默失效路径:
+#     ① $hba 在但 $ident 丢了/被清空 → 守卫判「已是基线」跳过 ⇒ pg_ident 永远补不回来,
+#        记忆库两个角色连不上,而脚本打的是绿字;
+#     ② $ident 在但 $hba 丢了 → 走 else,把**已被 apply-schema.ps1 追加过映射的 pg_ident 整个覆写**,
+#        正是本段注释自己警告的那件事。
+#   pg_ident 是记忆库唯一那道不依赖 NTFS 的强闸(SSPI 绑 SID),它的完整性不能挂在另一个文件的存在性上。
+$hbaOk   = (Select-String -Path $hba   -Pattern 'LocalAI Hub' -Quiet -EA SilentlyContinue)
+$identOk = (Test-Path -LiteralPath $ident) -and
+           (@(Get-Content -LiteralPath $ident -EA SilentlyContinue |
+              Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') }).Count -ge 1)
+if ($hbaOk -and $identOk) {
   Write-Host "  [5] pg_hba/pg_ident 已是本项目基线,保留现状(含 schema 追加的角色映射)"
+} elseif ($hbaOk -and -not $identOk) {
+  # ★ 只缺 pg_ident:绝不能走 else(那会连 pg_hba 一起覆写);也绝不能静默跳过。
+  throw ("pg_hba 已是本项目基线,但 pg_ident.conf 缺失或为空($ident)。`n" +
+         "  这两个文件必须同时成立 —— pg_ident 空表意味着 SSPI 映射全丢,记忆库角色连不上。`n" +
+         "  拒绝自动修复:自动重写会覆盖 apply-schema.ps1 追加过的 ai_mem_local / ai_mem_remote 映射。`n" +
+         "  请人工确认后手工补齐,并跑 90-ops\verify-isolation.ps1 的 ⑤ 段复核。")
 } else {
   Write-NoBom $hba @"
 # LocalAI Hub — 仅本机回环 · SSPI 绑 Windows SID(D30 · §6.8)

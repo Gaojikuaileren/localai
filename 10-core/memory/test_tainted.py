@@ -152,6 +152,23 @@ check("★ 新增档位默认无权(allowlist 形状)",
           for tier in (CallerTier.LAN_DEVICE, CallerTier.CHANNEL_RELAY,
                        CallerTier.REMOTE_UNAUTH)))
 
+# ★★ 两个「结构上取不到任何正文」的档位(D66 / §6.3 档位表 · §17.7)。
+#    _ALLOWED_CALLERS 的形状是 {敏感度: 允许档位集},没有「把某档位登记为空集」的位置,
+#    所以 tainted.py 里那句「由 test_tainted.py 的一条正面断言守着」指的就是下面这条。
+#    ——【不要】为了"看起来登记过"而把它们加进任何集合;那会让这条断言变红。
+from tainted import NO_PLAINTEXT_TIERS   # noqa: E402
+check("★★ resident-observer / ext-operator 不出现在任何 allowlist 里",
+      all(tier not in tiers
+          for tiers in _ALLOWED_CALLERS.values()
+          for tier in NO_PLAINTEXT_TIERS))
+check("  └ 且这两档确实是枚举成员(不是裸字符串)",
+      NO_PLAINTEXT_TIERS == {CallerTier.RESIDENT_OBSERVER, CallerTier.EXT_OPERATOR})
+for _tier in NO_PLAINTEXT_TIERS:
+    for _sens in ("S0", "S1", "S2"):
+        blocks(lambda t=t, s=_sens, c=_tier: unseal_for_client(
+                   seal(SECRET, sensitivity=s, source="user_typed"), caller=c),
+               f"★ {_tier.value} 取 {_sens} 正文必须被拒", MemoryLeakError)
+
 print("=== 7d. ★★ __eq__ 不得成为猜测-确认预言机 ===")
 # 原实现比 _VAULT 里的两段明文,不经解封点、不记账、不看 sensitivity。
 # 实测:seal('X','S0') == seal('X','S2') 为 True 且 ledger 增量为 0

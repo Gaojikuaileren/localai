@@ -221,15 +221,30 @@ class CallerTier(str, Enum):
     LAN_DEVICE = "lan-device"              # 已配对的局域网客户端(P3b)
     CHANNEL_RELAY = "channel-relay"        # 外联通道的桥(P3d)—— 全系统最低信任档
     REMOTE_UNAUTH = "remote-unauthenticated"
+    # ↓ 两个「结构上取不到任何正文」的档位。写出来比省略强:省略会被后人当成漏了。
+    RESIDENT_OBSERVER = "resident-observer"   # Vigil(§6.3 档位表)—— 只读 mem.exists + 投影
+    EXT_OPERATOR = "ext-operator"             # 层二外部控制面(D66)—— 记忆维「不适用」
 
 
 # ★ allowlist:键是敏感度,值是**允许**取用的档位。
 #   新增一个档位而不在这里登记 ⇒ 它对任何敏感度都取不到正文(fail-closed)。
+#
+# ★★ RESIDENT_OBSERVER 与 EXT_OPERATOR **刻意不出现在下面任何一个集合里**。
+#    这不是漏写 —— 是 §6.3 档位表与 D66 的直接兑现:
+#      · Vigil 只能读 mem.exists 与投影,拿不到任何正文(§17.7 隔离设计);
+#      · 层二外部控制面按 D67 只能拿结构投影,记忆库任何行都无揭示路径。
+#    本结构是 {敏感度: 允许档位集},没有「把某档位登记为空集」的位置,
+#    所以这条约束由 test_tainted.py 的一条正面断言守着:
+#    断言这两档不出现在任何 _ALLOWED_CALLERS 的值里。
+#    ——【不要】为了"看起来登记过"而把它们加进任何集合。
 _ALLOWED_CALLERS = {
     "S0": frozenset({CallerTier.TRUSTED_LOCAL, CallerTier.LAN_DEVICE}),
     "S1": frozenset({CallerTier.TRUSTED_LOCAL, CallerTier.LAN_DEVICE}),
     "S2": frozenset({CallerTier.TRUSTED_LOCAL}),      # §4.11.4 结构性隔离,无提级路径
 }
+
+# ★ 无正文档位:这两档对任何敏感度都取不到正文。给它一个名字,让断言有标的。
+NO_PLAINTEXT_TIERS = frozenset({CallerTier.RESIDENT_OBSERVER, CallerTier.EXT_OPERATOR})
 
 
 @dataclass(frozen=True)

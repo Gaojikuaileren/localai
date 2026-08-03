@@ -1,0 +1,57 @@
+# 调用方账户分级 —— 谁配得上 `trusted-local`(D30 修正 · 2026-08-03)
+#
+# ★★ 本文件是 **allowlist**,不是 denylist。缺文件 / 缺字段 / 空表 ⇒ **拒绝启动**。
+#
+# ── 为什么要有这个文件 ────────────────────────────────────────────────
+#
+# `classify_caller` 原来的判据是「不在 LOCAL_DENY_ACCOUNTS 就给 trusted-local」——
+# denylist + fail-open。而 `trusted-local` 是:
+#   · `E1_OVERRIDE_ALLOWED_TIERS` 的【唯一】成员(能解除 E1 凭证拦截)
+#   · `_ALLOWED_CALLERS["S2"]` 的【唯一】成员(能取 S2 正文)
+# 也就是说:**本机上任何一个没被点名拒绝的账户,连上来就是全系统最高档。**
+#
+# 2026-08-03 实测,这条判据在本机上【已经漏了】:
+#   CodexSandboxOffline / CodexSandboxOnline —— 两个外部 AI 沙箱账户,
+#   Enabled、在 Users 组、不在拒绝表里 ⇒ 按原判据它们就是 trusted-local。
+# 这与 provenance denylist / E1 override / unseal caller 是同一族缺陷:
+# **判据写成放行优先,新增的东西默认自由。**
+#
+# ⇒ 反过来写:只有【显式登记】的账户才配 trusted-local,其余一律降为 `unregistered-local`。
+#   降档**不断连** —— chat 仍可用(与直连 llama-server 等价,不构成回归),
+#   但拿不到 E1 解除权、拿不到 S2 正文。
+
+[caller]
+
+# ★ 能获得 trusted-local 的本机账户。改这张表 = 发放全系统最高档,须走决议。
+trusted_local = [
+  "Zori Ma",      # 机主(交互登录用户)—— D28「本机走 OS 信任」的那个"人"
+  "ai-mem",       # 记忆平面自身:memory-service 回调网关时需要它
+]
+
+# ── 本机现存账户的完整分类(2026-08-03 `Get-LocalUser` 实测)────────────
+#
+# 这一节是**给人看的账目**,不被代码读取。它存在的理由:
+# 上面那张表只说了"谁在里面",这一节说清"谁不在里面、以及为什么" ——
+# 否则半年后没人知道某个账户是被【裁定排除】还是【压根没注意到】。
+#
+#   Zori Ma              → trusted_local   机主
+#   ai-mem               → trusted_local   记忆平面
+#   ai-asset             → LOCAL_DENY      §6.8 隔离服务账户
+#   ai-exec              → LOCAL_DENY      §6.8 隔离服务账户
+#   (ai-vigil)           → LOCAL_DENY      D69,账户尚未创建
+#   (ai-ctl)             → LOCAL_DENY      D72,账户尚未创建
+#   (ai-op)              → LOCAL_DENY      形态 A 外部 AI 宿主,账户尚未创建
+#   CodexSandboxOffline  → 【不登记】      外部 AI 沙箱。★ 它不该有 trusted-local,
+#   CodexSandboxOnline   → 【不登记】        但也不必进 LOCAL_DENY(那会给它一个可探测的
+#                                            403 与一条审计噪声)。降为 unregistered-local 即可。
+#   WsiAccount           → 【不登记】      Windows 子系统账户,与本项目无关
+#   Alle                 → 【不登记】      ✅ 已裁定(2026-08-03,用户答):**访客账户,无管理员权限**,
+#                                          不是家庭成员的登录账户 ⇒ 不进 trusted_local。
+#                                          它落 unregistered-local:仍能用 chat,但拿不到
+#                                          E1 解除权、拿不到 S2 正文 —— 这正是访客该有的档位。
+#                                          ★ 将来若第二位家庭成员要用客户端,那是【另一个账户】,
+#                                            届时须显式加进上面的 trusted_local 并留一条决议。
+#   Administrator / Guest / DefaultAccount / WDAGUtilityAccount → 均 Disabled,不登记
+#
+# ★ 新增任何本地账户时:先在这一节给它一行,再决定进不进 trusted_local。
+#   `test_caller_allowlist.py` 会穷举本机账户,发现未在此节记账的就报出来。

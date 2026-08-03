@@ -23,62 +23,131 @@
 #
 # ★ 注意 egress 与 sensitivity 无关:一条 S0 记忆送进云端,同样违反 §5.6.2 的 L5。
 
+# ★★ 每个别名还必须显式声明 `local_only` 与 `agent_allow`(D69)—— 同样没有默认值。
+#
+#   local_only = true   该别名【永远】由本机后端服务,不得被改指向任何出境 provider。
+#                       与 egress = true 互斥(load_registry 断言)。
+#   local_only = false  该别名的驾驶者可替换(用户裁定「驾驶者可以替换」)。
+#
+#   agent_allow = [...]  允许使用该别名的 Agent 身份,取值来自下面这张【封闭表】:
+#
+#       assistant.main   用户在客户端里对话的日常助手
+#       asset-director   资产导演 Agent(§6.6 独立身份:共用模型别名但不共用工具池与记忆域)
+#       memory-service   记忆平面自身的检索/嵌入调用
+#       vigil            常驻清醒助手(§17)
+#       pet              桌面宠物(P8 · Vigil 的身体)
+#
+#   ★ 不允许写 ["*"]。理由与 egress 同源:通配是 denylist 形状,
+#     新增一个 Agent 时它默认落在【放行】一侧。load_registry 对 "*" 直接拒绝启动。
+#
+# ★★★ 「Vigil / 宠物始终本地」的强制形态(D69)——必须如实理解它挡的是什么:
+#
+#   真正的强制点【不在这张表里】,而在传输:Vigil 与宠物不经本网关,连专用命名管道
+#   \\.\pipe\LocalAI.Model.resident 到一个进程内只加载 assistant.resident、
+#   不链接任何 HTTP 客户端的后端;网关的 LOCAL_DENY_ACCOUNTS 含 ai-vigil,
+#   使它【结构上连不上网关】。Agent 身份由端点证明,不由报文声明。
+#
+#   ⚠ 本表的 agent_allow 是**纵深防御,不是唯一防线**,而且【当前请求路径上并未强制】——
+#     网关的请求上下文里根本没有 agent 维(唯一会话标识是客户端自报的 x-session-id,
+#     读它就违反 §6.6 F1)。这里如实写明,不得据此声称「已按 Agent 挂载」。
+#     它现在提供的是两件真东西:① 启动期的全表断言(见 load_registry 的反向断言)
+#     ② 一份人类可审的声明,改动必然出现在 diff 里。
+
 [aliases."assistant.fast"]
-egress     = false
-kind       = "chat"
-backend    = "http://127.0.0.1:18081"   # llama-server · 8B
-contract   = "8b"                        # 上下文由后端实际装载决定(D25,最低 8K)
-tier_min   = "low"
+egress      = false
+local_only  = false                      # 驾驶者可替换(改指云端时须同时把 egress 翻 true)
+agent_allow = ["assistant.main", "asset-director"]
+kind        = "chat"
+backend     = "http://127.0.0.1:18081"   # llama-server · 8B
+contract    = "8b"                       # 上下文由后端实际装载决定(D25,最低 8K)
+tier_min    = "low"
 
 [aliases."assistant.voice"]
-egress     = false
-kind       = "chat"
-backend    = "http://127.0.0.1:18081"   # 与 fast 共后端,语音场景用 8K
-contract   = "8b@8k"
-tier_min   = "low"
+egress      = false
+local_only  = false
+agent_allow = ["assistant.main"]
+kind        = "chat"
+backend     = "http://127.0.0.1:18081"   # 与 fast 共后端,语音场景用 8K
+contract    = "8b@8k"
+tier_min    = "low"
 
 [aliases."assistant.deep"]
-egress     = false
-kind       = "chat"
-backend    = "http://127.0.0.1:18082"   # llama-server · 30B-A3B@32K(P1 实测 57.5 tok/s)
-contract   = "30b-a3b@32k"
-tier_min   = "high"
-fallback   = "8b@32k"                    # 装不下时兜底(§8.1.4)
+egress      = false
+local_only  = false
+agent_allow = ["assistant.main"]
+kind        = "chat"
+backend     = "http://127.0.0.1:18082"   # llama-server · 30B-A3B@32K(P1 实测 57.5 tok/s)
+contract    = "30b-a3b@32k"
+tier_min    = "high"
+fallback    = "8b@32k"                   # 装不下时兜底(§8.1.4)
 
 [aliases."assistant.vision"]
-egress     = false
-kind       = "chat_multimodal"
-backend    = "http://127.0.0.1:18083"   # llama-qwen2vl · vlm.small
-contract   = "vlm.small(Qwen2.5-VL-3B)"
-tier_min   = "mid"
+egress      = false
+local_only  = false
+agent_allow = ["assistant.main", "asset-director"]
+kind        = "chat_multimodal"
+backend     = "http://127.0.0.1:18083"   # llama-qwen2vl · vlm.small
+contract    = "vlm.small(Qwen2.5-VL-3B)"
+tier_min    = "mid"
+
+# ★ 常驻清醒助手与桌面宠物专用 —— 「始终本地」的声明面(D69)
+#
+#   它列在这里【不是】为了让网关路由它(ai-vigil 在 LOCAL_DENY_ACCOUNTS 里,连不上网关),
+#   而是为了让「Vigil 用哪个模型」这件事有一个唯一的、被断言钉死的声明位置:
+#     · 硬断言:本条目必须存在,且 egress=false ∧ local_only=true ∧ 无 provider 字段
+#     · 反向全表断言:不存在任何 agent_allow 含 "vigil" 且(egress=true 或 local_only=false)的条目
+#
+#   ★ 未来放开 Vigil 用外部模型的【接口】,就是这两条断言本身 ——
+#     不是一个 allow_external 开关。放开必须:改本条目 + 改 resident-backend 的加载表
+#     + **显式删掉 load_registry 里那条反向断言** + 走 §12.4 哈希绑定批准 + 在 DECISIONS.md 留条目。
+#     即:放开必然有 diff、有决议号、有测试变红,不可能悄悄发生。
+#     一个布尔开关迟早会在某次「先跑通」里被翻成 true;一条断言不会。
+[aliases."assistant.resident"]
+egress      = false
+local_only  = true                       # ★ 与 egress=true 互斥,load_registry 强制
+agent_allow = ["vigil", "pet"]           # ★ 全表唯一含 "vigil" 的条目(反向断言钉死)
+kind        = "chat"
+backend     = "pipe://LocalAI.Model.resident"   # ★ 命名管道,不是 HTTP —— 不经网关
+contract    = "resident.cpu"             # §17:常驻 · CPU · 不占 GPU 驻留集合
+tier_min    = "low"
 
 [aliases."embedding.default"]
-egress     = false
-kind       = "embedding"
-backend    = "http://127.0.0.1:18084"   # CPU embedding(bge-m3)· P2 后续
-contract   = "bge-m3"
+egress      = false
+local_only  = false
+agent_allow = ["assistant.main", "memory-service"]
+kind        = "embedding"
+backend     = "http://127.0.0.1:18084"   # CPU embedding(bge-m3)· P2 后续
+contract    = "bge-m3"
 
 [aliases."rerank.default"]
-egress     = false
-kind       = "rerank"
-backend    = "http://127.0.0.1:18084"
-contract   = "bge-reranker"
+egress      = false
+local_only  = false
+agent_allow = ["assistant.main", "memory-service"]
+kind        = "rerank"
+backend     = "http://127.0.0.1:18084"
+contract    = "bge-reranker"
 
 # —— 以下不走本网关的 chat 路由,列此仅为别名清单完整 ——
 
 [aliases."escalate.cloud"]
-egress     = true                        # ★ 云端 —— 记忆正文永不得进它的 prompt
-kind       = "chat_cloud"
-provider   = "gemini"                    # 需 API key · 过出境闸门(§4.6)· P2 后续
+egress      = true                       # ★ 云端 —— 记忆正文永不得进它的 prompt
+local_only  = false
+agent_allow = ["assistant.main"]         # ★ 不含 vigil/pet —— 反向断言的主要标的
+kind        = "chat_cloud"
+provider    = "gemini"                   # 需 API key · 过出境闸门(§4.6)· P2 后续
 egress_gate = true                       # (旧字段名,保留兼容;判据以 egress 为准)
-note       = "仅升级推理能力 · 粒度锁 L2(Q2)"
+note        = "仅升级推理能力 · 粒度锁 L2(Q2)"
 
 [aliases."image.concept"]
-egress     = true                        # nano-banana 在云端
-kind       = "job_cloud"
-note       = "nano-banana · JOB 平面 · 不经本网关 chat 路由"
+egress      = true                       # nano-banana 在云端
+local_only  = false
+agent_allow = ["asset-director"]
+kind        = "job_cloud"
+note        = "nano-banana · JOB 平面 · 不经本网关 chat 路由"
 
 [aliases."image.texture"]
-egress     = false                       # ComfyUI 在本机
-kind       = "job_local"
-note       = "ComfyUI · JOB 平面 · 不经本网关 chat 路由"
+egress      = false                      # ComfyUI 在本机
+local_only  = false
+agent_allow = ["asset-director"]
+kind        = "job_local"
+note        = "ComfyUI · JOB 平面 · 不经本网关 chat 路由"
