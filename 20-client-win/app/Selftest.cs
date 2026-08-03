@@ -5105,6 +5105,21 @@ public static class Selftest
                            "★★ 多张网卡时让人自己选 —— 放行在虚拟机的仅主机网卡上等于没放行,"
                            + "而界面会显示成功,那是最难查的一种失败");
 
+                    // ⑨ 起中枢要绑【用户刚选的那张网卡】,不能靠 .cmd 里写死的地址
+                    var step = Slice(dv4, "async Task StartEdgeStepAsync", "/// <summary>");
+                    Assert(step is not null && step.Contains("run-lan ") && step.Contains("bindIp"),
+                           "★★ 有网卡地址就直接 run-lan <ip> —— 启动Edge.cmd 把地址写死成一台开发机的,"
+                           + "换机器或换一次 DHCP 租约就绑到不存在的地址上");
+                    Assert(step is not null && step.Contains("启动Edge.cmd"),
+                           "★ 拿不到地址时仍退回 .cmd,但要如实说明它绑的是写死的那个地址");
+                    // ⑩ 状态行不许跨 Build 共享(它被 Clear 掉之后界面会永久静默,再 Add 还会抛)
+                    Assert(!Body(dv4).Contains("readonly TextBlock _setupStatus"),
+                           "★★ 状态行不许是跨 Build 共享的单例控件 —— 被摘出可视树后界面永久静默,"
+                           + "重新挂回去还会抛 InvalidOperationException,把唯一能推进的按钮一起清掉");
+                    var picker2 = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
+                    Assert(picker2 is not null && !picker2.Contains("host.Children.Clear()"),
+                           "★★ 选网卡的面板不许 Clear 整个动作区 —— 那会把状态行一起摘走");
+
                     // ⑧ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
                     Assert(!body4.Contains("Edge 窗口里输入 open"),
                            "★★ 「去 Edge 窗口里敲 open」是命令行时代的说法 —— 留着会把人支到黑框里");

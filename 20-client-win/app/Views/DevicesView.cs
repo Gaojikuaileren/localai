@@ -242,9 +242,9 @@ public sealed class DevicesView : UserControl
             {
                 Line("② 防火墙 8443:还没放行 —— 副机会连不上这台。");
                 Line("★ 这一步要弹一次系统授权框,所以不替你点。", muted: true);
-                Action(Ui.Primary("放行防火墙 8443(需要一次系统授权)", (_, _) => BuildNicPicker(_setupActions!, _setupStatus)));
+                var fwStatus = NewStatus();
+                Action(Ui.Primary("放行防火墙 8443(需要一次系统授权)", (_, _) => BuildNicPicker(_setupActions!, fwStatus)));
                 Action(Ui.Secondary("先跳过(只在本机用)", async (_, _) => await StartEdgeStepAsync()));
-                Action(_setupStatus);
                 return;
             }
 
@@ -260,15 +260,43 @@ public sealed class DevicesView : UserControl
         }
     }
 
-    readonly TextBlock _setupStatus = Ui.Body("");
-
-    async Task StartEdgeStepAsync()
+    // ★★ 这里原来是 `readonly TextBlock _setupStatus = Ui.Body("")` —— 一个**跨 Build 共享**的控件。
+    //   两个后果都真出现了:BuildNicPicker 会 Children.Clear() 把它从可视树上摘走,
+    //   之后所有状态文字都写进一个看不见的控件(界面永久静默,而"公用网络"那句最有用的解释
+    //   恰恰就是没人看得见的那句);再把同一个控件重新 Add 又会抛
+    //   InvalidOperationException(元素已有父级),catch 里的 ResetLines() 顺手把唯一能推进的
+    //   按钮也清掉,此后这个视图里不可恢复。
+    //   ⇒ 每次要用就【新建一个】,谁用谁负责把它挂进树里。
+    TextBlock NewStatus()
     {
+        var t = Ui.Body("");
+        Action(t);
+        return t;
+    }
+
+    /// <summary>
+    /// 起中枢。★ bindIp 非空时【直接调 localai-lan-edge.exe run-lan &lt;ip&gt;】,不走 启动Edge.cmd ——
+    ///   那个 .cmd 把绑定地址**写死**成一台开发机的 192.168.178.61:换台机器、或这台换一次
+    ///   DHCP 租约/改用 Wi-Fi,它绑的就是一个不存在的地址,而"无痛丝滑"这条主线在第二台电脑上
+    ///   从来没成立过。而我们手里【已经有正确答案】—— 用户刚在网卡选择里挑过。
+    /// ★ 拿不到 IP 时才退回 .cmd(总比什么都不做强),并如实说明它绑的是脚本里写死的那个地址。
+    /// </summary>
+    async Task StartEdgeStepAsync(string? bindIp = null)
+    {
+        var dir = Services.HubAdmin.HostToolsDir();
+        var exe = dir is null ? null : Path.Combine(dir, "localai-lan-edge.exe");
+        if (bindIp is { Length: > 0 } && exe is not null && File.Exists(exe))
+        {
+            Line($"③ 中枢:正在启动(绑定 {bindIp}:{Services.HubAdmin.EdgePort})…");
+            await StartEdgeAsync(exe, NewStatus(), $"run-lan {bindIp}");
+            return;
+        }
         var cmd = Services.HubAdmin.StartEdgeCmd();
-        if (cmd is null) { Line("③ 中枢:找不到 启动Edge.cmd"); Retry(); return; }
+        if (cmd is null) { Line("③ 中枢:找不到中枢程序,也找不到 启动Edge.cmd"); Retry(); return; }
         Line("③ 中枢:正在启动…");
-        Action(_setupStatus);
-        await StartEdgeAsync(cmd, _setupStatus);
+        Line("★ 没拿到本机网卡地址,只能跑 启动Edge.cmd —— 它绑的是脚本里写死的那个地址,"
+             + "换过网段/换过机器的话会绑不上。", muted: true);
+        await StartEdgeAsync(cmd, NewStatus());
     }
 
     /// <summary>失败之后给一次重试 —— 而且只有一个按钮,别让人在一堆选项里猜。</summary>
@@ -281,7 +309,6 @@ public sealed class DevicesView : UserControl
     /// </summary>
     void BuildNicPicker(StackPanel host, TextBlock status)
     {
-        host.Children.Clear();
         var nics = Services.HostSetup.LocalNics();
         if (nics.Count == 0)
         {
@@ -290,26 +317,31 @@ public sealed class DevicesView : UserControl
         }
         if (nics.Count == 1)
         {
-            _ = SetupHostAsync(nics[0].Alias, status);
+            // ★ 只有一张网卡就不问 —— 没有可选的东西时弹选择框只是在浪费一次点击
+            _ = SetupHostAsync(nics[0].Alias, nics[0].Ip, status);
             return;
         }
-        host.Children.Add(Ui.Body("这台有多张网卡,防火墙规则要放在【副机能看见的那一张】上,请选一张:"));
-        host.Children.Add(Ui.Caption("★ 192.168.56.x 之类通常是虚拟机的仅主机网卡 —— 放在那上面副机看不见,"
-                                     + "而且界面会显示成功,那是最难查的一种失败。"));
+        // ★ 画在【自己的子面板】里,不去 Clear 整个动作区 —— 那会把状态行一起摘走,界面从此静默
+        var box = new StackPanel();
+        box.Children.Add(Ui.Body("这台有多张网卡,防火墙规则要放在【副机能看见的那一张】上,请选一张:"));
+        box.Children.Add(Ui.Caption("★ 192.168.56.x 之类通常是虚拟机的仅主机网卡 —— 放在那上面副机看不见,"
+                                    + "而且界面会显示成功,那是最难查的一种失败。"));
         foreach (var (alias, ip) in nics)
         {
-            var b = Ui.Secondary($"{alias} · {ip}", (_, _) => { host.Children.Clear(); _ = SetupHostAsync(alias, status); });
+            var a = alias; var i = ip;
+            var b = Ui.Secondary($"{a} · {i}", (_, _) => { box.Visibility = Visibility.Collapsed; _ = SetupHostAsync(a, i, status); });
             b.Margin = new Thickness(0, 4, 0, 0);
             b.HorizontalAlignment = HorizontalAlignment.Left;
-            host.Children.Add(b);
+            box.Children.Add(b);
         }
+        host.Children.Add(box);
     }
 
     /// <summary>
     /// 按顺序把这台装成主机。★ 一步失败就停 —— 后面几步在前一步没成的前提下做了也白做,
     /// 而且会用一串新错误盖住真正的原因。
     /// </summary>
-    async Task SetupHostAsync(string nicAlias, TextBlock status)
+    async Task SetupHostAsync(string nicAlias, string nicIp, TextBlock status)
     {
         void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
         string Mark(Services.SetupStep st) => st.Outcome switch
@@ -339,7 +371,7 @@ public sealed class DevicesView : UserControl
         //   直接中止会让人以为整套都废了 —— 那不是实情。
         var cmd = Services.HubAdmin.StartEdgeCmd();
         if (cmd is null) { Say($"① 身份:{Mark(id)}。② 防火墙:{Mark(fw)}。③ 找不到 启动Edge.cmd。"); return; }
-        await StartEdgeAsync(cmd, status);
+        await StartEdgeStepAsync(nicIp);
     }
 
     /// <summary>
@@ -354,7 +386,7 @@ public sealed class DevicesView : UserControl
     /// ★★ 拉起 ≠ 起来了:只有【回环管理面真的答话】才算数。在那之前一律说"正在等它应答",
     ///   绝不因为 Process.Start 没抛异常就宣布成功 —— 那是今天反复在修的那类谎。
     /// </summary>
-    async Task StartEdgeAsync(string cmd, TextBlock status)
+    async Task StartEdgeAsync(string cmd, TextBlock status, string? args = null)
     {
         void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
 
@@ -363,7 +395,8 @@ public sealed class DevicesView : UserControl
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = cmd,
-                // ★ UseShellExecute:让 .cmd 开自己的控制台窗口 —— Edge 会把「拨号 …:8443」那行打在里面,
+                Arguments = args ?? "",
+                // ★ UseShellExecute:让它开自己的控制台窗口 —— Edge 会把「拨号 …:8443」那行打在里面,
                 //   出问题时那个窗口就是唯一的现场。藏起来等于把证据丢掉。
                 UseShellExecute = true,
                 WorkingDirectory = Path.GetDirectoryName(cmd) ?? "",
