@@ -90,14 +90,9 @@
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
-        <!-- 品牌 -->
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
-          <!-- 品牌方块用【主题色】而不是着重色:它表示"这是哪套皮肤/哪个应用",不是一个可点的东西。
-               着重色留给"能点、被选中"的语义 —— 两者混用久了,用户会以为哪儿都能点。 -->
-          <Border Width="16" Height="16" CornerRadius="4" Background="{DynamicResource ThemeColor}" Margin="0,0,9,0"/>
-          <TextBlock Text="本地 AI 中枢" FontWeight="SemiBold" FontSize="12.5"
-                     Foreground="{DynamicResource FgPrimary}" VerticalAlignment="Center"/>
-        </StackPanel>
+        <!-- 品牌块已移除(用户裁定 2026-08-03):任务栏/托盘已有图标与名字,窗口里不再重复。
+             这一列留空,拖动区从更左侧开始。 -->
+        <Border Grid.Column="0" Background="Transparent" MouseLeftButtonDown="OnTitleBarDrag"/>
 
         <!-- 中间空白 = 拖动区(CaptionHeight=0,所以靠 MouseLeftButtonDown 触发 DragMove) -->
         <Border Grid.Column="1" Background="Transparent" MouseLeftButtonDown="OnTitleBarDrag"/>

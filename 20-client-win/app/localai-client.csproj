@@ -7,7 +7,9 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <!-- 客户端图标(用户提供,Assets/icon):exe/任务栏/托盘同一套 -->
-    <ApplicationIcon>Assets/icon/favicon.ico</ApplicationIcon>
+    <ApplicationIcon>Assets/icon/app.ico</ApplicationIcon>
+    <!-- app.ico 由 icon-1024 生成:原图背景是【透明】,黑线条猫在深色壁纸上像"没填充" ——
+         垫白色圆角底 + 补 256/64 大尺寸帧(favicon.ico 只有 16/32/48,大图标全靠放大)。 -->
     <!-- 项目文件名带连字符,默认命名空间 "localai-client" 不是合法标识符 ——
          设了 ApplicationIcon 之后 WinFX 目标才开始校验它(之前空标签一直没触发)。显式给对。 -->
     <RootNamespace>LocalAI.Client</RootNamespace>

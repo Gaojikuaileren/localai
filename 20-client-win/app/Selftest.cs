@@ -4587,8 +4587,8 @@ public static class Selftest
                            "★ 次着重色有真活:跨天全天的线与当日日程的点分色");
                 var mwBrand = TryReadSource("MainWindow.xaml");
                 if (mwBrand is not null)
-                    Assert(mwBrand.Contains("Background=\"{DynamicResource ThemeColor}\""),
-                           "★ 品牌标记用主题色(身份),不用着重色 —— 否则看着像个能点的按钮");
+                    // 品牌块已整体移除(用户裁定 2026-08-03):任务栏/托盘已有图标与名字,窗口里不再重复
+                Assert(!mwBrand.Contains("本地 AI 中枢\" FontWeight"), "★ 窗口左上不再放标题与图标块");
             }
             {
                 // 结构性的按皮肤分叉必须【屈指可数且登记在案】。新增一处就会让这条挂掉,
