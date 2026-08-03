@@ -66,6 +66,8 @@ public partial class App : Application
         base.OnStartup(e);
 
         AppPaths.EnsureStateDir();
+        // 配对时把本机版本戳带过去(自报信息,只作显示 —— 见 ClientTransport 里的说明)
+        LocalAI.ClientTransport.Transport.ClientVersion = BuildInfo.Stamp ?? "dev";
 
         // ★ 全局异常兜底:此前没有任何处理 —— 任何未捕获异常 = 进程【静默闪退】(用户反馈"添加附件闪退"就是这类)。
         //   UI 线程异常记日志 + 用我们的对话框如实告知,并【标记已处理】让应用活下来(多数是可恢复的,如某个对话框抛错);

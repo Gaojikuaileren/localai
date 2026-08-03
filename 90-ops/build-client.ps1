@@ -34,9 +34,12 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 Write-Host "[1] 发布单文件 exe(自包含,win-x64)…"
 Push-Location $app
+# ★ 把版本戳烧进程序集 —— 客户端才能自报"我是哪一版"。
+#   不烧的话,版本只存在 VERSION.txt 里,而那个文件拷丢了就永远说不清手上这个 exe 是什么。
 & dotnet publish -c Release -r win-x64 --self-contained true `
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true -o $Out --nologo -v q
+    -p:EnableCompressionInSingleFile=true -p:InformationalVersion=$ver `
+    -o $Out --nologo -v q
 $code = $LASTEXITCODE
 Pop-Location
 if ($code -ne 0) { Write-Host "X 发布失败" -ForegroundColor Red; exit 1 }

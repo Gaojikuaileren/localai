@@ -4752,6 +4752,65 @@ public static class Selftest
                 }
             }
 
+            // ---- 两边版本核验(三层,别混为一谈)----
+            {
+                // 开发树里跑自检时没有烧过版本戳 —— 它就该如实说"开发构建",不编一个号
+                Assert(Services.BuildInfo.Display.Length > 0, "版本显示永远有话说");
+                Assert(Services.BuildInfo.Stamp is null || Services.BuildInfo.Stamp.Length >= 8,
+                       "★ 版本戳要么没有(开发树),要么是真的那一串 —— 不允许编一个出来");
+                var biSrc = TryReadSource(Path.Combine("Services", "BuildInfo.cs"));
+                if (biSrc is not null)
+                    Assert(biSrc.Contains("开发构建") && biSrc.Contains("不编一个版本号"),
+                           "★★ 拿不到版本戳时如实说 —— 装出来的版本号会让「两边版本对不对得上」这件事失去意义");
+                var ctSrc = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
+                if (ctSrc is not null)
+                {
+                    Assert(ctSrc.Contains("clientVersion = ClientVersion"),
+                           "★ 配对时上报本机版本戳(服务端忽略未知字段,不影响老主机)");
+                    Assert(ctSrc.Contains("自报的、未被六词覆盖的】信息"),
+                           "★★ 写明 clientVersion 是自报信息、不在六词覆盖范围内 —— 只作显示,不做判断");
+                }
+                var dv3 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dv3 is not null)
+                    Assert(dv3.Contains("配对的六个词会直接对不上"),
+                           "★★ 界面要说清:协议版本不一致是【结构性】被六词拦住的,不靠人去核");
+            }
+
+            // ---- 局域网自动找中枢(用户:「两边都开着就该一键连上」)----
+            {
+                // ★ 证书名 -> hub_id 的识别是纯函数,直接逐个验
+                Assert(Services.HubDiscovery.HubIdFromServerName("localai-f6hsduipeesexb6f.local") == "f6hsduipeesexb6f",
+                       "★ 从证书名里取出 hub_id(命名来自 identity:localai-<hub>.local)");
+                Assert(Services.HubDiscovery.HubIdFromServerName("localai-ABC.LOCAL") == "ABC", "大小写不敏感");
+                foreach (var bad in new[] { "", "example.com", "localai-.local", "notlocalai-x.local", "localai-x.lan" })
+                    Assert(Services.HubDiscovery.HubIdFromServerName(bad) is null,
+                           $"★ 认不出这个形状就返回 null(实得 {bad})—— 8443 上蹲着别的东西不能当成我们的中枢");
+                Assert(Services.HubDiscovery.HubIdFromServerName(null) is null, "null 不抛异常");
+                Assert(Services.HubDiscovery.EdgePort == 8443, "业务口端口与 lan-edge run-lan 一致");
+
+                var hdSrc = TryReadSource(Path.Combine("Services", "HubDiscovery.cs"));
+                if (hdSrc is not null)
+                {
+                    Assert(hdSrc.Contains("发现不建立信任"),
+                           "★★ 文件头必须写明【发现不建立信任】—— 这里故意不校验证书,"
+                           + "不写清楚就会被后人读成「我们接受任意证书」");
+                    Assert(hdSrc.Contains("if (mask < 24) continue;"),
+                           "★ 只扫 /24 及更窄 —— 再宽就是几万个地址,扫它既慢又像在做端口扫描");
+                    Assert(hdSrc.Contains("MaxParallel"), "★ 并发有上限 —— 254 个地址不限并发会把网卡与防火墙日志淹了");
+                }
+                var hcSrc2 = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                if (hcSrc2 is not null)
+                {
+                    var rd = Slice(hcSrc2, "public async Task<bool> RediscoverAsync", "public void UnpairLocal");
+                    Assert(rd is not null && rd.Contains("mine.Count != 1"),
+                           "★★ 找回中枢只接受【恰好一台 hub_id 完全一致】的 —— 零台或多台都不猜");
+                }
+                var dv2 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dv2 is not null)
+                    Assert(dv2.Contains("绝不替用户挑") || dv2.Contains("请自己挑一个"),
+                           "★ 找到多个中枢时摆出来让人自己挑(合租/邻居/自己两台都是正常情况)");
+            }
+
             // ---- S4 · 配对审批与设备管理接【主机本地回环管理面】(D37/D48)----
             {
                 var ha = new Services.HubAdmin();

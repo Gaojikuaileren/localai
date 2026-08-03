@@ -32,6 +32,9 @@ public sealed class ClientProfile
 
 public static class Transport
 {
+    /// <summary>本客户端的版本戳(由宿主在启动时设一次;不设就是 "unknown")。见客户端的 BuildInfo。</summary>
+    public static string ClientVersion { get; set; } = "unknown";
+
     static CngProvider SwProv => new(Ca.TlsKeyProvider);   // non-exportable software CNG (B17/D44)
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 
@@ -104,7 +107,11 @@ public static class Transport
         byte[]? serverLeaf = null;
         JsonElement en;
         using (var boot = Boot(dial, d => serverLeaf = d))
-            en = await Post(boot, edgeUrl + "/pair/enroll", new { csr = Convert.ToBase64String(csr), clientNonce = Convert.ToBase64String(clientNonce), claimSecretHash = Convert.ToBase64String(claimSecretHash), protocolVersion = 1, displayName });
+            // ★ clientVersion 是【自报的、未被六词覆盖的】信息 —— 与 displayName 同级:只作显示,
+            //   不做任何判断,永不进 prompt。真正决定"能不能配上"的是 protocolVersion(它进了 SAS 推导:
+            //   两边协议版本不同,六个词直接对不上)。
+            //   服务端忽略不认识的字段,所以多带这一个不会影响老主机。
+            en = await Post(boot, edgeUrl + "/pair/enroll", new { csr = Convert.ToBase64String(csr), clientNonce = Convert.ToBase64String(clientNonce), claimSecretHash = Convert.ToBase64String(claimSecretHash), protocolVersion = 1, displayName, clientVersion = ClientVersion });
         if (serverLeaf is null) throw new InvalidOperationException("did not capture server leaf");
 
         var reqId = en.GetProperty("requestId").GetString()!;

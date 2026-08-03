@@ -116,31 +116,58 @@ public sealed class DevicesView : UserControl
     }
 
     /// <summary>
-    /// 主机上的客户端:自动填中枢地址。
-    /// ★ 判据是两条【肯定证据】叠加:① 回环管理面应答且 hubId 与本机一致(或本机还没配对过);
-    ///   ② 本机某张网卡的 8443 真的连得上。两条都成立才填 —— 任何一条不成立就留空并说实话。
+    /// 自动找中枢。两步:
+    ///   ① 先 ping 回环管理面 —— 本机就是主机的话,答案立刻就有(还顺带知道 hub_id);
+    ///   ② 否则**扫本机所在的 /24**,找 8443 上证书名形如 `localai-*.local` 的那台。
+    /// ★ 发现【不建立信任】:它只把地址找出来,连不连仍由六个词与 mTLS 决定(见 HubDiscovery 文件头)。
+    /// ★ 三种结果分开处理,**找到多个时绝不替用户挑**(合租/邻居/自己两台主机都是正常情况)。
     /// </summary>
     async Task AutofillHubAddress(TextBox addr, TextBlock note)
     {
         var admin = TheApp.HubAdmin;
-        var isHost = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId);
-        if (!isHost)
+        if (await admin.ProbeAsync(TheApp.Hub.Profile?.HubId))
         {
-            Dispatcher.Invoke(() => note.Text = "这台不是主机 —— 请照主机 Edge 窗口里那行「拨号 …:8443」填。");
+            var own = await Services.HubAdmin.DiscoverEdgeDialAsync();
+            Dispatcher.Invoke(() =>
+            {
+                if (own is null)
+                {
+                    note.Text = "本机就是主机,但没探到业务口(8443)—— 先确认 Edge 起着、防火墙放行了。";
+                    return;
+                }
+                if (addr.Text.Trim().Length == 0) addr.Text = own;
+                note.Text = $"本机就是主机(hub {admin.HubId})—— 地址已自动填好。"
+                          + "★ 这里【不能】填 127.0.0.1:业务口只绑在网卡 IP 上,回环上只有管理面。";
+            });
             return;
         }
-        var dial = await Services.HubAdmin.DiscoverEdgeDialAsync();
+
+        Dispatcher.Invoke(() => note.Text = "正在局域网里找中枢(扫本网段的 8443)…");
+        var hits = await Services.HubDiscovery.ScanAsync();
         Dispatcher.Invoke(() =>
         {
-            if (dial is null)
+            if (hits.Count == 0)
             {
-                // 管理面在、业务口却探不到:多半 Edge 只起了管理面,或防火墙拦着。如实说,不猜。
-                note.Text = "本机就是主机,但没探到中枢的业务口(8443)—— 先确认 Edge 起着、防火墙放行了,或照它窗口里那行填。";
+                note.Text = "没找到中枢。请确认主机上的 Edge 起着、两台在同一个网段、防火墙放行了 8443;"
+                          + "或照主机窗口里那行「拨号 …:8443」手填。";
                 return;
             }
-            if (addr.Text.Trim().Length == 0) addr.Text = dial;
-            note.Text = $"本机就是主机(hub {admin.HubId})—— 地址已自动填好。"
-                      + "★ 这里【不能】填 127.0.0.1:业务口只绑在网卡 IP 上,回环上只有管理面。";
+            if (hits.Count == 1)
+            {
+                if (addr.Text.Trim().Length == 0) addr.Text = hits[0].Dial;
+                note.Text = $"找到中枢 {hits[0].HubId}({hits[0].Dial})—— 地址已填好。"
+                          + "★ 找到它不等于信任它:接下来的六个词必须两边逐字一致。";
+                return;
+            }
+            // ★ 多个:摆出来让人自己挑,绝不替他决定连哪一个
+            note.Text = $"找到 {hits.Count} 个中枢 —— 请自己挑一个(合租、邻居、或你自己装了两台,都可能这样):";
+            foreach (var h in hits)
+            {
+                var pick = Ui.Secondary($"{h.HubId} · {h.Dial}", (_, _) => { addr.Text = h.Dial; });
+                pick.Margin = new Thickness(0, 4, 0, 0);
+                pick.HorizontalAlignment = HorizontalAlignment.Left;
+                if (note.Parent is Panel host) host.Children.Insert(host.Children.IndexOf(note) + 1, pick);
+            }
         });
     }
 
@@ -214,6 +241,11 @@ public sealed class DevicesView : UserControl
             //   自动发现随 P3b.2 的 DNS-SD 补上 —— 到时候它填的也是这一个字段。
             ChangeDialRow(p),
             Ui.Body($"协议:{TheApp.Hub.ProtocolNote}", muted: true),
+            Ui.Body($"本机客户端:{Services.BuildInfo.Display}", muted: true),
+            // ★ 三层版本别混为一谈:协议版本决定能不能对话(而且它已经写进六词推导,
+            //   两边不同就配不上);客户端版本戳只影响"功能是不是同一套",是提示不是拦截。
+            Ui.Caption("★ 两台客户端的【协议版本】不一致时,配对的六个词会直接对不上 "
+                       + "—— 因为词是从协议版本 + 双方随机数 + CSR 指纹推出来的。这一层不靠人去核。"),
             Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",
@@ -249,9 +281,34 @@ public sealed class DevicesView : UserControl
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
         row.Children.Add(box);
         row.Children.Add(save);
+        // ★ 更好的办法:别让人去查 IP —— 按 hub_id 在局域网里把它找回来。
+        //   身份从来不是"地址",而是配对时钉住的那套证书;换了地址仍然是同一个中枢。
+        var find = Ui.Secondary("在局域网里找回它", async (_, _) =>
+        {
+            var note = Ui.Caption("正在扫本网段…");
+            if (find_host is not null) { find_host.Children.Clear(); find_host.Children.Add(note); }
+            var ok = await TheApp.Hub.RediscoverAsync();
+            if (ok) await TheApp.Hub.ProbeAsync();
+            Dispatcher.Invoke(() =>
+            {
+                if (ok) { Build(); (Application.Current.MainWindow as MainWindow)?.RefreshStatus(); }
+                else if (find_host is not null)
+                {
+                    find_host.Children.Clear();
+                    find_host.Children.Add(Ui.Caption("没找到:" + (TheApp.Hub.LastError ?? "未知原因")
+                        + " —— 确认主机上 Edge 起着、两台在同一网段、防火墙放行了 8443。"));
+                }
+            });
+        });
+        find.Margin = new Thickness(8, 0, 0, 0);
+        row.Children.Add(find);
+
         var wrap = new StackPanel();
         wrap.Children.Add(row);
-        wrap.Children.Add(Ui.Caption("换了路由器/网段就在这里改 —— 证书与配对原样保留,不用重新配对。"));
+        find_host = new StackPanel();
+        wrap.Children.Add(find_host);
+        wrap.Children.Add(Ui.Caption("换了路由器/网段:点【在局域网里找回它】就行,或者手改地址 —— "
+                                    + "两条路都【不动证书与配对】,不必重新配对。"));
         return wrap;
     }
 
@@ -335,6 +392,7 @@ public sealed class DevicesView : UserControl
     }
 
     string? admin_err;
+    StackPanel? find_host;
 
     /// <summary>
     /// 一条待批准的请求。★ 六个词要与对方屏幕上【逐字一致】才能按批准 ——

@@ -313,6 +313,24 @@ public sealed class HubClient
         return true;
     }
 
+    /// <summary>
+    /// 连不上时,在局域网里【按 hub_id 把它找回来】并更新拨号地址。
+    ///
+    /// ★ 为什么这件事是安全的:身份从来不是"地址",而是**配对时钉住的那套证书**。
+    ///   我们只接受证书名里 hub_id 与本机档案**完全一致**的那一台;换了地址仍然是同一个中枢,
+    ///   而冒名者拿不到那个 hub_id 对应的 CA 签名 —— 就算它把 hub_id 抄过去,
+    ///   之后的 mTLS 也会在校验链的那一步失败。所以这一步不放松任何一条信任。
+    /// ★ 找到多台同 hub_id(不该发生)时【不猜】:返回 false,由界面让人自己选。
+    /// </summary>
+    public async Task<bool> RediscoverAsync(CancellationToken ct = default)
+    {
+        if (Profile is null || string.IsNullOrWhiteSpace(Profile.HubId)) return false;
+        var hits = await HubDiscovery.ScanAsync(ct: ct);
+        var mine = hits.Where(h => string.Equals(h.HubId, Profile.HubId, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (mine.Count != 1) { LastError = mine.Count == 0 ? "局域网里没找到这个中枢" : "找到多台同 id 的中枢,请手动选"; return false; }
+        return SetDial(mine[0].Dial);
+    }
+
     public void UnpairLocal()
     {
         var keyName = Profile?.KeyName;
