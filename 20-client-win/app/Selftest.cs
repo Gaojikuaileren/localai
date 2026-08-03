@@ -4774,9 +4774,21 @@ public static class Selftest
                     Assert(haSrc.Contains("!string.Equals(HubId, expectHubId"),
                            "★★ 连得上还不够:自报的 hubId 必须与本机档案一致 —— 同机可能跑着另一个中枢");
                 }
+                // ★ 主机上不该再手填中枢地址(用户问:「或许不需要填?」)
+                Assert(Services.HubAdmin.EdgePort == 8443, "业务口端口与 lan-edge 的 run-lan 一致");
+                var haSrc2 = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
+                if (haSrc2 is not null)
+                {
+                    Assert(haSrc2.Contains("DiscoverEdgeDialAsync") && haSrc2.Contains("return null;"),
+                           "★★ 探不到就返回 null —— 界面据此如实说「没探到」,绝不猜一个地址填进去");
+                    Assert(haSrc2.Contains("169.254."),
+                           "★ 跳过 APIPA 自封地址 —— 没拿到 DHCP 的网卡上探不出业务口");
+                }
                 var dvSrc = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
                 if (dvSrc is not null)
                 {
+                    Assert(Body(dvSrc).Contains("不能】填 127.0.0.1"),
+                           "★ 主机上要说清为什么不能填回环 —— 业务口只绑网卡 IP,回环上只有管理面");
                     Assert(dvSrc.Contains("ProbeAsync(TheApp.Hub.Profile?.HubId)"),
                            "★ 界面拿【肯定证据】判断这台是不是主机,不拿 ThisMachineIsHub 那个启发式当权限判定");
                     Assert(dvSrc.Contains("逐字一致") && dvSrc.Contains("这时候必须点取消"),

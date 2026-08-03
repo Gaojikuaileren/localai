@@ -151,4 +151,58 @@ public sealed class HubAdmin
 
     public Task<(int status, string body)> RevokeAsync(string deviceId)
         => Call(HttpMethod.Post, "/admin/devices/revoke", new { deviceId });
+
+    // ---------------------------------------------------------------- 本机的中枢在哪个地址上听
+    /// <summary>业务口(LAN Edge)的端口。★ 与 lan-edge `run-lan` 里的 `8443` 一致。</summary>
+    public const int EdgePort = 8443;
+
+    /// <summary>
+    /// 本机就是主机时,**自己探出**中枢的拨号地址,不必让人手填。
+    ///
+    /// ★ 为什么不能填 `127.0.0.1:8443`:`run-lan &lt;ip&gt;` 把业务口**只绑在那张网卡的 IP 上**
+    ///   (`k.Listen(cfg.Bind, 8443, …)`),回环上只有管理面(8442)。
+    ///   往 127.0.0.1:8443 拨是连不上的 —— 这正是「主机上也要填一个看起来很奇怪的局域网 IP」的由来。
+    /// ★ 所以:枚举本机的 IPv4,挨个试 8443 能不能连上,谁应答就是它。
+    ///   拿的是**肯定证据**(TCP 连得上),不是"哪个 IP 看着像"。
+    /// ★ 探不到就返回 null —— 让界面如实说"没探到,请照 Edge 窗口里那行填",绝不猜一个填进去。
+    /// </summary>
+    public static async Task<string?> DiscoverEdgeDialAsync(int timeoutMs = 400)
+    {
+        foreach (var ip in LocalIPv4())
+        {
+            try
+            {
+                using var sock = new System.Net.Sockets.TcpClient();
+                var connect = sock.ConnectAsync(ip, EdgePort);
+                if (await Task.WhenAny(connect, Task.Delay(timeoutMs)) == connect && sock.Connected)
+                    return $"{ip}:{EdgePort}";
+            }
+            catch { /* 这张网卡不通就换下一张 —— 探测失败不是错误 */ }
+        }
+        return null;
+    }
+
+    /// <summary>本机的 IPv4(跳过回环与未启用的网卡)。</summary>
+    static IEnumerable<string> LocalIPv4()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        System.Net.NetworkInformation.NetworkInterface[] nics;
+        try { nics = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces(); }
+        catch { yield break; }
+        foreach (var n in nics)
+        {
+            if (n.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+            if (n.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+            System.Net.NetworkInformation.UnicastIPAddressInformationCollection addrs;
+            try { addrs = n.GetIPProperties().UnicastAddresses; }
+            catch { continue; }
+            foreach (var a in addrs)
+            {
+                if (a.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                var s = a.Address.ToString();
+                if (s.StartsWith("169.254.", StringComparison.Ordinal)) continue;   // APIPA:没拿到 DHCP 的自封地址
+                if (seen.Add(s)) yield return s;
+            }
+        }
+    }
 }

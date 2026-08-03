@@ -87,6 +87,11 @@ public sealed class DevicesView : UserControl
         name.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
 
         var status = Ui.Body("");
+        // ★ 本机就是主机时【不该让人手填地址】(用户问:"或许不需要填?" —— 对,主机这边确实不该填)。
+        //   先 ping 回环管理面确认身份,再探出 Edge 到底在哪张网卡上听,自动填好。
+        //   探不到就留空并如实说"照 Edge 窗口里那行填",绝不猜一个填进去。
+        var autoNote = Ui.Caption("正在看这台是不是主机…");
+        _ = AutofillHubAddress(addr, autoNote);
         var go = Ui.Primary(Strings.Get("pairing.start"), async (_, _) =>
         {
             var dial = addr.Text.Trim();
@@ -101,13 +106,42 @@ public sealed class DevicesView : UserControl
             Ui.Subtitle(Strings.Get("pairing.title")),
             Ui.Body("本机还没有和中枢配对。填写中枢地址后点一次「开始配对」即可,配对成功后会【永久记住】,以后开机自动连接。", muted: true),
             new Border { Height = 10 },
-            Ui.Body(Strings.Get("pairing.hub_address")), addr,
+            Ui.Body(Strings.Get("pairing.hub_address")), addr, autoNote,
             Ui.Body(Strings.Get("pairing.device_name")), name,
             go,
             new Border { Height = 8 },
             status,
             Ui.Caption("提示:中枢地址形如 192.168.178.61:8443 —— 主机启动 Edge 时会把它打印在窗口里。")
         ));
+    }
+
+    /// <summary>
+    /// 主机上的客户端:自动填中枢地址。
+    /// ★ 判据是两条【肯定证据】叠加:① 回环管理面应答且 hubId 与本机一致(或本机还没配对过);
+    ///   ② 本机某张网卡的 8443 真的连得上。两条都成立才填 —— 任何一条不成立就留空并说实话。
+    /// </summary>
+    async Task AutofillHubAddress(TextBox addr, TextBlock note)
+    {
+        var admin = TheApp.HubAdmin;
+        var isHost = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId);
+        if (!isHost)
+        {
+            Dispatcher.Invoke(() => note.Text = "这台不是主机 —— 请照主机 Edge 窗口里那行「拨号 …:8443」填。");
+            return;
+        }
+        var dial = await Services.HubAdmin.DiscoverEdgeDialAsync();
+        Dispatcher.Invoke(() =>
+        {
+            if (dial is null)
+            {
+                // 管理面在、业务口却探不到:多半 Edge 只起了管理面,或防火墙拦着。如实说,不猜。
+                note.Text = "本机就是主机,但没探到中枢的业务口(8443)—— 先确认 Edge 起着、防火墙放行了,或照它窗口里那行填。";
+                return;
+            }
+            if (addr.Text.Trim().Length == 0) addr.Text = dial;
+            note.Text = $"本机就是主机(hub {admin.HubId})—— 地址已自动填好。"
+                      + "★ 这里【不能】填 127.0.0.1:业务口只绑在网卡 IP 上,回环上只有管理面。";
+        });
     }
 
     async Task StartPairing(string dial, string displayName, TextBlock status)
