@@ -195,6 +195,18 @@ public sealed class ReplyState
         },
     };
 
+    /// <summary>
+    /// 署名日期的【唯一书写格式】—— 与 Compose 里"空就用当天"那一支的格式一模一样,
+    /// 于是"选了今天"与"留空"排出来的字面完全相同,不会因为两处各写各的而对不上。
+    /// </summary>
+    public const string SignDateFormat = "yyyy年M月d日";
+
+    /// <summary>把存着的署名日期解析回来。解析不出(老存档里可能是随手敲的字)就当没有。</summary>
+    public static DateTime? ParseSignDate(string? s)
+        => DateTime.TryParseExact((s ?? "").Trim(), SignDateFormat,
+                                  System.Globalization.CultureInfo.InvariantCulture,
+                                  System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+
     /// <summary>问候清单 = (不加) + 内置(按语言×语气) + 用户自定义。</summary>
     public string[] Greetings(string lang, ReplyTone t)
         => new[] { NoGreeting }.Concat(BuiltinGreetings(lang, t)).Concat(Profile.CustomGreetings).ToArray();

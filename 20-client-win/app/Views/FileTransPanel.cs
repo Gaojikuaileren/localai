@@ -1,5 +1,6 @@
 // P3c -- 文件翻译场景的会话区(用户裁定 2026-08-02,D59):
-//   左 = 原文件预览(导入按钮 / 直接拖入;PNG/JPG 真渲染,PDF 如实说"预览待接入"),
+//   左 = 原文件预览(导入按钮 / 直接拖入;PNG/JPG/PDF 都真渲染 —— PDF 走系统自带的
+//       Windows.Data.Pdf,逐页渲染 + 角标翻页,见 Services/PdfRender.cs),
 //       标注框画在预览上(工具栏开了"创建标注框"才能画;坐标归一化,缩放不跑偏);
 //   右 = 翻译结果实时预览 + 保存 —— 引擎未接入(P4),右侧如实说明,【不伪造译文】。
 
@@ -53,7 +54,8 @@ public sealed class FileTransPanel : UserControl
         empty.Children.Add(import);
         stage.Children.Add(empty);
         _emptyHost = empty;
-        // ★ 页码角标(用户裁定):左上角显示当前页;多页 PDF 的翻页随渲染(P4)接入,按下如实说
+        // ★ 页码角标(用户裁定):左上角显示当前页。多页 PDF 点它翻下一页(到末页回到第 1 页)——
+        //   翻页控件另开一排会跟工具栏抢地方,而角标本来就在说"你在第几页",点它翻最顺手。
         _pageTag.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         _pageTag.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var pageHost = new Border { Child = _pageTag, Padding = new Thickness(6, 2, 6, 2),
@@ -64,9 +66,9 @@ public sealed class FileTransPanel : UserControl
         pageHost.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            if (_isPdf) ConfirmDialog.Show("还翻不了页",
-                "PDF 的渲染与翻页要等系统渲染组件随引擎(P4)一起接入 —— 页数现在也读不出来,不编一个数。",
-                confirmText: "知道了", cancelText: "关闭");
+            if (!_isPdf || _pdf is null || _pdf.PageCount <= 1) return;
+            _page = (_page + 1) % _pdf.PageCount;
+            ShowPdfPage();
         };
         _pageHost = pageHost;
 
@@ -167,6 +169,12 @@ public sealed class FileTransPanel : UserControl
     readonly TextBlock _pageTag = new() { Text = "" };
     Border _pageHost = null!;
     bool _isPdf;
+    // ★ 打开着的 PDF 与当前页 —— 渲染是异步的,回来时要确认"还是这一份、还是这一页"才贴图,
+    //   否则连着导入两份 PDF 会出现后一份先画、前一份后到,把新图盖回旧图。
+    PdfPreview? _pdf;
+    string? _pdfPath;
+    int _page;
+    int _renderSeq;
     bool _usingCache;   // 源没了、在用导入时的副本(角标里如实标注)
 
     void PickFile()
@@ -226,10 +234,15 @@ public sealed class FileTransPanel : UserControl
         _pageTag.Text = (_isPdf ? "第 1 页 / ?" : "第 1 页 / 1") + (_usingCache ? " · 源文件已不在,用导入时的副本" : "");
         if (_isPdf)
         {
-            // ★ 如实:PDF 的渲染要 WinRT(随引擎一起接),现在不画一个假封面
-            _img.Source = null;
-            _emptyHost.Visibility = Visibility.Visible;
-            _hint.Text = $"已导入 PDF:{Path.GetFileName(doc.Path)}\n★ PDF 预览尚未接入(需要系统渲染组件,随翻译引擎 P4 一起接)。\n标注框要在预览上画,所以 PDF 暂时只能整页翻译。\n\n第 1 页 / —(页码导航随 PDF 渲染一起接入)";
+            if (!string.Equals(_pdfPath, readable, StringComparison.OrdinalIgnoreCase))
+            {
+                _pdf = null; _pdfPath = readable; _page = 0;
+                _img.Source = null;
+                _emptyHost.Visibility = Visibility.Visible;
+                _hint.Text = $"正在渲染 {Path.GetFileName(doc.Path)} …";
+                OpenPdf(readable);
+            }
+            else ShowPdfPage();
         }
         else
         {
@@ -397,6 +410,51 @@ public sealed class FileTransPanel : UserControl
         if (r.IsEmpty || r.Width < 6 || r.Height < 6) return;   // 误点不算框
         TheApp.FileTrans.AddBox(sid, new Services.MarkBox(
             (r.X - img.X) / img.Width, (r.Y - img.Y) / img.Height, r.Width / img.Width, r.Height / img.Height));
+    }
+
+    /// <summary>
+    /// 打开 PDF(异步)。打不开就如实说 —— 加密/损坏的 PDF 系统组件也读不了,
+    /// 这时候画一张空白页假装成功,比说不出来更糟。
+    /// </summary>
+    async void OpenPdf(string path)
+    {
+        var seq = ++_renderSeq;
+        var pdf = await PdfPreview.OpenAsync(path);
+        if (seq != _renderSeq) return;             // 中途又导入了别的,这一次的结果作废
+        if (pdf is null)
+        {
+            _img.Source = null;
+            _emptyHost.Visibility = Visibility.Visible;
+            _hint.Text = $"这份 PDF 打不开:{Path.GetFileName(path)}\n可能是加密的或者已损坏 —— 系统的 PDF 组件读不了它。";
+            _pageHost.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _pdf = pdf;
+        _page = 0;
+        ShowPdfPage();
+    }
+
+    /// <summary>把当前页画出来。渲染宽度按预览区实宽的 2 倍取,缩放到 5x 时也不糊。</summary>
+    async void ShowPdfPage()
+    {
+        if (_pdf is null) return;
+        var seq = ++_renderSeq;
+        var want = (uint)Math.Clamp((int)(ActualWidth > 0 ? ActualWidth : 900) * 2, 600, 3200);
+        var bmp = await _pdf.RenderAsync(_page, want);
+        if (seq != _renderSeq || _pdf is null) return;
+        if (bmp is null)
+        {
+            _emptyHost.Visibility = Visibility.Visible;
+            _hint.Text = "这一页渲染不出来 —— 文件可能损坏。";
+            return;
+        }
+        _img.Source = bmp;
+        _emptyHost.Visibility = Visibility.Collapsed;
+        _pageHost.Visibility = Visibility.Visible;
+        _pageTag.Text = $"第 {_page + 1} 页 / {_pdf.PageCount}"
+                      + (_pdf.PageCount > 1 ? " · 点这里翻页" : "")
+                      + (_usingCache ? " · 源文件已不在,用导入时的副本" : "");
+        RedrawBoxes();
     }
 
     void RedrawBoxes()

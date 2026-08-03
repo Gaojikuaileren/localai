@@ -2513,10 +2513,16 @@ public static class Selftest
                     //   轻则两父节点异常,重则 TSF 持锁期 FailFast(catch 不住,crash.log 里都留不下)。
                     Assert(!rpSrc.Contains("_resultBtns.Children.Clear()"),
                            "★★ 生成键那一排只建一次,刷新只改 Visibility/IsEnabled");
-                    var rpCtor = Slice(rpSrc, "void BuildActionsOnce()", "void RefreshActions(");
-                    Assert(rpCtor is not null && rpCtor.Contains("_dateWrap.Children.Add(_signDate)")
+                    var rpCtor = Slice(rpSrc, "void BuildActionsOnce()", "void PickSignDate()");
+                    Assert(rpCtor is not null && rpCtor.Contains("_dateWrap.Children.Add(_dateField)")
                            && Slice(rpSrc, "void RefreshActions(", "void BuildLog(")?.Contains("Children.Add(") != true,
-                           "★ _signDate 只在装配那一次进树;刷新那段一个 Children.Add 都不许有");
+                           "★ 署名日期那一格只在装配那一次进树;刷新那段一个 Children.Add 都不许有");
+                    // ★ 署名日期不再是自由输入(用户裁定 2026-08-03):点开是日期选择浮窗,
+                    //   滚轮复用日程/待办那一套 WheelPicker.Date —— 不另造一种日期控件。
+                    Assert(!rpSrc.Contains("TextBox _signDate") && rpSrc.Contains("WheelPicker.Date(picked"),
+                           "★ 署名日期改成日期选择浮窗(复用既有滚轮),不再让人敲字");
+                    Assert(rpSrc.Contains("Save(d => d.SignDate = \"\");") && rpSrc.Contains("ReplyState.SignDateFormat"),
+                           "★ 浮窗两个出口:【留空 = 生成那天】与【选定则钉死】—— 两者不是一回事");
                     Assert(rpSrc.Contains("DockPanel.SetDock(actions, Dock.Bottom)"),
                            "★ 生成/署名日期/图标那排在板块底部,不挤标题行");
                     Assert(rpSrc.Contains("Rebuild();   // ★ 先画一遍"),
@@ -2561,6 +2567,44 @@ public static class Selftest
 
                 var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
                 Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");
+            }
+
+            // ---- 文件翻译:PDF 预览(用户裁定 2026-08-03:"PDF 预览功能也做出来,目前是空的")----
+            // ★★ 这条是【行为】断言:真的写一份 PDF、真的让系统组件渲染、真的检查像素回来了。
+            //   源码断言在这件事上没有意义 —— "代码里有 PdfPreview" 不等于"渲染得出来"。
+            {
+                var pdfPath = Path.Combine(Path.GetTempPath(), "localai-selftest-min.pdf");
+                var ok = false;
+                try { File.WriteAllBytes(pdfPath, MinimalPdf("Hello PDF preview")); ok = true; }
+                catch { }
+                if (ok)
+                {
+                    // ★ 丢到线程池上跑:WinRT 的异步在 STA 上直接 .Result 有把自己等死的风险
+                    var r = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        var doc = await Services.PdfPreview.OpenAsync(pdfPath);
+                        if (doc is null) return (Pages: -1, W: 0, H: 0);
+                        var bmp = await doc.RenderAsync(0, 400);
+                        return (Pages: doc.PageCount, W: bmp?.PixelWidth ?? 0, H: bmp?.PixelHeight ?? 0);
+                    }).GetAwaiter().GetResult();
+                    Assert(r.Pages == 1, $"★★ PDF 打得开且页数认得出(实得 {r.Pages})—— 打不开就该如实说,不画空白页假装成功");
+                    Assert(r.W == 400 && r.H > 400, $"★★ PDF 真的渲染出像素:按给定宽度出图、高度按页面比例(实得 {r.W}x{r.H})");
+                    // 坏文件必须【打不开】,不能返回一个空文档冒充成功
+                    var badPath = Path.Combine(Path.GetTempPath(), "localai-selftest-bad.pdf");
+                    try { File.WriteAllText(badPath, "not a pdf at all"); } catch { }
+                    var bad = System.Threading.Tasks.Task.Run(async () => await Services.PdfPreview.OpenAsync(badPath)).GetAwaiter().GetResult();
+                    Assert(bad is null, "★ 坏文件返回 null(界面据此如实说'打不开'),不返回一个空壳文档");
+                    // 源码文本断言只在能读到源码时跑(发布后的单文件 exe 里没有源码 ——
+                    //   不包这一层的话,发布产物跑自检会无缘无故地红两条)
+                    var ftp = TryReadSource(Path.Combine("Views", "FileTransPanel.cs"));
+                    if (ftp is not null)
+                    {
+                        Assert(!ftp.Contains("PDF 预览尚未接入") && ftp.Contains("_pdf.PageCount"),
+                               "★ 面板里那句『PDF 预览尚未接入』要跟着删掉 —— 接上了还留着就是界面在说假话");
+                        Assert(ftp.Contains("if (seq != _renderSeq) return;"),
+                               "★ 异步渲染要认序号:连着导入两份 PDF 时,晚回来的那张不许盖掉新的");
+                    }
+                }
             }
 
             // ---- 气温曲线:颜色按温度分段 + 与逐小时那排同一根时间轴(2026-08-02 用户裁定)----
@@ -4937,6 +4981,39 @@ public static class Selftest
     /// 那样标记一旦被重构掉就是 ArgumentOutOfRangeException:自检【进程崩掉】而不是报 FAIL,
     /// 反而更难查。调用方拿到 null 就跳过该条(与"发布版无源码"同样的处理)。
     /// </summary>
+
+    /// <summary>
+    /// 手写一份【最小可用 PDF】(一页 A4 + 一行字)。用来验 PDF 预览这条路真的通 ——
+    /// ★ 不能拿"代码里有 PdfPreview"当验证:那只证明写了代码,不证明系统组件真的能渲染出像素。
+    ///   偏移量必须自己算准,算错的话系统组件会直接拒收 —— 这本身也是这段代码的自检。
+    /// </summary>
+    internal static byte[] MinimalPdf(string text)
+    {
+        var content = $"BT /F1 36 Tf 60 700 Td ({text}) Tj ET";
+        var objs = new[]
+        {
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+            $"<</Length {content.Length}>>stream\n{content}\nendstream",
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        };
+        var sb = new System.Text.StringBuilder();
+        sb.Append("%PDF-1.4\n");
+        var offsets = new int[objs.Length + 1];
+        for (int i = 0; i < objs.Length; i++)
+        {
+            offsets[i + 1] = sb.Length;
+            sb.Append(i + 1).Append(" 0 obj").Append(objs[i]).Append("endobj\n");
+        }
+        var xref = sb.Length;
+        sb.Append("xref\n0 ").Append(objs.Length + 1).Append('\n');
+        sb.Append("0000000000 65535 f \n");
+        for (int i = 1; i <= objs.Length; i++) sb.Append(offsets[i].ToString("0000000000")).Append(" 00000 n \n");
+        sb.Append("trailer<</Size ").Append(objs.Length + 1).Append("/Root 1 0 R>>\nstartxref\n").Append(xref).Append("\n%%EOF");
+        return System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+    }
+
     static string? Slice(string? src, string from, string? to = null)
     {
         if (src is null) return null;

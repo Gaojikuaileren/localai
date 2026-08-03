@@ -310,6 +310,31 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 回信页渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★★ PDF 预览 —— 接完必须看图:断言只能证明"有像素回来了",
+        //   证明不了画出来的是不是那一页(旋转、黑底、反色都能“成功”)。
+        try
+        {
+            var pdfPath = Path.Combine(Path.GetTempPath(), "localai-wheeltest.pdf");
+            File.WriteAllBytes(pdfPath, Selftest.MinimalPdf("Hello PDF preview"));
+            var bmp = System.Threading.Tasks.Task.Run(async () =>
+            {
+                var doc = await Services.PdfPreview.OpenAsync(pdfPath);
+                return doc is null ? null : await doc.RenderAsync(0, 420);
+            }).GetAwaiter().GetResult();
+            if (bmp is not null)
+            {
+                var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));
+                using var fs = File.Create(Path.Combine(outDir, "pdf-page.png"));
+                enc.Save(fs);
+            }
+            else Console.WriteLine("wheeltest: PDF 渲染拿到空图");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: PDF 渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // ★ 主页整页(天气改竖排折叠 + 日历往下延伸)—— 版面改动必须看图
         try
         {

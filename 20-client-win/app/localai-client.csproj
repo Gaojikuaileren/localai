@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- ★ 靠 Windows 自带的 PDF 渲染组件(Windows.Data.Pdf)画文件翻译的 PDF 预览 ——
+         它是系统的一部分,不引第三方二进制、不联网,符合本项目【全本地】的底线。
+         代价:目标框架得写成带 Windows SDK 版本的形式(它只多一层投影,不改变 WPF 本身)。 -->
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>

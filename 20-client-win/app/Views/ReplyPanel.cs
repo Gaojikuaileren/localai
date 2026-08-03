@@ -30,9 +30,15 @@ public sealed class ReplyPanel : UserControl
     readonly TextBox _draft = Area();
     readonly TextBox _incoming = Area();
     readonly TextBox _result = Area(readOnly: true);
-    // 宽度不定:它在动作排里吃剩余宽(见 BuildActionsOnce)—— 定宽会在窄窗口下把按钮挤出去
-    readonly TextBox _signDate = new() { Padding = new Thickness(5, 3, 5, 3), MinWidth = 84,
-                                         VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+    // ★ 署名日期【不让人敲字】(用户裁定 2026-08-03):点开是日期选择浮窗。
+    //   理由:它最后要排进信里,自由输入必然出现"2026/8/3""八月三日""明天"这类各写各的;
+    //   而且这一栏原来就是那次 FailFast 事故的现场(带焦点的 TextBox 被重挂)——
+    //   换成一枚按钮之后,这一格连焦点都不需要了。
+    //   滚轮复用日程/待办那一套 WheelPicker.Date,不另造一种日期控件。
+    readonly TextBlock _dateText = new() { VerticalAlignment = VerticalAlignment.Center };
+    readonly Border _dateField = new() { Padding = new Thickness(8, 4, 8, 4), MinWidth = 84,
+                                         VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0),
+                                         BorderThickness = new Thickness(1), Cursor = System.Windows.Input.Cursors.Hand };
     readonly StackPanel _log = new();
     // ★★ 动作排【只建一次】(2026-08-03 事故):此前每次 Rebuild 都新建容器再把字段级 _signDate
     //   塞进去 —— 旧父子关系没解开,直接 InvalidOperationException;更要命的是
@@ -42,8 +48,7 @@ public sealed class ReplyPanel : UserControl
     readonly DockPanel _resultBtns = new() { LastChildFill = true };
     readonly StackPanel _tail = new() { Orientation = Orientation.Horizontal };
     readonly Grid _dateWrap = new() { Margin = new Thickness(0, 0, 6, 0) };
-    readonly TextBlock _dateHint = new() { Text = "署名日期 · 空=当天", IsHitTestVisible = false,
-                                           VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 0, 0) };
+
     Button _gen = null!;
     FrameworkElement _sendBtn = null!, _pdfBtn = null!, _copyBtn = null!;
     bool _editing;
@@ -76,11 +81,11 @@ public sealed class ReplyPanel : UserControl
         //   _result 是只读产出框,不进圈(与"只读正文不占 Tab 序"的既定纪律一致,鼠标照样能拖选复制)。
         FocusPolicy.SetTabOrder(_draft, 10);
         FocusPolicy.SetTabOrder(_incoming, 11);
-        FocusPolicy.SetTabOrder(_signDate, 12);
+        // 署名日期现在是一枚按钮(点开浮窗选),不是输入框 —— 不进 Tab 圈。
 
         _draft.TextChanged += (_, _) => Save(d => d.Draft = _draft.Text);
         _incoming.TextChanged += (_, _) => Save(d => d.Incoming = _incoming.Text);
-        _signDate.TextChanged += (_, _) => Save(d => d.SignDate = _signDate.Text);
+
         Rebuild();   // ★ 先画一遍:离屏渲染诊断不会触发 Loaded,不先画按钮排在图里是空的
         // -= 再 +=:Loaded 在重新挂树时会再来一次,而 Unloaded 不保证成对 —— 不防就会重复订阅
         Loaded += (_, _) => { TheApp.Reply.Changed -= Rebuild; TheApp.Reply.Changed += Rebuild; Rebuild(); };
@@ -145,13 +150,14 @@ public sealed class ReplyPanel : UserControl
         {
             if (_draft.Text != d.Draft) _draft.Text = d.Draft;
             if (_incoming.Text != d.Incoming) _incoming.Text = d.Incoming;
-            if (_signDate.Text != d.SignDate) _signDate.Text = d.SignDate;
+
         }
         if (_result.Text != d.Result) _result.Text = d.Result;
 
         // ★ 生成中:输入一律禁用(用户裁定)—— 半路改输入会让产出与记录对不上号
         var busy = st.Busy;
-        _draft.IsEnabled = _incoming.IsEnabled = _signDate.IsEnabled = !busy;
+        _draft.IsEnabled = _incoming.IsEnabled = !busy;
+        _dateField.IsEnabled = !busy;
 
         BuildLog(st, d);
         RefreshActions(d, busy);
@@ -215,10 +221,19 @@ public sealed class ReplyPanel : UserControl
     /// </summary>
     void BuildActionsOnce()
     {
-        _dateHint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        _dateHint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        _dateWrap.Children.Add(_signDate);
-        _dateWrap.Children.Add(_dateHint);
+        _dateText.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var dateRow = new StackPanel { Orientation = Orientation.Horizontal };
+        var dateIcon = Theme.Icons.Make(Theme.IconName.Calendar, 13, "FgMuted");
+        dateIcon.Margin = new Thickness(0, 0, 6, 0);
+        dateIcon.VerticalAlignment = VerticalAlignment.Center;
+        dateRow.Children.Add(dateIcon);
+        dateRow.Children.Add(_dateText);
+        _dateField.Child = dateRow;
+        _dateField.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        _dateField.SetResourceReference(Border.BorderBrushProperty, "Border");
+        _dateField.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        _dateField.MouseLeftButtonUp += (_, e) => { e.Handled = true; if (!TheApp.Reply.Busy) PickSignDate(); };
+        _dateWrap.Children.Add(_dateField);
 
         _gen = Ui.Primary("生成", (_, _) =>
         {
@@ -253,7 +268,41 @@ public sealed class ReplyPanel : UserControl
         DockPanel.SetDock(_tail, Dock.Right);
         _resultBtns.Children.Add(_tail);
         _resultBtns.Children.Add(_dateWrap);   // LastChildFill:留到最后 add 才吃得到剩余宽
-        _signDate.TextChanged += (_, _) => SyncDateHint();
+    }
+
+    /// <summary>
+    /// 署名日期浮窗:滚轮选年月日 + 两个出口。
+    /// ★「用当天」不是"选今天",而是把这一栏【清空】—— 空的含义是"生成那天",
+    ///   隔几天再生成会跟着变;选定的日期则钉死。两者不是一回事,所以给两个出口。
+    /// </summary>
+    void PickSignDate()
+    {
+        var st = TheApp.Reply;
+        var picked = ReplyState.ParseSignDate(st.Doc.SignDate) ?? DateTime.Today;
+        var body = new StackPanel();
+        body.Children.Add(WheelPicker.Date(picked, d => picked = d));
+        var note = Ui.Caption("留空 = 生成那天(隔天再生成会跟着变);选定则钉死。");
+        note.TextWrapping = TextWrapping.Wrap;
+        note.Margin = new Thickness(0, 4, 0, 8);
+        body.Children.Add(note);
+
+        var row = new DockPanel { LastChildFill = false };
+        var useToday = Ui.Secondary("用当天(留空)", (_, _) =>
+        {
+            Save(d => d.SignDate = "");
+            Overlay.CloseActive();
+        });
+        DockPanel.SetDock(useToday, Dock.Left);
+        row.Children.Add(useToday);
+        var ok = Ui.Primary("就用这天", (_, _) =>
+        {
+            Save(d => d.SignDate = picked.ToString(ReplyState.SignDateFormat));
+            Overlay.CloseActive();
+        });
+        DockPanel.SetDock(ok, Dock.Right);
+        row.Children.Add(ok);
+        body.Children.Add(row);
+        Flyout.Show(_dateField, "署名日期", body, width: 300);
     }
 
     /// <summary>刷新动作排 —— 只改属性,一个控件都不重挂。</summary>
@@ -266,9 +315,10 @@ public sealed class ReplyPanel : UserControl
         _copyBtn.ToolTip = paper ? "复制格式文本" : "复制";
         _gen.Content = busy ? "生成中…" : "生成";
         _gen.IsEnabled = !busy;
-        SyncDateHint();
+        var set = d.SignDate.Trim().Length > 0;
+        _dateText.Text = set ? d.SignDate.Trim() : "署名日期 · 空=当天";
+        _dateText.SetResourceReference(TextBlock.ForegroundProperty, set ? "FgPrimary" : "FgMuted");
     }
 
-    void SyncDateHint()
-        => _dateHint.Visibility = _signDate.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+
 }
