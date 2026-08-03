@@ -23,6 +23,7 @@ if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
+$manifestDirectory = Split-Path -Parent (Resolve-Path -LiteralPath $ManifestPath)
 $clipEntries = @($manifest.clips.PSObject.Properties)
 $clipNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
@@ -94,7 +95,11 @@ foreach ($entry in $clipEntries) {
     }
 
     $frames = @($clip.frames)
-    if ($manifest.stage -eq 'production') {
+    $clipStage = [string]$manifest.stage
+    if ($null -ne $clip.PSObject.Properties['asset_stage']) {
+        $clipStage = [string]$clip.asset_stage
+    }
+    if ($clipStage -eq 'production') {
         $distinctSprites = @($frames | ForEach-Object { $_.sprite } | Sort-Object -Unique)
         $holdTotal = Get-Sum @($frames | ForEach-Object { [int]$_.hold })
 
@@ -108,6 +113,69 @@ foreach ($entry in $clipEntries) {
             foreach ($frame in $frames) {
                 if ([int]$frame.hold -ne 1) {
                     Add-ValidationError "$name locomotion frame $($frame.sprite) must use hold=1."
+                }
+            }
+        }
+
+        if ($null -ne $clip.PSObject.Properties['source_sheet']) {
+            $sourceSheetId = [string]$clip.source_sheet
+            $sourceSheetProperty = $manifest.source_sheets.PSObject.Properties[$sourceSheetId]
+            if ($null -eq $sourceSheetProperty) {
+                Add-ValidationError "$name references missing source sheet $sourceSheetId."
+            }
+            else {
+                $sourceSheet = $sourceSheetProperty.Value
+                $sourcePath = Join-Path $manifestDirectory ([string]$sourceSheet.file)
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                    Add-ValidationError "$name source sheet is missing: $sourcePath"
+                }
+                if ((@($sourceSheet.cell) -join ',') -ne '128,128' -or (@($sourceSheet.sheet_size) -join ',') -ne '512,128') {
+                    Add-ValidationError "$name source sheet must be four 128x128 cells in one 512x128 row."
+                }
+                if ([int]$sourceSheet.ground_y -ne 112 -or (@($sourceSheet.pivot) -join ',') -ne '64,112') {
+                    Add-ValidationError "$name source sheet must share ground_y=112 and pivot=64,112."
+                }
+            }
+        }
+
+        if ($name -eq 'door_enter' -or $name -eq 'door_exit') {
+            if ($frames.Count -ne 4 -or @($frames | Where-Object { [int]$_.hold -ne 1 }).Count -ne 0) {
+                Add-ValidationError "$name must contain four one-tick frames."
+            }
+            $expectedEvent = if ($name -eq 'door_enter') { 'portal_enter' } else { 'portal_exit' }
+            $eventCount = @($frames | Where-Object { $expectedEvent -in @($_.events) }).Count
+            if ($eventCount -ne 1) {
+                Add-ValidationError "$name must emit $expectedEvent exactly once."
+            }
+            for ($frameIndex = 0; $frameIndex -lt $frames.Count; $frameIndex++) {
+                $frame = $frames[$frameIndex]
+                if ([int]$frame.source_index -ne $frameIndex) {
+                    Add-ValidationError "$name frame $frameIndex must use matching source_index."
+                }
+                if ([int]$frame.root_delta[0] -ge 0 -or [int]$frame.root_delta[1] -ne 0) {
+                    Add-ValidationError "$name frame $frameIndex must move negative x and zero y in the authored-left master."
+                }
+                if ([int]$frame.door_anchor_offset[1] -ne 0) {
+                    Add-ValidationError "$name frame $frameIndex must keep a zero-y door anchor offset."
+                }
+                if ($frameIndex -lt ($frames.Count - 1)) {
+                    $nextFrame = $frames[$frameIndex + 1]
+                    $resolvedNextX = [int]$frame.door_anchor_offset[0] + [int]$frame.root_delta[0]
+                    if ($resolvedNextX -ne [int]$nextFrame.door_anchor_offset[0]) {
+                        Add-ValidationError "$name frame $frameIndex root_delta does not reach the next door anchor offset."
+                    }
+                }
+            }
+            if (-not [bool]$frames[-1].can_exit -or @($frames[0..($frames.Count - 2)] | Where-Object { [bool]$_.can_exit }).Count -ne 0) {
+                Add-ValidationError "$name must allow exit only on its final frame."
+            }
+            $visibleFractions = @($frames | ForEach-Object { [double]$_.visible_fraction })
+            for ($frameIndex = 0; $frameIndex -lt ($visibleFractions.Count - 1); $frameIndex++) {
+                if ($name -eq 'door_enter' -and $visibleFractions[$frameIndex] -le $visibleFractions[$frameIndex + 1]) {
+                    Add-ValidationError 'door_enter visible_fraction must strictly decrease.'
+                }
+                if ($name -eq 'door_exit' -and $visibleFractions[$frameIndex] -ge $visibleFractions[$frameIndex + 1]) {
+                    Add-ValidationError 'door_exit visible_fraction must strictly increase.'
                 }
             }
         }
@@ -209,4 +277,3 @@ Write-Host " v1a body:      $bodyV1a"
 Write-Host " v1a loading:   $loadingV1a"
 Write-Host " full body:     $bodyFull"
 Write-Host " full loading:  $loadingFull"
-

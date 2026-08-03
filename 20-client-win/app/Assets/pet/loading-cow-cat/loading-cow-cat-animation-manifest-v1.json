@@ -29,6 +29,32 @@
       "full_body": false
     }
   },
+  "source_sheets": {
+    "door_enter_left_1x": {
+      "file": "source/body-clips/door_enter_left_1x.png",
+      "cell": [128, 128],
+      "layout": { "columns": 4, "rows": 1 },
+      "sheet_size": [512, 128],
+      "fps": 6,
+      "master_direction": "left",
+      "runtime_mirror": true,
+      "palette": ["#000000", "#FFFFFF", "#00000000"],
+      "ground_y": 112,
+      "pivot": [64, 112]
+    },
+    "door_exit_left_1x": {
+      "file": "source/body-clips/door_exit_left_1x.png",
+      "cell": [128, 128],
+      "layout": { "columns": 4, "rows": 1 },
+      "sheet_size": [512, 128],
+      "fps": 6,
+      "master_direction": "left",
+      "runtime_mirror": true,
+      "palette": ["#000000", "#FFFFFF", "#00000000"],
+      "ground_y": 112,
+      "pivot": [64, 112]
+    }
+  },
   "direction_policy": {
     "authoring_direction": "left",
     "right_direction": "runtime_mirror",
@@ -442,8 +468,79 @@
       "loop": false,
       "v1a": true,
       "must_finish": true,
+      "asset_stage": "production",
+      "source_sheet": "door_enter_left_1x",
       "direction": { "from": "left", "to": "left", "runtime_mirror": true },
-      "frames": []
+      "frames": [
+        {
+          "sprite": "door_enter_left_00",
+          "source_index": 0,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [32, 80],
+          "root_delta": [-60, 0],
+          "door_anchor_offset": [83, 0],
+          "render_profile": "outside",
+          "visible_fraction": 0.975295,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [18, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [86, 112] }
+          ],
+          "events": [],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_enter_left_01",
+          "source_index": 1,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [31, 83],
+          "root_delta": [-55, 0],
+          "door_anchor_offset": [23, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.751965,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [38, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [66, 112] }
+          ],
+          "events": ["portal_enter"],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_enter_left_02",
+          "source_index": 2,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [26, 80],
+          "root_delta": [-26, 0],
+          "door_anchor_offset": [-32, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.388329,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [10, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [62, 112] }
+          ],
+          "events": [],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_enter_left_03",
+          "source_index": 3,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [23, 80],
+          "root_delta": [-33, 0],
+          "door_anchor_offset": [-58, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.08419,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [9, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [94, 112] }
+          ],
+          "events": [],
+          "can_exit": true
+        }
+      ]
     },
     "door_exit": {
       "group": "door",
@@ -454,8 +551,79 @@
       "loop": false,
       "v1a": true,
       "must_finish": true,
+      "asset_stage": "production",
+      "source_sheet": "door_exit_left_1x",
       "direction": { "from": "left", "to": "left", "runtime_mirror": true },
-      "frames": []
+      "frames": [
+        {
+          "sprite": "door_exit_left_00",
+          "source_index": 0,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [30, 84],
+          "root_delta": [-23, 0],
+          "door_anchor_offset": [68, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.138391,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [16, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [72, 112] }
+          ],
+          "events": [],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_exit_left_01",
+          "source_index": 1,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [28, 84],
+          "root_delta": [-50, 0],
+          "door_anchor_offset": [45, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.433907,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [14, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [82, 112] }
+          ],
+          "events": [],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_exit_left_02",
+          "source_index": 2,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [25, 76],
+          "root_delta": [-55, 0],
+          "door_anchor_offset": [-5, 0],
+          "render_profile": "behind",
+          "visible_fraction": 0.625525,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [10, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [70, 112] }
+          ],
+          "events": [],
+          "can_exit": false
+        },
+        {
+          "sprite": "door_exit_left_03",
+          "source_index": 3,
+          "hold": 1,
+          "pivot": [64, 112],
+          "fx_anchor": [24, 75],
+          "root_delta": [-50, 0],
+          "door_anchor_offset": [-60, 0],
+          "render_profile": "outside",
+          "visible_fraction": 0.766067,
+          "contacts": [
+            { "part": "fore_near", "surface": "ground", "at": [16, 112] },
+            { "part": "hind_near", "surface": "ground", "at": [84, 112] }
+          ],
+          "events": ["portal_exit"],
+          "can_exit": true
+        }
+      ]
     },
     "grab_start": {
       "group": "drag",
@@ -519,6 +687,8 @@
   },
   "edges": [
     { "from": "suspended", "to": "stand", "clip": "wake_from_hidden", "must_finish": true, "priority": 30 },
+    { "from": "suspended", "to": "behind_door", "clip": null, "must_finish": false, "priority": 30,
+      "note": "挂起前猫在门外(桌面/另一台 PC)时,恢复必须回到 behind_door 而不是 stand。无条件走 wake_from_hidden 会让本机凭空生出第二只猫,破坏唯一实体(D40)。恢复路径须先向权威确认猫在谁手里。" },
     { "from": "stand", "to": "walk", "clip": "stand_to_walk", "must_finish": true, "priority": 30 },
     { "from": "walk", "to": "stand", "clip": "walk_to_stop", "must_finish": true, "priority": 30 },
     { "from": "walk", "to": "trot", "clip": null, "must_finish": false, "at_event": "shared_paw_down", "priority": 30 },
@@ -575,8 +745,8 @@
     "audited_full_body_frames": 168,
     "full_loading_frames": 12,
     "full_sleep_reuse_body_frames": 159,
-    "full_mobility_cut_body_frames": 142,
-    "full_sleep_reuse_and_mobility_cut_body_frames": 133
+    "full_mobility_cut_body_frames": 134,
+    "full_sleep_reuse_and_mobility_cut_body_frames": 125
   },
   "optimizations": {
     "sleep_reuse": {
@@ -586,9 +756,11 @@
       "changes_v1a_total": false
     },
     "mobility_cut": {
-      "omit_clips": ["trot", "run", "stalk", "pounce"],
-      "saved_body_frames": 26,
-      "changes_v1a_total": false
+      "omit_clips": ["trot", "run", "stalk", "stand_to_stalk", "stalk_to_stand", "pounce"],
+      "omit_states": ["trot", "run", "stalk"],
+      "saved_body_frames": 34,
+      "changes_v1a_total": false,
+      "note": "原先只删 trot/run/stalk/pounce(26 帧),但 stand_to_stalk 与 stalk_to_stand 会留成指向已删状态的孤儿边 —— 8 张帧画了没人播。pounce 的唯一入边也来自 stalk,故一并删。若要保留 pounce,须先给它补一条 stand->stand 的自环边。"
     },
     "hard_82_option": {
       "clip": "stand_to_walk",

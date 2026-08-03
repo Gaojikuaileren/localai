@@ -1,0 +1,242 @@
+{
+  "format": "cowcat-door-mask@1",
+  "revision": 5,
+  "canvas": {
+    "width": 128,
+    "height": 128,
+    "ground_y": 112,
+    "pivot": [64, 112]
+  },
+  "mask": {
+    "opaque_rgba": [255, 255, 255, 255],
+    "transparent_rgba": [0, 0, 0, 0],
+    "runtime_fill": "active_skin_base_color",
+    "antialias": false
+  },
+  "layer_contract": {
+    "actor_layer": "cat",
+    "clip_targets": ["cat", "loading"],
+    "portal_mask_semantics": "white pixels are the door-local region in which an actor behind the portal may remain visible",
+    "portal_masks_render": false,
+    "doors_mirror_with_actor": false,
+    "profiles": {
+      "cat_front_with_leaf": {
+        "draw_order": ["back", "leaf", "cat", "front"],
+        "portal_clip": false
+      },
+      "cat_behind_with_leaf": {
+        "draw_order": ["back", "cat", "leaf", "front"],
+        "portal_clip": true
+      },
+      "cat_front": {
+        "draw_order": ["back", "cat", "front"],
+        "portal_clip": false
+      },
+      "cat_behind": {
+        "draw_order": ["back", "cat", "front"],
+        "portal_clip": true
+      }
+    },
+    "transition_rules": [
+      "switch from cat_front to cat_behind at the portal_enter event",
+      "switch from cat_behind to cat_front at the portal_exit event",
+      "portal clipping applies to both the cat body and its loading spinner",
+      "hide the actor only after door_enter has fully crossed the portal",
+      "do not close a moving leaf until the actor has cleared the portal"
+    ]
+  },
+  "clip_bindings": {
+    "body_manifest": "../loading-cow-cat-animation-manifest-v1.json",
+    "anchor_offset_semantics": "source-sheet pivot relative to portal.bottom_center in authored-left space; negate x together with root_delta when runtime_mirror is true",
+    "door_enter": {
+      "source_sheet_ref": "door_enter_left_1x",
+      "door_asset": "door_desktop",
+      "runtime_mirror": true,
+      "scene_motion": "left_to_right",
+      "leaf_frame": 3,
+      "profile_switch_event": "portal_enter",
+      "profiles_by_source_frame": ["outside", "behind", "behind", "behind"],
+      "terminal_anchor_offset_master": [-91, 0]
+    },
+    "door_exit": {
+      "source_sheet_ref": "door_exit_left_1x",
+      "door_asset": "door_corridor",
+      "runtime_mirror": true,
+      "scene_motion": "left_to_right",
+      "profile_switch_event": "portal_exit",
+      "profiles_by_source_frame": ["behind", "behind", "behind", "outside"],
+      "terminal_anchor_offset_master": [-110, 0]
+    }
+  },
+  "assets": {
+    "door_desktop": {
+      "file": "door_desktop.png",
+      "side": "right",
+      "cell": [128, 128],
+      "frames": 4,
+      "layout": { "columns": 4, "rows": 1 },
+      "open_sequence": [0, 1, 2, 3],
+      "close_sequence": [3, 2, 1, 0],
+      "construction": "large top-hinged home-door cat flap sized around the unchanged full-scale cat; no human-sized door is drawn",
+      "layers": {
+        "back": {
+          "file": "door_desktop_back.png",
+          "role": "visual_back",
+          "frames": 1,
+          "draw": true
+        },
+        "leaf": {
+          "file": "door_desktop_leaf.png",
+          "role": "moving_leaf",
+          "frames": 4,
+          "layout": { "columns": 4, "rows": 1 },
+          "draw": true,
+          "fully_open_frame": 3
+        },
+        "front": {
+          "file": "door_desktop_front.png",
+          "role": "visual_front_occluder",
+          "frames": 1,
+          "draw": true
+        },
+        "portal_mask": {
+          "file": "door_desktop_portal_mask.png",
+          "role": "stencil",
+          "frames": 1,
+          "draw": false,
+          "space": "door_local",
+          "contributes_to_composite": false
+        }
+      },
+      "profiles": {
+        "outside": "cat_front_with_leaf",
+        "behind": "cat_behind_with_leaf"
+      },
+      "interaction": {
+        "approach": "left_to_right",
+        "anchor": {
+          "position_ref": "portal.bottom_center",
+          "offset": [0, 4],
+          "resolved": [89, 112]
+        },
+        "occlusion_plane": {
+          "axis": "x",
+          "position_ref": "portal.max_x",
+          "resolved_position": 123,
+          "hidden_side": "greater"
+        },
+        "crossing_requires_leaf_frame": 3,
+        "leaf_hinge": {
+          "position": [89, 46],
+          "pivot_is_constant": true
+        }
+      },
+      "motion_contract": {
+        "animated_layers": ["leaf"],
+        "static_layers": ["back", "front", "portal_mask"],
+        "portal_frame_binding": "constant_for_entire_clip",
+        "only_leaf_may_change_between_composite_frames": true
+      },
+      "validation": {
+        "portal_bbox": [55, 46, 123, 108],
+        "portal_area": 4299,
+        "portal_min_clearance": [69, 63],
+        "portal_ground_relation": "ends_at_sill_top",
+        "sill_top_y": 109,
+        "leaf_portal_coverage": {
+          "closed_min": 1.0,
+          "fully_open_max": 0.0,
+          "min_step_drop": 0.15
+        }
+      }
+    },
+    "door_corridor": {
+      "semantic_id": "door_other_client",
+      "legacy_id": "door_corridor",
+      "file": "door_corridor.png",
+      "side": "left",
+      "cell": [128, 128],
+      "frames": 1,
+      "layout": { "columns": 1, "rows": 1 },
+      "always_open": true,
+      "construction": "soft plush cat-cave doorway with two compressed top cushions, uneven stuffed sides and a thick foreground lip; it is a cross-client passage, not an architectural arch or sleeping prop",
+      "destination_kind": "other_client",
+      "link_scope": "cross_client",
+      "geometry": {
+        "topology": "soft_cat_cave_mouth",
+        "material_cue": "padded_contour_only",
+        "softness_method": "uneven_binary_silhouette_with_open_fold_notches",
+        "architectural_arch_forbidden": true
+      },
+      "layers": {
+        "back": {
+          "file": "door_corridor_back.png",
+          "role": "plush_cave_shell",
+          "frames": 1,
+          "draw": true
+        },
+        "leaf": null,
+        "front": {
+          "file": "door_corridor_front.png",
+          "role": "near_plush_lip",
+          "frames": 1,
+          "draw": true
+        },
+        "portal_mask": {
+          "file": "door_corridor_portal_mask.png",
+          "role": "stencil",
+          "frames": 1,
+          "draw": false,
+          "space": "door_local",
+          "contributes_to_composite": false
+        }
+      },
+      "profiles": {
+        "outside": "cat_front",
+        "behind": "cat_behind"
+      },
+      "interaction": {
+        "approach": "right_to_left",
+        "anchor": {
+          "position_ref": "portal.bottom_center",
+          "offset": [0, 4],
+          "resolved": [50, 112]
+        },
+        "occlusion_plane": {
+          "axis": "x",
+          "position_ref": "portal.min_x",
+          "resolved_position": 16,
+          "hidden_side": "less"
+        }
+      },
+      "motion_contract": {
+        "animated_layers": [],
+        "static_layers": ["back", "front", "portal_mask"],
+        "portal_frame_binding": "constant_for_entire_clip",
+        "only_leaf_may_change_between_composite_frames": true
+      },
+      "validation": {
+        "portal_bbox": [16, 47, 84, 108],
+        "portal_area": 3994,
+        "portal_min_clearance": [69, 62],
+        "portal_ground_relation": "ends_at_sill_top",
+        "sill_top_y": 109,
+        "aspect_ratio_range": [1.08, 1.15],
+        "symmetry_tolerance": 0.02,
+        "soft_body_bbox": [0, 30, 111, 112],
+        "front_lip_bbox": [4, 42, 110, 112],
+        "outer_width_height_ratio_min": 1.2,
+        "uniform_thickness_forbidden": true,
+        "top_fold_notch_count_min": 1,
+        "portal_max_straight_edge_run": 10
+      }
+    }
+  },
+  "excluded": [
+    "floor",
+    "background",
+    "sleeping_bed_or_resting_prop",
+    "scratch_effect",
+    "architectural_arch"
+  ]
+}

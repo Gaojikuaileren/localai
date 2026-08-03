@@ -1,0 +1,313 @@
+{
+  "format": "cowcat-door-body-source-stats@1",
+  "cell": [
+    128,
+    128
+  ],
+  "ground_y": 112,
+  "pivot": [
+    64,
+    112
+  ],
+  "common_scale": 0.22140221402214022,
+  "clips": {
+    "door_enter": {
+      "file": "door_enter_left_1x.png",
+      "sheet_size": [
+        512,
+        128
+      ],
+      "frames": [
+        {
+          "source_index": 0,
+          "bbox": [
+            13,
+            71,
+            119,
+            112
+          ],
+          "opaque_count": 2631,
+          "black_count": 2241,
+          "white_count": 390,
+          "fx_anchor": [
+            32,
+            80
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                18,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                86,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "c2cf437a5b8092c55b8c98f45974fae415e8b688f5ae5a2ad81dbce8bbeb4a81"
+        },
+        {
+          "source_index": 1,
+          "bbox": [
+            13,
+            74,
+            110,
+            112
+          ],
+          "opaque_count": 2290,
+          "black_count": 1922,
+          "white_count": 368,
+          "fx_anchor": [
+            31,
+            83
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                38,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                66,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "183592dc3ac3f920e076801a8cec02f550ab5f3ae4ccf19e81c79855b27c03dc"
+        },
+        {
+          "source_index": 2,
+          "bbox": [
+            4,
+            71,
+            123,
+            112
+          ],
+          "opaque_count": 2776,
+          "black_count": 2287,
+          "white_count": 489,
+          "fx_anchor": [
+            26,
+            80
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                10,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                62,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "af1112b827e97de37ec10beac03e0747162b1813a23ac009ff241ec2502bf460"
+        },
+        {
+          "source_index": 3,
+          "bbox": [
+            4,
+            71,
+            110,
+            112
+          ],
+          "opaque_count": 2530,
+          "black_count": 2209,
+          "white_count": 321,
+          "fx_anchor": [
+            23,
+            80
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                9,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                94,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "b242bea725d46ef5ec13ba3476eba0a23f5d32fc2b7300e92415fb92fe734abb"
+        }
+      ]
+    },
+    "door_exit": {
+      "file": "door_exit_left_1x.png",
+      "sheet_size": [
+        512,
+        128
+      ],
+      "frames": [
+        {
+          "source_index": 0,
+          "bbox": [
+            12,
+            76,
+            111,
+            112
+          ],
+          "opaque_count": 2175,
+          "black_count": 1879,
+          "white_count": 296,
+          "fx_anchor": [
+            30,
+            84
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                16,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                72,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "0efd1835387f4183f0eb76fc67f8095ab9ff7ac49ddcd2a6834afb3511d24d11"
+        },
+        {
+          "source_index": 1,
+          "bbox": [
+            10,
+            76,
+            110,
+            112
+          ],
+          "opaque_count": 2383,
+          "black_count": 2010,
+          "white_count": 373,
+          "fx_anchor": [
+            28,
+            84
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                14,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                82,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "71a7945d27008e09bc89571bbd6cce5febb9c367c5c842d698b17fa26301b26e"
+        },
+        {
+          "source_index": 2,
+          "bbox": [
+            6,
+            66,
+            110,
+            112
+          ],
+          "opaque_count": 2617,
+          "black_count": 2211,
+          "white_count": 406,
+          "fx_anchor": [
+            25,
+            76
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                10,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                70,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "4206368615617c4235c2089f1bf90324a90dea6201d70c1c2d6919e34512cb80"
+        },
+        {
+          "source_index": 3,
+          "bbox": [
+            5,
+            64,
+            111,
+            112
+          ],
+          "opaque_count": 2723,
+          "black_count": 2315,
+          "white_count": 408,
+          "fx_anchor": [
+            24,
+            75
+          ],
+          "contacts": [
+            {
+              "part": "fore_near",
+              "surface": "ground",
+              "at": [
+                16,
+                112
+              ]
+            },
+            {
+              "part": "hind_near",
+              "surface": "ground",
+              "at": [
+                84,
+                112
+              ]
+            }
+          ],
+          "sha256_rgba": "ea6cf6ba39483a5bb5e8eeef78245ace8b677de1aac4c5ae7611bc086f9ce3b0"
+        }
+      ]
+    }
+  }
+}

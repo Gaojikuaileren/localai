@@ -57,7 +57,10 @@
 
 ```text
 loading-cow-cat/
-├─ source/                         # 可编辑像素源文件；不由运行时加载
+├─ source/                         # 可编辑像素源文件；不由运行时直接加载
+│  └─ body-clips/
+│     ├─ door_enter_left_1x.png   # 4×1，每格 128×128
+│     └─ door_exit_left_1x.png    # 4×1，每格 128×128
 ├─ atlas/
 │  ├─ cow-cat-core-1x.png          # 透明、黑白、nearest
 │  └─ cow-cat-core-1x.json
@@ -72,6 +75,7 @@ loading-cow-cat/
 ```json
 {
   "id": "walk_left_03",
+  "source_index": 3,
   "rect": [384, 0, 128, 128],
   "ticks": 1,
   "pivot": [64, 112],
@@ -90,6 +94,10 @@ loading-cow-cat/
 - `contacts`：当前锁地的爪，用于验证是否滑步。
 - `events`：落脚、起跳、落地、闭眼、加载步进等离散事件。
 - `can_exit`：状态机是否允许在该帧离开 clip。
+- `source_index`：该帧在可编辑源 sheet 中的零基 cell 序号；打 atlas 后仍保留以便回溯。
+- `door_anchor_offset`：仅门交互使用；角色 pivot 相对 `portal.bottom_center` 的整数偏移，记录在左向母版空间。运行时镜像时 x 与 `root_delta.x` 一起取反。
+- `render_profile`：仅门交互使用；`outside` 不做 portal 裁切，`behind` 同时把猫与加载环裁到固定 `portal_mask` 内。
+- `visible_fraction`：使用实际门资产、运行时方向、portal 裁切和 `front` 遮挡合成后，可见猫实体像素数除以原始完整猫实体像素数。该数值由验证器测量，不能目测填写。
 
 ## 5. 6 fps 播放器
 
@@ -289,6 +297,15 @@ stateDiagram-v2
 | `door_enter` | 4 | 4 | 0.667 s | ● |
 | `door_exit` | 4 | 4 | 0.667 s | ● |
 
+正式源文件是两张 PNG sheet：`source/body-clips/door_enter_left_1x.png` 与 `door_exit_left_1x.png`，均为 `512×128`、4 个 `128×128` cell。每格必须画完整猫；不得把钻进门后的身体预先从 PNG 擦掉。
+
+- `door_enter` 绑定右侧 `door_desktop`，运行时镜像为向右钻入；门板固定在 fully-open frame 3。第 2 张角色帧触发唯一一次 `portal_enter`，profile 从 `outside` 切到 `behind`。
+- `door_exit` 绑定左侧跨客户端软猫窝门，运行时镜像为向右钻出。第 4 张角色帧触发唯一一次 `portal_exit`，profile 从 `behind` 切回 `outside`。
+- `door_enter.visible_fraction` 必须逐帧严格下降；`door_exit.visible_fraction` 必须逐帧严格上升。最后一个 tick 的 `root_delta` 必须把角色彻底移出门平面，再进入下一个状态。
+- 门的 `back` 始终在猫后，`front` 始终在猫前；`portal_mask` 不渲染，只裁切猫和头部加载环。门不随角色镜像。
+- 跨客户端门不是建筑拱门。它是厚薄不均、顶部带压痕、底部有柔软近景唇边的猫窝式穿行洞；没有睡垫、屋顶、房间背景或休息语义。
+- 穿洞动作保持真实四足低姿：前腿探入/落地、躯干通过、后腿蹬地、尾巴最后通过；不缩猫、不压扁身体、不改洞口尺寸。
+
 ### 7.8 拖拽
 
 | Clip | 独立帧 | ticks | 时长 | v1a |
@@ -332,6 +349,8 @@ v1a = 静止 10 + blink 3 + walk 8 + 过渡 34 + 出场 5 + 门 14 + 拖拽 10 =
 | F · 拖拽 | `grab_start`、`dangle`、`drop_land` | 10 | 84 |
 
 加载环 12 张单独出图和验收，不计入角色帧累计。每一批先通过花纹、ground line 和状态缝合检查，再进入下一批，避免 84 张全部画完后才发现基准漂移。
+
+门是角色 atlas 之外仅存的场景依赖：`doors/door_desktop.png` 4 帧、`doors/door_corridor.png` 1 帧是兼容合成图；正式渲染使用同目录的 `back / leaf / front / portal_mask` 分层，契约见 `doors/door-assets-v1.json`。Desktop 是按未缩放猫尺寸放大的家门猫洞；Corridor 是通往另一个客户端的常开圆洞隧道，不是睡眠猫窝。猫在门外时位于 leaf 之后、front 之前；跨过门平面后切换为 portal-clipped 的 behind profile，加载环必须与身体一起裁切。整个 clip 中 portal 几何固定，Desktop 仅 leaf 可变化，Corridor 没有活动门层。它们不计入猫本体 84/168 或加载环 12 的帧预算。地板、背景、睡眠设施与挠门特效均取消。
 
 ## 9. 给生成方的硬约束
 

@@ -4752,6 +4752,88 @@ public static class Selftest
                 }
             }
 
+            // ================= P3c 收尾(2026-08-03 用户裁定「把 P3c 收尾」)=================
+            {
+                // ---- 记忆面板:判据四项里此前缺的【编辑】与【溯源展开】----
+                var mc = new Services.MemoryCenter();
+                var mid = Services.MemoryCenter.NewId();
+                mc.Add(new Services.MemoryEntry(mid, "原标题", "原正文", Services.MemoryKind.Summary,
+                        Services.ProjectScope.Personal, Services.MemberContext.Current, "p-1",
+                        new[] { "s-1", "s-2" }, DateTime.Now));
+                Assert(!mc.EditText(mid, "   ", "x"), "★ 标题空了不许保存 —— 列表里会变成一条没名字的东西");
+                Assert(mc.EditText(mid, "改过的标题", "改过的正文"), "★ 记忆条目可编辑(P3c 判据四项之一)");
+                var after = mc.Find(mid)!;
+                Assert(after.Title == "改过的标题" && after.Body == "改过的正文", "改的内容真的写进去了");
+                Assert(after.EditedByHuman && after.EditedAt is not null,
+                       "★★ 人手改过要打标记 —— 不标的话人改的内容会以【AI 摘要】的身份进 prompt,那是骗下游");
+                Assert(after.Scope == Services.ProjectScope.Personal && after.SourceProjectId == "p-1"
+                       && after.SourceSessionIds!.Count == 2,
+                       "★ 编辑只动标题与正文:范围是权限动作、来源是溯源锚,都不许在编辑框里悄悄改");
+                Assert(!mc.EditText(mid, "改过的标题", "改过的正文"), "没变就不写、不广播(免得白落一次盘)");
+                Assert(!mc.EditText("no-such-id", "a", "b"), "改一条不存在的记忆:老实返回 false");
+
+                var sv = TryReadSource(Path.Combine("Views", "StorageView.cs"));
+                if (sv is not null)
+                {
+                    Assert(sv.Contains("SegChip(\"溯源\"") && sv.Contains("SegChip(\"编辑\""),
+                           "★ 记忆条目上有【溯源】与【编辑】两个入口(判据写的四项要齐)");
+                    var tb = Slice(sv, "FrameworkElement TraceBlock(", "FrameworkElement EditBlock(");
+                    Assert(tb is not null, "切片得真的取到(取不到就跳过 = 假断言)");
+                    Assert(tb is null || (tb.Contains("没有记来源会话") && tb.Contains("原文已被删除")
+                           && tb.Contains("这条会话已经不在了")),
+                           "★★ 溯源要把四种情形【分开说】:有原文 / 原文删了 / 没记来源 / 会话没了 —— "
+                           + "含糊的溯源比没有溯源更坏(P3a 的硬线是「每条可溯源」)");
+                }
+
+                // ---- 协议版本协商(D45:「主机 v5,你 v3,请更新」)----
+                var hubC = new Services.HubClient();
+                Assert(Services.HubClient.ClientProtocol >= 1 && Services.HubClient.ProtocolHeader == "X-LocalAI-Protocol",
+                       "客户端自报协议版本,头名两边一致");
+                Assert(hubC.HubProtocol is null && hubC.ProtocolNote.Contains("未协商"),
+                       "★ 中枢没报版本 = 【未协商】,如实说;不假装协商过,也不因此拒连(没有证据说它不兼容)");
+                var hcSrc = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                if (hcSrc is not null)
+                {
+                    Assert(hcSrc.Contains("HubState.ProtocolMismatch"),
+                           "★ 协议对不上单列一态 —— 症状像\"连不上\"但处置是【去更新某一端】,混进 Offline 会让人一直重启中枢");
+                    var call = Slice(hcSrc, "public async Task<(int status, string body)> CallAsync", "public async Task EndSessionAsync");
+                    // ★ 两个下标都得【先确认存在】再比大小:IndexOf 找不到返回 -1,
+                    //   而 -1 恒小于任何下标 —— 照着写 a < b 的话,把那行删掉断言反而变绿。
+                    //   (这条写下去时就先红了一次:我找的是一串根本不存在的文本。)
+                    var iNote = call?.IndexOf("NoteProtocol(r.headers)", StringComparison.Ordinal) ?? -1;
+                    var iOnline = call?.IndexOf("HubState.Online : HubState.Offline", StringComparison.Ordinal) ?? -1;
+                    Assert(iNote >= 0 && iOnline >= 0 && iNote < iOnline,
+                           "★★ 先过协议闸再判在线 —— 两边对格式的理解不一致时,解出来的东西本身就不可信");
+                    Assert(hcSrc.Contains("请更新【客户端】") && hcSrc.Contains("请更新【中枢】"),
+                           "★ 说清该更新哪一端(D45 原话:「主机 v5,你 v3,请更新」),不只说\"版本不匹配\"");
+                }
+
+                // ---- 换网段:改地址而不是重新配对 ----
+                Assert(!hubC.SetDial("不是地址"), "★ 地址格式不对就拒收(收下去只会在\"连不上\"时多一层歧义)");
+                Assert(hcSrc is null || hcSrc.Contains("public bool SetDial(string dial)"),
+                       "★ 有【改连接地址】入口 —— 重新配对会删掉本机私钥,把有效身份亲手销毁");
+                var dv = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                Assert(dv is null || dv.Contains("ChangeDialRow(p)"), "★ 已配对卡片上真的把改地址露出来了");
+
+                // ---- Open WebUI 退役(判据项)----
+                var stack = TryReadSource(Path.Combine("..", "..", "90-ops", "start-stack.ps1"));
+                if (stack is not null)
+                    Assert(!stack.Contains("Open WebUI  http://"),
+                           "★★ Open WebUI 已退役:栈不再把它当日常入口打印出来(留着入口 = 文档说退役、界面还在推)");
+
+                // ---- 可分发产物(验收第一句「同一个安装包」)----
+                var pack = TryReadSource(Path.Combine("..", "..", "90-ops", "build-client.ps1"));
+                if (pack is not null)
+                {
+                    Assert(pack.Contains("SHA256") && pack.Contains("VERSION.txt") && pack.Contains("安装说明.txt"),
+                           "★ 出包 = exe + 校验和 + 版本戳 + 一页说明(缺一样就说不清这份包是什么)");
+                    Assert(pack.Contains("FAIL=0"),
+                           "★★ 自检没过就不出包 —— 红着还打包等于把已知坏的东西送到另一台机器上");
+                    Assert(pack.Contains("dirty"),
+                           "★ 工作树不干净要写进版本戳,别让人拿到一个说不清来源的包");
+                }
+            }
+
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
@@ -5059,6 +5141,205 @@ public static class Selftest
                 var xaml = File.ReadAllText(Path.Combine(themeDir, skin + ".xaml"));
                 var miss = need.Where(k => !xaml.Contains("\"" + k + "\"")).ToList();
                 Assert(miss.Count == 0, $"皮肤 {skin} 定义了全部令牌" + (miss.Count > 0 ? " 缺:" + string.Join(",", miss) : ""));
+            }
+
+            // ================= 桌宠(P8 前置 · v1a 哑巴猫) =================
+            // 帧资产尚未交付,故这里断言的全是**不依赖任何一张图**的东西:时钟、转移图、意图通道。
+            // 渲染正确性等 A 批身份锁定帧到位后另立断言。
+
+            // ---- 6 fps 固定步长时钟(动画规范 §5)----
+            {
+                Assert(Math.Abs(Services.Pet.PetClock.TickMs - 1000.0 / 6) < 1e-9,
+                    "tick 时长由 fps 导出(1000/6),不写死 166");
+
+                var clk = new Services.Pet.PetClock(); clk.Reset(0);
+                Assert(clk.Advance(100) == 0, "不足一个 tick 不推进");
+                Assert(clk.Advance(200) == 1, "跨过 166.67ms 推进 1 tick");
+
+                var drift = new Services.Pet.PetClock(); drift.Reset(0);
+                int total = 0;
+                for (int i = 1; i <= 60; i++) total += drift.Advance(i * 100);
+                Assert(total == 36, $"accumulator 不漂移:6 秒恰好 36 tick(实得 {total})");
+
+                var stall = new Services.Pet.PetClock(); stall.Reset(0);
+                var burst = stall.Advance(10_000);
+                Assert(burst == Services.Pet.PetClock.MaxCatchUpTicks && stall.Resyncs == 1,
+                    "长卡顿最多追赶 2 tick 后重同步(规范 §5:禁止快速补播一串动作)");
+
+                var rollback = new Services.Pet.PetClock(); rollback.Reset(5000);
+                Assert(rollback.Advance(1000) == 0 && rollback.Resyncs == 1, "时钟回拨不产生负 tick,直接重同步");
+            }
+
+            // ---- manifest 校验:全部 fail-closed ----
+            {
+                static string Mini(string clips, string states, string edges)
+                    => "{\"fps\":6,\"clips\":" + clips + ",\"states\":" + states + ",\"edges\":" + edges + ",\"parallel_layers\":[]}";
+                const string LoopA = "\"a_loop\":{\"group\":\"idle\",\"track\":\"body\",\"independent_frames\":1,\"ticks\":6,\"duration_ms\":1000.0,\"loop\":true}";
+                const string StateA = "{\"suspended\":{},\"a\":{\"loop_clip\":\"a_loop\"}}";
+                const string EdgeA = "[{\"from\":\"suspended\",\"to\":\"a\",\"clip\":null,\"must_finish\":false}]";
+
+                var good = Services.Pet.PetManifest.Parse(Mini("{" + LoopA + "}", StateA, EdgeA));
+                Assert(good.Validate().Count == 0, "最小合法 manifest 通过校验");
+
+                var orphan = Services.Pet.PetManifest.Parse(Mini(
+                    "{" + LoopA + ",\"nobody_plays_me\":{\"group\":\"idle\",\"track\":\"body\",\"independent_frames\":4,\"ticks\":6,\"duration_ms\":1000.0,\"loop\":true}}",
+                    StateA, EdgeA));
+                Assert(orphan.Validate().Any(e => e.Contains("孤儿")),
+                    "孤儿 clip 被判错 —— 这条正是「删了 stalk 却留下 stand_to_stalk」那 8 张废帧的形状");
+
+                var dangling = Services.Pet.PetManifest.Parse(Mini(
+                    "{" + LoopA + "}", "{\"suspended\":{},\"a\":{\"loop_clip\":\"does_not_exist\"}}", EdgeA));
+                Assert(dangling.Validate().Any(e => e.Contains("不存在")), "状态指向不存在的 clip 被判错");
+
+                var unreachable = Services.Pet.PetManifest.Parse(Mini(
+                    "{" + LoopA + "}", "{\"suspended\":{},\"a\":{\"loop_clip\":\"a_loop\"},\"island\":{}}", EdgeA));
+                Assert(unreachable.Validate().Any(e => e.Contains("不可达")), "从 suspended 走不到的状态被判错(死支路)");
+            }
+
+            // ---- 真 manifest + 动画状态机 ----
+            var petJson = TryReadSource(Path.Combine("Assets", "pet", "loading-cow-cat", "loading-cow-cat-animation-manifest-v1.json"));
+            if (petJson is null)
+                Console.WriteLine("  SKIP  桌宠 manifest(发布环境没有源码目录)");
+            else
+            {
+                var m = Services.Pet.PetManifest.Parse(petJson);
+                var errs = m.Validate();
+                Assert(errs.Count == 0, "真 manifest 通过全部校验" + (errs.Count > 0 ? " → " + string.Join(" / ", errs.Take(4)) : ""));
+
+                var v1aBody = m.Clips.Values.Where(c => c.V1a && c.Track == "body").Sum(c => c.IndependentFrames);
+                var v1aLoad = m.Clips.Values.Where(c => c.V1a && c.Track == "loading").Sum(c => c.IndependentFrames);
+                Assert(v1aBody == 84 && v1aLoad == 12, $"v1a 帧预算 = 84 身体 + 12 加载环(实得 {v1aBody}+{v1aLoad})");
+
+                // 寻路:行为层只说"我要去睡",四段过渡由状态机自己解
+                var toSleep = m.FindPath("stand", "sleep");
+                Assert(toSleep is { Count: 3 }
+                       && toSleep[0].Clip == "stand_to_sit" && toSleep[1].Clip == "sit_to_loaf" && toSleep[2].Clip == "loaf_to_sleep",
+                    "stand→sleep 自动解出 stand_to_sit → sit_to_loaf → loaf_to_sleep(调用方不拼链)");
+
+                Assert(m.FindPath("suspended", "behind_door") is { Count: 1 } bd && bd[0].Clip is null,
+                    "suspended→behind_door 有直达边:猫在门外时休眠恢复不会被拉回家(否则本机凭空多一只猫)");
+
+                Assert(m.TurnEdge("stand")?.Clip == "turn_180", "站姿的转身边是 turn_180");
+                Assert(m.TurnEdge("sit") is null, "坐姿没有转身边 —— 要转身必须先起身");
+
+                static void Run(Services.Pet.PetAnimator a, int n) { for (int i = 0; i < n; i++) a.Advance(); }
+
+                // 起手:挂起态醒来
+                var an = new Services.Pet.PetAnimator(m);
+                Assert(an.State == "suspended" && an.PlayingClip is null, "初始停在 suspended,不播任何 clip");
+                an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                an.Advance();
+                Assert(an.PlayingClip == "wake_from_hidden", "醒来先播 wake_from_hidden");
+                Run(an, 12);
+                Assert(an.State == "stand" && an.PlayingClip == "idle_stand", "播完落到 stand 并停在 idle_stand");
+
+                // must_finish 不可被普通意图打断
+                an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Rest, Services.Pet.PetIntentSource.Behavior));
+                an.Advance();
+                Assert(an.PlayingClip == "stand_to_sit", "去坐先播过渡 clip");
+                var mid = an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Idle, Services.Pet.PetIntentSource.Behavior));
+                Assert(mid.Outcome == Services.Pet.PetIntentOutcome.Deferred,
+                    "过渡播到一半的意图被【推迟】而不是丢弃 —— 返回三态,不做 fire-and-forget");
+                Assert(an.PlayingClip == "stand_to_sit", "推迟期间过渡照播,姿态不跳变");
+
+                // 坐着要转身:必须先起身,不许一帧镜像
+                Run(an, 24);
+                Assert(an.State == "stand", "被推迟的意图在可离开时生效(回到 stand)");
+                an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Rest, Services.Pet.PetIntentSource.Behavior));
+                Run(an, 12);
+                Assert(an.State == "sit", "落到 sit");
+                an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Face, Services.Pet.PetIntentSource.Behavior, Facing: Services.Pet.PetFacing.Right));
+                var sawTurn = false;
+                for (int i = 0; i < 40 && an.Facing != Services.Pet.PetFacing.Right; i++)
+                { an.Advance(); if (an.PlayingClip == "turn_180") sawTurn = true; }
+                Assert(sawTurn && an.Facing == Services.Pet.PetFacing.Right && an.State == "stand",
+                    "坐着转身会先起身再走 turn_180;朝向只在转身 clip 播完时才翻");
+
+                // 表演白名单从 insert_clips 推导,不是硬编码
+                var badPerform = an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Perform, Services.Pet.PetIntentSource.Behavior, Clip: "walk"));
+                Assert(badPerform.Outcome == Services.Pet.PetIntentOutcome.Rejected, "表演意图不能点名移动 clip");
+                var okPerform = an.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Perform, Services.Pet.PetIntentSource.Behavior, Clip: "stretch"));
+                Assert(okPerform.IsAccepted, "stretch 在 stand 的 insert_clips 里,可以点名");
+
+                // ---- 助手的把手:结构性约束,不是权限判断 ----
+                var a2 = new Services.Pet.PetAnimator(m);
+                a2.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                Run(a2, 14);
+                Assert(!Services.Pet.PetIntentPolicy.CanAssistantOpenDoors, "助手在策略上不能开门");
+                Assert(a2.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.EnterDoor, Services.Pet.PetIntentSource.Assistant)).Outcome
+                       == Services.Pet.PetIntentOutcome.Rejected,
+                    "助手不能让猫直接穿门 —— 它只能让猫去挠门,开不开由你定");
+                Assert(a2.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.ScratchDoor, Services.Pet.PetIntentSource.Assistant)).IsAccepted,
+                    "助手可以让猫去挠门(权限模型变成角色行为)");
+                Assert(a2.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Suspend, Services.Pet.PetIntentSource.Assistant)).Outcome
+                       == Services.Pet.PetIntentOutcome.Rejected,
+                    "Suspend 不在助手白名单里 —— 新增一个 Kind 默认落在拒绝那边");
+
+                var a3 = new Services.Pet.PetAnimator(m);
+                a3.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                Run(a3, 14);
+                var rateOk = 0; var rateNo = 0;
+                for (int i = 0; i < Services.Pet.PetIntentPolicy.AssistantIntentsPerMinute + 3; i++)
+                {
+                    var r = a3.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Idle, Services.Pet.PetIntentSource.Assistant));
+                    if (r.Outcome == Services.Pet.PetIntentOutcome.Rejected) rateNo++; else rateOk++;
+                }
+                Assert(rateOk == Services.Pet.PetIntentPolicy.AssistantIntentsPerMinute && rateNo == 3,
+                    "助手意图有速率上限(一只每秒换动作的猫本身就是打扰,哪怕一句话没说)");
+
+                // 紧急挂起:绕过 must_finish,且不播退场演出
+                var a4 = new Services.Pet.PetAnimator(m);
+                a4.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                a4.Advance();
+                Assert(a4.PlayingClip == "wake_from_hidden" && !a4.CanExitNow(), "过渡中途,不可离开");
+                a4.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Suspend, Services.Pet.PetIntentSource.Reaction));
+                Assert(a4.State == "suspended" && a4.PlayingClip is null,
+                    "独占全屏/休眠时立即隐藏,绕过 must_finish 且不播退场演出(规范 §5)");
+
+                // 加载环:独立并行层,但在猫不在场时不渲染
+                var a5 = new Services.Pet.PetAnimator(m);
+                a5.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Attend, Services.Pet.PetIntentSource.Reaction, On: true, Clip: "job-1"));
+                Assert(!a5.LoadingVisible, "suspended 时加载环不渲染");
+                a5.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                Run(a5, 14);
+                Assert(a5.LoadingVisible, "猫在场且有任务在跑时加载环点亮");
+                a5.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Attend, Services.Pet.PetIntentSource.Reaction, On: true, Clip: "job-2"));
+                a5.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Attend, Services.Pet.PetIntentSource.Reaction, On: false, Clip: "job-1"));
+                Assert(a5.LoadingVisible, "加载环按任务 id 计数,关掉其中一个不会误灭(不是单个 Boolean)");
+                a5.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Attend, Services.Pet.PetIntentSource.Reaction, On: false, Clip: "job-2"));
+                Assert(!a5.LoadingVisible, "最后一个任务结束才熄灭");
+
+                // 拖拽:唯一被允许绕过寻路的输入(它是物理的),但仍不打断必须播完的过渡
+                var a6 = new Services.Pet.PetAnimator(m);
+                a6.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                Run(a6, 14);
+                Assert(a6.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Grab, Services.Pet.PetIntentSource.User)).IsAccepted,
+                    "站着时可以被拎起(走 *visible 通配边,不走寻路)");
+                Run(a6, 4);
+                Assert(a6.State == "dangle", "拎起后进入 dangle");
+                Assert(a6.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Drop, Services.Pet.PetIntentSource.User)).IsAccepted, "可以放下");
+                Run(a6, 8);
+                Assert(a6.State == "stand", "松手必须落地再交还状态机,不凭空回到 idle");
+
+                var a7 = new Services.Pet.PetAnimator(m);
+                Assert(a7.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Grab, Services.Pet.PetIntentSource.User)).Outcome
+                       == Services.Pet.PetIntentOutcome.Rejected, "猫不在场时拎不到");
+
+                // 意图不排队:latest-wins
+                var a8 = new Services.Pet.PetAnimator(m);
+                a8.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Wake, Services.Pet.PetIntentSource.Behavior));
+                Run(a8, 14);
+                a8.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Rest, Services.Pet.PetIntentSource.Behavior));
+                a8.Post(new Services.Pet.PetIntent(Services.Pet.PetIntentKind.Sleep, Services.Pet.PetIntentSource.Behavior));
+                Run(a8, 40);
+                Assert(a8.State == "sleep", "意图不排队,只保留最新一个(不补演一串过时动作)");
+
+                // 每条意图都留痕
+                Assert(a8.Audit.Count >= 3 && a8.Audit.All(x => !string.IsNullOrEmpty(x.Result.Reason) || x.Result.IsAccepted),
+                    "每条意图的处置都进审计(谁·何时·投了什么·怎么处置的)");
+
+                Assert(new Services.Pet.PetAnimator(m).UsesPlaceholderRootDelta,
+                    "帧数据(root_delta/contacts)未交付前,位移用占位常量并如实标注 —— 不伪装成已实现");
             }
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }

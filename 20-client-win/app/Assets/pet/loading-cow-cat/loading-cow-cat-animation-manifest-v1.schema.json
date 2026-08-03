@@ -51,6 +51,10 @@
       },
       "additionalProperties": false
     },
+    "source_sheets": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sourceSheet" }
+    },
     "clips": {
       "type": "object",
       "minProperties": 1,
@@ -83,6 +87,51 @@
         "atlas": { "type": "string", "minLength": 1 },
         "parallel": { "type": "boolean" },
         "full_body": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "sourceSheet": {
+      "type": "object",
+      "required": [
+        "file",
+        "cell",
+        "layout",
+        "sheet_size",
+        "fps",
+        "master_direction",
+        "runtime_mirror",
+        "palette",
+        "ground_y",
+        "pivot"
+      ],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "cell": { "$ref": "#/$defs/intPoint" },
+        "layout": {
+          "type": "object",
+          "required": ["columns", "rows"],
+          "properties": {
+            "columns": { "type": "integer", "minimum": 1 },
+            "rows": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "sheet_size": { "$ref": "#/$defs/intPoint" },
+        "fps": { "const": 6 },
+        "master_direction": { "const": "left" },
+        "runtime_mirror": { "const": true },
+        "palette": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "#000000" },
+            { "const": "#FFFFFF" },
+            { "const": "#00000000" }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "ground_y": { "const": 112 },
+        "pivot": { "$ref": "#/$defs/intPoint" }
       },
       "additionalProperties": false
     },
@@ -131,6 +180,8 @@
         "loop": { "type": "boolean" },
         "v1a": { "type": "boolean" },
         "must_finish": { "type": "boolean" },
+        "asset_stage": { "enum": ["requirements", "production"] },
+        "source_sheet": { "type": "string", "minLength": 1 },
         "direction": { "$ref": "#/$defs/direction" },
         "frames": {
           "type": "array",
@@ -163,6 +214,7 @@
       ],
       "properties": {
         "sprite": { "type": "string", "minLength": 1 },
+        "source_index": { "type": "integer", "minimum": 0 },
         "hold": { "type": "integer", "minimum": 1 },
         "pivot": { "$ref": "#/$defs/intPoint" },
         "fx_anchor": {
@@ -172,6 +224,13 @@
           ]
         },
         "root_delta": { "$ref": "#/$defs/intPoint" },
+        "door_anchor_offset": { "$ref": "#/$defs/intPoint" },
+        "render_profile": { "enum": ["outside", "behind"] },
+        "visible_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "contacts": {
           "type": "array",
           "items": { "$ref": "#/$defs/contact" }
