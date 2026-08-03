@@ -133,7 +133,7 @@
 | **P1 基准测试** | ✅ **完成 17/17 全部实测**(2026-07-27) |
 | **P2 核心链路** | ✅ **基本完成** —— 权限档位已移至 P4(D37);WebAuthn 已作废(D34) |
 | **P3a 记忆系统** | ✅ **已验收(2026-07-28)** —— S0–S9 全部完成,四门全绿(见下) |
-| **P3c 统一客户端** | 🟡 **已按 D77 收尾 · 待签字(2026-08-03)** —— S0 选型 ✅(D47 WPF)· S1 成员层 ✅ · S2 管理面 ✅(仅回环 D48)· S3 WPF 外壳 ✅ · S1b 证书续签 ✅(D49)· **协议版本协商 ✅**(客户端半边;网关回头那半行归网关线)· **主页 ✅** · **聊天 + 项目体系 ✅** · **本地落盘 ✅(D50)** · **D45 过滤实装 ✅**(客户端侧 fail-closed;**仍用设备本地哨兵,区分不了同机两名成员 —— 端到端归 P4/主机侧**)· **分层存储 / 记忆库 / 存储清理 ✅** · **记忆面板 浏览/编辑/删除/溯源 ✅** · **共享模型 ✅(D52)** · **翻译空间四场景 ✅**(文字翻译 · 同传界面骨架 · 文件翻译含 PDF 预览 · 多语言表)· **回信 ✅**(D61–D63)· **全功能幽灵会话 ✅**(D62)· **Open WebUI 退役 ✅** · **可分发产物 ✅**(`build-client.ps1`)。 **剩(都不是代码活):** S4 配对界面接回环管理面【跑实机】· 出的包在副机上装一遍。 **已裁定移走:** i18n 三语 → P7 · 记忆面板接 P3a S5 后端 → P4 · D45 成员轴端到端 → P4 · 主机自识别按 D36 → P7 · 安装器 → P7/P11 · 桌宠 → P8(D76)。 **其余四个工作空间**(资产/课程/电脑控制/财务/投资)按用户裁定等这三块搭好再回来 |
+| **P3c 统一客户端** | 🟡 **已按 D77 收尾 · 待签字(2026-08-03)** —— S0 选型 ✅(D47 WPF)· S1 成员层 ✅ · S2 管理面 ✅(仅回环 D48)· S3 WPF 外壳 ✅ · S1b 证书续签 ✅(D49)· **协议版本协商 ✅**(客户端半边;网关回头那半行归网关线)· **主页 ✅** · **聊天 + 项目体系 ✅** · **本地落盘 ✅(D50)** · **D45 过滤实装 ✅**(客户端侧 fail-closed;**仍用设备本地哨兵,区分不了同机两名成员 —— 端到端归 P4/主机侧**)· **分层存储 / 记忆库 / 存储清理 ✅** · **记忆面板 浏览/编辑/删除/溯源 ✅** · **共享模型 ✅(D52)** · **翻译空间四场景 ✅**(文字翻译 · 同传界面骨架 · 文件翻译含 PDF 预览 · 多语言表)· **回信 ✅**(D61–D63)· **全功能幽灵会话 ✅**(D62)· **Open WebUI 退役 ✅** · **可分发产物 ✅**(`build-client.ps1`)。 **剩(都不是代码活):** S4 配对界面接回环管理面【跑实机】· 出的包在副机上装一遍。 **已裁定移走:** i18n 三语 → P7 · 记忆面板接 P3a S5 后端 → P4 · D45 成员轴端到端 → P4 · 主机自识别按 D36 → P7 · 安装器 → P7/P11 · 桌宠 → P8(D76)。 **其余**五个**工作空间(资产 / 课程 / 电脑控制 / **财务管理** / 投资研究 —— 用户裁定**等这三块搭好再回来**;清单的单一事实来源是 `Views/Workspaces.cs`,现为**七个**)按用户裁定等这三块搭好再回来 |
 | **P3b 身份与准入** | ✅ **实机上线完成(2026-07-29,两台真 PC)** —— S0–S6 全绿。S5:Edge LAN 绑定(`run-lan <ip>`)+ 交互式配对控制台(六词弹屏 + `approve/deny/list`,`Pairing` 线程安全)+ **提权护栏**(D46)+ 双击启动器。S6 实机验收:**配对**(mTLS+六词SAS,SENIORBIRDS→active/LAN_DEVICE)· **成员调用 200**+Edge 注入已验证指纹(客户端伪造的 X-LocalAI-* 被剥离)· **吊销后 401** · 重配对新证书 active。真 hub = `f6hsduipeesexb6f`(CA 在 TPM,**普通用户等级铸**,见 D46 教训)。回归:identity 48 + lan-edge 8 + client-e2e 6 + client-transport 单文件 5。产物:`dist/2nd-pc/`(第二台 PC 自包含 exe + 配对说明)、`dist/host/`(identity+lan-edge exe + 双击启动器 `启动Edge.cmd`/`重置并铸身份.cmd`)。防火墙:`LocalAI-LAN-Edge` 仅 8443/LocalSubnet/以太网/该程序 |
 
 ### ★ P3a 验收签字(§14 四门 · 2026-07-28)
@@ -169,7 +169,7 @@ S6 冷启动只跑一次录后能改 · S7 四个数实测填阈值误记0即FAI
 | PG schema(含 sensitivity_domain/crypto_tier) | ✅ | 24 表 · 2 角色 · `v_memory_nons2` · 否定用例含行级 S2 实攻。**验收口径已于 P3a-S2 收紧**:除数 PASS 外,还核对「预期报错」的条数与顺序 —— 正是顺序对不上暴露了 §4.5 铁律失效(见下) |
 | **E1 入口凭证检测器** | ✅ | 6 类 + 校验和 · 扫整个载荷 · 流式亦拦 · 带内解除 · 审计不泄露 |
 | `secret_ref` 登记表 | ✅ | 随 schema 建,整表 S2,远程角色 SELECT 抛权限错 |
-| 网关调用方身份校验(D30) | ✅ | 端口→PID→WMI GetOwner,拒 ai-asset/ai-exec |
+| 网关调用方身份校验(D30) | ✅ | **allowlist(D30 修正,2026-08-03 `f7cda8e`)**:`config/caller-accounts.toml` 是「谁配得上 trusted-local」的**唯一来源**,缺文件/缺字段/空表/通配 **拒绝启动**;表外账户降 `unregistered-local`(不断连,但失去 E1 解除权与 S2 正文权)。denylist 保留为纵深:ai-asset/ai-exec/ai-vigil/ai-ctl/ai-op。★ 改判据的原因是实测到两个未登记的外部 AI 沙箱账户按原判据能拿到 trusted-local |
 | embedding / rerank(CPU :18084) | ✅ | 服务 Running · `.\ai-mem` · 自启 · 仅回环 · 1024 维 · rerank 语义正确 |
 | 首版界面 Open WebUI | ✅ **已退役(2026-08-03,D77)** | 历史任务完成(把网关端到端验通);入口已改统一客户端。数据已归档进 `{state}\quarantine\20260803-openwebui\` |
 | 剪贴板历史/跨设备同步检查 | ✅ | 2026-07-28 复验:两者均关闭。策略层未配置(加固项,非 §14 要求)—— 任何以你身份运行的程序仍可重新打开 |
@@ -322,7 +322,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 | ~~活数据库的备份方式~~ | ~~P3a~~ | ✅ **2026-07-28 已解除**:逻辑转储落地 + 每次备份自证可恢复 + 金丝雀演练 PASS + 真机备份跑通(G:) |
 | ~~上行带宽未测~~ | ~~P3b 手机端体验~~ | ✅ **2026-07-28 作废**:手机不再有全功能路径(D34),外联通道是文本,带宽无关 |
 | ~~**★ LAN 命名 + 证书方案未定**~~ | ~~P3b 全部内容~~ | ✅ **2026-07-29 落定(D43 + S1/S2.1 实证)**:命名 `localai-<hub-id-short>.local`;应用自有 mTLS,CA 私钥落 TPM 不可导出;TLS 栈 = Kestrel + .NET/CNG。回环 spike + 签发核心已在真机验通 |
-| **★ 出境闸:方向 A 已做,方向 B 待做** | **P3d 外联通道** | **★ 2026-07-31 更正**:07-30 这格原本写「已落地 … test 13 + gateway 套件 71 全绿」——**那是假的**。`e4_egress.py` 从未入库(git 全历史无此文件),而 `gateway.py:28` 的 `import e4_egress` 是真的,于是**整个网关一天都起不来**(`import gateway` → ModuleNotFoundError,6 个测试文件里 4 个连收集都过不去,`start-stack.ps1` 必失败)。根因:07-30 的 commit 4f49a63 把 gateway 挂点夹带进一个客户端提交,模块本体没 stage。<br>**07-31 已补齐并实测**:`e4_egress.py`(E1 检测器的薄封装,**签名里没有 override 参数** —— 出境的放行能力在结构上不存在)+ `test_e4_egress.py` 18 条。gateway 全套现在 **151 PASS / 0 FAIL**(caller_identity 10 · caller_policy 15 · e1 50 · e4_egress 18 · egress_registry 12 · gateway_e1 36 · lan_edge_policy 10)。**仍缺方向 B**(响应回程闸:上游返回 / P3d Signal 出口的扫描点)。**接外联通道之前必须补方向 B** |
+| **★ 出境闸:方向 A 已做,方向 B 待做** | **P3d 外联通道** | **★ 2026-07-31 更正**:07-30 这格原本写「已落地 … test 13 + gateway 套件 71 全绿」——**那是假的**。`e4_egress.py` 从未入库(git 全历史无此文件),而 `gateway.py:28` 的 `import e4_egress` 是真的,于是**整个网关一天都起不来**(`import gateway` → ModuleNotFoundError,6 个测试文件里 4 个连收集都过不去,`start-stack.ps1` 必失败)。根因:07-30 的 commit 4f49a63 把 gateway 挂点夹带进一个客户端提交,模块本体没 stage。<br>**07-31 已补齐并实测**:`e4_egress.py`(E1 检测器的薄封装,**签名里没有 override 参数** —— 出境的放行能力在结构上不存在)+ `test_e4_egress.py` 18 条。gateway 全套 **233 PASS / 0 FAIL**(2026-08-03 实跑 10 个文件:caller_identity 10 · caller_policy 20 · e1 50 · e4_egress 18 · egress_registry 12 · gateway_e1 36 · imports 6 · lan_edge_policy 10 · local_only_registry 69 · no_proxy 2 —— 增量来自调用方判据改 allowlist 与 local_only 两组新测试)。**仍缺方向 B**(响应回程闸:上游返回 / P3d Signal 出口的扫描点)。**接外联通道之前必须补方向 B** |
 
 > P1 阶段的全部阻塞(语音栈选型 · C4 语料 · llama.cpp · 桌面基线)**均已解除**。
 
@@ -363,7 +363,7 @@ powershell -ExecutionPolicy Bypass -File "E:\.meine\.Proj_Soft\.Proj\.localAI\90
 |---|---|---|
 | **P3a** | 恢复演练 · 备份目标 · 活库备份方式 | ✅ 三项全部满足(2026-07-28 真机验证) |
 | **P3b** | 待决事项 1 裁定 | ✅ 已裁定(D43 S0.4=移除 Tailscale);四问已答、审计通过、已开工 |
-| **P3b** | **LAN TLS 与绑 LAN 捆绑交付** | 🔵 **进行中**:S0 决议已落(D43,精简优先)。**做不出 TLS 之前继续只绑回环**;S1–S4 回环门禁全过前禁止非回环监听 |
+| **P3b** | **LAN TLS 与绑 LAN 捆绑交付** | ✅ **2026-07-29 已捆绑交付**:lan-edge 在 `<LAN IP>:8443` 跑 Kestrel + mTLS(UseHttps + 客户端证书校验),CA 私钥落 TPM;回环门禁全过。**本条前置解除** |
 | **P3c** | P3b 完成(客户端要能配对)+ P3a S1 | 🔵 S1 已完成;P3b ✅ 已实机验收(2026-07-29,见上) |
 | **P3c** | **★ 身份层「设备 × 成员」**(D45) | 🟡 **部分**:成员表已落(identity S1 selftest 14/14 · Store.cs 成员/角色/设备默认成员)。**端到端未通**:gateway/membership.py 只解析到设备、memory 无 `visibility_scope` 列、客户端拿不到成员 id(MemberContext 用设备本地哨兵)。⇒ D45 裁定 2/3 尚未生效,「仅本人」目前挡不住同机另一成员。已按用户裁定在此前提下开工,真身份接入排在 S4 之后 |
 | **P3d** | **响应侧出境闸** | 🔵 方向 A(请求出境 E4)✅ **2026-07-31 真正落地**(07-30 标 ✅ 系误记 —— 模块当时并不存在,详见上方阻塞表);方向 B(响应回程)❌ 仍是硬前置 |
@@ -438,7 +438,7 @@ vram_budget  =  15.92 − desktop_floor − 0.8      ← 导出值,不单独设
 | **PostgreSQL** | **18.4-2** · 服务 `pg-mem` · `.\ai-mem` · 仅 127.0.0.1:5432 · SSPI(无 DB 口令) | 2026-07-27 |
 | **Qdrant** | **v1.18.3**(pin)· `Qdrant` 6333/6334 + `Qdrant-s2` 6335/6336 · 均 `.\ai-mem` · 各自 api_key | 2026-07-27 |
 | **embedding** | bge-m3(1024 维)+ bge-reranker-v2-m3 · venv `D:\AI\venvs\embedding` · **transformers 钉 <5** | 2026-07-28 |
-| **Open WebUI** | 0.11.0 · venv `D:\AI\venvs\openwebui` · DATA_DIR `D:\AI\state\openwebui` | 2026-07-28 |
+| ~~**Open WebUI**~~ | **已退役并归档(2026-08-03,D77)**:DATA_DIR 移入 `{state}\quarantine\20260803-openwebui\`(1.25 MB,库内 0 条对话);venv `D:\AI\venvs\openwebui` 待清 | 2026-08-03 |
 | **记忆库 venv** | `D:\AI\venvs\memory`(psycopg + httpx)· 记忆各模块与验收脚本在此运行 | 2026-07-28 |
 | **向量空间** | `mem.vector_space` 登记编码指纹:bge-m3 · 1024 · Cosine · 无前缀 · 归一化。**指纹不一致则拒绝启动** | 2026-07-28 |
 | **`{state}/secrets`** | `D:\AI\state\secrets` · 凭据与私钥的唯一落点 · 强 ACL(实测真 Deny ACE)· **且排除出备份**(实测:11 个金丝雀,`state` 计数纹丝不动;`robocopy /XD` 含嵌套一并挡住) | 2026-07-28 |
@@ -466,7 +466,7 @@ D1–D33 全部已决;**D34–D41 于 2026-07-28 新增**(架构改向),其中 4
 - 后端 llama-server **无鉴权** —— 网关不是唯一咽喉,同机进程可直连 18081 绕过 E1/审计。
   ★ **D65 把这条从"技术债"升级为"待决项 6 的一半"**:Windows 防火墙不过滤回环、账户 ACL 管不了 TCP,
   所以对一个跑在本机的 Agent Worker,这条**默认成立且无法用现有手段封堵**
-- `/health` 与 `/v1/models` **不做身份校验**(信息量低,但与其他端点不一致)
+- `/health` 不做身份校验 —— **S3 已收窄为只回 `{status:ok}`,设计如此,不是欠账**。~~`/v1/models`~~ **已于 P3b S3 纳入认证**(ROUTE_TIERS 标 authenticated + remote-unauthenticated 401),本条撤销
 - 身份解析是**同步阻塞调用**跑在 async 端点里(WMI ~250ms 会卡事件循环)
 - schema 中标 `[推断]` 的列是设计发明,待 P3a 最终化
 - 审计日志 `session_id` 恒为 `unknown` —— Open WebUI 不发 `X-Session-Id`,凭证命中记录无法关联到具体对话

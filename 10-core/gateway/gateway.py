@@ -5,7 +5,7 @@
 
 ★ 本文件是骨架:别名路由 + 契约回写已实装并可测。
   安全层(下方 STUB 标注)是 P2 后续填的,当前明确未实装 —— 不假装有:
-    - 认证:D28 本机走 OS 信任(loopback + 登录用户)/ 远程走 WebAuthn
+    - 认证:D28 本机走 OS 信任(loopback + 登录用户,判据是 allowlist 见下)/ 远程经 LAN Edge mTLS(D34 已作废 WebAuthn)
     - 权限:六元组 + 按档位挂工具池(§6.3)
     - 出境闸门:§4.6(escalate.cloud 才需要)
     - 审计:§9
@@ -352,13 +352,14 @@ _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), trust_env
 
 # ────────────────────────────────────────────────────────────
 # 认证(D28)+ 调用方 OS 身份(D30 混淆代理修正)
-# 本机(loopback)→ 解析调用方账户(port→PID→WMI GetOwner)→ 隔离服务账户(ai-asset/ai-exec)拒绝,
-# 其余(人类 / ai-mem)trusted-local。远程 → WebAuthn(P2 后续,当前 401)。
+# 本机(loopback)→ 解析调用方账户(port→PID→WMI GetOwner)→ 隔离服务账户拒绝(见 LOCAL_DENY_ACCOUNTS);
+# 远程 → 经 LAN Edge 的 mTLS 通道(D34 已作废 WebAuthn,D43 改走 mTLS),直连本口一律 401。
 #
-# ★ fail 策略(重要):解析不到账户时,当前 fail-open 为 trusted-local —— 因为网关【现在只转发
-#   chat,不代理记忆】,放行一个身份不明的本机调用方不构成记忆泄露。
-#   ★★ 一旦网关开始代理记忆/Qdrant(注入 api_key / 连 PG),那条路径【必须改用 require_trusted_local
-#   即 fail-closed】:必须 positively 解析到非隔离账户,否则拒。见下。
+# ★★ 判据是 **allowlist**(D30 修正,2026-08-03):只有登记在 `config/caller-accounts.toml` 里的账户
+#   才是 trusted-local;解析不到身份的、以及表外的一切账户,统统落 `unregistered-local`(降档不断连)。
+#   ——— 原来的 fail-open 判据(「解析不到就当 trusted-local」)已被实测推翻:
+#   两个未登记的外部 AI 沙箱账户(CodexSandboxOffline / Online)按它就能白拿最高档。
+#   记录见 worklog 2026-08.md「回头补一」。**这段注释以前描述的正是那条被推翻的判据。**
 # ────────────────────────────────────────────────────────────
 # ★ 只认 IPv4 回环。绝不能把 ::1 也当可信(2026-07-28 审查发现):
 #   caller_identity 只查 AF_INET(IPv4)表,对 ::1 调用方【永远解析不到身份】→ 恒 fail-open
@@ -496,8 +497,8 @@ async def chat_completions(request: Request):
     if caller == "remote-unauthenticated":
         return JSONResponse(
             status_code=401,
-            content={"error": {"message": "远程访问需 WebAuthn(P2 后续);本机请走 loopback",
-                               "type": "unauthenticated", "code": "webauthn_required"}},
+            content={"error": {"message": "远程访问须经 LAN Edge 的 mTLS 通道(D34/D43);本机请走 loopback",
+                               "type": "unauthenticated", "code": "mtls_required"}},
         )
     if caller == "denied-account":
         ident = caller_identity.account_from_request(request)
