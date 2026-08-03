@@ -21,16 +21,20 @@ public sealed class ReplyBar : UserControl
     static App TheApp => (App)Application.Current;
     bool _syncing;
 
-    readonly Slider _tone = new() { Minimum = 0, Maximum = 3, TickFrequency = 1, IsSnapToTickEnabled = true, IsMoveToPointEnabled = true };
     readonly ComboBox _lang = new(), _greet = new(), _close = new();
-    readonly TextBox _theirName = new(), _theirAddr = new(), _theirContact = new();
-    readonly TextBox _myName = new(), _myAddr = new(), _myContact = new(), _signDate = new();
+    readonly TextBox _theirName = new(), _theirAddr = new(), _theirPostal = new(), _theirContact = new();
+    readonly TextBox _myName = new(), _myAddr = new(), _myPostal = new(), _myContact = new(), _signDate = new();
 
-    static readonly string[] MediumNames = { "邮件", "纸质", "消息" };
-    static readonly string[] ToneNames = { "朋友", "普通", "正式", "行政" };
+    // 载体顺序:消息 -> 邮件 -> 信件(用户裁定 2026-08-03,由轻到重)。
+    // 界面顺序与枚举值不是一回事 —— 下面这张表把"第几格"翻译成 ReplyMedium。
+    static readonly string[] MediumNames = { "消息", "邮件", "信件" };
+    static readonly ReplyMedium[] MediumOrder = { ReplyMedium.Message, ReplyMedium.Email, ReplyMedium.Paper };
+    static int MediumSlot(ReplyMedium m) => Math.Max(0, Array.IndexOf(MediumOrder, m));
+    static readonly string[] ToneNames = { "熟人", "礼貌", "行政" };
 
     readonly List<Border> _mediumDots = new();
     readonly List<TextBlock> _mediumLabels = new();
+    readonly List<Border> _toneDots = new();
     readonly List<TextBlock> _toneLabels = new();
 
     public ReplyBar()
@@ -43,29 +47,29 @@ public sealed class ReplyBar : UserControl
         speech.ColumnDefinitions.Add(new ColumnDefinition());
         speech.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
         speech.ColumnDefinitions.Add(new ColumnDefinition());
-        var sLeft = new StackPanel();
+        var sLeft = new StackPanel { Orientation = Orientation.Horizontal };
         sLeft.Children.Add(PointerRow("载体", MediumNames, _mediumDots, _mediumLabels,
-                                      i => { if (!_syncing) SaveDoc(d => d.Medium = (ReplyMedium)i); }));
+                                      i => { if (!_syncing) SaveDoc(d => d.Medium = MediumOrder[i]); }));
         sLeft.Children.Add(ToneRow());
         Grid.SetColumn(sLeft, 0); speech.Children.Add(sLeft);
         var sRight = new StackPanel();
         sRight.Children.Add(Labeled("语言", _lang));
-        sRight.Children.Add(Labeled("问候", _greet));
-        sRight.Children.Add(Labeled("祝福", _close));
+        sRight.Children.Add(Labeled("问候", WithAdd(_greet, greeting: true)));
+        sRight.Children.Add(Labeled("祝福", WithAdd(_close, greeting: false)));
         Grid.SetColumn(sRight, 2); speech.Children.Add(sRight);
 
         // ---- 卡 2:对方信息(跟随会话)----
         var them = new StackPanel();
-        them.Children.Add(Field("姓名", _theirName, "[对方称呼]"));
-        them.Children.Add(Field("地址(只排进纸质)", _theirAddr, "[对方地址]"));
-        them.Children.Add(Field("联系(邮箱/手机)", _theirContact, "[对方联系方式]"));
+        them.Children.Add(Field(_theirName, "对方称呼"));
+        them.Children.Add(AddressField(_theirAddr, _theirPostal, "对方地址(只排进纸质)", "邮编 + 地区"));
+        them.Children.Add(Field(_theirContact, "对方联系方式"));
 
         // ---- 卡 3:我方信息(常驻模板 + 署名日期)----
         var mine = new StackPanel();
-        mine.Children.Add(Field("署名", _myName, "[我的署名]"));
-        mine.Children.Add(Field("地址", _myAddr, "[我的地址]"));
-        mine.Children.Add(Field("联系(邮箱/手机)", _myContact, "[我的联系方式]"));
-        mine.Children.Add(Field("署名日期(纸质)", _signDate, "空 = 生成当天"));
+        mine.Children.Add(Field(_myName, "我的署名"));
+        mine.Children.Add(AddressField(_myAddr, _myPostal, "我的地址", "邮编 + 地区"));
+        mine.Children.Add(Field(_myContact, "我的联系方式(邮箱/手机)"));
+        mine.Children.Add(Field(_signDate, "署名日期 · 纸质用,空 = 当天"));
 
         // ★ 星号宽度:用语要两列所以宽些;两张信息卡窄(用户裁定),窄窗口一起等比压缩
         var grid = new Grid { Height = BarHeight };
@@ -107,20 +111,21 @@ public sealed class ReplyBar : UserControl
     /// </summary>
     FrameworkElement PointerRow(string label, string[] names, List<Border> dots, List<TextBlock> labels, Action<int> pick)
     {
-        var box = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+        // 竖直排布(用户裁定 2026-08-03):档名在圆点右边一行一个,横向只占一列宽 ——
+        //   横向摆三四个档名太吃宽度,竖着摆省下的宽度留给信息卡。
+        var box = new StackPanel { Margin = new Thickness(0, 0, 14, 0) };
         box.Children.Add(Ui.Caption(label));
+        var body = new Grid { Margin = new Thickness(2, 3, 0, 0) };
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13) });
+        body.ColumnDefinitions.Add(new ColumnDefinition());
+        for (int i = 0; i < names.Length; i++) body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var track = new Grid { Margin = new Thickness(0, 6, 0, 3), Height = 10 };
-        for (int i = 0; i < names.Length; i++) track.ColumnDefinitions.Add(new ColumnDefinition());
-        // 轨道线:贯穿全宽、恒定灰 —— 它只表示"这些档位在一条线上",不表示进度
-        var line = new Border { Height = 1, VerticalAlignment = VerticalAlignment.Center,
-                                Margin = new Thickness(6, 0, 6, 0) };
+        // 竖直轨道线:贯穿全部档位、恒定灰 —— 只说明"这些档位在一条线上",不表示进度
+        var line = new Border { Width = 1, HorizontalAlignment = HorizontalAlignment.Center,
+                                Margin = new Thickness(0, 8, 0, 8) };
         line.SetResourceReference(Border.BackgroundProperty, "Border");
-        Grid.SetColumnSpan(line, names.Length);
-        track.Children.Add(line);
-
-        var row = new Grid();
-        for (int i = 0; i < names.Length; i++) row.ColumnDefinitions.Add(new ColumnDefinition());
+        Grid.SetRowSpan(line, names.Length);
+        body.Children.Add(line);
 
         for (int i = 0; i < names.Length; i++)
         {
@@ -129,46 +134,66 @@ public sealed class ReplyBar : UserControl
                                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
                                    Cursor = System.Windows.Input.Cursors.Hand, BorderThickness = new Thickness(1) };
             dot.MouseLeftButtonUp += (_, e) => { e.Handled = true; pick(idx); };
-            Grid.SetColumn(dot, i);
-            track.Children.Add(dot);
+            Grid.SetRow(dot, i);
+            body.Children.Add(dot);
             dots.Add(dot);
 
-            var t = new TextBlock { Text = names[i], TextAlignment = TextAlignment.Center,
+            var t = new TextBlock { Text = names[i], Margin = new Thickness(6, 2, 0, 2),
                                     Cursor = System.Windows.Input.Cursors.Hand };
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
             t.MouseLeftButtonUp += (_, e) => { e.Handled = true; pick(idx); };
-            Grid.SetColumn(t, i);
-            row.Children.Add(t);
+            Grid.SetRow(t, i); Grid.SetColumn(t, 1);
+            body.Children.Add(t);
             labels.Add(t);
         }
-        box.Children.Add(track);
-        box.Children.Add(row);
+        box.Children.Add(body);
         return box;
     }
 
-    /// <summary>语气用真滑条:朋友→行政【确实】是由随意到正式的梯度,填充在这儿有意义。</summary>
+    /// <summary>语气与载体同款竖直指针 —— 三档之后滑条已无必要,也省下横向空间。</summary>
     FrameworkElement ToneRow()
+        => PointerRow("语气", ToneNames, _toneDots, _toneLabels,
+                      i => { if (!_syncing) SaveDoc(d => { d.Tone = (ReplyTone)i; d.GreetingIndex = 0; d.ClosingIndex = 0; }); });
+
+    /// <summary>下拉右侧挂一个「+」:自定义问候/祝福(跨会话共用,存 Profile)。</summary>
+    FrameworkElement WithAdd(ComboBox cb, bool greeting)
     {
-        var box = new StackPanel();
-        box.Children.Add(Ui.Caption("语气"));
-        _tone.Margin = new Thickness(0, 2, 0, 1);
-        box.Children.Add(_tone);
-        var row = new Grid();
-        for (int i = 0; i < ToneNames.Length; i++)
+        var row = new DockPanel { LastChildFill = true };
+        var plus = new TextBlock { Text = "+", FontWeight = FontWeights.SemiBold, Margin = new Thickness(6, 0, 2, 0),
+                                   VerticalAlignment = VerticalAlignment.Center, Cursor = System.Windows.Input.Cursors.Hand,
+                                   ToolTip = greeting ? "自定义问候语" : "自定义祝福语" };
+        plus.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        plus.MouseLeftButtonUp += (_, e) => { e.Handled = true; AskCustom(greeting, plus); };
+        DockPanel.SetDock(plus, Dock.Right);
+        row.Children.Add(plus);
+        row.Children.Add(cb);
+        return row;
+    }
+
+    void AskCustom(bool greeting, FrameworkElement anchor)
+    {
+        var box = new TextBox { Padding = new Thickness(8, 5, 8, 5), Width = 240 };
+        var body = new StackPanel();
+        body.Children.Add(Ui.Caption(greeting ? "写一句你自己的问候语:" : "写一句你自己的祝福语:"));
+        box.Margin = new Thickness(0, 4, 0, 6);
+        body.Children.Add(box);
+        var ok = Ui.Primary("加入清单", (_, _) =>
         {
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-            var idx = i;
-            var t = new TextBlock { Text = ToneNames[i], Cursor = System.Windows.Input.Cursors.Hand,
-                                    TextAlignment = i == 0 ? TextAlignment.Left
-                                                  : i == ToneNames.Length - 1 ? TextAlignment.Right : TextAlignment.Center };
-            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            t.MouseLeftButtonUp += (_, e) => { e.Handled = true; _tone.Value = idx; };
-            Grid.SetColumn(t, i);
-            row.Children.Add(t);
-            _toneLabels.Add(t);
-        }
-        box.Children.Add(row);
-        return box;
+            var st = TheApp.Reply;
+            var d = st.Doc;
+            var idx = st.AddCustom(greeting, box.Text, d.Language, d.Tone);
+            if (idx >= 0)
+            {
+                st.EnsureSession();
+                if (greeting) d.GreetingIndex = idx; else d.ClosingIndex = idx;
+                st.Touch();
+            }
+            Overlay.CloseActive();
+        });
+        ok.HorizontalAlignment = HorizontalAlignment.Right;
+        body.Children.Add(ok);
+        Flyout.Show(anchor, greeting ? "自定义问候" : "自定义祝福", body, width: 280);
+        box.Focus();
     }
 
     static FrameworkElement Labeled(string label, FrameworkElement el)
@@ -180,15 +205,16 @@ public sealed class ReplyBar : UserControl
         return p;
     }
 
-    /// <summary>带 [方括号] 占位提示的输入框 —— 空着时告诉你这一格会被填成什么。</summary>
-    static FrameworkElement Field(string label, TextBox tb, string placeholder)
+    /// <summary>
+    /// 只有输入框、【不带标题】(用户裁定 2026-08-03):空栏里的占位字样已经说明这一格是什么,
+    /// 再加一行标题纯属重复,还白吃一行高度。
+    /// </summary>
+    static FrameworkElement Field(TextBox tb, string placeholder)
     {
-        var p = new StackPanel { Margin = new Thickness(0, 0, 0, 4) };
-        p.Children.Add(Ui.Caption(label));
-        tb.Padding = new Thickness(5, 2, 5, 2);
-        tb.Margin = new Thickness(0, 1, 0, 0);
+        var p = new StackPanel { Margin = new Thickness(0, 0, 0, 5) };
+        tb.Padding = new Thickness(5, 3, 5, 3);
         var hint = new TextBlock { Text = placeholder, IsHitTestVisible = false,
-                                   Margin = new Thickness(7, 3, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                                   Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
         hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         hint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         void Sync() => hint.Visibility = tb.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -201,6 +227,42 @@ public sealed class ReplyBar : UserControl
         return p;
     }
 
+    /// <summary>
+    /// ★ 地址 = 【融合的两栏】(用户裁定 2026-08-03):上行街道地址、下行【右侧】邮编+地区,
+    ///   共用一个边框看着是一格 —— 比让人在单行里敲回车可控:排版时两行各就各位,不靠用户手动断行。
+    /// </summary>
+    static FrameworkElement AddressField(TextBox line1, TextBox line2, string ph1, string ph2)
+    {
+        static Grid Cell(TextBox tb, string ph, bool right)
+        {
+            tb.BorderThickness = new Thickness(0);
+            tb.Background = Brushes.Transparent;
+            tb.Padding = new Thickness(5, 3, 5, 3);
+            tb.TextAlignment = right ? TextAlignment.Right : TextAlignment.Left;
+            var hint = new TextBlock { Text = ph, IsHitTestVisible = false,
+                                       HorizontalAlignment = right ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+                                       VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 7, 0) };
+            hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            hint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            void Sync() => hint.Visibility = tb.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            tb.TextChanged += (_, _) => Sync();
+            Sync();
+            var g = new Grid();
+            g.Children.Add(tb); g.Children.Add(hint);
+            return g;
+        }
+        var stack = new StackPanel();
+        stack.Children.Add(Cell(line1, ph1, right: false));
+        var sep = new Border { Height = 1, Margin = new Thickness(5, 0, 5, 0) };
+        sep.SetResourceReference(Border.BackgroundProperty, "Border");
+        stack.Children.Add(sep);
+        stack.Children.Add(Cell(line2, ph2, right: true));
+        var box = new Border { Child = stack, BorderThickness = new Thickness(1), Margin = new Thickness(0, 0, 0, 5) };
+        box.SetResourceReference(Border.BorderBrushProperty, "Border");
+        box.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        return box;
+    }
+
     void SaveDoc(Action<ReplyDoc> set)
     {
         TheApp.Reply.EnsureSession();
@@ -210,12 +272,6 @@ public sealed class ReplyBar : UserControl
 
     void WireEvents()
     {
-        _tone.ValueChanged += (_, _) =>
-        {
-            HighlightTone((int)_tone.Value);
-            if (_syncing) return;
-            SaveDoc(d => { d.Tone = (ReplyTone)(int)_tone.Value; d.GreetingIndex = 0; d.ClosingIndex = 0; });
-        };
         _lang.SelectionChanged += (_, _) => { if (!_syncing && _lang.SelectedItem is ComboBoxItem { Tag: string c }) SaveDoc(d => d.Language = c); };
         _greet.SelectionChanged += (_, _) => { if (!_syncing) SaveDoc(d => d.GreetingIndex = Math.Max(0, _greet.SelectedIndex)); };
         _close.SelectionChanged += (_, _) => { if (!_syncing) SaveDoc(d => d.ClosingIndex = Math.Max(0, _close.SelectedIndex)); };
@@ -229,32 +285,29 @@ public sealed class ReplyBar : UserControl
             };
         Txt(_theirName, v => TheApp.Reply.Doc.TheirName = v, true);
         Txt(_theirAddr, v => TheApp.Reply.Doc.TheirAddress = v, true);
+        Txt(_theirPostal, v => TheApp.Reply.Doc.TheirPostal = v, true);
         Txt(_theirContact, v => TheApp.Reply.Doc.TheirContact = v, true);
         Txt(_signDate, v => TheApp.Reply.Doc.SignDate = v, true);   // 日期随信,不随模板
         // 我方三项 = 常驻模板:不建会话、跨会话共享
         Txt(_myName, v => TheApp.Reply.Profile.MyName = v, false);
         Txt(_myAddr, v => TheApp.Reply.Profile.MyAddress = v, false);
+        Txt(_myPostal, v => TheApp.Reply.Profile.MyPostal = v, false);
         Txt(_myContact, v => TheApp.Reply.Profile.MyContact = v, false);
     }
 
-    void HighlightMedium(int sel)
+    void HighlightMedium(int sel) => Paint(_mediumDots, _mediumLabels, sel);
+
+    void HighlightTone(int sel) => Paint(_toneDots, _toneLabels, sel);
+
+    static void Paint(List<Border> dots, List<TextBlock> labels, int sel)
     {
-        for (int i = 0; i < _mediumDots.Count; i++)
+        for (int i = 0; i < dots.Count; i++)
         {
             var on = i == sel;
-            _mediumDots[i].SetResourceReference(Border.BackgroundProperty, on ? "Accent" : "BgSurface");
-            _mediumDots[i].SetResourceReference(Border.BorderBrushProperty, on ? "Accent" : "Border");
-            _mediumLabels[i].SetResourceReference(TextBlock.ForegroundProperty, on ? "Accent" : "FgMuted");
-            _mediumLabels[i].FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
-        }
-    }
-
-    void HighlightTone(int sel)
-    {
-        for (int i = 0; i < _toneLabels.Count; i++)
-        {
-            _toneLabels[i].SetResourceReference(TextBlock.ForegroundProperty, i == sel ? "Accent" : "FgMuted");
-            _toneLabels[i].FontWeight = i == sel ? FontWeights.SemiBold : FontWeights.Normal;
+            dots[i].SetResourceReference(Border.BackgroundProperty, on ? "Accent" : "BgSurface");
+            dots[i].SetResourceReference(Border.BorderBrushProperty, on ? "Accent" : "Border");
+            labels[i].SetResourceReference(TextBlock.ForegroundProperty, on ? "Accent" : "FgMuted");
+            labels[i].FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
         }
     }
 
@@ -265,8 +318,16 @@ public sealed class ReplyBar : UserControl
         _syncing = true;
         try
         {
-            HighlightMedium((int)d.Medium);
-            _tone.Value = (int)d.Tone; HighlightTone((int)d.Tone);
+            HighlightMedium(MediumSlot(d.Medium));
+            HighlightTone((int)d.Tone);
+            // ★ 语言只列【设置里勾的语言池】(用户裁定 2026-08-03)——
+            //   回信要用的语言就那几种,整本目录翻起来没意义。池是空的就退回母语一项,不给空下拉。
+            var pool = TheApp.Settings.TranslationPool?.Where(x => Languages.Find(x) is not null).ToList() ?? new();
+            if (pool.Count == 0) pool.Add(d.Language);
+            if (!pool.Contains(d.Language)) pool.Insert(0, d.Language);   // 存的语言不在池里也得看得见
+            _lang.Items.Clear();
+            foreach (var code in pool)
+                _lang.Items.Add(new ComboBoxItem { Content = $"{Languages.Find(code)?.Name ?? code} ({code})", Tag = code });
             for (int i = 0; i < _lang.Items.Count; i++)
                 if (_lang.Items[i] is ComboBoxItem { Tag: string c } && c == d.Language) { _lang.SelectedIndex = i; break; }
             void FillCombo(ComboBox cb, string[] items, int sel)
@@ -275,12 +336,13 @@ public sealed class ReplyBar : UserControl
                 foreach (var x in items) cb.Items.Add(new ComboBoxItem { Content = x });
                 cb.SelectedIndex = Math.Clamp(sel, 0, items.Length - 1);
             }
-            FillCombo(_greet, ReplyState.GreetingsFor(d.Tone), d.GreetingIndex);
-            FillCombo(_close, ReplyState.ClosingsFor(d.Tone), d.ClosingIndex);
+            // 问候/祝福跟随【语言 + 语气】(用户裁定):换语言就换那门语言的说法
+            FillCombo(_greet, TheApp.Reply.Greetings(d.Language, d.Tone), d.GreetingIndex);
+            FillCombo(_close, TheApp.Reply.Closings(d.Language, d.Tone), d.ClosingIndex);
             void Set(TextBox tb, string v) { if (!tb.IsFocused && tb.Text != v) tb.Text = v; }
-            Set(_theirName, d.TheirName); Set(_theirAddr, d.TheirAddress); Set(_theirContact, d.TheirContact);
+            Set(_theirName, d.TheirName); Set(_theirAddr, d.TheirAddress); Set(_theirPostal, d.TheirPostal); Set(_theirContact, d.TheirContact);
             Set(_signDate, d.SignDate);
-            Set(_myName, me.MyName); Set(_myAddr, me.MyAddress); Set(_myContact, me.MyContact);
+            Set(_myName, me.MyName); Set(_myAddr, me.MyAddress); Set(_myPostal, me.MyPostal); Set(_myContact, me.MyContact);
         }
         finally { _syncing = false; }
     }

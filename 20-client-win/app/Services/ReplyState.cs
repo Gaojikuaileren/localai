@@ -11,17 +11,19 @@ namespace LocalAI.Client.Services;
 
 /// <summary>载体:邮件 / 纸质信件 / 短消息(滑条三档)。</summary>
 public enum ReplyMedium { Email, Paper, Message }
-/// <summary>语气:朋友 / 普通 / 正式 / 行政(滑条四档)。</summary>
-public enum ReplyTone { Friend, Normal, Formal, Official }
+/// <summary>语气三档(用户裁定 2026-08-03):熟人 / 礼貌 / 行政 —— 四档里"普通/正式"区分不明显,砍掉一档。</summary>
+public enum ReplyTone { Casual, Polite, Official }
 
 /// <summary>一封回信的全部状态(跟随会话落盘)。</summary>
 public sealed class ReplyDoc
 {
     public ReplyMedium Medium { get; set; } = ReplyMedium.Email;
-    public ReplyTone Tone { get; set; } = ReplyTone.Normal;
+    public ReplyTone Tone { get; set; } = ReplyTone.Polite;
     public string Language { get; set; } = "zh";
     public string TheirName { get; set; } = "";
     public string TheirAddress { get; set; } = "";
+    /// <summary>对方邮编 + 地区(与地址是【融合的两栏】:上行街道,下行右侧邮编地区)。</summary>
+    public string TheirPostal { get; set; } = "";
     public string TheirContact { get; set; } = "";
     /// <summary>署名日期:只用于纸质信件,空 = 生成当天。
     /// ★ UI 摆在【我方信息】卡里(署名是我方的事,用户裁定 2026-08-03),
@@ -39,7 +41,12 @@ public sealed class ReplyProfile
 {
     public string MyName { get; set; } = "";
     public string MyAddress { get; set; } = "";
+    /// <summary>我方邮编 + 地区(同上,融合两栏的下半)。</summary>
+    public string MyPostal { get; set; } = "";
     public string MyContact { get; set; } = "";
+    /// <summary>自定义问候/祝福(用户裁定 2026-08-03:可自行添加)—— 跨会话共用,跟着模板走。</summary>
+    public List<string> CustomGreetings { get; set; } = new();
+    public List<string> CustomClosings { get; set; } = new();
 }
 
 public sealed class ReplySave
@@ -83,22 +90,98 @@ public sealed class ReplyState
 
     public void Touch() => Changed?.Invoke();
 
-    // ---------------------------------------------------------------- 问候/祝福预设(按语气取)
-    public static string[] GreetingsFor(ReplyTone t) => t switch
+    // ---------------------------------------------------------------- 问候/祝福预设
+    // ★ 跟随【语言 + 语气】(用户裁定 2026-08-03):写德语信却给中文"此致敬礼"是错的。
+    //   目录里没有的语言退回英文一套 —— 如实用通行说法,不硬造。
+    //   用户可自定义追加(存 Profile.CustomGreetings/CustomClosings,跨会话共用)。
+    public const string NoGreeting = "(不加问候)";
+    public const string NoClosing = "(不加祝福)";
+
+    static string[] BuiltinGreetings(string lang, ReplyTone t) => lang switch
     {
-        ReplyTone.Friend => new[] { "(不加问候)", "嗨,", "好久不见!", "见字如面。" },
-        ReplyTone.Normal => new[] { "(不加问候)", "你好!", "展信佳。", "近来可好?" },
-        ReplyTone.Formal => new[] { "(不加问候)", "您好!", "展信安好。", "谨启者:" },
-        _ => new[] { "(不加问候)", "您好!", "敬启者:", "兹复函如下:" },
+        "zh" => t switch
+        {
+            ReplyTone.Casual => new[] { "嗨,", "好久不见!", "见字如面。" },
+            ReplyTone.Polite => new[] { "你好!", "您好!", "展信佳。" },
+            _ => new[] { "您好!", "敬启者:", "兹复函如下:" },
+        },
+        "ja" => t switch
+        {
+            ReplyTone.Casual => new[] { "やあ、", "お久しぶりです!", "こんにちは。" },
+            ReplyTone.Polite => new[] { "こんにちは。", "お世話になっております。", "お元気ですか。" },
+            _ => new[] { "拝啓", "謹啓", "平素より大変お世話になっております。" },
+        },
+        "de" => t switch
+        {
+            ReplyTone.Casual => new[] { "Hi,", "Hallo!", "Lange nicht gehört!" },
+            ReplyTone.Polite => new[] { "Hallo,", "Guten Tag,", "Liebe Grüße vorab," },
+            _ => new[] { "Sehr geehrte Damen und Herren,", "Sehr geehrte/r Frau/Herr,", "Bezugnehmend auf Ihr Schreiben," },
+        },
+        "fr" => t switch
+        {
+            ReplyTone.Casual => new[] { "Salut,", "Coucou !", "Ça fait longtemps !" },
+            ReplyTone.Polite => new[] { "Bonjour,", "Cher/Chère,", "J'espère que vous allez bien." },
+            _ => new[] { "Madame, Monsieur,", "Suite à votre courrier,", "Veuillez trouver ci-après notre réponse." },
+        },
+        _ => t switch      // en 及未收录语言:用通行英文说法
+        {
+            ReplyTone.Casual => new[] { "Hi,", "Hey!", "Long time no see!" },
+            ReplyTone.Polite => new[] { "Hello,", "Dear ,", "I hope this finds you well." },
+            _ => new[] { "Dear Sir or Madam,", "To whom it may concern,", "In reply to your letter," },
+        },
     };
 
-    public static string[] ClosingsFor(ReplyTone t) => t switch
+    static string[] BuiltinClosings(string lang, ReplyTone t) => lang switch
     {
-        ReplyTone.Friend => new[] { "(不加祝福)", "祝好!", "盼复!", "保重!" },
-        ReplyTone.Normal => new[] { "(不加祝福)", "祝一切顺利!", "顺祝安康!", "盼早日回复。" },
-        ReplyTone.Formal => new[] { "(不加祝福)", "此致敬礼!", "顺颂时祺!", "敬盼回复。" },
-        _ => new[] { "(不加祝福)", "此致敬礼!", "特此函复。", "顺颂公祺!" },
+        "zh" => t switch
+        {
+            ReplyTone.Casual => new[] { "祝好!", "盼复!", "保重!" },
+            ReplyTone.Polite => new[] { "祝一切顺利!", "顺祝安康!", "盼早日回复。" },
+            _ => new[] { "此致敬礼!", "特此函复。", "顺颂公祺!" },
+        },
+        "ja" => t switch
+        {
+            ReplyTone.Casual => new[] { "それでは!", "またね。", "お元気で。" },
+            ReplyTone.Polite => new[] { "よろしくお願いいたします。", "ご返信お待ちしております。", "ご自愛ください。" },
+            _ => new[] { "敬具", "謹白", "何卒よろしくお願い申し上げます。" },
+        },
+        "de" => t switch
+        {
+            ReplyTone.Casual => new[] { "Liebe Grüße", "Bis bald!", "Mach's gut!" },
+            ReplyTone.Polite => new[] { "Viele Grüße", "Beste Grüße", "Ich freue mich auf Ihre Antwort." },
+            _ => new[] { "Mit freundlichen Grüßen", "Hochachtungsvoll", "Für Rückfragen stehe ich zur Verfügung." },
+        },
+        "fr" => t switch
+        {
+            ReplyTone.Casual => new[] { "À bientôt !", "Bises,", "Prends soin de toi !" },
+            ReplyTone.Polite => new[] { "Cordialement,", "Bien à vous,", "Dans l'attente de votre réponse," },
+            _ => new[] { "Veuillez agréer mes salutations distinguées.", "Respectueusement,", "Je vous prie d'agréer l'expression de ma considération." },
+        },
+        _ => t switch
+        {
+            ReplyTone.Casual => new[] { "Cheers!", "Take care!", "Talk soon!" },
+            ReplyTone.Polite => new[] { "Best regards,", "Kind regards,", "Looking forward to your reply." },
+            _ => new[] { "Yours faithfully,", "Yours sincerely,", "Respectfully," },
+        },
     };
+
+    /// <summary>问候清单 = (不加) + 内置(按语言×语气) + 用户自定义。</summary>
+    public string[] Greetings(string lang, ReplyTone t)
+        => new[] { NoGreeting }.Concat(BuiltinGreetings(lang, t)).Concat(Profile.CustomGreetings).ToArray();
+
+    public string[] Closings(string lang, ReplyTone t)
+        => new[] { NoClosing }.Concat(BuiltinClosings(lang, t)).Concat(Profile.CustomClosings).ToArray();
+
+    /// <summary>自定义追加(跨会话共用)。重复/空不加;返回它在当前清单里的下标(-1 = 没加成)。</summary>
+    public int AddCustom(bool greeting, string text, string lang, ReplyTone t)
+    {
+        text = text.Trim();
+        if (text.Length == 0) return -1;
+        var list = greeting ? Profile.CustomGreetings : Profile.CustomClosings;
+        if (!list.Contains(text)) list.Add(text);
+        Changed?.Invoke();
+        return Array.IndexOf(greeting ? Greetings(lang, t) : Closings(lang, t), text);
+    }
 
     // ---------------------------------------------------------------- 格式装配(现在就真干活的部分)
     /// <summary>
@@ -108,12 +191,12 @@ public sealed class ReplyState
     /// <summary>空值一律换成 [方括号] 占位 —— 产出是可直接找替换的模板,而不是悄悄少一行。</summary>
     static string Or(string? v, string slot) => string.IsNullOrWhiteSpace(v) ? slot : v!.Trim();
 
-    public static string Compose(ReplyDoc d, ReplyProfile me)
+    public string Compose(ReplyDoc d, ReplyProfile me)
     {
-        var greet0 = GreetingsFor(d.Tone).ElementAtOrDefault(d.GreetingIndex) ?? "";
-        var close0 = ClosingsFor(d.Tone).ElementAtOrDefault(d.ClosingIndex) ?? "";
-        var greet = greet0.StartsWith("(") ? "" : greet0;
-        var close = close0.StartsWith("(") ? "" : close0;
+        var greet0 = Greetings(d.Language, d.Tone).ElementAtOrDefault(d.GreetingIndex) ?? "";
+        var close0 = Closings(d.Language, d.Tone).ElementAtOrDefault(d.ClosingIndex) ?? "";
+        var greet = greet0 == NoGreeting ? "" : greet0;
+        var close = close0 == NoClosing ? "" : close0;
         var call = Or(d.TheirName, "[对方称呼]") + ":";
         var body = d.Draft.Trim();
         var sb = new System.Text.StringBuilder();
@@ -142,6 +225,7 @@ public sealed class ReplyState
 
             default:   // Paper:完整信件格式 —— 地址块 / 称呼 / 正文(段首缩进)/ 祝福 / 右对齐署名+日期
                 sb.AppendLine(Or(d.TheirAddress, "[对方地址]"));
+                if (d.TheirPostal.Trim().Length > 0) sb.AppendLine(d.TheirPostal.Trim());
                 sb.AppendLine();
                 if (call.Length > 0) sb.AppendLine(call);
                 if (greet.Length > 0) sb.AppendLine("    " + greet);
@@ -156,6 +240,7 @@ public sealed class ReplyState
                 sb.AppendLine((sign + "  " + date).PadLeft(36));   // 右侧署名 + 日期(纸质专属)
                 sb.AppendLine();
                 sb.AppendLine(Or(me.MyAddress, "[我的地址]"));
+                if (me.MyPostal.Trim().Length > 0) sb.AppendLine(me.MyPostal.Trim());
                 sb.AppendLine(Or(me.MyContact, "[我的联系方式]"));
                 break;
         }

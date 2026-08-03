@@ -2296,22 +2296,23 @@ public static class Selftest
 
             // ---- 回信(D61,2026-08-03 用户裁定)----
             {
-                var rd = new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Tone = Services.ReplyTone.Formal,
+                var rd = new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Tone = Services.ReplyTone.Official,
                     TheirName = "王先生", TheirAddress = "北京市某街 2 号",
                     SignDate = "2026年8月3日", GreetingIndex = 1, ClosingIndex = 1,
                     Draft = "感谢来信。\n事情已办妥。" };
                 var me = new Services.ReplyProfile { MyName = "李四", MyAddress = "上海市某路 1 号", MyContact = "13800000000" };
-                var paper = Services.ReplyState.Compose(rd, me);
+                var rst = new Services.ReplyState();
+                var paper = rst.Compose(rd, me);
                 Assert(paper.Contains("王先生:") && paper.Contains("    您好!") && paper.Contains("此致敬礼!"),
                        "★ 纸质:称呼/缩进问候/祝福各就各位(格式装配是真的,不等引擎)");
                 Assert(paper.Contains("李四  2026年8月3日") && paper.Contains("北京市某街 2 号"),
                        "★ 纸质:右侧署名+日期、对方地址排入(日期只进纸质)");
                 rd.Medium = Services.ReplyMedium.Message;
-                var msg = Services.ReplyState.Compose(rd, me);
+                var msg = rst.Compose(rd, me);
                 Assert(!msg.Contains("2026年8月3日") && !msg.Contains("某街"),
                        "★ 短消息:不排日期不排地址(紧凑)");
                 rd.Medium = Services.ReplyMedium.Email;
-                var mail = Services.ReplyState.Compose(rd, me);
+                var mail = rst.Compose(rd, me);
                 Assert(mail.Contains("13800000000") && !mail.Contains("某路"),
                        "★ 邮件:带签名联系方式;地址只进纸质");
                 // 设置跟随会话:两个会话各自的 Doc 互不串
@@ -2323,10 +2324,20 @@ public static class Selftest
                 rs.SetSession(null);
                 Assert(rs.Doc.TheirName == "", "新进来 = 全默认(草稿态)");
                 // ★ 空值 -> [方括号] 模板占位(用户裁定 2026-08-03):产出是填空模板,不是悄悄少一行
-                var blank = Services.ReplyState.Compose(
+                var blank = rst.Compose(
                     new Services.ReplyDoc { Medium = Services.ReplyMedium.Paper, Draft = "正文" }, new Services.ReplyProfile());
                 Assert(blank.Contains("[对方称呼]") && blank.Contains("[我的署名]") && blank.Contains("[我的地址]"),
                        "★ 信息为空时装配成 [方括号] 占位,复制出去就是可找替换的模板");
+                // 问候/祝福跟随【语言 + 语气】,且可自定义追加(跨会话共用)
+                Assert(rst.Greetings("de", Services.ReplyTone.Official).Any(x => x.StartsWith("Sehr geehrte"))
+                    && rst.Greetings("zh", Services.ReplyTone.Official).Any(x => x.Contains("敬启者")),
+                       "★ 问候语跟随语言(德语信不给中文套语)");
+                Assert(rst.Closings("ja", Services.ReplyTone.Official).Contains("敬具"), "祝福同理随语言");
+                var addIdx = rst.AddCustom(true, "见信如晤", "zh", Services.ReplyTone.Polite);
+                Assert(addIdx > 0 && rst.Greetings("zh", Services.ReplyTone.Polite)[addIdx] == "见信如晤",
+                       "★ 可自定义追加问候语,追加后就在清单里");
+                Assert(rst.Profile.CustomGreetings.Count == 1 && rst.AddCustom(true, "见信如晤", "zh", Services.ReplyTone.Polite) > 0,
+                       "重复追加不会加出两条");
                 var rbSrc = TryReadSource(Path.Combine("Views", "ReplyBar.cs"));
                 if (rbSrc is not null)
                 {
@@ -2335,8 +2346,17 @@ public static class Selftest
                            "★ 载体用指针式选择器,不用带填充的滑条(没有进度语义)");
                     Assert(!rbSrc.Contains("new ScrollViewer"),
                            "★ 设置卡里不许【构造】滚动条 —— 内容按最小窗口算好,装得下(注释里提它不算)");
-                    Assert(rbSrc.Contains("Field(\"署名日期(纸质)\"") && rbSrc.Contains("CardOf(\"我方信息"),
+                    // 字段不再带标题(用户裁定 2026-08-03):占位字样已说明是什么,省一行高度
+                    var iMine = rbSrc.IndexOf("var mine = new StackPanel();", StringComparison.Ordinal);
+                    Assert(iMine >= 0 && rbSrc.IndexOf("署名日期", iMine, StringComparison.Ordinal) > iMine,
                            "★ 署名日期归【我方信息】卡(署名是我方的事)");
+                    Assert(rbSrc.Contains("AddressField(_myAddr, _myPostal") && rbSrc.Contains("AddressField(_theirAddr, _theirPostal"),
+                           "★ 地址是融合两栏:上行街道 + 下行右侧邮编地区(不靠用户手敲回车断行)");
+                    Assert(rbSrc.Contains("static readonly ReplyMedium[] MediumOrder = { ReplyMedium.Message, ReplyMedium.Email, ReplyMedium.Paper }"),
+                           "★ 载体界面顺序 消息-邮件-信件(与枚举值解耦)");
+                    Assert(!rbSrc.Contains("new Slider"), "★ 语气也改竖直指针,不再用滑条(三档 + 省横向空间)");
+                    Assert(rbSrc.Contains("TheApp.Settings.TranslationPool"),
+                           "★ 语言只列设置里勾的语言池,不翻整本目录");
                 }
                 var rpSrc = TryReadSource(Path.Combine("Views", "ReplyPanel.cs"));
                 if (rpSrc is not null)

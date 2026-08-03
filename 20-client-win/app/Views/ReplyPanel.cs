@@ -136,7 +136,7 @@ public sealed class ReplyPanel : UserControl
             var doc = st.Doc;
             if (doc.Draft.Trim().Length == 0)
             { ConfirmDialog.Show("还没有内容", "先在左上写你想回复的内容。", confirmText: "好", cancelText: "关闭"); return; }
-            doc.Result = ReplyState.Compose(doc, st.Profile);
+            doc.Result = st.Compose(doc, st.Profile);
             st.Touch();
         });
         gen.Margin = new Thickness(0, 0, 6, 0);
