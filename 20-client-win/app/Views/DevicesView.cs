@@ -222,60 +222,146 @@ public sealed class DevicesView : UserControl
     }
 
     // ---------------------------------------------------------------- 其它已配对的电脑(需主机管理 API)
+    // ================= P3c S4:管理面(仅主机本地回环)=================
+    // ★ 这张卡有两副面孔,取决于【这台是不是主机】,而"是不是"靠 ping 回环管理面拿肯定证据,
+    //   不靠猜拨号地址(见 HubAdmin 的说明)。
+    //   · 是主机 → 配对审批(六个词 + 倒计时 + 批准/拒绝)+ 设备列表与解除,全走 127.0.0.1;
+    //   · 不是   → 如实说这条路【结构上】走不通(不是版本问题),别让人等一个不会来的版本。
     UIElement RemoteDevicesCard()
     {
         var list = new StackPanel();
         var card = Ui.Card(Ui.Stack(
-            Ui.Subtitle("其它已配对的电脑"),
+            Ui.Subtitle("配对审批与设备管理"),
             list));
 
         if (!TheApp.Hub.IsPaired)
         {
             list.Children.Add(Ui.Body("配对之后才能查看家庭里的其它电脑。", muted: true));
-            return card;
+            list.Children.Add(Ui.Caption("★ 主机自己那台除外 —— 主机上的客户端不必先配对也能开管理面(配对审批本身归它管)。"));
         }
 
-        list.Children.Add(Ui.Body("正在读取…", muted: true));
-        _ = LoadRemoteDevices(list);
+        list.Children.Add(Ui.Body("正在探测主机管理面…", muted: true));
+        _ = LoadAdminPanel(list);
         return card;
     }
 
-    async Task LoadRemoteDevices(StackPanel list)
+    async Task LoadAdminPanel(StackPanel list)
     {
-        try
+        var admin = TheApp.HubAdmin;
+        var ok = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId);
+        List<PendingPair> pending = new();
+        List<AdminDevice> devices = new();
+        if (ok)
         {
-            var (status, body) = await TheApp.Hub.ListDevicesRawAsync();
-            Dispatcher.Invoke(() =>
-            {
-                list.Children.Clear();
-                if (status == 404)
-                {
-                    // ★ 这里的 404 【不是】"主机还没升级"(那是原来写的,是个假原因,审计 2026-07-31 确认)——
-                    //   按 D37/D48,/admin/* 只挂在主机本地的回环口上,局域网 mTLS 口对它一律 404,
-                    //   连存在性都不暴露。也就是说:从别的机器走这条路【永远】拿不到,升级也没用。
-                    //   把结构性的"走不通"说成"暂时还没有",会让人一直等一个不会来的版本。
-                    list.Children.Add(Ui.Body("设备管理只能在主机那台电脑上操作。", muted: true));
-                    list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口,局域网这条路结构上就到不了 —— 不是版本问题。要解除设备,请到主机上操作。"));
-                    return;
-                }
-                if (status == 403)
-                {
-                    list.Children.Add(Ui.Body("只有家庭安全管理员可以管理设备。", muted: true));
-                    return;
-                }
-                if (status != 200) { list.Children.Add(Ui.Body($"读取失败({status})。", muted: true)); return; }
-                RenderDevices(list, body);
-            });
+            try { pending = await admin.PendingAsync(); devices = await admin.DevicesAsync(); }
+            catch (Exception ex) { admin_err = ex.Message; }
         }
-        catch (Exception ex)
+
+        Dispatcher.Invoke(() =>
         {
-            Dispatcher.Invoke(() =>
+            list.Children.Clear();
+            if (!ok)
             {
-                list.Children.Clear();
-                list.Children.Add(Ui.Body("连不上中枢,暂时看不到设备列表。", muted: true));
-                list.Children.Add(Ui.Caption(ex.Message));
-            });
-        }
+                // ★ 结构性走不通,说清楚 ——「管理接口只开在主机本地的回环口」是 D37/D48 的设计,
+                //   不是"主机还没升级"。把结构性的走不通说成"暂时还没有",会让人一直等。
+                list.Children.Add(Ui.Body("这台不是主机 —— 配对审批与设备管理只能在主机上操作。", muted: true));
+                list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口(127.0.0.1:"
+                                             + Services.HubAdmin.AdminPort + "),局域网那条路结构上就到不了 —— 不是版本问题。"));
+                if (admin.LastError is { Length: > 0 } why) list.Children.Add(Ui.Caption("探测结果:" + why));
+                return;
+            }
+
+            list.Children.Add(Ui.Body($"本机就是主机(hub {admin.HubId})—— 管理面已连上。"));
+
+            // ---- 配对窗口:显式开关 ----
+            var winRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 4) };
+            winRow.Children.Add(Ui.Body(admin.PairingWindowOpen ? "配对窗口:开着" : "配对窗口:关着"));
+            var toggle = admin.PairingWindowOpen
+                ? Ui.Secondary("关掉窗口", async (_, _) => { await admin.WindowAsync(false); Build(); })
+                : Ui.Secondary("开 10 分钟", async (_, _) => { await admin.WindowAsync(true, 10); Build(); });
+            toggle.Margin = new Thickness(10, 0, 0, 0);
+            winRow.Children.Add(toggle);
+            list.Children.Add(winRow);
+            list.Children.Add(Ui.Caption("★ 窗口【不随开机自动打开】—— 开机自启 + 无条件开窗 = 每次开机在局域网上敞开一个无人值守的准入窗口。"));
+
+            // ---- 待批准的配对请求(S4 的正题)----
+            list.Children.Add(new Border { Height = 10 });
+            list.Children.Add(Ui.Body("待批准的配对请求"));
+            if (pending.Count == 0)
+                list.Children.Add(Ui.Caption(admin.PairingWindowOpen ? "现在没有等待批准的请求。" : "窗口关着,不会有新请求进来。"));
+            foreach (var p in pending) list.Children.Add(PendingRow(p));
+
+            // ---- 设备列表 ----
+            list.Children.Add(new Border { Height = 10 });
+            list.Children.Add(Ui.Body("已配对的电脑"));
+            var live = devices.Where(d => d.Status != "revoked").ToList();
+            if (live.Count == 0) list.Children.Add(Ui.Caption("还没有别的电脑配对进来。"));
+            foreach (var d in live) list.Children.Add(DeviceRow(d));
+        });
+    }
+
+    string? admin_err;
+
+    /// <summary>
+    /// 一条待批准的请求。★ 六个词要与对方屏幕上【逐字一致】才能按批准 ——
+    /// 界面只把两边的词摆出来,**绝不代人比对**,也不提供"跳过"。
+    /// </summary>
+    UIElement PendingRow(PendingPair p)
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 6, 0, 6) };
+        box.Children.Add(Ui.Body(p.DisplayName.Length > 0 ? p.DisplayName : "(未自报名)"));
+        var words = new TextBlock
+        {
+            Text = string.Join("  ", p.Sas),
+            FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+            FontSize = 18, Margin = new Thickness(0, 2, 0, 2), TextWrapping = TextWrapping.Wrap,
+        };
+        words.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        box.Children.Add(words);
+        box.Children.Add(Ui.Caption($"这六个词必须与那台电脑屏幕上显示的【逐字一致】。剩余 {Math.Max(0, p.SecondsLeft)} 秒。"));
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        var deny = Ui.Danger("拒绝", async (_, _) => { await TheApp.HubAdmin.DenyAsync(p.RequestId); Build(); });
+        var ok = Ui.Primary("词一致,批准", async (_, _) =>
+        {
+            if (!ConfirmDialog.Show("批准这台电脑",
+                    "确认那台电脑屏幕上显示的六个词与这里【逐字一致】吗?\n\n" + string.Join("  ", p.Sas)
+                    + "\n\n★ 不一致就意味着中间有人 —— 这时候必须点取消。",
+                    confirmText: "逐字核对过了,批准", cancelText: "取消")) return;
+            await TheApp.HubAdmin.ApproveAsync(p.RequestId);
+            Build();
+        });
+        ok.Margin = new Thickness(0, 0, 8, 0);
+        row.Children.Add(ok);
+        row.Children.Add(deny);
+        box.Children.Add(row);
+
+        var card = new Border { Child = box, Padding = new Thickness(10), BorderThickness = new Thickness(1) };
+        card.SetResourceReference(Border.BorderBrushProperty, "Accent");
+        card.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        return card;
+    }
+
+    UIElement DeviceRow(AdminDevice d)
+    {
+        var row = new DockPanel { Margin = new Thickness(0, 6, 0, 6), LastChildFill = true };
+        var revoke = Ui.Danger(Strings.Get("devices.revoke"), async (_, _) =>
+        {
+            if (!ConfirmDialog.Show(Strings.Get("devices.revoke"),
+                    Strings.Get("devices.revoke_confirm", ("device", d.DisplayName)),
+                    confirmText: Strings.Get("devices.revoke"), danger: true)) return;
+            await TheApp.HubAdmin.RevokeAsync(d.DeviceId);
+            Build();
+        });
+        DockPanel.SetDock(revoke, Dock.Right);
+        row.Children.Add(revoke);
+        // 自报名可能含恶意内容:只作显示(WPF 文本节点已转义),永不进 prompt。
+        // ★ 同名设备很常见(实机就有两条 SENIORBIRDS)—— 必须带上证书指纹短码,只按名字分不开。
+        var col = new StackPanel();
+        col.Children.Add(Ui.Body($"{d.DisplayName}   ·   {d.Status}"));
+        col.Children.Add(Ui.Caption("指纹 " + (d.CertShort ?? "(无活动证书)") + "   ·   " + d.DeviceId));
+        row.Children.Add(col);
+        return row;
     }
 
     void RenderDevices(StackPanel list, string json)

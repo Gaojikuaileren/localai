@@ -1,4 +1,4 @@
-# build-client.ps1 — 出一份可以拿到另一台机器上装的客户端产物(P3c 验收第一句)。
+﻿# build-client.ps1 — 出一份可以拿到另一台机器上装的客户端产物(P3c 验收第一句)。
 #
 # ★ 这不是「安装器」,是【可分发产物】。区别写在这儿,免得以后有人拿它当 MSI 用:
 #   · 它做的:单文件 exe + SHA256 + 版本戳 + 一页安装说明,打成一个目录(可整包拷走/压缩)。
@@ -44,14 +44,19 @@ if ($code -ne 0) { Write-Host "X 发布失败" -ForegroundColor Red; exit 1 }
 $exe = Join-Path $Out 'localai-client.exe'
 if (-not (Test-Path $exe)) { Write-Host "X 没有产出 exe" -ForegroundColor Red; exit 1 }
 
-Write-Host "[2] 自检(发布产物本身跑一遍)…"
-$selftest = & $exe --selftest
-$last = ($selftest | Select-Object -Last 1)
-if ($last -notmatch 'FAIL=0') {
-    Write-Host "X 发布产物自检没过:$last" -ForegroundColor Red
-    Write-Host "  ★ 不出包 —— 自检红着还打包,等于把已知坏的东西送到另一台机器上。" -ForegroundColor Red
+Write-Host "[2] 自检（发布产物本身跑一遍）…"
+# ★ 门禁看【退出码】而不是 stdout：客户端是 WinExe，自检靠 AttachConsole 把字写到
+#   【调用者的控制台】上，PowerShell 的管道根本接不到 —— 拿 $()抓它会得到空字符串。
+#   Selftest.Run() 的契约是：有一条红就返回 1。那才是可靠的那一位。
+& $exe --selftest
+$code = $LASTEXITCODE
+if ($code -ne 0) {
+    Write-Host ""
+    Write-Host "X 发布产物自检没过（退出码 $code）—— 上面就是它的输出。" -ForegroundColor Red
+    Write-Host "  ★ 不出包：自检红着还打包，等于把已知坏的东西送到另一台机器上。" -ForegroundColor Red
     exit 1
 }
+$last = "自检通过（退出码 0）"
 Write-Host "    $last"
 
 Write-Host "[3] 校验和与版本戳…"

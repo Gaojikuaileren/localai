@@ -4752,6 +4752,44 @@ public static class Selftest
                 }
             }
 
+            // ---- S4 · 配对审批与设备管理接【主机本地回环管理面】(D37/D48)----
+            {
+                var ha = new Services.HubAdmin();
+                Assert(Services.HubAdmin.DefaultAdminPort == 8442,
+                       "★ 回环管理端口与 lan-edge 的 AdminPort 常量一致 —— 对不上的表现是「主机上也说不是主机」");
+                Assert(!ha.Available && ha.HubId is null,
+                       "★ 没探测过之前一律【不可用】—— 管理面的可达性是探出来的,不是假设出来的");
+                // ★ 探一个必定连不上的端口:必须【如实说不可用】,不许 fail-open 成"可用"
+                Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", "1");
+                var probed = System.Threading.Tasks.Task.Run(async () => await new Services.HubAdmin().ProbeAsync("whatever")).GetAwaiter().GetResult();
+                Assert(!probed, "★★ 连不上就是连不上 —— 管理面探测 fail-closed(连不上却说可用 = 界面给出根本点不动的按钮)");
+                Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", null);
+
+                var haSrc = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
+                if (haSrc is not null)
+                {
+                    Assert(haSrc.Contains("http://127.0.0.1:") && !haSrc.Contains("https://"),
+                           "★ 管理面只走回环明文 —— 门禁是【端口 + 回环】而不是证书;在回环上再套 mTLS 会把"
+                           + "「主机自己管自己」绑死在「必须先配对成功」上,而配对审批本身就归它管(鸡生蛋)");
+                    Assert(haSrc.Contains("!string.Equals(HubId, expectHubId"),
+                           "★★ 连得上还不够:自报的 hubId 必须与本机档案一致 —— 同机可能跑着另一个中枢");
+                }
+                var dvSrc = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dvSrc is not null)
+                {
+                    Assert(dvSrc.Contains("ProbeAsync(TheApp.Hub.Profile?.HubId)"),
+                           "★ 界面拿【肯定证据】判断这台是不是主机,不拿 ThisMachineIsHub 那个启发式当权限判定");
+                    Assert(dvSrc.Contains("逐字一致") && dvSrc.Contains("这时候必须点取消"),
+                           "★★ 六个词【不代人比对】:界面只把词摆出来并要求人确认逐字一致,不提供跳过");
+                    // ★ 看【去注释后的正文】—— 解释“为什么不能这么写”的注释里就带着这个词,不脱注释会自己撞自己
+                    Assert(!Body(dvSrc).Contains("主机还没升级"),
+                           "★ 副机那条路是【结构性】走不通(D37/D48),不许再写成\"暂时还没有\" —— 那会让人等一个不会来的版本");
+                    var pend = Slice(dvSrc, "UIElement PendingRow(", "UIElement DeviceRow(");
+                    Assert(pend is not null && pend.Contains("SecondsLeft"),
+                           "★ 待批准的请求要显示剩余秒数 —— 到点它在主机侧就失效了,界面不能装作它还在");
+                }
+            }
+
             // ================= P3c 收尾(2026-08-03 用户裁定「把 P3c 收尾」)=================
             {
                 // ---- 记忆面板:判据四项里此前缺的【编辑】与【溯源展开】----
@@ -4827,8 +4865,10 @@ public static class Selftest
                 {
                     Assert(pack.Contains("SHA256") && pack.Contains("VERSION.txt") && pack.Contains("安装说明.txt"),
                            "★ 出包 = exe + 校验和 + 版本戳 + 一页说明(缺一样就说不清这份包是什么)");
-                    Assert(pack.Contains("FAIL=0"),
-                           "★★ 自检没过就不出包 —— 红着还打包等于把已知坏的东西送到另一台机器上");
+                    // ★ 门禁认【退出码】:客户端是 WinExe,自检靠 AttachConsole 写到调用者的控制台,
+                    //   PowerShell 的管道接不到 —— 拿 stdout 判会得到空字符串(实测踩过)。
+                    Assert(pack.Contains("") && pack.Contains("exit 1"),
+                           "★★ 自检没过就不出包(认退出码)—— 红着还打包等于把已知坏的东西送到另一台机器上");
                     Assert(pack.Contains("dirty"),
                            "★ 工作树不干净要写进版本戳,别让人拿到一个说不清来源的包");
                 }

@@ -23,6 +23,8 @@ public partial class App : Application
 
     public AppSettings Settings { get; private set; } = new();
     public HubClient Hub { get; private set; } = new();
+    /// <summary>主机本地管理面(仅回环)—— 配对审批与设备管理走它,见 HubAdmin 的说明。</summary>
+    public HubAdmin HubAdmin { get; } = new();
     /// <summary>全局任务中心:底部横条与全局抽屉共用同一份状态(用户裁定抽屉是全局的)。</summary>
     public TaskCenter Tasks { get; } = new();
     /// <summary>显存实时监视(左导航的显存条)。2 秒轮询,窗口不可见时自动停表。</summary>
