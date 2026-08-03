@@ -34,6 +34,33 @@ public sealed class ReplyDoc
     public string Incoming { get; set; } = "";       // 来信(可空)
     public string Draft { get; set; } = "";          // 我想回复的内容
     public string Result { get; set; } = "";         // 生成结果(装配产物)
+    /// <summary>这封信的历次生成记录(最新在后)。会话进不进列表就看它有没有记录。</summary>
+    public List<ReplyRecord> Records { get; set; } = new();
+    /// <summary>当前选中回看的记录;null = 正在写新的一条。</summary>
+    public string? SelectedRecordId { get; set; }
+}
+
+/// <summary>
+/// 一条【对话记录】(用户裁定 2026-08-03):按下「生成」才产生 —— 把当时的输入与设置整份存下来,
+/// 连同产出。选中它可回看/继续编辑;编辑后再生成【追加新记录】,不覆盖旧的。
+/// </summary>
+public sealed class ReplyRecord
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
+    public DateTime At { get; set; } = DateTime.Now;
+    /// <summary>还在生成中(AI 接入后是真的等待;此时输入框禁用,见 ReplyPanel)。</summary>
+    public bool Generating { get; set; }
+    public string Draft { get; set; } = "";
+    public string Incoming { get; set; } = "";
+    public string Result { get; set; } = "";
+    public ReplyMedium Medium { get; set; }
+    public ReplyTone Tone { get; set; }
+    public string Language { get; set; } = "zh";
+    public string TheirName { get; set; } = "";
+    public string TheirAddress { get; set; } = "";
+    public string TheirPostal { get; set; } = "";
+    public string TheirContact { get; set; } = "";
+    public string SignDate { get; set; } = "";
 }
 
 /// <summary>我方信息 —— 【常驻模板】(用户裁定 2026-08-03):很少改,跨会话共享,不随会话走。</summary>
@@ -75,7 +102,10 @@ public sealed class ReplyState
         ? (_docs.TryGetValue(sid, out var d) ? d : _docs[sid] = new ReplyDoc())
         : _scratch;
 
-    /// <summary>第一笔真实编辑时建会话(设置要跟随会话,没有会话就没有"跟随")。</summary>
+    /// <summary>
+    /// 建会话 —— ★【只在按下「生成」时调用】(用户裁定 2026-08-03):
+    ///   有了第一条对话记录,这条会话才进右侧会话列表;在那之前随便写随便调,不留一条空会话。
+    /// </summary>
     public void EnsureSession()
     {
         if (SessionId is not null) return;
@@ -246,6 +276,69 @@ public sealed class ReplyState
         }
         return sb.ToString().TrimEnd() + "\n";
     }
+
+    /// <summary>
+    /// 按下「生成」:先落一条【生成中】的记录(输入与设置整份快照),再把产出写回去。
+    /// ★ 永远【追加】—— 选中旧记录改完再生成,得到的是新的一条,旧的原样保留(用户裁定)。
+    /// ★ 装配是同步的,所以 Generating 立刻转 false;AI 接入(P4)后这里就是真的等待窗口。
+    /// </summary>
+    public ReplyRecord Generate()
+    {
+        EnsureSession();                 // 有记录才进会话列表 —— 就是这一刻
+        var d = Doc;
+        var rec = new ReplyRecord
+        {
+            Generating = true,
+            Draft = d.Draft, Incoming = d.Incoming,
+            Medium = d.Medium, Tone = d.Tone, Language = d.Language,
+            TheirName = d.TheirName, TheirAddress = d.TheirAddress,
+            TheirPostal = d.TheirPostal, TheirContact = d.TheirContact, SignDate = d.SignDate,
+        };
+        d.Records.Add(rec);
+        d.SelectedRecordId = rec.Id;
+        Changed?.Invoke();               // 先让界面看到"正在生成"
+
+        rec.Result = Compose(d, Profile);
+        rec.Generating = false;
+        d.Result = rec.Result;
+        Changed?.Invoke();
+        return rec;
+    }
+
+    /// <summary>删掉一条自定义问候/祝福(内置的删不掉 —— 那不是用户加的)。</summary>
+    public bool RemoveCustom(bool greeting, string text)
+    {
+        var ok = (greeting ? Profile.CustomGreetings : Profile.CustomClosings).Remove(text);
+        if (ok)
+        {
+            // 下标可能已经越界 —— 退回"不加",不要指着一条被删掉的
+            var d = Doc;
+            if (greeting) d.GreetingIndex = 0; else d.ClosingIndex = 0;
+            Changed?.Invoke();
+        }
+        return ok;
+    }
+
+    public bool IsCustom(bool greeting, string text)
+        => (greeting ? Profile.CustomGreetings : Profile.CustomClosings).Contains(text);
+
+    /// <summary>选中一条记录回看:把它的输入与设置读回编辑区(不动常驻模板)。</summary>
+    public void SelectRecord(string? id)
+    {
+        var d = Doc;
+        d.SelectedRecordId = id;
+        if (d.Records.FirstOrDefault(r => r.Id == id) is { } r)
+        {
+            d.Draft = r.Draft; d.Incoming = r.Incoming; d.Result = r.Result;
+            d.Medium = r.Medium; d.Tone = r.Tone; d.Language = r.Language;
+            d.TheirName = r.TheirName; d.TheirAddress = r.TheirAddress;
+            d.TheirPostal = r.TheirPostal; d.TheirContact = r.TheirContact; d.SignDate = r.SignDate;
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>当前是否有记录正在生成 —— 界面据此禁用输入(用户裁定)。</summary>
+    public bool Busy => Doc.Records.Any(r => r.Generating);
 
     // ---------------------------------------------------------------- 存档
     public ReplySave Export() => new() { Profile = Profile, Docs = new(_docs) };

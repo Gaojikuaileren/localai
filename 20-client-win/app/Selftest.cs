@@ -2338,6 +2338,14 @@ public static class Selftest
                        "★ 可自定义追加问候语,追加后就在清单里");
                 Assert(rst.Profile.CustomGreetings.Count == 1 && rst.AddCustom(true, "见信如晤", "zh", Services.ReplyTone.Polite) > 0,
                        "重复追加不会加出两条");
+                // ★ 加得进去就得删得掉(用户反馈 2026-08-03)
+                rst.Doc.GreetingIndex = rst.Greetings("zh", Services.ReplyTone.Polite).Length - 1;
+                Assert(rst.IsCustom(true, "见信如晤") && !rst.IsCustom(true, rst.Greetings("zh", Services.ReplyTone.Polite)[1]),
+                       "★ 分得清哪条是用户自己加的(内置的不给删)");
+                Assert(rst.RemoveCustom(true, "见信如晤") && rst.Profile.CustomGreetings.Count == 0,
+                       "★ 自定义问候语删得掉");
+                Assert(rst.Doc.GreetingIndex == 0, "★ 删掉选中项后下标退回【不加】,不能指着一条不存在的");
+                Assert(!rst.RemoveCustom(false, "敬具"), "内置祝福删不掉(那不是用户加的)");
                 var rbSrc = TryReadSource(Path.Combine("Views", "ReplyBar.cs"));
                 if (rbSrc is not null)
                 {
@@ -2347,16 +2355,32 @@ public static class Selftest
                     Assert(!rbSrc.Contains("new ScrollViewer"),
                            "★ 设置卡里不许【构造】滚动条 —— 内容按最小窗口算好,装得下(注释里提它不算)");
                     // 字段不再带标题(用户裁定 2026-08-03):占位字样已说明是什么,省一行高度
-                    var iMine = rbSrc.IndexOf("var mine = new StackPanel();", StringComparison.Ordinal);
-                    Assert(iMine >= 0 && rbSrc.IndexOf("署名日期", iMine, StringComparison.Ordinal) > iMine,
-                           "★ 署名日期归【我方信息】卡(署名是我方的事)");
+                    // ★ 署名日期已挪去生成键左边(用户裁定 2026-08-03),设置条里不应再有它
+                    Assert(!rbSrc.Contains("_signDate"), "★ 署名日期不在设置条 —— 它跟着【生成】走");
+                    // ★ 两卡的输入栏均分【卡内高度】,但底部留视觉间隔(用户反馈 2026-08-03)
+                    Assert(rbSrc.Contains("var them = Fields(") && rbSrc.Contains("var mine = Fields("),
+                           "★ 对方/我方信息的输入栏撑满卡高(不再是顶部堆一堆)");
+                    var iFields = rbSrc.IndexOf("static FrameworkElement Fields(", StringComparison.Ordinal);
+                    Assert(iFields >= 0 && rbSrc.IndexOf("GridUnitType.Star", iFields, StringComparison.Ordinal) > iFields
+                        && rbSrc.IndexOf("new Thickness(0, 0, 0, 6)", iFields, StringComparison.Ordinal) > iFields,
+                           "★ 均分用星号行高,且底部留 6px —— 撑满不等于贴死(用户补充)");
                     Assert(rbSrc.Contains("AddressField(_myAddr, _myPostal") && rbSrc.Contains("AddressField(_theirAddr, _theirPostal"),
                            "★ 地址是融合两栏:上行街道 + 下行右侧邮编地区(不靠用户手敲回车断行)");
+                    // ★ 融合栏得是【一块底色】—— 否则中间那条线把圆角切开,看着像两个控件(用户反馈 2026-08-03)
+                    var iAf = rbSrc.IndexOf("static FrameworkElement AddressField(", StringComparison.Ordinal);
+                    Assert(iAf >= 0 && rbSrc.IndexOf("box.SetResourceReference(Border.BackgroundProperty, \"BgSunken\")", iAf, StringComparison.Ordinal) > iAf,
+                           "★ 地址+邮编共用一层底色与圆角(视觉上就是一格)");
                     Assert(rbSrc.Contains("static readonly ReplyMedium[] MediumOrder = { ReplyMedium.Message, ReplyMedium.Email, ReplyMedium.Paper }"),
                            "★ 载体界面顺序 消息-邮件-信件(与枚举值解耦)");
                     Assert(!rbSrc.Contains("new Slider"), "★ 语气也改竖直指针,不再用滑条(三档 + 省横向空间)");
                     Assert(rbSrc.Contains("TheApp.Settings.TranslationPool"),
                            "★ 语言只列设置里勾的语言池,不翻整本目录");
+                    // ★ 语言列封顶在【列】上,不是给面板定宽(渲染图 2026-08-03:
+                    //   定宽在最小窗下被 Grid 剪掉右边,自定义的「+」整个没了)
+                    Assert(rbSrc.Contains("new ColumnDefinition { MaxWidth = 158 }") && !rbSrc.Contains("VerticalAlignment.Top, Width = 158"),
+                           "★ 语言/问候/祝福那列窄了跟着缩 —— 「+」在最小窗下也得点得到");
+                    Assert(rbSrc.Contains("RemoveCustom(greeting, text)"),
+                           "★ 自定义浮窗里列出已加的并给得了删(用户反馈:加得进删不掉)");
                 }
                 var rpSrc = TryReadSource(Path.Combine("Views", "ReplyPanel.cs"));
                 if (rpSrc is not null)
@@ -2365,6 +2389,13 @@ public static class Selftest
                     var iIn = rpSrc.IndexOf("Sect(\"来信(可留空)\"", StringComparison.Ordinal);
                     Assert(iDraft >= 0 && iIn > iDraft, "★ 我想回复的内容在上、来信在下(用户裁定对调)");
                     Assert(rpSrc.Contains("Sect(\"对话记录\""), "★ 生成结果下方多一块【对话记录】(四板块)");
+                    Assert(rpSrc.Contains("署名日期"), "★ 署名日期改放在生成键左边(跟产出挺在一起)");
+                    // ★ 动作排在板块【底部】:挤进标题行的话,最小窗宽下 DockPanel 先满足右侧按钮,
+                    //   标题只剩一个字的宽 —— 「生成结果」被压成竖排(渲染图 2026-08-03 拍到)
+                    Assert(rpSrc.Contains("DockPanel.SetDock(actions, Dock.Bottom)"),
+                           "★ 生成/署名日期/图标那排在板块底部,不挤标题行");
+                    Assert(rpSrc.Contains("Rebuild();   // ★ 先画一遍"),
+                           "★ 构造时先画一遍 —— 否则离屏渲染诊断里这一块永远是空的(骗自己)");
                 }
                 var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
                 Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");

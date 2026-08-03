@@ -255,6 +255,42 @@ public static class WheelTest
             Console.WriteLine("wheeltest: 会话面板渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
         }
 
+        // ★★ 回信场景整页 —— 四板块 + 下方三张设置卡。
+        //   这一块全是【高度分配】的活:字段撑不撑得满卡、地址融合栏的缝露不露、
+        //   指针圆点有没有挤在顶上 —— 断言一个都看不见,只有画出来才知道。
+        //   最小窗(960 客区约 900)与宽版各一张。
+        try
+        {
+            ThemeManager.Initialize(Skin.Breeze);
+            // ★ ChatView 建起来时自己会 SetSession(null) —— 所以种子得种在【草稿档】上,
+            //   种到某个会话里画出来的反而是空的(上一版就这样把按钮排漏掉了)。
+            app.Reply.SetScene(true);
+            app.Reply.SetSession(null);
+            var rd = app.Reply.Doc;
+            rd.Medium = Services.ReplyMedium.Paper;   // 纸质:地址/邮编/署名日期全亮着
+            rd.Incoming = "这是对方来信的正文。";
+            rd.Draft = "这是我想回复的意思。";
+            rd.Records.Add(new Services.ReplyRecord { Id = "wt-1", At = DateTime.Now.AddMinutes(-6),
+                Draft = "上一版的回复草稿,用来看看记录行长什么样", Medium = Services.ReplyMedium.Paper });
+            rd.Records.Add(new Services.ReplyRecord { Id = "wt-2", At = DateTime.Now, Generating = true,
+                Draft = "正在生成的那一条", Medium = Services.ReplyMedium.Paper, Tone = Services.ReplyTone.Official });
+            rd.SelectedRecordId = "wt-1";
+            app.Reply.AddCustom(true, "见信如晤", rd.Language, rd.Tone);
+            foreach (var (w, file) in new[] { (900.0, "reply-min.png"), (1180.0, "reply-wide.png") })
+            {
+                var rv = new ChatView("chat") { Width = w, Height = 640 };
+                rv.Measure(new Size(w, 640));
+                rv.Arrange(new Rect(0, 0, w, 640));
+                rv.UpdateLayout();
+                Save(Themed(rv), Path.Combine(outDir, file), (int)w + 40, 680);
+            }
+            app.Reply.SetScene(false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("wheeltest: 回信页渲染跳过(" + ex.GetType().Name + ": " + ex.Message + ")");
+        }
+
         // ★ 主页整页(天气改竖排折叠 + 日历往下延伸)—— 版面改动必须看图
         try
         {

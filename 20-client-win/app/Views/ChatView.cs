@@ -1159,14 +1159,16 @@ public sealed class ChatView : UserControl
             {
                 // 绑定当前选中的回信会话(没选中 = 草稿态,首笔编辑自建会话并选中)
                 TheApp.Reply.SetSession(_sessionId is { } rsid2 && TheApp.Chat.Find(rsid2)?.ReplyLetter == true ? _sessionId : null);
+                // ★ 与翻译空间同构(用户裁定 2026-08-03):会话卡【只框四个内容板块】,
+                //   用语/对方信息/我方信息 是下方【独立】的卡,不套在会话卡里。
                 var rBody = new DockPanel { LastChildFill = true };
                 DockPanel.SetDock(chatHead, Dock.Top);
                 rBody.Children.Add(chatHead);
                 var rBar = new ReplyBar { Margin = new Thickness(0, 10, 0, 0) };
                 DockPanel.SetDock(rBar, Dock.Bottom);
                 rBody.Children.Add(rBar);
-                rBody.Children.Add(new ReplyPanel());
-                return ConvCard(rBody);
+                rBody.Children.Add(ConvCard(new ReplyPanel()));
+                return rBody;
             }
             _chatSceneHead = chatHead;   // 聊天场景:切换条交给下面的常规装配挂在顶部
         }
