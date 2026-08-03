@@ -4984,14 +4984,15 @@ public static class Selftest
 
                     // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
                     var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
-                    // ★★ 两个下标都要【先确认存在】再比大小:IndexOf 找不到返回 -1,而 -1 恒小于任何下标 ——
-                    //   照着写 a < b 的话,把提权检查【整段删掉】断言反而是绿的。
-                    //   (这条本轮就先犯了一次:删掉检查后它没红,是证红那一步把它抓出来的。)
-                    var iElev = se?.IndexOf("Elevation.IsElevated()", StringComparison.Ordinal) ?? -1;
                     var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
-                    Assert(iElev >= 0 && iSpawn >= 0 && iElev < iSpawn,
-                           "★★ 拉起 Edge 之前先查本进程有没有提权 —— 子进程继承完整性等级,"
-                           + "提权的客户端拉起的 Edge 会立刻 exit 3 并报「密钥集不存在」,那句话指不到真正的原因");
+                    // ★★ 这里原来断言「拉起 Edge 之前先查本进程有没有提权」。**已退役,而且是反过来钉的**:
+                    //   同日实测推翻了那个判据 —— 本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,
+                    //   身份也是在 High 下铸的、在 High 下 CngKey.Open 得开。
+                    //   拿"是不是管理员"当门槛,会在这种机器上把一个本来能起来的中枢永远挡住,理由还是假的。
+                    //   ⇒ 现在要求的正相反:【不许】预判,直接试着起,让中枢自己说话。
+                    Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
+                           "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
+                           + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
                     Assert(se is not null && se.Contains("UseShellExecute = true"),
                            "★ 让 .cmd 开自己的控制台窗口 —— 出问题时那个窗口是唯一的现场,藏起来等于把证据丢掉");
                     var iWait = se?.IndexOf("admin.ProbeAsync", StringComparison.Ordinal) ?? -1;
@@ -5029,8 +5030,16 @@ public static class Selftest
                                + "是在替用户假设一件没看过的事");
                         Assert(hsBody.Contains("Win32Exception"),
                                "★ 用户在 UAC 上点「否」是【正常路径】,要如实说没放行会怎样,不是抛个异常了事");
-                        Assert(hsBody.Contains("Elevation.IsElevated()"),
-                               "★★ 铸身份前先查本进程有没有提权 —— 提权铸出来的 CA 普通用户永远打不开,且不可回退");
+                        // ★★ 同上,这条也退役并反过来钉:要紧的不是"是不是普通用户",
+                        //   而是【铸的时候和用的时候是不是同一个等级】—— 那要中枢侧把铸造等级记下来才能比,
+                        //   已写进 integrity-guard-asks-wrong-question-2026-08-03.md。
+                        Assert(!hsBody.Contains("Elevation.IsElevated()"),
+                               "★★ 铸身份不许拿「我是不是管理员」当门槛 —— "
+                               + "UAC 关闭的机器上根本没有普通身份的进程,那条门槛会把它彻底堵死");
+                        // ★ 这一条查的是**文件头注释**,所以看原文而不是 Body() —— Body() 会把注释剥掉。
+                        //   (刚写的时候就用错了 hsBody,当场红了一次。)
+                        Assert(hs.Contains("铸的时候和用的时候是不是同一个等级"),
+                               "★ 文件头要写清真正要防的是什么,免得后人又照着「普通用户」那句写回去");
                     }
                     var nicPick = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
                     Assert(nicPick is not null && nicPick.Contains("nics.Count == 1") && nicPick.Contains("请选一张"),
@@ -5157,10 +5166,19 @@ public static class Selftest
                     var findSlice = Slice(dvSrc, "在局域网里找回它", "find.Margin");
                     Assert(findSlice is not null && findSlice.Contains("HostToolsDir()"),
                            "★★ 「找回它」失败也要走同一条线索 —— 人会先点它,远早于滚到第三张卡");
-                    // ★ 钉到【那句报错原文】上 —— 只钉"普通用户"/"管理员"这两个词会被别处的文案蒙混过关
-                    Assert(Body(dvSrc).Contains("密钥集不存在") && Body(dvSrc).Contains("【普通用户】双击"),
-                           "★★ 必须先说管理员这条坑 —— Edge 一检测到管理员就退出,"
-                           + "而它报的「密钥集不存在」完全指不到真正的原因(我自己也踩了)");
+                    // ★★ 这里原来有一条断言,要求界面写明「必须用普通用户双击,否则报密钥集不存在」。
+                    //   **它已退役** —— 同日实测把那个说法推翻了:这台机器 EnableLUA=0(UAC 关闭),
+                    //   桌面 explorer 本身就是 High,身份就是在 High 下铸的,两把密钥在 High 进程里
+                    //   CngKey.Open 都成功。照那句写就是在界面上印一句假话。
+                    //   真正的判据是【密钥打不打得开】(见 Elevation.DeviceKeyUsable 与
+                    //   decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md)。
+                    //   ⇒ 现在钉的是:失败时把【中枢自己吐出来的原因】原样带出来,而不是我们替它编一个。
+                    Assert(Body(dvSrc).Contains("请看刚弹出来的那个黑色窗口"),
+                           "★★ 中枢起不来时指向它自己的窗口 —— 那里才有真实原因,"
+                           + "别用我们猜的理由(「你是不是用管理员跑的」)去盖住它");
+                    Assert(!Body(dvSrc).Contains("必须用【普通用户】双击"),
+                           "★★ 不许再断言「必须普通用户」—— UAC 关闭的机器上根本没有普通身份的进程,"
+                           + "那句话在那里是假的");
                     Assert(dvSrc.Contains("逐字一致") && dvSrc.Contains("这时候必须点取消"),
                            "★★ 六个词【不代人比对】:界面只把词摆出来并要求人确认逐字一致,不提供跳过");
                     // ★ 看【去注释后的正文】—— 解释“为什么不能这么写”的注释里就带着这个词,不脱注释会自己撞自己

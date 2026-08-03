@@ -172,50 +172,107 @@ public sealed class DevicesView : UserControl
     }
 
     /// <summary>手动重探一次(换了状态 —— 比如刚把 Edge 起起来 —— 用它,不用重开客户端)。</summary>
-    UIElement RecheckRow() => Ui.Secondary("重新检测这台的角色", (_, _) => { _role = HostRole.Unknown; Build(); });
+    UIElement RecheckRow() => Ui.Secondary("角色检测", (_, _) => { _role = HostRole.Unknown; Build(); });
 
-    /// <summary>本机多半就是主机,但中枢没起来。★ 只给唯一有用的那一步 —— 而且这一步能直接点。</summary>
+    /// <summary>
+    /// 本机多半就是主机,但中枢没起来。
+    ///
+    /// ★★ 这张卡【不摆按钮】。用户裁定:「无痛丝滑,不需要跑任何命令栏和设置」——
+    ///   那么"铸身份""起中枢"这些就是内部步骤,不是让人做选择的地方。进这一页就自己做完。
+    /// ★ 唯一会冒出按钮的情形只有两种,而且都是**真的需要人**:
+    ///   ① 防火墙规则不在 —— 那一步要系统授权框,绝不能不问自取地弹;
+    ///   ② 上面哪一步失败了 —— 给一次重试,并且把真实原因摆出来。
+    /// </summary>
     UIElement HubDownCard()
     {
-        var dir = Services.HubAdmin.HostToolsDir();
-        var cmd = Services.HubAdmin.StartEdgeCmd();
-        var st = Ui.Body("");
-        var stack = Ui.Stack(
-            Ui.Subtitle("中枢没在这台机器上运行"),
-            Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"));
-
-        // ★ 用户定的目标:用户不跑任何命令栏 —— 程序来跑。这一条按顺序做完
-        //   铸身份 → 放行防火墙(唯一需要 UAC 的一步)→ 起 Edge,每一步都如实报结果。
-        var setupHost = new StackPanel();
-        stack.Children.Add(new Border { Height = 10 });
-        stack.Children.Add(Ui.Primary("一次装好这台主机", (_, _) => BuildNicPicker(setupHost, st)));
-        stack.Children.Add(setupHost);
-        stack.Children.Add(Ui.Caption("做三件事:铸中枢身份(已有就跳过、绝不覆盖)、放行防火墙 8443"
-                                      + "(★ 这一步会弹一次系统的管理员授权框 —— 只有这一步需要)、启动中枢。"));
-
-        if (cmd is not null)
-        {
-            stack.Children.Add(new Border { Height = 10 });
-            stack.Children.Add(Ui.Body("或者只做其中一步:", muted: true));
-            stack.Children.Add(Ui.Primary("启动中枢(Edge)", async (_, _) => await StartEdgeAsync(cmd, st)));
-            stack.Children.Add(st);
-            // ★ 说清它凭什么能替你点:这不是"绕过"了那条护栏,而是本来就满足它。
-            stack.Children.Add(Ui.Caption("★ 客户端本身就以【普通用户】运行(D46 强制),它拉起的 Edge 继承同一个身份 —— "
-                                          + "正是 CA 私钥所在的那个上下文。所以这里点得动,而从提权的终端里拉就不行。"));
-            stack.Children.Add(Ui.Caption("也可以自己去双击:" + cmd));
-        }
-        else
-        {
-            stack.Children.Add(Ui.Caption("去主机端目录里双击 启动Edge.cmd:" + (dir ?? "(没找到主机端目录)")));
-            stack.Children.Add(Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
-                                          + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"));
-        }
-
-        if (TheApp.HubAdmin.LastError is { Length: > 0 } w) stack.Children.Add(Ui.Caption("探测结果:" + w));
-        stack.Children.Add(new Border { Height = 10 });
-        stack.Children.Add(RecheckRow());
-        return Ui.Card(stack);
+        _setupLines = new StackPanel();
+        _setupActions = new StackPanel();
+        var card = Ui.Card(Ui.Stack(
+            Ui.Subtitle("正在把这台准备成中枢主机…"),
+            // ★ 先把【观察到的事】说出来,再说我要做什么 —— 顺序反了就成了"我说了算"
+            Ui.Body("中枢没在这台机器上运行。本机装着主机端程序,所以这台应该就是主机。", muted: true),
+            _setupLines,
+            _setupActions,
+            new Border { Height = 10 },
+            // ★ 用户要求保留:换了状态(比如手动起了中枢)时不用重开客户端。
+            //   它【只重探】,不启动任何东西 —— 按钮必须只做它名字说的那件事(自检钉着)。
+            RecheckRow()));
+        _ = AutoSetupAsync();
+        return card;
     }
+
+    StackPanel? _setupLines;
+    StackPanel? _setupActions;
+
+    void Line(string text, bool muted = false) => Dispatcher.Invoke(() =>
+        _setupLines?.Children.Add(muted ? Ui.Caption(text) : Ui.Body(text)));
+
+    void ResetLines() => Dispatcher.Invoke(() =>
+    {
+        _setupLines?.Children.Clear();
+        _setupActions?.Children.Clear();
+    });
+
+    void Action(UIElement e) => Dispatcher.Invoke(() => _setupActions?.Children.Add(e));
+
+    /// <summary>
+    /// 自动把这台装成主机。★ 顺序:身份 → (防火墙,只在缺的时候才问)→ 起中枢。
+    /// ★ 每一步都把【实际结果】写出来,失败就停在那儿说真原因,不往下堆新错误。
+    /// </summary>
+    async Task AutoSetupAsync()
+    {
+        ResetLines();
+        try
+        {
+            // ---- ① 身份(不需要任何授权,直接做)----
+            Line("① 中枢身份:正在检查…", muted: true);
+            var id = await Services.HostSetup.EnsureIdentityAsync();
+            ResetLines();
+            Line(id.Outcome == Services.SetupOutcome.Failed
+                ? "① 中枢身份:没弄成 —— " + id.Detail
+                : "① 中枢身份:" + (id.Outcome == Services.SetupOutcome.Skipped ? "本来就有" : "已铸好"));
+            if (id.Outcome == Services.SetupOutcome.Failed) { Retry(); return; }
+
+            // ---- ② 防火墙:★ 只在【规则不在】时才出按钮,因为它要弹系统授权框 ----
+            if (await Services.HostSetup.FirewallRuleExistsAsync())
+            {
+                Line("② 防火墙 8443:本来就放行了");
+            }
+            else
+            {
+                Line("② 防火墙 8443:还没放行 —— 副机会连不上这台。");
+                Line("★ 这一步要弹一次系统授权框,所以不替你点。", muted: true);
+                Action(Ui.Primary("放行防火墙 8443(需要一次系统授权)", (_, _) => BuildNicPicker(_setupActions!, _setupStatus)));
+                Action(Ui.Secondary("先跳过(只在本机用)", async (_, _) => await StartEdgeStepAsync()));
+                Action(_setupStatus);
+                return;
+            }
+
+            // ---- ③ 起中枢 ----
+            await StartEdgeStepAsync();
+        }
+        catch (Exception ex)
+        {
+            // ★ 这是 fire-and-forget 调的 —— 不兜住的话界面就停在"正在…",而没人知道为什么
+            ResetLines();
+            Line("准备过程出错(" + ex.GetType().Name + "):" + ex.Message);
+            Retry();
+        }
+    }
+
+    readonly TextBlock _setupStatus = Ui.Body("");
+
+    async Task StartEdgeStepAsync()
+    {
+        var cmd = Services.HubAdmin.StartEdgeCmd();
+        if (cmd is null) { Line("③ 中枢:找不到 启动Edge.cmd"); Retry(); return; }
+        Line("③ 中枢:正在启动…");
+        Action(_setupStatus);
+        await StartEdgeAsync(cmd, _setupStatus);
+    }
+
+    /// <summary>失败之后给一次重试 —— 而且只有一个按钮,别让人在一堆选项里猜。</summary>
+    void Retry() => Action(Ui.Secondary("重试", (_, _) => { _ = AutoSetupAsync(); }));
 
     /// <summary>
     /// 防火墙规则要绑在【某一张网卡】上,所以先让人选一张 —— ★ 不替他挑:
@@ -288,24 +345,18 @@ public sealed class DevicesView : UserControl
     /// <summary>
     /// 替用户把中枢启起来。
     ///
-    /// ★★ 前提必须先查:客户端自己【不能】是提权的。
-    ///   子进程继承父进程的完整性等级 —— 提权的客户端拉起的 Edge 同样是 High,
-    ///   它会立刻 exit 3 并报「密钥集不存在」,而那句话完全指不到真正的原因。
-    ///   与其把一个注定失败的进程扔出去,不如当场说清楚。
-    ///   (D46 本来就要求客户端始终普通用户运行,这里是**再确认一次**,不是替代那条护栏。)
+    /// ★★ 这里【不再】预判"我是不是管理员"。同日实测推翻了那个判据:
+    ///   本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,身份也是在 High 下铸的,
+    ///   两把密钥在 High 进程里 CngKey.Open 都成功 —— 拿"是不是管理员"当门槛,
+    ///   会在这种机器上把一个本来能起来的中枢永远挡住,而且给的理由是假的。
+    ///   ⇒ 直接试着起,让中枢**自己**说话;失败时把人指向它自己的窗口,那里才有真实原因。
+    ///   (见 decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md)
     /// ★★ 拉起 ≠ 起来了:只有【回环管理面真的答话】才算数。在那之前一律说"正在等它应答",
     ///   绝不因为 Process.Start 没抛异常就宣布成功 —— 那是今天反复在修的那类谎。
     /// </summary>
     async Task StartEdgeAsync(string cmd, TextBlock status)
     {
         void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
-
-        if (Services.Elevation.IsElevated())
-        {
-            Say("这个客户端正以【管理员】身份运行,拉起来的 Edge 会继承同一个身份并立刻退出"
-                + "(它会报「密钥集不存在」)。请用普通方式重开客户端,或自己双击:" + cmd);
-            return;
-        }
 
         try
         {
@@ -345,8 +396,8 @@ public sealed class DevicesView : UserControl
         }
         // ★ 到点还没应答:如实说"没等到",并指向刚刚弹出来的那个窗口 —— 那里有真正的原因
         Say($"{StartEdgeWaitSeconds} 秒内没等到中枢应答。请看刚弹出来的那个黑色窗口 —— "
-            + "它里面就是失败原因(常见:身份是用管理员铸的、端口被占、或绑的网卡地址不存在了)。"
-            + "处理完点「重新检测这台的角色」。");
+            + "它里面就是失败原因(常见:端口被占、绑的网卡地址已经不存在了、或当前身份打不开中枢密钥)。"
+            + "处理完点「角色检测」。");
     }
 
 
@@ -500,7 +551,7 @@ public sealed class DevicesView : UserControl
                         ? "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
                           + " —— 而本机装着主机端程序,多半是这台的 Edge 还没启动。去双击 "
                           + (Services.HubAdmin.StartEdgeCmd() ?? Path.Combine(hd, "启动Edge.cmd"))
-                          + "(用普通用户,别用管理员)。"
+                          + "。"
                         : "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
                           + " —— 确认主机那台的 Edge 起着、两台在同一网段、防火墙放行了 8443。"));
                 }
