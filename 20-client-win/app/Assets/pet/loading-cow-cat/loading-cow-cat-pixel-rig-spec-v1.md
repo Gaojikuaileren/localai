@@ -5,7 +5,7 @@
 ## 0. 当前边界
 
 - 本文件是**角色美术、拆件与动画状态机规范**，不是 P8 已实现证明。
-- 当前推荐按 DragonBones 类骨骼/槽位方案准备素材；正式渲染后端仍须通过 A7-pet 实测。
+- ~~当前推荐按 DragonBones 类骨骼/槽位方案准备素材~~ → **已作废(D76)**:渲染为纯像素逐帧 6 fps,不做骨骼/槽位;A7-pet 的实测对象是「逐帧位图 + WPF 分层透明窗口 + DWM 合成」。
 - 当前主视觉参考：`loading-cow-cat-character-model-sheet-pixel-low-v2.png`（约 `192×128` 逻辑像素语言）。
 - `loading-cow-cat-character-model-sheet-pixel-v1.png` 保留为较高像素密度的对照稿，不作为当前造型基准。
 - 模型表只用于造型校准，**不能直接当拆件图集**；正式 atlas 必须补齐所有被遮挡关节与重叠像素。
