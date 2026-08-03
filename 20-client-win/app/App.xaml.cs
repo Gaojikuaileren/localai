@@ -359,8 +359,26 @@ public partial class App : Application
     readonly System.Windows.Threading.DispatcherTimer _saveDebounce =
         new() { Interval = TimeSpan.FromMilliseconds(400) };
 
+    /// <summary>
+    /// 幽灵会话的【不留痕】承诺在场景状态里也得算数(用户裁定 2026-08-03)。
+    /// 回信/译表/文件翻译各自按 sessionId 存一张文档表,ChatCenter 那层 Ghost 过滤管不到 ——
+    /// 所以这里接两根线:存盘时问一句"这条是不是幽灵"(不写),幽灵被抹时把文档一起删掉。
+    /// </summary>
+    void AttachGhostDiscipline()
+    {
+        bool IsGhost(string sid) => Chat.Find(sid)?.Ghost == true;
+        FileTrans.IsGhostSession = IsGhost;
+        I18n.IsGhostSession = IsGhost;
+        Reply.IsGhostSession = IsGhost;
+        Chat.GhostsPurged += ids =>
+        {
+            foreach (var id in ids) { FileTrans.Drop(id); I18n.Drop(id); Reply.Drop(id); }
+        };
+    }
+
     void AttachAutoSave()
     {
+        AttachGhostDiscipline();
         _saveDebounce.Tick += (_, _) => { _saveDebounce.Stop(); SaveStores(); };
         void Touch() => Dispatcher.Invoke(() => { _saveDebounce.Stop(); _saveDebounce.Start(); });
         Projects.Changed += Touch;

@@ -82,11 +82,12 @@ public sealed class ReplyBar : UserControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.Children.Add(CardOf("用语", speech, 0, false));
         grid.Children.Add(CardOf("对方信息", them, 1, true));
-        grid.Children.Add(CardOf("我方信息 · 常驻模板", mine, 2, true));
+        grid.Children.Add(CardOf("我方信息", mine, 2, true));   // 不写「· 常驻模板」(用户裁定):它是行为,不必写在标题里
         Content = grid;
 
         WireEvents();
-        Loaded += (_, _) => { TheApp.Reply.Changed += Refresh; Refresh(); };
+        Refresh();   // ★ 先画一遍(同 ReplyPanel):离屏渲染诊断不触发 Loaded —— 不先画,图里的指针圆点是没上色的
+        Loaded += (_, _) => { TheApp.Reply.Changed -= Refresh; TheApp.Reply.Changed += Refresh; Refresh(); };   // 同 ReplyPanel:防重复订阅
         Unloaded += (_, _) => TheApp.Reply.Changed -= Refresh;
     }
 
@@ -156,19 +157,29 @@ public sealed class ReplyBar : UserControl
             var idx = i;
             var dot = new Border { Width = 9, Height = 9, CornerRadius = new CornerRadius(5),
                                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-                                   Cursor = System.Windows.Input.Cursors.Hand, BorderThickness = new Thickness(1) };
-            dot.MouseLeftButtonUp += (_, e) => { e.Handled = true; pick(idx); };
+                                   IsHitTestVisible = false, BorderThickness = new Thickness(1) };
             Grid.SetRow(dot, i);
             body.Children.Add(dot);
             dots.Add(dot);
 
-            var t = new TextBlock { Text = names[i], Margin = new Thickness(6, 2, 0, 2),
-                                    Cursor = System.Windows.Input.Cursors.Hand };
+            var t = new TextBlock { Text = names[i], Margin = new Thickness(6, 0, 0, 0),
+                                    VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            t.MouseLeftButtonUp += (_, e) => { e.Handled = true; pick(idx); };
             Grid.SetRow(t, i); Grid.SetColumn(t, 1);
             body.Children.Add(t);
             labels.Add(t);
+
+            // ★★ 命中区 = 【整行】的透明盖板(用户反馈 2026-08-03:"现在点击范围太小很难点到")。
+            //   圆点才 9px、档名只有几个字,两者之间和右边的空白原本都是死区。
+            //   圆点与档名改成不参与命中(IsHitTestVisible=false),点击全交给这块盖板。
+            var row = new Border { Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand,
+                                   Margin = new Thickness(-2, 0, -4, 0) };
+            row.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+            row.MouseEnter += (_, _) => row.SetResourceReference(Border.BackgroundProperty, "BgHover");
+            row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
+            row.MouseLeftButtonUp += (_, e) => { e.Handled = true; pick(idx); };
+            Grid.SetRow(row, i); Grid.SetColumnSpan(row, 2);
+            body.Children.Add(row);
         }
         box.Children.Add(body);
         return box;
@@ -198,35 +209,8 @@ public sealed class ReplyBar : UserControl
     {
         var box = new TextBox { Padding = new Thickness(8, 5, 8, 5), Width = 240 };
         var body = new StackPanel();
-        // ★ 已加的列在这儿,各带 ×(用户反馈 2026-08-03:加得进去删不掉)。内置的不在此列 —— 那不是用户加的。
-        var mineList = greeting ? TheApp.Reply.Profile.CustomGreetings : TheApp.Reply.Profile.CustomClosings;
-        if (mineList.Count > 0)
-        {
-            body.Children.Add(Ui.Caption("已添加的(点 × 删掉):"));
-            foreach (var one in mineList.ToList())
-            {
-                var text = one;
-                var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 2, 0, 2) };
-                var x = new TextBlock { Text = "×", Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(6, 0, 2, 0) };
-                x.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                x.MouseEnter += (_, _) => x.SetResourceReference(TextBlock.ForegroundProperty, "RiskDanger");
-                x.MouseLeave += (_, _) => x.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                x.MouseLeftButtonUp += (_, e2) =>
-                {
-                    e2.Handled = true;
-                    TheApp.Reply.RemoveCustom(greeting, text);
-                    Overlay.CloseActive();
-                    AskCustom(greeting, anchor);   // 就地重开,列表当场更新
-                };
-                DockPanel.SetDock(x, Dock.Right);
-                row.Children.Add(x);
-                var t = new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis };
-                t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-                row.Children.Add(t);
-                body.Children.Add(row);
-            }
-            body.Children.Add(new Border { Height = 8 });
-        }
+        // ★ 这个浮窗【只管加】—— 删除入口在下拉里那条目自己后面(见 CustomAwareItem)。
+        //   一件事两个入口 = 两份真相,而且藏在浮窗里的那份用户根本没找到。
         body.Children.Add(Ui.Caption(greeting ? "写一句你自己的问候语:" : "写一句你自己的祝福语:"));
         box.Margin = new Thickness(0, 4, 0, 6);
         body.Children.Add(box);
@@ -237,7 +221,6 @@ public sealed class ReplyBar : UserControl
             var idx = st.AddCustom(greeting, box.Text, d.Language, d.Tone);
             if (idx >= 0)
             {
-                st.EnsureSession();
                 if (greeting) d.GreetingIndex = idx; else d.ClosingIndex = idx;
                 st.Touch();
             }
@@ -311,7 +294,7 @@ public sealed class ReplyBar : UserControl
         stack.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         stack.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var c1 = Cell(line1, ph1, right: false);
-        var c2 = Cell(line2, ph2, right: true);
+        var c2 = Cell(line2, ph2, right: false);   // 左对齐:和其余输入栏一致(用户裁定 2026-08-03)
         var sep = new Border { Height = 1, Margin = new Thickness(7, 0, 7, 0), Opacity = 0.6 };
         sep.SetResourceReference(Border.BackgroundProperty, "Border");
         Grid.SetRow(c1, 0); Grid.SetRow(sep, 1); Grid.SetRow(c2, 2);
@@ -325,9 +308,11 @@ public sealed class ReplyBar : UserControl
         return box;
     }
 
+    // ★ 这里【不建会话】(用户反馈 2026-08-03:"即使对话记录没有任何记录的条例,
+    //   也会在会话列表中创建会话记录")—— 设置照样存进草稿档,
+    //   等按下「生成」时 EnsureSession 会把整份草稿搬进新会话(见 ReplyState.EnsureSession)。
     void SaveDoc(Action<ReplyDoc> set)
     {
-        TheApp.Reply.EnsureSession();
         set(TheApp.Reply.Doc);
         TheApp.Reply.Touch();
     }
@@ -337,23 +322,69 @@ public sealed class ReplyBar : UserControl
         _lang.SelectionChanged += (_, _) => { if (!_syncing && _lang.SelectedItem is ComboBoxItem { Tag: string c }) SaveDoc(d => d.Language = c); };
         _greet.SelectionChanged += (_, _) => { if (!_syncing) SaveDoc(d => d.GreetingIndex = Math.Max(0, _greet.SelectedIndex)); };
         _close.SelectionChanged += (_, _) => { if (!_syncing) SaveDoc(d => d.ClosingIndex = Math.Max(0, _close.SelectedIndex)); };
-        void Txt(TextBox tb, Action<string> set, bool session)
+        void Txt(TextBox tb, Action<string> set)
             => tb.TextChanged += (_, _) =>
             {
                 if (_syncing) return;
-                if (session) TheApp.Reply.EnsureSession();
-                set(tb.Text);
+                set(tb.Text);          // 同上:不建会话,写进草稿档就行
                 TheApp.Reply.Touch();
             };
-        Txt(_theirName, v => TheApp.Reply.Doc.TheirName = v, true);
-        Txt(_theirAddr, v => TheApp.Reply.Doc.TheirAddress = v, true);
-        Txt(_theirPostal, v => TheApp.Reply.Doc.TheirPostal = v, true);
-        Txt(_theirContact, v => TheApp.Reply.Doc.TheirContact = v, true);
-        // 我方三项 = 常驻模板:不建会话、跨会话共享
-        Txt(_myName, v => TheApp.Reply.Profile.MyName = v, false);
-        Txt(_myAddr, v => TheApp.Reply.Profile.MyAddress = v, false);
-        Txt(_myPostal, v => TheApp.Reply.Profile.MyPostal = v, false);
-        Txt(_myContact, v => TheApp.Reply.Profile.MyContact = v, false);
+        // ★ Tab 次序接在会话卡那三个之后(10/11/12,见 ReplyPanel)—— 顺序即阅读顺序
+        FocusPolicy.SetTabOrder(_theirName, 20);
+        FocusPolicy.SetTabOrder(_theirAddr, 21);
+        FocusPolicy.SetTabOrder(_theirPostal, 22);
+        FocusPolicy.SetTabOrder(_theirContact, 23);
+        FocusPolicy.SetTabOrder(_myName, 24);
+        FocusPolicy.SetTabOrder(_myAddr, 25);
+        FocusPolicy.SetTabOrder(_myPostal, 26);
+        FocusPolicy.SetTabOrder(_myContact, 27);
+
+        // 对方四项 = 跟着会话走(存在 Doc 里)
+        Txt(_theirName, v => TheApp.Reply.Doc.TheirName = v);
+        Txt(_theirAddr, v => TheApp.Reply.Doc.TheirAddress = v);
+        Txt(_theirPostal, v => TheApp.Reply.Doc.TheirPostal = v);
+        Txt(_theirContact, v => TheApp.Reply.Doc.TheirContact = v);
+        // 我方四项 = 常驻模板(存在 Profile 里,跨会话共用)
+        Txt(_myName, v => TheApp.Reply.Profile.MyName = v);
+        Txt(_myAddr, v => TheApp.Reply.Profile.MyAddress = v);
+        Txt(_myPostal, v => TheApp.Reply.Profile.MyPostal = v);
+        Txt(_myContact, v => TheApp.Reply.Profile.MyContact = v);
+    }
+
+    /// <summary>
+    /// 下拉里的一项。★【自定义的那几条后面带一个 ×】(用户裁定 2026-08-03:
+    /// "下拉菜单中自定义的字符后面加上一个叉点击删除")——
+    /// 删除入口就应该在看得见它的地方,藏在「+」浮窗里等于没有。
+    /// 内置条目不给 × —— 那不是用户加的。
+    /// </summary>
+    ComboBoxItem CustomAwareItem(ComboBox cb, string text, bool greeting)
+    {
+        if (!TheApp.Reply.IsCustom(greeting, text)) return new ComboBoxItem { Content = text };
+
+        var it = new ComboBoxItem { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        var row = new DockPanel { LastChildFill = true };
+        var x = new TextBlock { Text = "×", Margin = new Thickness(8, 0, 0, 0), FontWeight = FontWeights.SemiBold,
+                                VerticalAlignment = VerticalAlignment.Center, Cursor = System.Windows.Input.Cursors.Hand,
+                                ToolTip = "删掉这条自定义" };
+        x.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        x.MouseEnter += (_, _) => x.SetResourceReference(TextBlock.ForegroundProperty, "RiskDanger");
+        x.MouseLeave += (_, _) => x.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        // ★ 用 Preview + Handled:不拦的话这一下会被 ComboBoxItem 当成「选中我」,
+        //   变成「想删却选上了」。★★ 删除本身排到下一轮 Dispatcher:
+        //   删一删就会 Changed -> Refresh -> cb.Items.Clear(),而此刻正在处理这个 Item 自己的鼠标事件 ——
+        //   当场把自己拆了就是又一次「输入期间移树」。
+        x.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            e.Handled = true;
+            cb.IsDropDownOpen = false;
+            Dispatcher.BeginInvoke(new Action(() => TheApp.Reply.RemoveCustom(greeting, text)));
+        };
+        DockPanel.SetDock(x, Dock.Right);
+        row.Children.Add(x);
+        row.Children.Add(new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis,
+                                         VerticalAlignment = VerticalAlignment.Center });
+        it.Content = row;
+        return it;
     }
 
     void HighlightMedium(int sel) => Paint(_mediumDots, _mediumLabels, sel);
@@ -391,15 +422,15 @@ public sealed class ReplyBar : UserControl
                 _lang.Items.Add(new ComboBoxItem { Content = $"{Languages.Find(code)?.Name ?? code} ({code})", Tag = code });
             for (int i = 0; i < _lang.Items.Count; i++)
                 if (_lang.Items[i] is ComboBoxItem { Tag: string c } && c == d.Language) { _lang.SelectedIndex = i; break; }
-            void FillCombo(ComboBox cb, string[] items, int sel)
+            void FillCombo(ComboBox cb, string[] items, int sel, bool greeting)
             {
                 cb.Items.Clear();
-                foreach (var x in items) cb.Items.Add(new ComboBoxItem { Content = x });
+                foreach (var x in items) cb.Items.Add(CustomAwareItem(cb, x, greeting));
                 cb.SelectedIndex = Math.Clamp(sel, 0, items.Length - 1);
             }
             // 问候/祝福跟随【语言 + 语气】(用户裁定):换语言就换那门语言的说法
-            FillCombo(_greet, TheApp.Reply.Greetings(d.Language, d.Tone), d.GreetingIndex);
-            FillCombo(_close, TheApp.Reply.Closings(d.Language, d.Tone), d.ClosingIndex);
+            FillCombo(_greet, TheApp.Reply.Greetings(d.Language, d.Tone), d.GreetingIndex, greeting: true);
+            FillCombo(_close, TheApp.Reply.Closings(d.Language, d.Tone), d.ClosingIndex, greeting: false);
             void Set(TextBox tb, string v) { if (!tb.IsFocused && tb.Text != v) tb.Text = v; }
             Set(_theirName, d.TheirName); Set(_theirAddr, d.TheirAddress); Set(_theirPostal, d.TheirPostal); Set(_theirContact, d.TheirContact);
             Set(_myName, me.MyName); Set(_myAddr, me.MyAddress); Set(_myPostal, me.MyPostal); Set(_myContact, me.MyContact);

@@ -341,7 +341,24 @@ public sealed class ReplyState
     public bool Busy => Doc.Records.Any(r => r.Generating);
 
     // ---------------------------------------------------------------- 存档
-    public ReplySave Export() => new() { Profile = Profile, Docs = new(_docs) };
+    /// <summary>
+    /// ★ 幽灵会话的文档不落盘(用户裁定 2026-08-03)。双保险的另一半是
+    /// ChatCenter.GhostsPurged 广播后的 Drop —— 自动存盘是防抖的(任何 Changed 都会排一次写盘),
+    /// 打字途中就会写一次,光靠"退出时删掉"守不住。
+    /// </summary>
+    public Func<string, bool>? IsGhostSession { get; set; }
+
+    /// <summary>会话没了(删除或幽灵被抹),它的文档一起清掉。</summary>
+    public void Drop(string sessionId)
+    {
+        if (_docs.Remove(sessionId)) Changed?.Invoke();
+    }
+
+    public ReplySave Export() => new()
+    {
+        Profile = Profile,
+        Docs = _docs.Where(kv => !(IsGhostSession?.Invoke(kv.Key) ?? false)).ToDictionary(kv => kv.Key, kv => kv.Value),
+    };
     public void Import(ReplySave? d)
     {
         if (d is null) return;

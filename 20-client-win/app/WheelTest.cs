@@ -81,7 +81,7 @@ public static class WheelTest
         //   (暖萌是实心的,一条画歪的路径填出来可能只是个看不出问题的黑块)。
         ThemeManager.Initialize(Skin.Breeze);
         var icons = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var ic in new[] { IconName.Translation, IconName.Mic, IconName.Dots, IconName.Star, IconName.Ai, IconName.File, IconName.Folder })
+        foreach (var ic in new[] { IconName.Translation, IconName.Mic, IconName.Dots, IconName.Star, IconName.Ai, IconName.File, IconName.Folder, IconName.Mail })
         {
             var box = new StackPanel { Margin = new Thickness(6, 0, 6, 0) };
             var el = Icons.Make(ic, 34, "FgPrimary");
@@ -91,7 +91,14 @@ public static class WheelTest
             box.Children.Add(lab);
             icons.Children.Add(box);
         }
-        Save(Themed(icons), Path.Combine(outDir, "icons.png"), 340, 80);
+        Save(Themed(icons), Path.Combine(outDir, "icons.png"), 420, 80);
+        // ★ 信封靠 EvenOdd 挖洞,描边皮肤看不出填充规则的毛病 —— 实心皮肤(暖萌)另画一张
+        ThemeManager.Initialize(Skin.Warm);
+        var iconsWarm = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var ic in new[] { IconName.Mail, IconName.Copy, IconName.Send, IconName.Chat })
+            iconsWarm.Children.Add(new Border { Child = Icons.Make(ic, 34, "FgPrimary"), Margin = new Thickness(8, 0, 8, 0) });
+        Save(Themed(iconsWarm), Path.Combine(outDir, "icons-warm.png"), 240, 70);
+        ThemeManager.Initialize(Skin.Breeze);
 
         // ★ 墨白皮肤下"选中项目"的可读性核对(用户反馈曾黑底黑字)。切到 Ink 皮肤渲染选中 vs 未选中两块。
         ThemeManager.Initialize(Skin.Ink);
@@ -284,6 +291,18 @@ public static class WheelTest
                 rv.UpdateLayout();
                 Save(Themed(rv), Path.Combine(outDir, file), (int)w + 40, 680);
             }
+            // ★★ 幽灵态的回信页 —— 全功能幽灵会话(2026-08-03)新接的一条路径:
+            //   会话卡换成虚线壳 + 顶上一条"不保留记录"的横幅,而设置条仍在卡外。
+            //   这类"壳换了一层"的改动断言看不见,只有画出来才知道虚线框有没有套错地方。
+            app.Reply.SetScene(true);
+            var gv = new ChatView("chat") { Width = 900, Height = 640 };
+            gv.ToggleGhost();   // 走真的那条路进幽灵态(OpenSession 开头就 PurgeGhosts,拿它进不去)
+            gv.Measure(new Size(900, 640));
+            gv.Arrange(new Rect(0, 0, 900, 640));
+            gv.UpdateLayout();
+            Save(Themed(gv), Path.Combine(outDir, "reply-ghost.png"), 940, 680);
+            app.Chat.PurgeGhosts();
+
             app.Reply.SetScene(false);
         }
         catch (Exception ex)

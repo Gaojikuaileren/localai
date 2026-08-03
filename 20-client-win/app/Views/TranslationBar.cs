@@ -395,8 +395,10 @@ public sealed class TranslationBar : UserControl
 
         // ★ 当前选中的就是一条同传会话 -> 在【它】里面继续(用户裁定 2026-08-02):
         //   一场会常常中途停一下再继续,每按一次就多一条记录的话,列表里全是碎片。
-        //   已删除/幽灵的不算 —— 往回收站里的会话续写等于写进看不见的地方。
-        if (_currentSession?.Invoke() is { Interpret: true, DeletedAt: null, Ghost: false } cur)
+        //   已删除的不算 —— 往回收站里的会话续写等于写进看不见的地方。
+        // ★★ 幽灵【算】(改于 2026-08-03,全功能幽灵会话):它就是你现在正开着的那条。
+        //   排掉它的话,在幽灵同传里按【开始】会下跌到下面另建一条【真】会话 —— 当场毁约。
+        if (_currentSession?.Invoke() is { Interpret: true, DeletedAt: null } cur)
         {
             TheApp.Interpret.Start(cur.SessionId);
             return;

@@ -158,16 +158,35 @@ public sealed class ChatCenter
         return true;
     }
 
-    /// <summary>幽灵会话:不保留记录、不纳入记忆,不进任何列表。开一个新的前先清掉旧的幽灵。</summary>
-    public ChatSession NewGhostSession(string workspaceKey)
+    /// <summary>
+    /// 幽灵会话:不保留记录、不纳入记忆,不进任何列表。开一个新的前先清掉旧的幽灵。
+    ///
+    /// ★★ 带【场景标记】(用户裁定 2026-08-03:"全功能都要幽灵会话")——
+    ///   此前它只吃 workspaceKey,建出来永远是一条普通文字会话:
+    ///   在同传/文件翻译/多语表/回信里按幽灵,会被踢回文字翻译或者按钮亮着但什么也没发生。
+    ///   带上标记后,各场景那四处 "Find(sid)?.XXX == true" 的判据一行都不用改就接上了。
+    /// </summary>
+    public ChatSession NewGhostSession(string workspaceKey, bool interpret = false, bool fileTrans = false,
+                                       bool i18nTable = false, bool replyLetter = false)
     {
         PurgeGhosts();
-        var s = new ChatSession(NewId(), "幽灵会话", null, ProjectScope.OnlyMe, DateTime.Now,
-            WorkspaceKey: workspaceKey, Ghost: true, OwnerMemberId: MemberContext.Current);
+        var title = interpret ? "幽灵同传" : fileTrans ? "幽灵文件翻译"
+                  : i18nTable ? "幽灵译表" : replyLetter ? "幽灵回信" : "幽灵会话";
+        var s = new ChatSession(NewId(), title, null, ProjectScope.OnlyMe, DateTime.Now,
+            WorkspaceKey: workspaceKey, Ghost: true, OwnerMemberId: MemberContext.Current,
+            Interpret: interpret, FileTrans: fileTrans, I18nTable: i18nTable, ReplyLetter: replyLetter);
         _sessions.Add(s);
         Changed?.Invoke();
         return s;
     }
+
+    /// <summary>
+    /// 幽灵会话被抹掉时广播一声(带上那批 id)。
+    /// ★ 场景状态(回信/译表/文件翻译)把自己的文档按 sessionId 存在另一张表里,
+    ///   ChatCenter 的 Ghost 过滤管不到它们 —— 不广播的话，“不留痕”就只是句口号。
+    ///   销毁路径只准有一条(同 PurgeArchives 那条纪律),免得将来又漏一处。
+    /// </summary>
+    public event Action<IReadOnlyCollection<string>>? GhostsPurged;
 
     /// <summary>清除所有幽灵会话及其消息(切走/退出即抹掉,不留痕)。</summary>
     public void PurgeGhosts()
@@ -182,6 +201,7 @@ public sealed class ChatCenter
         _sessions.RemoveAll(s => ids.Contains(s.SessionId));
         _messages.RemoveAll(m => ids.Contains(m.SessionId));
         PurgeArchives(ids);   // ★ 幽灵会话的承诺是【不留痕】,温层当然也不能留
+        GhostsPurged?.Invoke(ids);   // 回信/译表/文件翻译的文档与副本跟着一起没
         Changed?.Invoke();
     }
 

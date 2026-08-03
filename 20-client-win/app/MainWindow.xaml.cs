@@ -68,7 +68,7 @@ public partial class MainWindow : Window
             //   否则打字进一个看不见的地方,回车还会直接把消息发出去(审计 2026-07-31)。
             //   这和"系统页盖着时停用底层页"是同一条规矩,只是遮罩这条当时漏了。
             if (Overlay.IsOpen) { FocusPolicy.Park(this, FocusPark); return; }
-            FocusPolicy.HandleTab(this, FocusPark);
+            FocusPolicy.HandleTab(this, FocusPark, back: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
         };
 
         // ★ Esc 是【总闸】:浮层和菜单都归它管。以前只管浮层 —— 万一菜单状态卡住,
@@ -121,6 +121,24 @@ public partial class MainWindow : Window
         //   于是"浮层开着时第一次点击只关浮层"这条规矩,对这类按钮从来没生效过:
         //   一次点击既关了浮层又顺手把人退回了上一页。
         PreviewMouseUp += (_, me) => { if (_swallowUp) { _swallowUp = false; me.Handled = true; } };
+
+        // ★★ 点【输入框以外】的地方 = 取消聚焦(用户裁定 2026-08-03)。
+        //   为什么挂在窗口层:① Park 要的 FocusPark 是本窗口的元素,别的层够不着;
+        //   ② 全窗口没有第二个焦点范围,SetFocusedElement 只能对 Window 设;
+        //   ③ Tab、Esc、点击吞噬三条焦点/输入规矩已经全在这个构造函数里,再分一层就是两套规则互不知情。
+        //   ★ 注册在上面那个"吞掉第一次点击"的处理器【之后】:C# 的 += 等价 handledEventsToo:false,
+        //     那一下被吞掉时这里根本不会被调到 —— "一次点击只做一件事"自动成立。
+        //   ★ 浮窗(Popup,独立 hwnd)里的点击要放行:回信页的「自定义问候」就是一个浮窗里的输入框,
+        //     把焦点硬拽回主窗口会让它失去激活、整个关掉,用户填了一半的字当场没。
+        PreviewMouseDown += (_, me) =>
+        {
+            if (me.OriginalSource is not DependencyObject d) return;
+            // ★ 下拉框开着时整条让路(与上面那两处同一条理由):选项住在独立 Popup 里,
+            //   先把焦点停走会把下拉当场关掉 —— 回信页那个【删自定义问候的 ×】就再也点不中了。
+            if (AnyDropDownOpen(this)) return;
+            if (Flyout.IsInside(d) || FocusPolicy.IsInsideInput(d)) return;
+            FocusPolicy.Park(this, FocusPark);
+        };
         StateChanged += (_, _) => SyncMaxButton();
         SyncMaxButton();
 
@@ -508,7 +526,7 @@ public partial class MainWindow : Window
             Foreground = (Brush)FindResource("FgPrimary"),
             Cursor = System.Windows.Input.Cursors.Hand,
         };
-        b.Click += (_, _) => Navigate(item.Key);
+        b.Click += (_, _) => { ResetSceneOf(item.Key); Navigate(item.Key); };
         if (visible) target.Children.Add(b);
         _nav.Add((item, b));   // ★ 不显示也登记 —— 见 BuildNav 里的说明
     }
@@ -522,6 +540,21 @@ public partial class MainWindow : Window
 
     /// <summary>当前盖在上面的系统页(null = 没盖)。返回箭头据此回到底下那一页。</summary>
     string? _systemKey;
+
+    /// <summary>
+    /// ★ 从【导航栏】点进一个工作空间 = 回到它的第一个功能(用户裁定 2026-08-03):
+    ///   翻译空间回文字翻译、聊天空间回聊天。此前它记着上次用的场景,于是"点翻译"可能
+    ///   直接落进同传或多语表 —— 导航栏那一栏说的是空间的名字,不是上次停在哪。
+    ///
+    /// ★ 只挂在【导航按钮】上,不挂在 Navigate 里:
+    ///   NavigateToSession / NavigateToProject 是"跳到这条会话自己的场景"(见它们的说明),
+    ///   换语言那条 Navigate(_currentKey) 是原地重建 —— 这两类都不该被顺手重置。
+    /// </summary>
+    void ResetSceneOf(string key)
+    {
+        if (key == "translation") TheApp.Interpret.SetMode(Services.TranslationMode.Text);
+        if (key == "chat") TheApp.Reply.SetScene(false);
+    }
 
     /// <summary>
     /// 用户【眼前】是哪一页 —— 导航栏高亮认这个。

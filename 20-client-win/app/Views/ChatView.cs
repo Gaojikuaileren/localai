@@ -463,7 +463,7 @@ public sealed class ChatView : UserControl
         //   用麦克风图标而不是加一行字:列表本来就窄,一个图标就够分辨,也不挤掉标题。
         if (s.Interpret || s.FileTrans || s.I18nTable || s.ReplyLetter)
         {
-            var mk = Icons.Make(s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Pdf, 12, selected ? "FgOnSelected" : "Accent");
+            var mk = Icons.Make(s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Mail, 12, selected ? "FgOnSelected" : "Accent");
             mk.Margin = new Thickness(0, 0, 5, 0);
             mk.VerticalAlignment = VerticalAlignment.Center;
             titleRow.Children.Add(mk);
@@ -951,7 +951,11 @@ public sealed class ChatView : UserControl
         //   -> OnChatChanged -> 这里重建,所以每发一条消息焦点持有者就换一次。
         //   不接住的话:发完第一条就得重新点一下输入框才能发第二条。
         //   ★ 只在【焦点原本就在旧输入框里】时才还回去 —— 否则会从别处(比如抽屉里的编辑器)抢焦点。
-        var refocus = _input.IsKeyboardFocusWithin;
+        //   ★★ 2026-08-03 起还要认 _justSent:"点空白处取消聚焦"是隧道 + 按下,
+        //     而发送键挂在 Click(松开)上 —— 焦点会先被停走,这里再嗅探就恒为 false,
+        //     于是"发完第一条得重新点一下输入框"那个老 bug 会原样复发。用鼠标发送时靠意图,不靠嗅探。
+        var refocus = _input.IsKeyboardFocusWithin || _justSent;
+        _justSent = false;
         BuildConversationCore();
         if (refocus) Dispatcher.BeginInvoke(new Action(FocusInputIfPresent), System.Windows.Threading.DispatcherPriority.Loaded);
     }
@@ -969,7 +973,13 @@ public sealed class ChatView : UserControl
         // 未接入 AI 的工作空间:同样的会话/项目外壳,但中间是占位,不做假界面。
         // ★ 它说的是"这个空间还没有 AI 能力"(正确形态 = 没有输入框),不是"你还没开始聊",
         //   所以不能并进空态提示 —— 那会让界面在接入后继续对用户撒谎。
-        if (_wsKey is not ("chat" or "translation")) { _conv.Content = PlaceholderCenter(); return; }
+        // ★ 占位空间也走幽灵壳:幽灵按钮在每个空间都给(2026-08-01 裁定),
+        //   按下去只有圈变实线、会话区纹丝不动 —— 那是按钮在说假话。
+        if (_wsKey is not ("chat" or "translation"))
+        {
+            _conv.Content = ConvShell(PlaceholderCenter(), InGhost, overlayBanner: false);
+            return;
+        }
 
         _conv.Content = BuildConvPanel(SpecFor(_wsKey));
     }
@@ -1091,7 +1101,7 @@ public sealed class ChatView : UserControl
                 b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
             }
             var captured = mode;
-            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); BuildConversation(); };
+            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); EndGhostOnSceneSwitch(); BuildConversation(); };
             row.Children.Add(b);
         }
         return row;
@@ -1100,6 +1110,10 @@ public sealed class ChatView : UserControl
     /// <summary>唯一的会话面板。聊天与翻译都由它生成,差异全部走 ConvSpec。</summary>
     FrameworkElement BuildConvPanel(ConvSpec spec)
     {
+        // ★★ 幽灵态要在【每一个场景】都看得见(用户裁定 2026-08-03):
+        //   同传/文件翻译/多语表/回信 都是提前 return 的分支,以前用的是普通卡 ——
+        //   手里真拿着一条幽灵会话,屏幕上却一点痕迹都没有。所以算在最前面。
+        var isGhost = _sessionId is { } gsid && TheApp.Chat.Find(gsid)?.Ghost == true;
         // ★ 翻译空间的三个场景:切到同传时整个会话区换成同传面板(输入框那一套不适用)。
         if (spec.ModeSwitch)
         {
@@ -1123,7 +1137,7 @@ public sealed class ChatView : UserControl
                     : mode == TranslationMode.FileTrans ? new FileTransPanel(ftSid)
                     : mode == TranslationMode.I18n ? BuildI18nPanel()
                     : (FrameworkElement)ReservedScenePlaceholder());
-                var only = ConvCard(body);
+                var only = ConvShell(body, isGhost, overlayBanner: false);
                 if (spec.BottomAccessory is null) return only;
                 var wrap = new DockPanel { LastChildFill = true };
                 var acc = spec.BottomAccessory();
@@ -1140,40 +1154,61 @@ public sealed class ChatView : UserControl
         if (_wsKey == "chat")
         {
             _replyScene = TheApp.Reply.SceneReply;
-            var chatHead = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
-            // ★ 图标切换(用户裁定 2026-08-03):与翻译工作区的场景切换同一语法同一位置
+            var chatHead = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+            // ★ 图标切换(用户裁定 2026-08-03):与翻译工作区的场景切换同一语法同一位置。
+            // ★★ 尺寸/间距/命中区一律拄 ModeSwitcher(上方 1050 行):两边长得不一样的话,
+            //   切空间时那一排按钮会股骨头地变形。命中区是透明方块 —— 描边图标中间是空的,
+            //   拿图标本身当按钮会点不中笔画之间的空隙。
             void SceneChip(IconName icon, string tip, bool on, Action click)
             {
-                var c = new Border { Child = Icons.Make(icon, 15, on ? "FgOnAccent" : "FgSecondary"),
-                                     Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 8, 0),
+                var glyph = Icons.Make(icon, 17, on ? "FgOnAccent" : "FgSecondary");
+                glyph.HorizontalAlignment = HorizontalAlignment.Center;
+                glyph.VerticalAlignment = VerticalAlignment.Center;
+                glyph.IsHitTestVisible = false;
+                var hit = new Grid { Width = 30, Height = 26, Background = Brushes.Transparent };
+                hit.Children.Add(glyph);
+                var c = new Border { Child = hit, Margin = new Thickness(0, 0, 6, 0),
                                      Cursor = Cursors.Hand, BorderThickness = new Thickness(1), ToolTip = tip };
                 c.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
                 if (on) { c.SetResourceReference(Border.BackgroundProperty, "Accent"); c.SetResourceReference(Border.BorderBrushProperty, "Accent"); }
-                else { c.Background = Brushes.Transparent; c.SetResourceReference(Border.BorderBrushProperty, "Border"); }
-                c.MouseLeftButtonUp += (_, e) => { e.Handled = true; click(); };
+                else
+                {
+                    c.Background = Brushes.Transparent;
+                    c.SetResourceReference(Border.BorderBrushProperty, "Border");
+                    c.MouseEnter += (_, _) => c.SetResourceReference(Border.BackgroundProperty, "BgHover");
+                    c.MouseLeave += (_, _) => c.Background = Brushes.Transparent;
+                }
+                c.MouseLeftButtonUp += (_, e) => { e.Handled = true; click(); EndGhostOnSceneSwitch(); };
                 chatHead.Children.Add(c);
             }
             SceneChip(IconName.Chat, "聊天", !_replyScene, () => TheApp.Reply.SetScene(false));
-            SceneChip(IconName.Pdf, "回信", _replyScene, () => TheApp.Reply.SetScene(true));
+            SceneChip(IconName.Mail, "回信", _replyScene, () => TheApp.Reply.SetScene(true));
             if (_replyScene)
             {
                 // 绑定当前选中的回信会话(没选中 = 草稿态,首笔编辑自建会话并选中)
                 TheApp.Reply.SetSession(_sessionId is { } rsid2 && TheApp.Chat.Find(rsid2)?.ReplyLetter == true ? _sessionId : null);
-                // ★ 与翻译空间同构(用户裁定 2026-08-03):会话卡【只框四个内容板块】,
+                // ★ 与翻译空间同构(用户裁定 2026-08-03):会话卡框【切换条 + 四个内容板块】,
                 //   用语/对方信息/我方信息 是下方【独立】的卡,不套在会话卡里。
+                // ★★ 切换条必须在卡【内】(用户裁定 2026-08-03):它属于会话板块,不是页面级导航。
+                //   翻译空间就是这么排的(上方 1109-1126):ConvCard 包的是【切换条 + 面板】整体,
+                //   底部设置条才在卡外。留在卡外时它悬在页面底色上,和 ReplyBar 混成一层。
                 var rBody = new DockPanel { LastChildFill = true };
                 DockPanel.SetDock(chatHead, Dock.Top);
                 rBody.Children.Add(chatHead);
+                rBody.Children.Add(new ReplyPanel());
+                // 走 ConvShell 而不是裸 ConvCard:幽灵会话的虚线框与提示在这一场景也得有
+                var rCard = ConvShell(rBody, isGhost, overlayBanner: false);
+                // DockPanel 顺序纪律:Dock 的先 Add、LastChildFill 的最后 Add —— 写反了卡不填充
+                var rWrap = new DockPanel { LastChildFill = true };
                 var rBar = new ReplyBar { Margin = new Thickness(0, 10, 0, 0) };
                 DockPanel.SetDock(rBar, Dock.Bottom);
-                rBody.Children.Add(rBar);
-                rBody.Children.Add(ConvCard(new ReplyPanel()));
-                return rBody;
+                rWrap.Children.Add(rBar);
+                rWrap.Children.Add(rCard);
+                return rWrap;
             }
             _chatSceneHead = chatHead;   // 聊天场景:切换条交给下面的常规装配挂在顶部
         }
 
-        var isGhost = _sessionId is { } sid && TheApp.Chat.Find(sid)?.Ghost == true;
         var hasMsgs = _sessionId is not null && TheApp.Chat.MessagesOf(_sessionId).Any();
         // ★ 居中态 = 【这个空间要居中】且【确实没有消息】。附件放哪、横幅浮不浮、
         //   滑动动画演不演,全都由它推出来 —— 此前是三处各写一遍,四种组合里两种是坏的。
@@ -1778,8 +1813,12 @@ public sealed class ChatView : UserControl
             TheApp.Chat.AskChoice(_sessionId, $"好 —— 已把{Languages.NameOf(code)}加进目标池,开始翻译。", Array.Empty<string>());
     }
 
+    /// <summary>刚刚点了发送 —— 见 BuildConversation 里那段说明(焦点已被"点空白"停走,不能再靠嗅探)。</summary>
+    bool _justSent;
+
     void SendCurrent()
     {
+        _justSent = true;
         var text = _input.Text;
         if (string.IsNullOrWhiteSpace(text) && _pending.Count == 0) return;   // 空且无附件不发
 
@@ -2157,15 +2196,36 @@ public sealed class ChatView : UserControl
         return b;
     }
 
+    /// <summary>
+    /// 换场景 = 换了一次 —— 幽灵的承诺只管【这一次】,所以切场景就把它抹了。
+    /// ★ 不这么做的话:一条带着旧场景标记的幽灵会横跨场景活下去,
+    ///   新场景根据标记判不出它是自己的(各场景都是 "Find(sid)?.XXX == true" 判据),
+    ///   于是屏幕上是新场景、手里拿着旧场景的幽灵,幽灵按钮还亮着。
+    /// </summary>
+    void EndGhostOnSceneSwitch()
+    {
+        if (!InGhost) return;
+        TheApp.Chat.PurgeGhosts();
+        _sessionId = null;
+        BuildSessions();   // 内部会跑 UpdateContext,幽灵按钮才会从实线回虚线
+    }
+
     /// <summary>进入 / 退出幽灵会话。退出即抹除该会话并回到普通会话(可退出 —— 用户反馈"按下之后无法退出")。</summary>
-    void ToggleGhost()
+    /// <summary>internal:渲染诊断要走【真的那条路】进幽灵态 —— 不能靠 OpenSession(它开头就清幽灵)。</summary>
+    internal void ToggleGhost()
     {
         // 退出幽灵 -> 回普通会话的空态(ToNormal 已经保证落在空会话上)
         if (InGhost) { ToNormal(); FocusInputIfPresent(); return; }
-        var g = TheApp.Chat.NewGhostSession(_wsKey);
+        // ★ 幽灵跟着【当前场景】建(用户裁定 2026-08-03:全功能都要幽灵会话)。
+        //   以前它永远建一条普通文字会话,于是在同传里按幽灵会被踢回文字翻译。
+        var m = TheApp.Interpret.Mode;
+        var g = TheApp.Chat.NewGhostSession(_wsKey,
+            interpret: _wsKey == "translation" && m == TranslationMode.Interpret,
+            fileTrans: _wsKey == "translation" && m == TranslationMode.FileTrans,
+            i18nTable: _wsKey == "translation" && m == TranslationMode.I18n,
+            replyLetter: _wsKey == "chat" && TheApp.Reply.SceneReply);
         _sessionId = g.SessionId;
-        // 幽灵是一条普通(非同传)会话 —— 在同传界面按幽灵得先切回文字翻译,否则按了看不见它
-        ApplySessionScene(g);
+        ApplySessionScene(g);   // 幽灵已经带着当前场景的标记,这一步现在是原地不动
         BuildSessions();
         BuildConversation();
         FocusInputIfPresent();

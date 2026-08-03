@@ -24,7 +24,7 @@ public enum IconName
     // 天气实况(按 WMO 代码选,见 Icons.ForWeather)
     WxSun, WxPartly, WxCloud, WxFog, WxDrizzle, WxRain, WxSnow, WxShower, WxThunder,
     // 通用小图标(回信等场景用;与天气同一共享表 —— 象形不随皮肤变)
-    Copy, Send,
+    Copy, Send, Mail,
     // 夜间变体:晴 -> 月亮;局部多云 -> 月亮 + 云(用户裁定 2026-08-01)
     WxMoon, WxPartlyNight,
     Menu, Close, Minimize, Maximize, Restore, ChevronRight, Member, Star, Mic, Dots, Refresh,
@@ -157,11 +157,15 @@ public static class Icons
     /// </summary>
     static readonly Dictionary<IconName, string> Weather3 = new()
     {
-        // 太阳:圆 + 八条光芒
         // 复制:两张叠起来的纸
         [IconName.Copy] = "M9 8 H19 V20 H9 Z M6 16 V5 H16",
         // 发送:纸飞机
         [IconName.Send] = "M3.5 11 L20.5 4 L14.5 20.5 L11 13.5 Z M11 13.5 L20.5 4",
+        // 信封:信体 + 掰开的 V —— 回信功能的标识(场景 chip 与会话列表都用它)。
+        // ★ V 的两端锚死在信体的左右上角:描边皮肤看不出多一笔(它压在顶边上),
+        //   实心皮肤(暖萌)靠 EvenOdd 把 V 挖成缺口 —— 一份路径两种渲染都成立。
+        [IconName.Mail] = "M3.5 6 H20.5 V18 H3.5 Z M3.5 6 L12 12.6 L20.5 6 Z",
+        // 太阳:圆 + 八条光芒
         [IconName.WxSun] = "M12 7.4 A4.6 4.6 0 1 1 11.99 7.4 Z M12 2.6 V4.8 M12 19.2 V21.4 "
                          + "M2.6 12 H4.8 M19.2 12 H21.4 M5.4 5.4 L6.9 6.9 M17.1 17.1 L18.6 18.6 "
                          + "M18.6 5.4 L17.1 6.9 M6.9 17.1 L5.4 18.6",

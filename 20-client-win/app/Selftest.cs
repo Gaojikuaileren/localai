@@ -337,6 +337,23 @@ public static class Selftest
             // 幽灵会话:不进任何列表
             var ghost = cc.NewGhostSession("chat");
             Assert(!cc.NormalSessions("chat").Any(x => x.SessionId == ghost.SessionId), "幽灵会话不进普通列表");
+            // ★★ 全功能幽灵会话(用户裁定 2026-08-03):幽灵得跟当前场景【同型】——
+            //   以前 NewGhostSession 只吃 workspaceKey,建出来永远是一条普通文字会话,
+            //   于是在同传/文件翻译/多语表/回信里按幽灵,要么被踢回文字翻译,要么按钮亮着但什么也没发生。
+            foreach (var (mk, name) in new (Func<Services.ChatSession>, string)[]
+                     {
+                         (() => cc.NewGhostSession("translation", interpret: true), "同传"),
+                         (() => cc.NewGhostSession("translation", fileTrans: true), "文件翻译"),
+                         (() => cc.NewGhostSession("translation", i18nTable: true), "多语表"),
+                         (() => cc.NewGhostSession("chat", replyLetter: true), "回信"),
+                     })
+            {
+                var g2 = mk();
+                var flagged = g2.Interpret || g2.FileTrans || g2.I18nTable || g2.ReplyLetter;
+                Assert(g2.Ghost && flagged, $"★ 幽灵会话能建成【{name}】那一型(不是一律普通文字会话)");
+                Assert(!cc.NormalSessions(g2.WorkspaceKey!).Any(x => x.SessionId == g2.SessionId),
+                       $"{name}幽灵照旧不进列表");
+            }
             cc.PurgeGhosts();
             Assert(cc.Find(ghost.SessionId) is null, "PurgeGhosts 抹掉幽灵会话");
 
@@ -387,6 +404,18 @@ public static class Selftest
                 Assert(chatSrc.Contains("void ToggleGhost()") && chatSrc.Contains("if (InGhost) { ToNormal();"), "幽灵按钮可【退出】(再按回普通会话的空态)");
                 Assert(chatSrc.Contains("GhostButton(bool active)") && chatSrc.Contains("if (!active) ring.StrokeDashArray"), "幽灵中=实线,未进入=虚线");
                 Assert(chatSrc.Contains("_ghostHost.Content = inProject ? null : GhostButton(InGhost)"), "项目会话下不显示幽灵按钮");
+                // ★★ 幽灵外壳要罩住【每一个场景】(用户裁定 2026-08-03)。同传/文件翻译/多语表/回信
+                //   都是提前 return 的分支,以前用的是普通卡 —— 手里真拿着幽灵会话,屏幕上一点痕迹都没有。
+                Assert(chatSrc.Contains("var only = ConvShell(body, isGhost, overlayBanner: false);"),
+                       "★ 同传/文件翻译/多语表 走幽灵外壳");
+                Assert(chatSrc.Contains("ConvShell(rBody, isGhost, overlayBanner: false)"),
+                       "★ 回信场景走幽灵外壳");
+                Assert(chatSrc.Contains("ConvShell(PlaceholderCenter(), InGhost, overlayBanner: false)"),
+                       "★ 占位空间也走幽灵外壳 —— 按钮已经在那儿了,按下去毫无反应比不给更假");
+                Assert(!chatSrc.Contains("NewGhostSession(_wsKey);"),
+                       "★ 建幽灵必须带上当前场景标记,裸调用就是退化回「永远是普通文字会话」");
+                Assert(chatSrc.Contains("void EndGhostOnSceneSwitch()") && chatSrc.Contains("EndGhostOnSceneSwitch();"),
+                       "★ 换场景 = 换了一次 —— 幽灵的承诺只管这一次,切场景就抹掉");
                 // ★ 幽灵按钮【每个工作空间都给】(2026-08-01 用户裁定)——
                 //   判据是"这个空间给不给新建会话",而 + 已经在所有空间都给了。
                 Assert(!chatSrc.Contains("_wsKey == \"chat\" && !inProject"),
@@ -724,6 +753,36 @@ public static class Selftest
                 Assert(!snap.Messages.Any(m => m.SessionId == ghostS.SessionId), "★ 幽灵会话的消息也不进存档");
                 Assert(snap.Sessions.Any(x => x.SessionId == keepS.SessionId), "普通会话进存档");
                 Assert(snap.Sessions.Any(x => x.SessionId == delS.SessionId && x.DeletedAt is not null), "已删除会话连 DeletedAt 一起存(重启后继续走 30 天)");
+
+                // ★★ 幽灵的"不留痕"在【场景文档】里也得算数(用户裁定 2026-08-03)——
+                //   回信/译表/文件翻译各自按 sessionId 存一张表,ChatCenter 这层 Ghost 过滤管不到它们。
+                //   自动存盘是防抖的(任何 Changed 都排一次写盘),打字途中就会写,光靠"退出时删"守不住。
+                {
+                    var gid = ghostS.SessionId;
+                    bool IsGhost(string sid) => store.Find(sid)?.Ghost == true;
+
+                    var rs2 = new Services.ReplyState { IsGhostSession = IsGhost };
+                    rs2.SetSession(gid); rs2.Doc.Draft = "幽灵回信正文";
+                    Assert(!rs2.Export().Docs.ContainsKey(gid), "★ 幽灵回信的文档不落盘");
+
+                    var is2 = new Services.I18nState { IsGhostSession = IsGhost };
+                    is2.SetSession(gid); is2.Doc.SourceLang = "zh";
+                    Assert(!is2.ExportDocs().ContainsKey(gid), "★ 幽灵译表的文档不落盘");
+
+                    var fs2 = new Services.FileTransState { IsGhostSession = IsGhost };
+                    var tmpF = Path.Combine(Path.GetTempPath(), "localai-ghost-ft.png");
+                    try { File.WriteAllBytes(tmpF, new byte[] { 1, 2, 3 }); } catch { }
+                    fs2.SetFile(gid, tmpF, ghost: true);
+                    Assert(!fs2.Export().ContainsKey(gid), "★ 幽灵文件翻译的文档不落盘");
+                    Assert(fs2.DocOf(gid)?.Cache is null,
+                           "★★ 幽灵文件翻译【不抄副本】—— 副本是为了「源没了会话还能活」,而幽灵本来就活不过这一次");
+
+                    // 抹掉幽灵 = 三张表跟着清(销毁路径只准有一条,广播出去各自清)
+                    var purged = false;
+                    store.GhostsPurged += ids => purged = ids.Contains(gid);
+                    store.PurgeGhosts();
+                    Assert(purged, "★ PurgeGhosts 会广播 id —— 场景文档靠它才知道该清谁");
+                }
 
                 // JSON 往返:枚举存名字、可空时间戳、附件都要能还原
                 var json = System.Text.Json.JsonSerializer.Serialize(snap, StoreJson);
@@ -1503,7 +1562,7 @@ public static class Selftest
                        "列表点开与深链打开走同一条切场景的路(别一处切一处不切)");
                 Assert(cvIS.Contains("if (movable) m.Items.Add(move)") && cvIS.Contains("if (movable) m.Items.Add(toWs)"),
                        "★ 不能搬的会话:菜单里【根本不出现】那两项,而不是点了再报错");
-                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Pdf"),
+                Assert(cvIS.Contains("s.Interpret ? IconName.Mic : s.FileTrans ? IconName.File : s.I18nTable ? IconName.Extensions : IconName.Mail"),
                        "同传/文件翻译/JSON译表会话在列表里各用自己的图标区分(列表窄,一个图标够用)");
                 // 顶部场景切换只要图标 + 透明命中块
                 var modeSw = Slice(cvIS, "FrameworkElement ModeSwitcher()", "return row;");
@@ -2379,6 +2438,16 @@ public static class Selftest
                     //   定宽在最小窗下被 Grid 剪掉右边,自定义的「+」整个没了)
                     Assert(rbSrc.Contains("new ColumnDefinition { MaxWidth = 158 }") && !rbSrc.Contains("VerticalAlignment.Top, Width = 158"),
                            "★ 语言/问候/祝福那列窄了跟着缩 —— 「+」在最小窗下也得点得到");
+                    // ★ 指针的命中区是【整行】的透明盖板(用户反馈:圆点 9px 太难点中)
+                    var rbPr = Slice(rbSrc, "FrameworkElement PointerRow(", "/// <summary>语气与载体同款竖直指针");
+                    Assert(rbPr is not null && rbPr.Contains("Grid.SetColumnSpan(row, 2)")
+                           && rbPr.Contains("Background = Brushes.Transparent") && rbPr.Contains("IsHitTestVisible = false"),
+                           "★ 载体/语气整行可点:圆点与档名让出命中,交给一块跨两列的透明盖板");
+                    // ★ 邮编+地区跟其余输入框一样左对齐(用户裁定 2026-08-03)
+                    Assert(rbSrc.Contains("Cell(line2, ph2, right: false)"),
+                           "★ 邮编+地区左对齐,不再独一份右对齐");
+                    Assert(rbSrc.Contains("CustomAwareItem(cb, x, greeting)") && rbSrc.Contains("PreviewMouseLeftButtonDown"),
+                           "★ 自定义那几条【在下拉里】各带一个 × ——删除入口要在看得见它的地方");
                     Assert(rbSrc.Contains("RemoveCustom(greeting, text)"),
                            "★ 自定义浮窗里列出已加的并给得了删(用户反馈:加得进删不掉)");
                 }
@@ -2389,14 +2458,79 @@ public static class Selftest
                     var iIn = rpSrc.IndexOf("Sect(\"来信(可留空)\"", StringComparison.Ordinal);
                     Assert(iDraft >= 0 && iIn > iDraft, "★ 我想回复的内容在上、来信在下(用户裁定对调)");
                     Assert(rpSrc.Contains("Sect(\"对话记录\""), "★ 生成结果下方多一块【对话记录】(四板块)");
+                    var cvR = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                    if (cvR is not null)
+                    {
+                        // ★ 场景切换条排在会话卡【内】—— 与翻译空间同一层级(用户裁定 2026-08-03)
+                        var rScene = Slice(cvR, "if (_replyScene)", "_chatSceneHead = chatHead;");
+                        Assert(rScene is not null && rScene.Contains("DockPanel.SetDock(chatHead, Dock.Top)")
+                               && !rScene.Contains("ConvCard(new ReplyPanel())"),
+                               "★ 回信的场景切换条在会话卡内,不是悬在页面底色上");
+                        Assert(rScene is not null
+                               && rScene.IndexOf("rWrap.Children.Add(rBar)", StringComparison.Ordinal)
+                                  < rScene.IndexOf("rWrap.Children.Add(rCard)", StringComparison.Ordinal),
+                               "★ 设置条仍在卡外,且 Dock 的先加(写反了卡就不填充 —— 这条只有渲染图看得见)");
+                        // ★ 回信用【信封】图标:PDF 是产出格式之一(还只在纸质载体下出现),不能拿它当功能标识
+                        Assert(cvR.Contains("SceneChip(IconName.Mail, \"回信\""),
+                               "★ 回信场景 chip 用信封图标");
+                    }
+                    foreach (var sk in new[] { Services.Skin.Ink, Services.Skin.Breeze, Services.Skin.Warm })
+                        Assert(Theme.Icons.PathFor(Theme.IconName.Mail, sk) is { Length: > 0 } mp
+                               && mp != Theme.Icons.PathFor(Theme.IconName.Pdf, sk),
+                               $"★ {sk}:信封有自己的路径,不是把 Pdf 的抄了一份");
                     Assert(rpSrc.Contains("署名日期"), "★ 署名日期改放在生成键左边(跟产出挺在一起)");
                     // ★ 动作排在板块【底部】:挤进标题行的话,最小窗宽下 DockPanel 先满足右侧按钮,
                     //   标题只剩一个字的宽 —— 「生成结果」被压成竖排(渲染图 2026-08-03 拍到)
+                    // ★★ 刷新不许碰树:清空重建会把带焦点的 _signDate 移出去 ——
+                    //   轻则两父节点异常,重则 TSF 持锁期 FailFast(catch 不住,crash.log 里都留不下)。
+                    Assert(!rpSrc.Contains("_resultBtns.Children.Clear()"),
+                           "★★ 生成键那一排只建一次,刷新只改 Visibility/IsEnabled");
+                    var rpCtor = Slice(rpSrc, "void BuildActionsOnce()", "void RefreshActions(");
+                    Assert(rpCtor is not null && rpCtor.Contains("_dateWrap.Children.Add(_signDate)")
+                           && Slice(rpSrc, "void RefreshActions(", "void BuildLog(")?.Contains("Children.Add(") != true,
+                           "★ _signDate 只在装配那一次进树;刷新那段一个 Children.Add 都不许有");
                     Assert(rpSrc.Contains("DockPanel.SetDock(actions, Dock.Bottom)"),
                            "★ 生成/署名日期/图标那排在板块底部,不挤标题行");
                     Assert(rpSrc.Contains("Rebuild();   // ★ 先画一遍"),
                            "★ 构造时先画一遍 —— 否则离屏渲染诊断里这一块永远是空的(骗自己)");
                 }
+                // ★★ 事故复现(2026-08-03,崩溃日志逐字对应):动作排每次重建都把字段级 _signDate
+                //   塞进一个【新建的】容器,而旧容器还是它的父 —— 第二次走到就抛
+                //   "指定的元素已经是另一个元素的逻辑子元素"。更狠的是它跑在 _signDate 自己的
+                //   TextChanged 里:带焦点的 TextBox 在 TSF 持锁期被重挂,WPF 直接 FailFast 杀进程。
+                //   ★ 必须调【两次】—— 一次不会红。
+                {
+                    var app0 = (App)System.Windows.Application.Current;
+                    var keep = app0.Reply.SessionId;
+                    app0.Reply.SetSession(null);
+                    app0.Reply.Doc.Medium = Services.ReplyMedium.Paper;   // 只有纸质载体才摆署名日期
+                    try
+                    {
+                        var rp = new Views.ReplyPanel();
+                        rp.Rebuild();
+                        rp.Rebuild();
+                        Assert(true, "★★ 载体=信件时连着重建两次不抛 —— 动作排只建一次、刷新只改属性");
+                    }
+                    catch (Exception ex)
+                    {
+                        Assert(false, "★★ 回信动作排重建又炸了(" + ex.GetType().Name + "):" + ex.Message);
+                    }
+                    app0.Reply.SetSession(keep);
+                }
+                // ★ 不按【生成】就不该冒出一条会话(用户反馈 2026-08-03:
+                //   "即使对话记录没有任何记录的条例,也会在会话列表中创建会话记录")
+                {
+                    var rst2 = new Services.ReplyState();
+                    rst2.SetSession(null);
+                    rst2.Doc.TheirName = "改个对方称呼";
+                    rst2.Doc.Medium = Services.ReplyMedium.Paper;
+                    rst2.Touch();
+                    Assert(rst2.SessionId is null, "★ 改设置/填对方信息【不】建会话 —— 只有按下生成才建");
+                }
+                var rbSrc0 = TryReadSource(Path.Combine("Views", "ReplyBar.cs"));
+                Assert(rbSrc0 is null || !rbSrc0.Contains("EnsureSession()"),
+                       "★ 设置条里不许再调 EnsureSession —— 建会话的时机只有一个:按下生成");
+
                 var rSess = new Services.ChatCenter().NewSession(null, "chat", replyLetter: true);
                 Assert(rSess.ReplyLetter && !Services.ChatCenter.CanMove(rSess), "回信会话与场景会话同规:不可搬走");
             }
@@ -4570,8 +4704,20 @@ public static class Selftest
             var mwTab = TryReadSource("MainWindow.xaml.cs");
             if (mwTab is not null)
             {
-                Assert(mwTab.Contains("ke.Key != Key.Tab") && mwTab.Contains("FocusPolicy.HandleTab(this, FocusPark)"),
+                Assert(mwTab.Contains("ke.Key != Key.Tab") && mwTab.Contains("FocusPolicy.HandleTab(this, FocusPark"),
                        "★ Tab 由窗口统一接管(不靠逐个控件设 IsTabStop)");
+                // ★ Shift+Tab 往回转(2026-08-03:圈里有好几个输入框之后,只能往前转就成了单行道)
+                Assert(mwTab.Contains("back: (Keyboard.Modifiers & ModifierKeys.Shift) != 0"),
+                       "★ Shift+Tab 在输入框圈里往回转");
+                // ★★ 点【输入框以外】= 取消聚焦(用户裁定 2026-08-03),且必须给浮窗放行 ——
+                //   回信页的「自定义问候」就是浮窗里的一个输入框,把焦点拽回主窗口会让浮窗整个关掉。
+                var mwPark = Slice(mwTab, "PreviewMouseUp += (_, me) =>", "StateChanged +=");
+                Assert(mwPark is not null && mwPark.Contains("FocusPolicy.IsInsideInput(d)") && mwPark.Contains("Flyout.IsInside(d)")
+                       && mwPark.Contains("FocusPolicy.Park(this, FocusPark)"),
+                       "★ 点输入框以外的地方取消聚焦;浮窗内部放行(否则浮窗里的输入框会被清掉)");
+                Assert(mwPark is not null && mwPark.IndexOf("AnyDropDownOpen(this)", StringComparison.Ordinal)
+                       < mwPark.IndexOf("FocusPolicy.Park(this, FocusPark)", StringComparison.Ordinal),
+                       "★ 下拉开着时不停焦点 —— 选项在独立 Popup 里,停一下就把下拉关了(删自定义的 × 当场失效)");
             }
             var cvMark = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvMark is not null)
@@ -4607,8 +4753,11 @@ public static class Selftest
             {
                 Assert(cvFocus.Contains("if (_input.IsLoaded) _input.Focus();"),
                        "★ 没有输入框的页面不聚焦任何东西(不对从未进树的控件 Focus)");
-                Assert(cvFocus.Contains("var refocus = _input.IsKeyboardFocusWithin;"),
-                       "★ 会话区重建后把焦点还给输入框(每发一条消息 _input 就被换掉一次)");
+                // ★ 2026-08-03 起多了 || _justSent:"点空白取消聚焦"是隧道+按下,发送键挂在松开上 ——
+                //   焦点先被停走,再嗅探就恒为 false,"发完第一条要重新点输入框"那个老 bug 会复发。
+                Assert(cvFocus.Contains("var refocus = _input.IsKeyboardFocusWithin || _justSent;")
+                       && cvFocus.Contains("_justSent = true;"),
+                       "★ 会话区重建后把焦点还给输入框:鼠标发送靠【记下的意图】,不靠嗅探当前焦点");
                 var ren = Slice(cvFocus, "void RenameSession(", "Flyout.Show(");
                 Assert(ren is not null && ren.Contains("Key.Escape"),
                        "★ 重命名浮窗自己收 Esc(主窗口那条总闸够不到独立 Popup)");

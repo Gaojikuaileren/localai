@@ -54,16 +54,22 @@ public sealed class FileTransState
     //   用户导入一张图、回头清理了下载文件夹,这个会话不该跟着死(框指着空气、译文成孤儿)。
     //   剪贴板截图早已是同一条纪律(粘贴即落 clips\)。代价是占一份磁盘,如实认;
     //   源文件还在就优先用源(用户改了源文件能看到最新的),源没了退回副本并在界面说明。
-    public void SetFile(string sessionId, string path)
+    /// <param name="ghost">
+    /// ★ 幽灵会话【不留副本】(用户裁定 2026-08-03:全功能都要幽灵会话):
+    /// 副本存在的理由是"源没了会话还能活",而幽灵本来就活不过这一次 ——
+    /// 给它抄一份副本,等于把用户刚说过"不要留"的文件留在盘上。
+    /// </param>
+    public void SetFile(string sessionId, string path, bool ghost = false)
     {
         string? cache = null;
-        try
-        {
-            System.IO.Directory.CreateDirectory(CacheDir);
-            cache = System.IO.Path.Combine(CacheDir, sessionId + System.IO.Path.GetExtension(path).ToLowerInvariant());
-            System.IO.File.Copy(path, cache, overwrite: true);
-        }
-        catch { cache = null; }   // 复制失败就没有副本 —— 界面在源丢失时如实说"副本也没有"
+        if (!ghost)
+            try
+            {
+                System.IO.Directory.CreateDirectory(CacheDir);
+                cache = System.IO.Path.Combine(CacheDir, sessionId + System.IO.Path.GetExtension(path).ToLowerInvariant());
+                System.IO.File.Copy(path, cache, overwrite: true);
+            }
+            catch { cache = null; }   // 复制失败就没有副本 —— 界面在源丢失时如实说"副本也没有"
         _docs[sessionId] = new FileDoc(path, _docs.TryGetValue(sessionId, out var old) ? old.Boxes : new List<MarkBox>(), cache);
         Changed?.Invoke();
     }
@@ -139,7 +145,14 @@ public sealed class FileTransState
     }
 
     // ---- 存档(文件路径 + 标注框;工具态/预览开关不落盘)----
-    public Dictionary<string, FileDoc> Export() => new(_docs);
+    /// <summary>
+    /// ★ 幽灵会话的文档不落盘。双保险的另一半是 PurgeGhosts 广播后的 Drop ——
+    /// 自动存盘是防抖的(App 里任何 Changed 都会排一次写盘),打字途中就会写,
+    /// 光靠"退出时删掉"守不住。
+    /// </summary>
+    public Func<string, bool>? IsGhostSession { get; set; }
+    public Dictionary<string, FileDoc> Export()
+        => _docs.Where(kv => !(IsGhostSession?.Invoke(kv.Key) ?? false)).ToDictionary(kv => kv.Key, kv => kv.Value);
     public void Import(Dictionary<string, FileDoc>? saved)
     {
         if (saved is null) return;

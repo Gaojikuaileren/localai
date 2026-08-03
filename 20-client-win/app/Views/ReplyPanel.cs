@@ -30,10 +30,22 @@ public sealed class ReplyPanel : UserControl
     readonly TextBox _draft = Area();
     readonly TextBox _incoming = Area();
     readonly TextBox _result = Area(readOnly: true);
-    readonly TextBox _signDate = new() { Width = 132, Padding = new Thickness(5, 3, 5, 3),
+    // 宽度不定:它在动作排里吃剩余宽(见 BuildActionsOnce)—— 定宽会在窄窗口下把按钮挤出去
+    readonly TextBox _signDate = new() { Padding = new Thickness(5, 3, 5, 3), MinWidth = 84,
                                          VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
     readonly StackPanel _log = new();
+    // ★★ 动作排【只建一次】(2026-08-03 事故):此前每次 Rebuild 都新建容器再把字段级 _signDate
+    //   塞进去 —— 旧父子关系没解开,直接 InvalidOperationException;更要命的是
+    //   带焦点的 TextBox 在 TSF(输入法框架)持锁期间被重挂,WPF 会 Environment.FailFast
+    //   把整个进程杀掉(catch 不住,日志里只留 TextStore.GrantLockWorker 那根栈)。
+    //   所以这一排从此只在构造时建,刷新只改属性,永不重建。
     readonly DockPanel _resultBtns = new() { LastChildFill = true };
+    readonly StackPanel _tail = new() { Orientation = Orientation.Horizontal };
+    readonly Grid _dateWrap = new() { Margin = new Thickness(0, 0, 6, 0) };
+    readonly TextBlock _dateHint = new() { Text = "署名日期 · 空=当天", IsHitTestVisible = false,
+                                           VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 0, 0) };
+    Button _gen = null!;
+    FrameworkElement _sendBtn = null!, _pdfBtn = null!, _copyBtn = null!;
     bool _editing;
 
     public ReplyPanel()
@@ -56,11 +68,22 @@ public sealed class ReplyPanel : UserControl
         Put(Sect("对话记录", new ScrollViewer { Content = _log, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, null), 2, 2);
         Content = grid;
 
+        BuildActionsOnce();
+
+        // ★ Tab 次序【显式登记】(用户裁定 2026-08-03:tab 在不同输入框之间切换)。
+        //   从会话卡里的正文起步,再到下方设置条(见 ReplyBar 的 20 开头那一段)——
+        //   靠树序不行:设置条在树里排在会话卡【前面】,走出来会是自下而上的。
+        //   _result 是只读产出框,不进圈(与"只读正文不占 Tab 序"的既定纪律一致,鼠标照样能拖选复制)。
+        FocusPolicy.SetTabOrder(_draft, 10);
+        FocusPolicy.SetTabOrder(_incoming, 11);
+        FocusPolicy.SetTabOrder(_signDate, 12);
+
         _draft.TextChanged += (_, _) => Save(d => d.Draft = _draft.Text);
         _incoming.TextChanged += (_, _) => Save(d => d.Incoming = _incoming.Text);
         _signDate.TextChanged += (_, _) => Save(d => d.SignDate = _signDate.Text);
         Rebuild();   // ★ 先画一遍:离屏渲染诊断不会触发 Loaded,不先画按钮排在图里是空的
-        Loaded += (_, _) => { TheApp.Reply.Changed += Rebuild; Rebuild(); };
+        // -= 再 +=:Loaded 在重新挂树时会再来一次,而 Unloaded 不保证成对 —— 不防就会重复订阅
+        Loaded += (_, _) => { TheApp.Reply.Changed -= Rebuild; TheApp.Reply.Changed += Rebuild; Rebuild(); };
         Unloaded += (_, _) => TheApp.Reply.Changed -= Rebuild;
     }
 
@@ -109,7 +132,12 @@ public sealed class ReplyPanel : UserControl
         return b;
     }
 
-    void Rebuild()
+    /// <summary>
+    /// internal 是一条【真缝】:无头自检要能连着调两次,复现 2026-08-03 那次
+    /// "第二次重建时 _signDate 还挂在上一个容器上"的事故 —— 靠 RaiseEvent(Loaded) 不可靠,
+    /// 离屏环境下订阅到底有没有生效不确定,那样断言会变成永远绿的假断言。
+    /// </summary>
+    internal void Rebuild()
     {
         var st = TheApp.Reply;
         var d = st.Doc;
@@ -126,7 +154,7 @@ public sealed class ReplyPanel : UserControl
         _draft.IsEnabled = _incoming.IsEnabled = _signDate.IsEnabled = !busy;
 
         BuildLog(st, d);
-        BuildResultActions(st, d, busy);
+        RefreshActions(d, busy);
     }
 
     void BuildLog(ReplyState st, ReplyDoc d)
@@ -180,70 +208,67 @@ public sealed class ReplyPanel : UserControl
         }
     }
 
-    void BuildResultActions(ReplyState st, ReplyDoc d, bool busy)
+    /// <summary>
+    /// 动作排装配 —— ★【只跑一次】。刷新走 RefreshActions,只改属性。
+    /// 右边的图标与生成键先占位(Dock.Right 按添加顺序从右往左排),
+    /// 署名日期最后放,吃剩下的宽 —— 窗口再窄也是它变短,不会把按钮挤出去。
+    /// </summary>
+    void BuildActionsOnce()
     {
-        _resultBtns.Children.Clear();
-        // ★ 右边的图标与生成键先占位(Dock.Right 按添加顺序从右往左排),
-        //   署名日期最后放【吃剩下的宽】—— 窗口再窄也是它变短,不会把按钮挤出去。
-        var tail = new StackPanel { Orientation = Orientation.Horizontal };
-        DockPanel.SetDock(tail, Dock.Right);
-        _resultBtns.Children.Add(tail);
-        if (d.Medium == ReplyMedium.Paper)
-        {
-            var hint = new TextBlock { Text = "署名日期 · 空=当天", IsHitTestVisible = false,
-                                       VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(7, 0, 0, 0) };
-            hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            hint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-            hint.Visibility = _signDate.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-            _signDate.TextChanged -= SyncDateHint;
-            _dateHint = hint;
-            _signDate.TextChanged += SyncDateHint;
-            _signDate.Width = double.NaN;   // 吃剩余宽度,不再钉死 132
-            _signDate.MinWidth = 84;
-            var wrap = new Grid { Margin = new Thickness(0, 0, 6, 0), HorizontalAlignment = HorizontalAlignment.Stretch };
-            wrap.Children.Add(_signDate);
-            wrap.Children.Add(hint);
-            _resultBtns.Children.Add(wrap);   // LastChildFill:留到最后 add 才吃得到剩余宽
-        }
-        else
-        {
-            _resultBtns.Children.Add(new Border());   // 没有日期栏时,占位撑开左边的空白
-        }
+        _dateHint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _dateHint.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        _dateWrap.Children.Add(_signDate);
+        _dateWrap.Children.Add(_dateHint);
 
-        var gen = Ui.Primary(busy ? "生成中…" : "生成", (_, _) =>
+        _gen = Ui.Primary("生成", (_, _) =>
         {
+            var st = TheApp.Reply;
             if (st.Busy) return;
             if (st.Doc.Draft.Trim().Length == 0)
             { ConfirmDialog.Show("还没有内容", "先在左上写你想回复的内容。", confirmText: "好", cancelText: "关闭"); return; }
             st.Generate();   // 建会话(有记录才进列表)+ 落记录 + 装配
         });
-        gen.IsEnabled = !busy;
-        gen.Margin = new Thickness(0, 0, 6, 0);
-        tail.Children.Add(gen);
+        _gen.Margin = new Thickness(0, 0, 6, 0);
+        _tail.Children.Add(_gen);
 
-        if (d.Medium == ReplyMedium.Email)
-            tail.Children.Add(IconBtn(Theme.IconName.Send, "推送到邮箱(接线方案待议)", () =>
-                ConfirmDialog.Show("还不能推送",
-                    "直接发进邮箱的接线方案还没定(候选:本机邮件客户端 mailto / SMTP)。\n先用复制图标粘到邮箱里发。",
-                    confirmText: "知道了", cancelText: "关闭")));
-        if (d.Medium == ReplyMedium.Paper)
-            tail.Children.Add(IconBtn(Theme.IconName.Pdf, "生成 PDF(随引擎接入)", () =>
-                ConfirmDialog.Show("还不能出 PDF",
-                    "PDF 排版输出随引擎(P4)一起接。复制图标给出的就是排好的信件格式文本,可粘进任何文档软件打印。",
-                    confirmText: "知道了", cancelText: "关闭")));
-        tail.Children.Add(IconBtn(Theme.IconName.Copy,
-            d.Medium == ReplyMedium.Paper ? "复制格式文本" : "复制", () =>
+        _sendBtn = IconBtn(Theme.IconName.Send, "推送到邮箱(接线方案待议)", () =>
+            ConfirmDialog.Show("还不能推送",
+                "直接发进邮箱的接线方案还没定(候选:本机邮件客户端 mailto / SMTP)。\n先用复制图标粘到邮箱里发。",
+                confirmText: "知道了", cancelText: "关闭"));
+        _pdfBtn = IconBtn(Theme.IconName.Pdf, "生成 PDF(随引擎接入)", () =>
+            ConfirmDialog.Show("还不能出 PDF",
+                "PDF 排版输出随引擎(P4)一起接。复制图标给出的就是排好的信件格式文本,可粘进任何文档软件打印。",
+                confirmText: "知道了", cancelText: "关闭"));
+        _copyBtn = IconBtn(Theme.IconName.Copy, "复制", () =>
         {
+            var d = TheApp.Reply.Doc;
             if (d.Result.Trim().Length == 0)
             { ConfirmDialog.Show("还没有结果", "先点「生成」。", confirmText: "好", cancelText: "关闭"); return; }
             try { Clipboard.SetText(d.Result); } catch { }
-        }));
+        });
+        _tail.Children.Add(_sendBtn);
+        _tail.Children.Add(_pdfBtn);
+        _tail.Children.Add(_copyBtn);
+
+        DockPanel.SetDock(_tail, Dock.Right);
+        _resultBtns.Children.Add(_tail);
+        _resultBtns.Children.Add(_dateWrap);   // LastChildFill:留到最后 add 才吃得到剩余宽
+        _signDate.TextChanged += (_, _) => SyncDateHint();
     }
 
-    TextBlock? _dateHint;
-    void SyncDateHint(object? s, TextChangedEventArgs e)
+    /// <summary>刷新动作排 —— 只改属性,一个控件都不重挂。</summary>
+    void RefreshActions(ReplyDoc d, bool busy)
     {
-        if (_dateHint is not null)
-            _dateHint.Visibility = _signDate.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var paper = d.Medium == ReplyMedium.Paper;
+        _dateWrap.Visibility = paper ? Visibility.Visible : Visibility.Collapsed;
+        _pdfBtn.Visibility = paper ? Visibility.Visible : Visibility.Collapsed;
+        _sendBtn.Visibility = d.Medium == ReplyMedium.Email ? Visibility.Visible : Visibility.Collapsed;
+        _copyBtn.ToolTip = paper ? "复制格式文本" : "复制";
+        _gen.Content = busy ? "生成中…" : "生成";
+        _gen.IsEnabled = !busy;
+        SyncDateHint();
     }
+
+    void SyncDateHint()
+        => _dateHint.Visibility = _signDate.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
 }

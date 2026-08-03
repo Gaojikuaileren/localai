@@ -191,7 +191,8 @@ public sealed class FileTransPanel : UserControl
                 $"文件翻译 · {Path.GetFileName(path)} · {DateTime.Now:M月d日 HH:mm}", fileTrans: true);
             sid = sess.SessionId;
         }
-        TheApp.FileTrans.SetFile(sid, path);
+        // 幽灵会话不抵副本 —— 它的承诺就是这一次之后什么都不剩
+        TheApp.FileTrans.SetFile(sid, path, ghost: TheApp.Chat.Find(sid)?.Ghost == true);
         // 新建的会话请宿主选中 —— 本面板绑的还是 null,不选中的话导入完看着像没反应
         if (isNew) TheApp.FileTrans.RequestFocus(sid);
     }
