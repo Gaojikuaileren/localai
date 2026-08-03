@@ -4856,6 +4856,77 @@ public static class Selftest
                            "★ 找到多个中枢时摆出来让人自己挑(合租/邻居/自己两台都是正常情况)");
             }
 
+
+            // ---- 一键配对:按角色分流 + 配对窗口的三道闸 ----
+            {
+                var dv4 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dv4 is not null)
+                {
+                    var body4 = Body(dv4);
+
+                    // ① 角色四分,一种都不许合并
+                    Assert(Enum.GetValues<Views.HostRole>().Length == 4,
+                           "★★ 角色必须是四种:Unknown / Host / HostHubDown / Client —— "
+                           + "把 HostHubDown 并进 Client,就又回到「主机上说这台不是主机」那个坑");
+                    var probe = Slice(dv4, "async Task ProbeRoleAsync", "/// <summary>手动重探");
+                    Assert(probe is not null && probe.IndexOf("LastProbe == Services.AdminProbeResult.Ok", StringComparison.Ordinal)
+                           < probe.IndexOf("HostToolsDir() is not null", StringComparison.Ordinal),
+                           "★★ 先看【肯定证据】(管理面答话)再看【线索】(本机有主机端程序)—— 顺序反了线索就会盖过证据");
+                    Assert(body4.Contains("case HostRole.Unknown:") && body4.Contains("ProbingCard()"),
+                           "★ 角色没探出来之前什么都不猜,如实说「正在确认」");
+
+                    // ② 主机那一支不许出现"填一个中枢地址配到别人家"的框
+                    var build4 = Slice(dv4, "void Build()", "UIElement ProbingCard()");
+                    Assert(build4 is not null && !build4.Contains("ClientPairCard()")
+                           || build4 is not null && build4.IndexOf("case HostRole.Host:", StringComparison.Ordinal)
+                              < build4.IndexOf("ClientPairCard()", StringComparison.Ordinal),
+                           "★ 主机分支只画主机的卡");
+
+                    // ③ 本机自配对:必须【当场重探】,不能拿旧结论当通行证;而且无论成败都关窗
+                    var self = Slice(dv4, "async Task SelfPairAsync", "/// <summary>「已配对的电脑」");
+                    Assert(self is not null && self.Contains("await admin.ProbeAsync"),
+                           "★★ 自配对前当场重探一次 —— 几分钟前的探测结果不是通行证(中枢可能换了、Edge 可能重起过)");
+                    Assert(self is not null && self.Contains("finally") && self.Contains("WindowAsync(false)"),
+                           "★★ 无论成败都关窗 —— 开着的窗口是暴露面,不能靠「正常路径会关」来保证");
+                    Assert(self is not null && self.Contains("WindowAsync(true, 1)"),
+                           "★ 自配对把窗口开到最短(1 分钟)—— 这几秒局域网上的 8443 也接受请求");
+                    Assert(self is not null && self.Contains("dials.Count > 1"),
+                           "★ 本机有多个地址在应答时不替他挑 —— 选错会把只有本机看得见的地址写进配对档案");
+
+                    // ④ 配对窗口的三道闸,各自独立(用户问:「只有主机没副机岂不是永远关不了」)
+                    Assert(Views.DevicesView.GraceSeconds > 0 && Views.DevicesView.GraceSeconds <= 300,
+                           "★★ 宽限必须【有上限】—— 写成「队列非空就不关」的话,局域网上任何人塞一条就能把窗口按住");
+                    Assert(Views.DevicesView.WindowMinutes > 0 && Views.DevicesView.WindowMinutes <= 30,
+                           "★ 中枢侧的分钟上限是最后一道闸:客户端崩了窗口也会自己关");
+                    var poll = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
+                    Assert(poll is not null && poll.Contains("DateTime.UtcNow >= _graceUntil"),
+                           "★★ 宽限到点【无条件】关 —— 这一条是「永远关不了」的正解");
+                    Assert(body4.Contains("Unloaded +=") && body4.Contains("HardCloseWindowAsync"),
+                           "★★ 离开这一页也要关窗 —— 「展开着就走人」不能把窗口留到分钟上限");
+                    Assert(body4.Contains("IsVisibleChanged +=") && body4.Contains("CollapseAddAsync"),
+                           "★ 页面不可见时按收起处理(带宽限)");
+                    Assert(body4.Contains("_addPanel = new StackPanel { Visibility = Visibility.Collapsed }"),
+                           "★★ 「添加一台新电脑」默认收起 —— 只有主机没有副机的人才不会无意中开窗;"
+                           + "展开这个动作本身就是明确意图");
+
+                    // ⑤ 六词比对【不许】被一键化掉
+                    var approveDlg = Slice(dv4, "async Task ShowApprovalDialogAsync", "// ============");
+                    Assert(approveDlg is not null && approveDlg.Contains("六个词逐字一样"),
+                           "★★ 批准按钮的文字本身就是那句断言,不是中性的「确定」—— "
+                           + "六个词管的是「这条请求是不是你发的」,displayName 是自报的可以随便写");
+                    Assert(approveDlg is not null && approveDlg.Contains("DenyAsync"),
+                           "★ 弹窗要有拒绝这条路,不能只有批准和关掉");
+                    Assert(approveDlg is not null && !approveDlg.Contains("跳过"),
+                           "★★ 不提供任何「跳过比对」的快捷方式");
+
+                    // ⑥ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
+                    Assert(!body4.Contains("Edge 窗口里输入 open"),
+                           "★★ 「去 Edge 窗口里敲 open」是命令行时代的说法 —— 留着会把人支到黑框里");
+                    Assert(body4.Contains("展开「＋ 添加一台新电脑」"),
+                           "★ 窗口关着时告诉他主机上现在该做哪一步");
+                }
+            }
+
             // ---- S4 · 配对审批与设备管理接【主机本地回环管理面】(D37/D48)----
             {
                 var ha = new Services.HubAdmin();

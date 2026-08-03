@@ -13,9 +13,39 @@ using LocalAI.Client.Services;
 
 namespace LocalAI.Client.Views;
 
+/// <summary>
+/// 这台电脑在这套装置里是什么角色。★ 四种,一种都不许合并:
+///   · Unknown     —— 还没探完。**不猜**,界面如实说"正在确认"。
+///   · Host        —— 回环管理面答话了且 hubId 对得上。这是唯一的【肯定证据】。
+///   · HostHubDown —— 探不到管理面,但本机装着主机端程序 ⇒ 多半是主机,只是 Edge 没起。
+///                    2026-08-03 就是栽在把这一种说成"这台不是主机"上。
+///   · Client      —— 探不到,也没有主机端程序。
+/// </summary>
+public enum HostRole { Unknown, Host, HostHubDown, Client }
+
 public sealed class DevicesView : UserControl
 {
     App TheApp => (App)Application.Current;
+
+    /// <summary>配对窗口一次开多久(分钟)。★ 这是【主机侧】的上限,由中枢自己到点失效 ——
+    /// 和客户端在不在、页面在哪、进程有没有崩,全都无关。这是最后一道闸。</summary>
+    public const int WindowMinutes = 10;
+
+    /// <summary>收起/换页时的宽限秒数上限。★ 必须【有上限】:
+    /// 写成"只要队列非空就不关"的话,局域网上任何人塞一条(或一条卡住的请求)就能把窗口按住。</summary>
+    public const int GraceSeconds = 90;
+
+    HostRole _role = HostRole.Unknown;
+
+    StackPanel? _devList;
+    StackPanel? _addPanel;
+    TextBlock? _addStatus;
+    Button? _addToggle;
+    bool _addExpanded;
+    System.Windows.Threading.DispatcherTimer? _pendTimer;
+    DateTime _graceUntil = DateTime.MinValue;
+    readonly HashSet<string> _popped = new(StringComparer.Ordinal);
+    bool _dialogOpen;
 
     readonly StackPanel _root = new();
     readonly TextBlock _sasBlock;
@@ -65,160 +95,100 @@ public sealed class DevicesView : UserControl
             _root.HorizontalAlignment = HorizontalAlignment.Left;
         }
 
+        // ★ 第 ① 道闸的另一半:离开这一页(切到别的设置分节、关窗口、重建界面)也要关掉配对窗口。
+        //   不挂这个的话,"展开着就走人"会把窗口一直留到中枢侧的分钟上限才关。
+        Unloaded += (_, _) => { if (_addExpanded || _graceUntil != DateTime.MinValue) _ = HardCloseWindowAsync(quiet: true); };
+        IsVisibleChanged += (_, e) =>
+        {
+            if (!(bool)e.NewValue && (_addExpanded || _graceUntil != DateTime.MinValue)) _ = CollapseAddAsync(leavingPage: true);
+        };
+
         Build();
     }
 
+    /// <summary>
+    /// ★ 按角色分流:主机和副机在这一页要做的事根本不同,摆同一套界面只会让两边都费解。
+    ///   · 主机:它就是中枢,不该出现"填一个中枢地址去配到别人家"的框;
+    ///     它要看的是【谁连进来了】和【怎么再加一台】。
+    ///   · 副机:它要看的是【同一网络下有哪些中枢】,挑一个配上去。
+    /// ★ 角色没探出来之前【什么都不猜】—— 如实说"正在确认",探完再画。
+    /// </summary>
     void Build()
     {
         _root.Children.Clear();
         // 独立页才画大标题;并入设置时由设置页的分节小标题领起,避免重复标题
         if (!_embedded) _root.Children.Add(Ui.Title(Strings.Get("devices.title")));
-        _root.Children.Add(TheApp.Hub.IsPaired ? PairedCard() : PairCard());
-        _root.Children.Add(_sasCard);
-        _root.Children.Add(RemoteDevicesCard());
-    }
-
-    // ---------------------------------------------------------------- 未配对:一键配对
-    UIElement PairCard()
-    {
-        var addr = new TextBox { Width = 320, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 12), Text = "" };
-        addr.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
-        var name = new TextBox { Width = 320, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 12), Text = Environment.MachineName };
-        name.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
-
-        var status = Ui.Body("");
-        // ★ 本机就是主机时【不该让人手填地址】(用户问:"或许不需要填?" —— 对,主机这边确实不该填)。
-        //   先 ping 回环管理面确认身份,再探出 Edge 到底在哪张网卡上听,自动填好。
-        //   探不到就留空并如实说"照 Edge 窗口里那行填",绝不猜一个填进去。
-        var autoNote = Ui.Caption("正在看这台是不是主机…");
-        _ = AutofillHubAddress(addr, autoNote);
-        var go = Ui.Primary(Strings.Get("pairing.start"), async (_, _) =>
+        switch (_role)
         {
-            var dial = addr.Text.Trim();
-            if (string.IsNullOrWhiteSpace(dial)) { status.Text = "请填写中枢地址,例如 192.168.178.61:8443"; return; }
-            // 证书 SAN 是 localai-<hub>.local,但拨号走 IP。EdgeUrl 用主机名让 TLS 校验通过,
-            // 实际 TCP 连接由 ConnectCallback 定向到这个 IP(P3b 既有做法)。
-            status.Text = Strings.Get("status.connecting");
-            await StartPairing(dial, name.Text.Trim(), status);
-        });
+            case HostRole.Unknown:
+                _root.Children.Add(ProbingCard());
+                _ = ProbeRoleAsync();
+                break;
 
-        return Ui.Card(Ui.Stack(
-            Ui.Subtitle(Strings.Get("pairing.title")),
-            Ui.Body("本机还没有和中枢配对。填写中枢地址后点一次「开始配对」即可,配对成功后会【永久记住】,以后开机自动连接。", muted: true),
-            new Border { Height = 10 },
-            Ui.Body(Strings.Get("pairing.hub_address")), addr, autoNote,
-            Ui.Body(Strings.Get("pairing.device_name")), name,
-            go,
-            new Border { Height = 8 },
-            status,
-            Ui.Caption("提示:中枢地址形如 192.168.178.61:8443 —— 主机启动 Edge 时会把它打印在窗口里。")
-        ));
+            case HostRole.Host:
+                _root.Children.Add(HostSelfCard());
+                _root.Children.Add(_sasCard);
+                _root.Children.Add(HostDevicesCard());
+                break;
+
+            case HostRole.HostHubDown:
+                _root.Children.Add(HubDownCard());
+                break;
+
+            default:   // Client
+                _root.Children.Add(TheApp.Hub.IsPaired ? PairedCard() : ClientPairCard());
+                _root.Children.Add(_sasCard);
+                break;
+        }
     }
+
+    UIElement ProbingCard() => Ui.Card(Ui.Stack(
+        Ui.Subtitle("正在确认这台电脑的角色…"),
+        Ui.Body("在 ping 本机的回环管理面(127.0.0.1:" + Services.HubAdmin.AdminPort + ")。", muted: true),
+        Ui.Caption("★ 拿到肯定证据才下结论 —— 这一页在探完之前不显示任何猜测。")));
 
     /// <summary>
-    /// 自动找中枢。两步:
-    ///   ① 先 ping 回环管理面 —— 本机就是主机的话,答案立刻就有(还顺带知道 hub_id);
-    ///   ② 否则**扫本机所在的 /24**,找 8443 上证书名形如 `localai-*.local` 的那台。
-    /// ★ 发现【不建立信任】:它只把地址找出来,连不连仍由六个词与 mTLS 决定(见 HubDiscovery 文件头)。
-    /// ★ 三种结果分开处理,**找到多个时绝不替用户挑**(合租/邻居/自己两台主机都是正常情况)。
+    /// 探角色。★ 顺序有讲究:先看【肯定证据】(管理面答话且 hubId 一致),
+    /// 拿不到再看【线索】(本机有没有主机端程序),两样都没有才认定是副机。
+    /// 把第二档漏掉就会在"主机但 Edge 没启动"时说成"这台不是主机" —— 那正是要修的那个坑。
     /// </summary>
-    async Task AutofillHubAddress(TextBox addr, TextBlock note)
-    {
-        // ★ 这个方法是 fire-and-forget 调的(`_ = AutofillHubAddress(...)`)—— 一旦抛出,异常没人观察,
-        //   界面上那行提示就永远停在"正在…",用户以为还在找。所以整段兜住,并把失败【说出来】。
-        try { await AutofillCore(addr, note); }
-        catch (Exception ex)
-        {
-            Dispatcher.Invoke(() => note.Text = "自动查找失败(" + ex.GetType().Name + ")—— 请手填地址:"
-                                                + "照主机 Edge 窗口里那行「拨号 …:8443」。");
-        }
-    }
-
-    async Task AutofillCore(TextBox addr, TextBlock note)
+    async Task ProbeRoleAsync()
     {
         var admin = TheApp.HubAdmin;
-        if (await admin.ProbeAsync(TheApp.Hub.Profile?.HubId))
-        {
-            var owns = await Services.HubAdmin.DiscoverEdgeDialsAsync(admin.HubId);
-            var own = owns.Count == 1 ? owns[0] : null;
-            Dispatcher.Invoke(() =>
-            {
-                if (owns.Count > 1)
-                {
-                    // ★ 本机有不止一个地址在 8443 上应答且都是这个中枢(run-lan 绑了 0.0.0.0 就会这样)。
-                    //   绝不替他挑:里面可能有 VirtualBox 那种【只有本机看得见】的仅主机网段,
-                    //   挑错了会被抄到副机上,而副机永远连不上。
-                    note.Text = $"本机就是主机,而且有 {owns.Count} 个地址都在 8443 上应答 —— 请自己挑一个"
-                              + "(带 192.168.56.x 之类的多半是虚拟机的仅主机网卡,副机看不见它):";
-                    foreach (var d in owns)
-                    {
-                        var pick = Ui.Secondary(d, (_, _) => { addr.Text = d; });
-                        pick.Margin = new Thickness(0, 4, 0, 0);
-                        pick.HorizontalAlignment = HorizontalAlignment.Left;
-                        if (note.Parent is Panel ph) ph.Children.Insert(ph.Children.IndexOf(note) + 1, pick);
-                    }
-                    return;
-                }
-                if (own is null)
-                {
-                    // ★★ 这里【不能】说"先确认 Edge 起着、防火墙放行了" —— 这两条恰好是上一行刚排除掉的:
-                    //   管理面答了话就证明 lan-edge 正在跑(管理口与业务口是同一个进程里的两个 Listen);
-                    //   而这一步是本机连本机,防火墙那条入站规则管的是副机过来的流量,不参与。
-                    //   代码此刻观察到的只有一件事:Edge 绑的地址不在"本机当前启用的非回环 IPv4"这张表里。
-                    note.Text = "本机就是主机(管理面答话了,Edge 正在跑)。但本机当前的网卡地址上都没人在 8443 上听 "
-                              + "—— 说明 Edge 绑在了另一个地址上(常见:开着 Edge 换了网/换了 IP,或启动时传的是 127.0.0.1)。"
-                              + "请看 Edge 窗口里那行「已监听 …:8443」照它填;跟当前网卡对不上就用当前网卡 IP 重启 Edge。"
-                              + " 本机当前网卡:" + string.Join("、", Services.HubAdmin.LocalIPv4List());
-                    return;
-                }
-                if (addr.Text.Trim().Length == 0) addr.Text = own;
-                note.Text = $"本机就是主机(hub {admin.HubId})—— 地址已自动填好。"
-                          + "★ 这里【不能】填 127.0.0.1:业务口只绑在网卡 IP 上,回环上只有管理面。";
-            });
-            return;
-        }
-
-        Dispatcher.Invoke(() => note.Text = "正在局域网里找中枢(扫本网段的 8443)…");
-        var scan = await Services.HubDiscovery.ScanAsync();
-        var hits = scan.Hits;
+        try { await admin.ProbeAsync(TheApp.Hub.Profile?.HubId); }
+        catch { /* 探不到就是没证据,不是错误 */ }
+        var role = admin.LastProbe == Services.AdminProbeResult.Ok ? HostRole.Host
+                 : Services.HubAdmin.HostToolsDir() is not null ? HostRole.HostHubDown
+                 : HostRole.Client;
         Dispatcher.Invoke(() =>
         {
-            if (hits.Count == 0)
-            {
-                // ★★ 「没找到」有两种,下一步完全不同,不许混着说:
-                //   · 一个网段都没扫(网卡掩码全宽于 /24)⇒ 这条路【结构上】走不通,只能手填;
-                //   · 扫过了没找到 ⇒ 才轮到查 Edge / 网段 / 防火墙。
-                var skipNote = scan.SkippedTooWide.Count > 0
-                    ? $" 另有 {string.Join("、", scan.SkippedTooWide)} 因掩码宽于 /24 没扫。" : "";
-                note.Text = scan.Scanned.Count == 0
-                    ? $"一个网段都没扫 —— 本机的网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),"
-                      + "自动查找结构上覆盖不到这种网段。请照主机 Edge 窗口里那行「拨号 …:8443」手填。"
-                    : Services.HubAdmin.HostToolsDir() is not null
-                        // ★ 本机装着主机端程序却又扫不到 —— 多半就是"这台是主机,但 Edge 没启动",直说。
-                        ? $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢 —— 而本机装着主机端程序,"
-                          + "所以多半是这台的 Edge 还没启动。去主机端目录双击 启动Edge.cmd(用普通用户,别用管理员)。" + skipNote
-                        : $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢。请确认主机那台的 Edge 起着、"
-                          + "两台在同一个网段、防火墙放行了 8443;或照主机窗口里那行「拨号 …:8443」手填。" + skipNote;
-                return;
-            }
-            if (hits.Count == 1)
-            {
-                if (addr.Text.Trim().Length == 0) addr.Text = hits[0].Dial;
-                note.Text = $"找到中枢 {hits[0].HubId}({hits[0].Dial})—— 地址已填好。"
-                          + "★ 找到它不等于信任它:接下来的六个词必须两边逐字一致。";
-                return;
-            }
-            // ★ 多个:摆出来让人自己挑,绝不替他决定连哪一个
-            note.Text = $"找到 {hits.Count} 个中枢 —— 请自己挑一个(合租、邻居、或你自己装了两台,都可能这样):";
-            foreach (var h in hits)
-            {
-                var pick = Ui.Secondary($"{h.HubId} · {h.Dial}", (_, _) => { addr.Text = h.Dial; });
-                pick.Margin = new Thickness(0, 4, 0, 0);
-                pick.HorizontalAlignment = HorizontalAlignment.Left;
-                if (note.Parent is Panel host) host.Children.Insert(host.Children.IndexOf(note) + 1, pick);
-            }
+            _role = role;
+            Build();
+            (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
         });
     }
+
+    /// <summary>手动重探一次(换了状态 —— 比如刚把 Edge 起起来 —— 用它,不用重开客户端)。</summary>
+    UIElement RecheckRow() => Ui.Secondary("重新检测这台的角色", (_, _) => { _role = HostRole.Unknown; Build(); });
+
+    /// <summary>本机多半就是主机,但中枢没起来。★ 只给唯一有用的那一步。</summary>
+    UIElement HubDownCard()
+    {
+        var dir = Services.HubAdmin.HostToolsDir();
+        var cmd = Services.HubAdmin.StartEdgeCmd();
+        return Ui.Card(Ui.Stack(
+            Ui.Subtitle("中枢没在这台机器上运行"),
+            Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"),
+            Ui.Caption(cmd is not null ? "去双击:" + cmd : "去主机端目录里双击 启动Edge.cmd:" + (dir ?? "")),
+            Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
+                       + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"),
+            Ui.Caption(TheApp.HubAdmin.LastError is { Length: > 0 } w ? "探测结果:" + w : ""),
+            new Border { Height = 10 },
+            RecheckRow()));
+    }
+
+
+
 
     async Task StartPairing(string dial, string displayName, TextBlock status)
     {
@@ -258,7 +228,10 @@ public sealed class DevicesView : UserControl
                             // ★ 配对窗口默认关闭(D48):这是第一次配对最常撞上的一条,给出可执行的下一步
                             //   而不是干巴巴的异常(2026-07-31 审计)。
                             : ex.Message.Contains("pairing window is closed")
-                                ? "主机侧的配对窗口是关着的。请到主机那台电脑的 Edge 窗口里输入 open,再回来点「开始配对」。"
+                                // ★ 文案跟着流程走:现在开窗的正路是【主机上展开「添加一台新电脑」】,
+                                //   不再是去 Edge 窗口里敲 open(那是命令行时代的说法,留着会把人支到黑框里)。
+                                ? "主机侧的配对窗口是关着的。请到主机那台电脑上打开客户端的同一页,"
+                                  + "展开「＋ 添加一台新电脑」—— 展开就会开窗,然后回来再点一次「开始配对」。"
                             : "配对失败:" + ex.Message;
             });
         }
@@ -312,6 +285,10 @@ public sealed class DevicesView : UserControl
             // ★ 状态行只有一个词,处置办法在 LastError 里 —— 不显示出来等于没说
             TheApp.Hub.LastError is { Length: > 0 } lastWhy ? Ui.Caption(lastWhy) : new Border { Height = 0 },
             new Border { Height = 12 },
+            // ★ 副机会在这一页找"其它电脑在哪" —— 说清它【结构上】就到不了,不是"主机还没升级",
+            //   否则人会一直等一个不会来的版本。
+            Ui.Caption("★ 配对审批与设备管理只在主机那台上 —— 按 D37 / D48,管理接口只开在主机本地的回环口,"
+                       + "局域网这条路结构上就到不了,不是版本问题。"),
             Ui.Caption("已记住这次配对 —— 以后启动会自动连接,不会再要求配对。"),
             new Border { Height = 12 },
             unpair
@@ -354,7 +331,7 @@ public sealed class DevicesView : UserControl
                 {
                     find_host.Children.Clear();
                     // ★ 这是已配对卡上唯一一个看起来能修连接的按钮,人会先点它 —— 远早于滚到第三张卡。
-                    //   所以这条失败路径必须和另外两条(AutofillCore / LoadAdminPanel)说同一套话,
+                    //   所以这条失败路径必须和另外两条(SelfPairAsync / HubDownCard)说同一套话,
                     //   否则它会把人支去查路由器/网段/防火墙,而真正要做的只是把本机的 Edge 起起来。
                     var hd = Services.HubAdmin.HostToolsDir();
                     find_host.Children.Add(Ui.Caption(hd is not null
@@ -379,117 +356,441 @@ public sealed class DevicesView : UserControl
         return wrap;
     }
 
-    // ---------------------------------------------------------------- 其它已配对的电脑(需主机管理 API)
-    // ================= P3c S4:管理面(仅主机本地回环)=================
-    // ★ 这张卡有两副面孔,取决于【这台是不是主机】,而"是不是"靠 ping 回环管理面拿肯定证据,
-    //   不靠猜拨号地址(见 HubAdmin 的说明)。
-    //   · 是主机 → 配对审批(六个词 + 倒计时 + 批准/拒绝)+ 设备列表与解除,全走 127.0.0.1;
-    //   · 不是   → 如实说这条路【结构上】走不通(不是版本问题),别让人等一个不会来的版本。
-    UIElement RemoteDevicesCard()
-    {
-        var list = new StackPanel();
-        var card = Ui.Card(Ui.Stack(
-            Ui.Subtitle("配对审批与设备管理"),
-            list));
 
-        if (!TheApp.Hub.IsPaired)
-        {
-            list.Children.Add(Ui.Body("配对之后才能查看家庭里的其它电脑。", muted: true));
-            list.Children.Add(Ui.Caption("★ 主机自己那台除外 —— 主机上的客户端不必先配对也能开管理面(配对审批本身归它管)。"));
-        }
-
-        list.Children.Add(Ui.Body("正在探测主机管理面…", muted: true));
-        _ = LoadAdminPanel(list);
-        return card;
-    }
-
-    async Task LoadAdminPanel(StackPanel list)
+    // ================================================================ 主机侧
+    /// <summary>
+    /// 「这台电脑上的中枢」+ 本机自己的连接。
+    ///
+    /// ★ 主机这台【也必须配对】,这一点不能含糊:业务口只绑在网卡 IP 上
+    ///   (`k.Listen(cfg.Bind, 8443)`),回环上只有管理面。所以本机客户端要聊天,
+    ///   同样得有成员证书,同样得走一次 enroll+批准。
+    /// ★ 但它可以【一次点击走完】:本机客户端手里有回环管理面(开窗、批准都归它),
+    ///   能自己把这条流程跑完,不用人填地址、不用人比六个词 —— 理由见 SelfPairAsync。
+    /// </summary>
+    UIElement HostSelfCard()
     {
         var admin = TheApp.HubAdmin;
-        var ok = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId);
-        List<PendingPair> pending = new();
-        List<AdminDevice> devices = new();
-        // ★ 分开记"取到了没有":取失败时列表也是空的,而空会被写成"没有请求 / 没有别的电脑"。
-        bool pendOk = false, devOk = false;
-        string? pendWhy = null, devWhy = null;
-        if (ok)
+        var stack = Ui.Stack(
+            Ui.Subtitle("这台电脑就是中枢主机"),
+            Ui.Body($"hub {admin.HubId}", muted: true),
+            Ui.Caption("★ 判据是【肯定证据】:本机回环管理面答话了,而且它自报的 hub id 与本机档案一致。"),
+            Ui.Caption("★ 本机的连接地址是探出来的,不用你填 —— 而且这里【不能】填 127.0.0.1:"
+                       + "业务口只绑在网卡 IP 上(run-lan 那个参数),回环上只有管理面。"));
+
+        if (TheApp.Hub.IsPaired)
         {
-            (pendOk, pending) = await admin.PendingAsync();
-            if (!pendOk) pendWhy = admin.LastError;
-            (devOk, devices) = await admin.DevicesAsync();
-            if (!devOk) devWhy = admin.LastError;
+            stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(Ui.Body("本机客户端:已配对(" + (TheApp.Hub.Profile?.Dial ?? "?") + ")"));
+            stack.Children.Add(Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {
+                HubState.Online => "status.online",
+                HubState.Connecting => "status.connecting",
+                HubState.Revoked => "status.revoked",
+                HubState.CertExpired => "status.cert_expired",
+                HubState.Unauthorized => "status.unauthorized",
+                HubState.HubServerError => "status.hub_error",
+                HubState.ProtocolMismatch => "status.proto_mismatch",
+                _ => "status.offline" })}", muted: true));
+            if (TheApp.Hub.LastError is { Length: > 0 } lw) stack.Children.Add(Ui.Caption(lw));
+        }
+        else
+        {
+            var st = Ui.Body("");
+            stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(Ui.Body("本机客户端还没有配对 —— 主机自己这台也需要成员证书才能用中枢。"));
+            stack.Children.Add(Ui.Caption("★ 这一步不需要你填地址、也不需要比六个词 —— 理由见下面那行。"));
+            stack.Children.Add(Ui.Primary("完成本机配对", async (_, _) => await SelfPairAsync(st)));
+            stack.Children.Add(st);
+            stack.Children.Add(Ui.Caption("★ 为什么本机不用比六个词:六个词防的是【两台机器之间】的中间人。"
+                                          + "本机走的是回环管理面 —— 能连上回环的人已经在这台机器上了,没有中间人可防。"));
+            stack.Children.Add(Ui.Caption("★ 代价说清楚:这一步会把配对窗口开【几秒】,那几秒局域网上的 8443 也接受请求;"
+                                          + "拿到本机自己那条请求后立刻关掉。(更好的做法是走一条只在回环上的通道,"
+                                          + "那要中枢侧加,已写进决议包。)"));
+        }
+
+        stack.Children.Add(new Border { Height = 10 });
+        stack.Children.Add(RecheckRow());
+        return Ui.Card(stack);
+    }
+
+    /// <summary>
+    /// 本机自配对:开窗 → enroll → 【自己批准】→ 关窗,一次点击走完。
+    ///
+    /// ★★ 为什么可以不比六个词(这一段必须写清楚,否则后人会以为我们放松了准入):
+    ///   六个词在这套装置里管两件事 —— ① 挡中间人;② 让批准的人确认"这条请求是我那台机器发的"。
+    ///   ①:客户端本来就会独立算一遍 SAS 并和主机返回的比,对不上就中止 —— 那一层是自动的,仍在。
+    ///   ②:这里批准的动作走的是**回环管理面**,而它的门禁就是"端口 + 回环"。
+    ///      能调它的人已经在这台机器上了,他本来就能批准任何请求 —— 让他再比一次自己写的词,
+    ///      不增加任何安全性,只增加一步。
+    /// ★★ 但有一条硬前提:必须【当场重探一次】管理面并确认 hubId 仍然一致才批准。
+    ///   不能拿几分钟前的探测结果当通行证 —— 那期间中枢可能换了、Edge 可能重起过。
+    /// ★ 只批准【本机这一条】:按 enroll 拿到的 requestId 精确批,不碰队列里其它任何请求。
+    /// </summary>
+    async Task SelfPairAsync(TextBlock status)
+    {
+        var admin = TheApp.HubAdmin;
+        void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
+
+        Say("正在确认本机就是主机…");
+        if (!await admin.ProbeAsync(TheApp.Hub.Profile?.HubId) || admin.LastProbe != Services.AdminProbeResult.Ok)
+        {
+            Say("本机配对中止:回环管理面没答话(" + (admin.LastError ?? "原因不明") + ")—— 不拿旧结论当通行证。");
+            return;
+        }
+
+        Say("正在找本机中枢在哪个地址上听…");
+        var dials = await Services.HubAdmin.DiscoverEdgeDialsAsync(admin.HubId);
+        if (dials.Count == 0)
+        {
+            Say("本机就是主机(管理面答话了,Edge 正在跑),但本机当前的网卡地址上都没人在 8443 上听 —— "
+                + "说明 Edge 绑在了另一个地址上。本机当前网卡:" + string.Join("、", Services.HubAdmin.LocalIPv4List()));
+            return;
+        }
+        if (dials.Count > 1)
+        {
+            // ★ 不替他挑:里面可能有只有本机看得见的仅主机网段,选错了会被写进配对档案
+            Say($"本机有 {dials.Count} 个地址都在 8443 上应答({string.Join("、", dials)})—— "
+                + "请到下面「添加一台新电脑」里手动选一个,别让我替你挑。");
+            return;
+        }
+
+        var dial = dials[0];
+        Say("正在配对(会把配对窗口开几秒)…");
+        var (wst, wbody) = await admin.WindowAsync(true, 1);   // ★ 最短:1 分钟
+        if (wst != 200) { Say($"没能打开配对窗口({wst} {wbody})—— 本机配对中止。"); return; }
+        try
+        {
+            var edgeUrl = $"https://{dial.Split(':')[0]}:{dial.Split(':')[1]}";
+            string? myReq = null;
+            await TheApp.Hub.PairAsync(edgeUrl, dial, Environment.MachineName, async (reqId, sas) =>
+            {
+                myReq = reqId;
+                // 六个词照样显示出来 —— 不比对不等于不告诉你发生了什么
+                Dispatcher.Invoke(() =>
+                {
+                    _sasBlock.Text = string.Join("   ", sas);
+                    _hint.Text = "本机自己批准中(同机走回环,无需人工比对)";
+                    _sasCard.Visibility = Visibility.Visible;
+                });
+                Say("正在自己批准这一条…");
+                var (ast, abody) = await admin.ApproveAsync(reqId);
+                if (ast != 200) Say($"自动批准失败({ast} {abody})");
+            });
+            Dispatcher.Invoke(() =>
+            {
+                _sasCard.Visibility = Visibility.Collapsed;
+                status.Text = "本机配对完成。";
+                Build();
+                (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
+            });
+        }
+        catch (Exception ex)
+        {
+            Dispatcher.Invoke(() => { _sasCard.Visibility = Visibility.Collapsed; status.Text = "本机配对失败:" + ex.Message; });
+        }
+        finally
+        {
+            // ★ 无论成败都关窗 —— 开着的窗口是暴露面,不能靠"正常路径会关"来保证
+            try { await admin.WindowAsync(false); } catch { }
+        }
+    }
+
+    /// <summary>「已配对的电脑」+「添加一台新电脑」。后者默认收起 —— 展开才开窗。</summary>
+    UIElement HostDevicesCard()
+    {
+        _devList = new StackPanel();
+        _addPanel = new StackPanel { Visibility = Visibility.Collapsed };
+        _addStatus = Ui.Caption("");
+
+        // ★ 「可见即开」只对这一块生效,而它默认收起 ⇒ 只有主机、没有副机的人永远不会无意中开窗。
+        //   展开这个动作本身就是明确意图,不用再去别处找开关。
+        _addToggle = Ui.Secondary("＋ 添加一台新电脑", async (_, _) => await ToggleAddAsync());
+
+        var stack = Ui.Stack(
+            Ui.Subtitle("已配对的电脑"),
+            _devList,
+            new Border { Height = 12 },
+            _addToggle,
+            _addStatus,
+            _addPanel);
+
+        _ = LoadDevicesAsync();
+        return Ui.Card(stack);
+    }
+
+    async Task LoadDevicesAsync()
+    {
+        var admin = TheApp.HubAdmin;
+        var (ok, devices) = await admin.DevicesAsync();
+        var why = ok ? null : admin.LastError;
+        Dispatcher.Invoke(() =>
+        {
+            if (_devList is null) return;
+            _devList.Children.Clear();
+            if (!ok)
+            {
+                // ★ 取不到 ≠ 一台都没有。写成"没有别的电脑"会让人把在册的机器再配一次。
+                _devList.Children.Add(Ui.Caption("没能取到设备列表(" + (why ?? "原因不明")
+                                                 + ")—— 这【不等于】没有别的电脑在册,别据此重复配对。"));
+                return;
+            }
+            var live = devices.Where(d => d.Status != "revoked").ToList();
+            if (live.Count == 0)
+            {
+                _devList.Children.Add(Ui.Caption("还没有别的电脑配对进来。"));
+                // ★ 说清"在线/离线"这一档现在给不出来,别让人以为列表里的都在线
+                _devList.Children.Add(Ui.Caption("★ 这里只列【在册】的电脑。「现在在不在线」中枢侧还没透出来"
+                                                 + "(设备记录里有 LastSeenAt,管理面还没带上它)—— 已写进决议包。"));
+                return;
+            }
+            foreach (var d in live) _devList.Children.Add(DeviceRow(d));
+            _devList.Children.Add(Ui.Caption("★ 这里列的是【在册】,不是【在线】。「现在连着没有」中枢侧还没透出来 —— 已写进决议包。"));
+        });
+    }
+
+
+    // ================================================================ 配对窗口的三道闸
+    // ★ 用户的顾虑:「只有主机没有副机,岂不是窗口永远开着关不了?」—— 对,所以闸必须【互相独立】,
+    //   谁先到谁生效,没有任何一道依赖"用户记得关"或"客户端还活着":
+    //     ① 收起这一块 / 离开这一页 / 关掉窗口 → 关;
+    //     ② 宽限【有上限】(GraceSeconds),而且只护"已经开始、还没走完"的那一条,
+    //        不是"队列非空就不关" —— 否则局域网上任何人塞一条就能把窗口按住;
+    //     ③ 中枢侧的分钟上限(WindowMinutes)自己到点失效 —— 和客户端在不在、页面在哪全无关。
+    //   ★ 而且这一块【默认收起】:只有主机、没有副机的人根本不会走到开窗这一步。
+
+    async Task ToggleAddAsync()
+    {
+        if (_addExpanded) { await CollapseAddAsync(); return; }
+
+        _addExpanded = true;
+        if (_addPanel is not null) _addPanel.Visibility = Visibility.Visible;
+        if (_addToggle is not null) _addToggle.Content = "－ 收起(收起就关掉配对窗口)";
+        var (st, body) = await TheApp.HubAdmin.WindowAsync(true, WindowMinutes);
+        Dispatcher.Invoke(() =>
+        {
+            if (_addStatus is null) return;
+            _addStatus.Text = st == 200
+                ? $"配对窗口已打开,最多 {WindowMinutes} 分钟后由中枢自己关掉;收起这一块或离开本页也会关。"
+                : $"没能打开配对窗口({st} {body})—— 副机现在配不进来。";
+        });
+        StartPendPolling();
+    }
+
+    async Task CollapseAddAsync(bool leavingPage = false)
+    {
+        if (!_addExpanded) return;
+        _addExpanded = false;
+        Dispatcher.Invoke(() =>
+        {
+            if (_addPanel is not null) _addPanel.Visibility = Visibility.Collapsed;
+            if (_addToggle is not null) _addToggle.Content = "＋ 添加一台新电脑";
+        });
+
+        // ★ 宽限:有正在进行的请求就别当场掐断 —— 副机可能正卡在 enroll 那几秒。
+        //   但宽限【有上限】,到点无条件关。
+        var (ok, pend) = await TheApp.HubAdmin.PendingAsync();
+        if (ok && pend.Count > 0)
+        {
+            _graceUntil = DateTime.UtcNow.AddSeconds(GraceSeconds);
+            Dispatcher.Invoke(() =>
+            {
+                if (_addStatus is not null)
+                    _addStatus.Text = $"有 {pend.Count} 条请求正在进行,配对窗口再留最多 {GraceSeconds} 秒,然后自动关。";
+            });
+            StartPendPolling();   // 让计时器去收尾
+            return;
+        }
+        await HardCloseWindowAsync(leavingPage);
+    }
+
+    async Task HardCloseWindowAsync(bool quiet = false)
+    {
+        _graceUntil = DateTime.MinValue;
+        StopPendPolling();
+        try { await TheApp.HubAdmin.WindowAsync(false); } catch { /* 关不掉也有中枢侧的分钟上限兜底 */ }
+        if (quiet) return;
+        Dispatcher.Invoke(() => { if (_addStatus is not null) _addStatus.Text = "配对窗口已关闭。"; });
+    }
+
+    void StartPendPolling()
+    {
+        if (_pendTimer is not null) return;
+        _pendTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        _pendTimer.Tick += async (_, _) => await PollPendingAsync();
+        _pendTimer.Start();
+    }
+
+    void StopPendPolling() { _pendTimer?.Stop(); _pendTimer = null; }
+
+    async Task PollPendingAsync()
+    {
+        var admin = TheApp.HubAdmin;
+        var (ok, pend) = await admin.PendingAsync();
+
+        // 宽限到点:无条件关
+        if (!_addExpanded && _graceUntil != DateTime.MinValue
+            && (DateTime.UtcNow >= _graceUntil || (ok && pend.Count == 0)))
+        {
+            await HardCloseWindowAsync();
+            return;
         }
 
         Dispatcher.Invoke(() =>
         {
-            list.Children.Clear();
+            if (_addPanel is null) return;
+            _addPanel.Children.Clear();
+            _addPanel.Children.Add(Ui.Body("等待副机来配对"));
             if (!ok)
             {
-                // ★★ 这一段以前直接断言「这台不是主机」—— 而代码观察到的只有"回环管理面没应答"。
-                //   2026-08-03 真的坑到人了:主机那台自己持有中枢身份,只是 lan-edge 没启动,
-                //   于是主机上也显示"这台不是主机",人就去怀疑配错了机器,而唯一要做的是把 Edge 起起来。
-                //   现在:先说观察到的,再按【本机有没有主机端程序】这条线索给出对应的下一步。
-                var hostDir = Services.HubAdmin.HostToolsDir();
-                if (hostDir is not null)
-                {
-                    list.Children.Add(Ui.Body("中枢没在这台机器上运行。"));
-                    list.Children.Add(Ui.Body("★ 但本机装着主机端程序 —— 所以这台应该就是主机,只是 Edge 还没起来。"));
-                    var cmd = Services.HubAdmin.StartEdgeCmd();
-                    list.Children.Add(Ui.Caption(cmd is not null
-                        ? "去双击:" + cmd
-                        : "去主机端目录里双击 启动Edge.cmd:" + hostDir));
-                    // ★ 这条坑极容易踩,而且报出来的错("密钥集不存在")完全指不到真正的原因,必须先说在前面
-                    list.Children.Add(Ui.Caption("★ 必须用【普通用户】双击,不要用管理员 —— Edge 一检测到管理员身份就直接退出,"
-                                                 + "因为 CA 私钥在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。"));
-                }
-                else
-                {
-                    list.Children.Add(Ui.Body("没探到本机在当中枢 —— 配对审批与设备管理只能在主机那台上操作。", muted: true));
-                    list.Children.Add(Ui.Caption("按 D37 / D48,管理接口只开在主机本地的回环口(127.0.0.1:"
-                                                 + Services.HubAdmin.AdminPort + "),局域网那条路结构上就到不了 —— 不是版本问题。"));
-                    list.Children.Add(Ui.Caption("★ 如果这台【就是】主机:那就是中枢没启动 —— 去主机端目录双击 启动Edge.cmd"
-                                                 + "(用普通用户,别用管理员)。"));
-                }
-                if (admin.LastError is { Length: > 0 } why) list.Children.Add(Ui.Caption("探测结果:" + why));
+                _addPanel.Children.Add(Ui.Caption("没能从管理面取到待批准列表(" + (admin.LastError ?? "原因不明")
+                                                  + ")—— 这【不等于】没有请求。先别让对方重新配对。"));
                 return;
             }
-
-            list.Children.Add(Ui.Body($"本机就是主机(hub {admin.HubId})—— 管理面已连上。"));
-
-            // ---- 配对窗口:显式开关 ----
-            var winRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 4) };
-            winRow.Children.Add(Ui.Body(admin.PairingWindowOpen ? "配对窗口:开着" : "配对窗口:关着"));
-            var toggle = admin.PairingWindowOpen
-                ? Ui.Secondary("关掉窗口", async (_, _) => { await admin.WindowAsync(false); Build(); })
-                : Ui.Secondary("开 10 分钟", async (_, _) => { await admin.WindowAsync(true, 10); Build(); });
-            toggle.Margin = new Thickness(10, 0, 0, 0);
-            winRow.Children.Add(toggle);
-            list.Children.Add(winRow);
-            list.Children.Add(Ui.Caption("★ 窗口【不随开机自动打开】—— 开机自启 + 无条件开窗 = 每次开机在局域网上敞开一个无人值守的准入窗口。"));
-
-            // ---- 待批准的配对请求(S4 的正题)----
-            list.Children.Add(new Border { Height = 10 });
-            list.Children.Add(Ui.Body("待批准的配对请求"));
-            if (!pendOk)
-                // ★★ 「没取到」绝不能写成「没有请求」—— 副机那边可能正卡着等批准,
-                //   人看到"没有请求"就回去重配,而重配会删掉副机私钥、在主机侧留下幽灵条目。
-                list.Children.Add(Ui.Caption("没能从管理面取到待批准列表(" + (pendWhy ?? "原因不明")
-                                             + ")—— 这【不等于】没有请求。先别让对方重新配对。"));
-            else if (pending.Count == 0)
-                list.Children.Add(Ui.Caption(admin.PairingWindowOpen ? "现在没有等待批准的请求。" : "窗口关着,不会有新请求进来。"));
-            foreach (var p in pending) list.Children.Add(PendingRow(p));
-
-            // ---- 设备列表 ----
-            list.Children.Add(new Border { Height = 10 });
-            list.Children.Add(Ui.Body("已配对的电脑"));
-            var live = devices.Where(d => d.Status != "revoked").ToList();
-            if (!devOk)
-                list.Children.Add(Ui.Caption("没能取到设备列表(" + (devWhy ?? "原因不明")
-                                             + ")—— 这【不等于】没有别的电脑在册,别据此重复配对。"));
-            else if (live.Count == 0) list.Children.Add(Ui.Caption("还没有别的电脑配对进来。"));
-            foreach (var d in live) list.Children.Add(DeviceRow(d));
+            if (pend.Count == 0)
+            {
+                _addPanel.Children.Add(Ui.Caption("现在没有等待批准的请求。到那台新电脑上打开客户端,"
+                                                  + "在同一页里选中这台主机、点「开始配对」。"));
+                return;
+            }
+            foreach (var p in pend) _addPanel.Children.Add(PendingRow(p));
         });
+
+        if (ok && !_dialogOpen)
+            foreach (var p in pend)
+                if (_popped.Add(p.RequestId)) { await ShowApprovalDialogAsync(p); break; }
     }
+
+    /// <summary>
+    /// 有新请求进来时弹一次。
+    ///
+    /// ★★ 这一步【不能一键化】,也不许提供"跳过比对":
+    ///   客户端自己已经会独立算一遍 SAS 和主机返回的比(对不上就中止)—— 中间人那一层是自动挡住的。
+    ///   六个词在这里管的是**另一件事**:确认【你批准的这条请求就是你那台机器发的】。
+    ///   局域网上任何人都能往待批准队列里塞一条,而 displayName 是**自报**的,可以写成"Zori 的笔记本"。
+    ///   没有这一比,弹窗就退化成"来了个请求,点批准" —— 准入就交给了谁先按弹窗。
+    /// ★ 所以按钮文字本身就是那句断言(「逐字一样」),不是一个中性的"确定"。
+    /// </summary>
+    async Task ShowApprovalDialogAsync(PendingPair p)
+    {
+        _dialogOpen = true;
+        try
+        {
+            var yes = ConfirmDialog.Show(
+                $"「{p.DisplayName}」请求配对",
+                "这台请求配对的电脑上应该显示着同样的六个词:\n\n"
+                + "    " + string.Join("   ", p.Sas) + "\n\n"
+                + "请走到那台电脑前,把六个词【逐字】对一遍。\n"
+                + "★ 设备名是对方自报的,可以随便写 —— 能证明「这条请求是你发的」的只有这六个词。\n"
+                + $"(还剩 {p.SecondsLeft} 秒过期)",
+                confirmText: "六个词逐字一样 —— 批准",
+                cancelText: "不一样 / 先不批",
+                danger: false);
+            if (yes) await TheApp.HubAdmin.ApproveAsync(p.RequestId);
+            else await TheApp.HubAdmin.DenyAsync(p.RequestId);
+        }
+        finally { _dialogOpen = false; }
+        await PollPendingAsync();
+    }
+
+    // ================================================================ 副机侧
+    /// <summary>
+    /// 副机:列出同一网络下的中枢,挑一个,点开始配对。
+    /// ★ 主机没开配对窗口时【也列得出来】—— 发现走的是 TLS 握手读证书名,和窗口开不开无关。
+    ///   那时点开始配对会拿到 403,照实说"那台的配对窗口没开",并告诉他去主机上做哪一步。
+    /// </summary>
+    UIElement ClientPairCard()
+    {
+        var name = new TextBox { Width = 320, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 12), Text = Environment.MachineName };
+        name.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
+        var status = Ui.Body("");
+        var list = new StackPanel();
+        var note = Ui.Caption("正在找同一网络下的中枢…");
+        string? picked = null;
+
+        var go = Ui.Primary(Strings.Get("pairing.start"), async (_, _) =>
+        {
+            if (picked is null) { status.Text = "请先在上面选一个中枢。"; return; }
+            status.Text = Strings.Get("status.connecting");
+            await StartPairing(picked, name.Text.Trim(), status);
+        });
+
+        _ = ScanForHubsAsync(list, note, d => { picked = d; status.Text = "已选:" + d; });
+
+        return Ui.Card(Ui.Stack(
+            Ui.Subtitle("连接到家里的中枢"),
+            Ui.Body("没探到本机在当中枢 —— 下面是同一网络下找到的中枢。选一个,点「开始配对」。", muted: true),
+            // ★ 措辞是「没探到」而不是那句更顺口的断言 —— 手里只有两条线索叠加(没有中枢应答、
+            //   也没装主机端程序),不是证明。断言那句话正是 2026-08-03 坑到人的写法。
+            Ui.Caption("★ 这是【没探到】,不是证明:本机既没有中枢在应答、也没装主机端程序。"
+                       + "如果中枢其实就跑在这台上,点下面「重新检测」。"),
+            note,
+            list,
+            new Border { Height = 8 },
+            Ui.Body(Strings.Get("pairing.device_name")), name,
+            go,
+            new Border { Height = 8 },
+            status,
+            Ui.Caption("★ 找到它不等于信任它:接下来两边屏幕上的六个词必须逐字一致,再由主机批准。"),
+            new Border { Height = 8 },
+            RecheckRow()));
+    }
+
+    async Task ScanForHubsAsync(StackPanel list, TextBlock note, Action<string> onPick)
+    {
+        try
+        {
+            var scan = await Services.HubDiscovery.ScanAsync();
+            Dispatcher.Invoke(() =>
+            {
+                list.Children.Clear();
+                if (scan.Hits.Count == 0)
+                {
+                    // ★ 「一个网段都没扫」与「扫了没找到」是两件事,下一步完全不同
+                    note.Text = scan.Scanned.Count == 0
+                        ? $"一个网段都没扫 —— 本机网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),"
+                          + "自动查找结构上覆盖不到。请照主机 Edge 窗口里那行「拨号 …:8443」手填(下面有手填入口)。"
+                        : $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢。请确认主机那台的 Edge 起着、"
+                          + "两台在同一个网段、防火墙放行了 8443。";
+                    list.Children.Add(ManualDialRow(onPick));
+                    return;
+                }
+                // ★ 全仓规矩:找到多个绝不替用户挑(合租、邻居、自己装了两台都是正常情况)
+                note.Text = $"找到 {scan.Hits.Count} 个中枢 —— 请自己挑一个"
+                          + (scan.SkippedTooWide.Count > 0 ? $"(另有 {string.Join("、", scan.SkippedTooWide)} 因掩码宽于 /24 没扫)" : "")
+                          + ":";
+                foreach (var h in scan.Hits)
+                {
+                    var b = Ui.Secondary($"{h.HubId} · {h.Dial}", (_, _) => onPick(h.Dial));
+                    b.Margin = new Thickness(0, 4, 0, 0);
+                    b.HorizontalAlignment = HorizontalAlignment.Left;
+                    list.Children.Add(b);
+                }
+                list.Children.Add(ManualDialRow(onPick));
+            });
+        }
+        catch (Exception ex)
+        {
+            // ★ fire-and-forget:不兜住的话提示行会永远停在"正在找…"
+            Dispatcher.Invoke(() => note.Text = "查找失败(" + ex.GetType().Name + ")—— 请手填地址。");
+        }
+    }
+
+    /// <summary>手填入口 —— 自动查找覆盖不到的网络(跨网段、掩码宽于 /24)只能靠它。</summary>
+    UIElement ManualDialRow(Action<string> onPick)
+    {
+        var box = new TextBox { Width = 240, Text = "", VerticalAlignment = VerticalAlignment.Center };
+        box.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
+        var use = Ui.Secondary("用这个地址", (_, _) => { var v = box.Text.Trim(); if (v.Length > 0) onPick(v); });
+        use.Margin = new Thickness(8, 0, 0, 0);
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+        row.Children.Add(box);
+        row.Children.Add(use);
+        var wrap = new StackPanel();
+        wrap.Children.Add(Ui.Caption("找不到?照主机 Edge 窗口里那行手填,形如 192.168.178.61:8443"));
+        wrap.Children.Add(row);
+        return wrap;
+    }
+
+
 
     // ★ 这里原来有个 `string? admin_err;`:全仓只写、从没读过 —— 一个【看起来有、其实没有】的错误通道。
     //   取数失败现在由 PendingAsync/DevicesAsync 的 ok 位如实带出来并显示,这个字段没有存在的理由。
