@@ -4845,10 +4845,32 @@ public static class Selftest
                        "★ 探测结果要说人话且只说观察到的 —— 不下「这台不是主机」这种结论");
                 Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", null);
 
-                // ★ "本机有没有主机端程序"是【线索】不是判据:开发树里没有 dist\host,应当如实返回 null 且不抛
-                Assert(Services.HubAdmin.HostToolsDir() is null,
-                       "★ 开发树里找不到主机端程序就返回 null —— 线索拿不到不是错误,界面照样要能说清楚");
-                Assert(Services.HubAdmin.StartEdgeCmd() is null, "★ 没有主机端目录时启动脚本路径也返回 null,不编一个路径出来");
+                // ★ "本机有没有主机端程序"是【线索】不是判据。
+                //   ★★ 这里【不能】直接断言 HostToolsDir() 是 null —— 那等于在断言"自检此刻跑在哪个目录下":
+                //     装在 dist\client 时 dist\host 真的就在旁边(会红),从 dist\client-pack 跑又没有(会绿),
+                //     两边都不说明代码对不对。本次真踩了这一回,所以改成对纯逻辑做**确定性**的两向测试。
+                {
+                    var htTmp = Path.Combine(Path.GetTempPath(), "localai-selftest-hosttools-" + Guid.NewGuid().ToString("N"));
+                    var client = Path.Combine(htTmp, "client");
+                    var host = Path.Combine(htTmp, "host");
+                    Directory.CreateDirectory(client);
+                    Directory.CreateDirectory(host);
+                    try
+                    {
+                        Assert(Services.HubAdmin.HostToolsDirNextTo(client) is null,
+                               "★ 旁边有 host 目录但【没有那个 exe】时仍返回 null —— 线索要看到真东西才算数");
+                        File.WriteAllText(Path.Combine(host, "localai-lan-edge.exe"), "x");
+                        Assert(Services.HubAdmin.HostToolsDirNextTo(client) is { } got
+                               && string.Equals(Path.GetFullPath(got).TrimEnd('\\'), Path.GetFullPath(host).TrimEnd('\\'),
+                                                StringComparison.OrdinalIgnoreCase),
+                               "★★ 旁边真有主机端程序时要找得到 —— 这条线索是"
+                               + "「主机但 Edge 没启动」与「这台真不是主机」的唯一分界");
+                        Assert(Services.HubAdmin.HostToolsDirNextTo(null) is null
+                               && Services.HubAdmin.HostToolsDirNextTo("  ") is null,
+                               "★ 拿不到目录就是没这条线索,不抛异常");
+                    }
+                    finally { try { Directory.Delete(htTmp, true); } catch { } }
+                }
 
                 var haSrc = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
                 if (haSrc is not null)

@@ -248,17 +248,22 @@ public sealed class HubAdmin
     /// </summary>
     public static string? HostToolsDir()
     {
-        try
-        {
-            // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(BaseDirectory 可能指向解包目录)
-            var exe = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(exe)) return null;
-            var dir = Path.GetDirectoryName(exe);
-            if (dir is null) return null;
-            var host = Path.GetFullPath(Path.Combine(dir, "..", "host"));
-            return File.Exists(Path.Combine(host, "localai-lan-edge.exe")) ? host : null;
-        }
+        // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(BaseDirectory 可能指向解包目录)
+        try { return HostToolsDirNextTo(Path.GetDirectoryName(Environment.ProcessPath)); }
         catch { return null; }   // 路径拿不到就是没这条线索,不是错误
+    }
+
+    /// <summary>
+    /// 上面那条的纯逻辑部分:给定客户端 exe 所在目录,看它旁边有没有 `..\host\localai-lan-edge.exe`。
+    /// ★ 抽出来是为了能**确定性地**测:直接断言 HostToolsDir() 的返回值等于在断言
+    ///   「自检此刻跑在哪个目录下」—— 那个断言在 dist\client 里会红、在 dist\client-pack 里会绿,
+    ///   两边都不说明代码对不对。(这个坑本次真踩了一回。)
+    /// </summary>
+    public static string? HostToolsDirNextTo(string? clientExeDir)
+    {
+        if (string.IsNullOrWhiteSpace(clientExeDir)) return null;
+        var host = Path.GetFullPath(Path.Combine(clientExeDir, "..", "host"));
+        return File.Exists(Path.Combine(host, "localai-lan-edge.exe")) ? host : null;
     }
 
     /// <summary>主机端的启动脚本(存在才返回)。界面用它把"去点哪个文件"直接说出来。</summary>

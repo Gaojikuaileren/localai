@@ -59,7 +59,27 @@ if ($code -ne 0) {
     Write-Host "  ★ 不出包：自检红着还打包，等于把已知坏的东西送到另一台机器上。" -ForegroundColor Red
     exit 1
 }
-$last = "自检通过（退出码 0）"
+
+# ★ 再跑一遍【第二种目录形状】—— 客户端真正装的位置是 dist\client,那儿 dist\host 就在旁边,
+#   而这里的 client-pack 旁边没有。只跑一种形状,"依赖安装位置"的断言就会溜过门禁:
+#   2026-08-03 真的溜过一次(HostToolsDir 的断言在 client-pack 绿、装到 dist\client 红)。
+#   代价是一次 exe 拷贝,换的是"断言必须与装在哪儿无关"这条被机械地钉住。
+$shape = Join-Path ([IO.Path]::GetTempPath()) ("localai-gate-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $shape 'client') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $shape 'host')   | Out-Null
+Copy-Item $exe (Join-Path $shape 'client\localai-client.exe') -Force
+Set-Content -Path (Join-Path $shape 'host\localai-lan-edge.exe') -Value 'stub' -Encoding utf8
+& (Join-Path $shape 'client\localai-client.exe') --selftest
+$code2 = $LASTEXITCODE
+Remove-Item $shape -Recurse -Force -ErrorAction SilentlyContinue
+if ($code2 -ne 0) {
+    Write-Host ""
+    Write-Host "X 换个安装位置自检就红了（退出码 $code2）。" -ForegroundColor Red
+    Write-Host "  ★ 说明有断言在断言【它自己跑在哪个目录下】,而不是断言代码的行为。" -ForegroundColor Red
+    Write-Host "    把那条断言改成与位置无关(例如把纯逻辑抽出来、拿临时目录做两向测试)。" -ForegroundColor Red
+    exit 1
+}
+$last = "自检通过（两种安装位置,退出码均为 0）"
 Write-Host "    $last"
 
 Write-Host "[3] 校验和与版本戳…"
