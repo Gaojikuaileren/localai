@@ -977,7 +977,7 @@ public sealed class ChatView : UserControl
         //   按下去只有圈变实线、会话区纹丝不动 —— 那是按钮在说假话。
         if (_wsKey is not ("chat" or "translation"))
         {
-            _conv.Content = ConvShell(PlaceholderCenter(), InGhost, overlayBanner: false);
+            _conv.Content = ConvShell(PlaceholderCenter(), InGhost);
             return;
         }
 
@@ -1101,7 +1101,7 @@ public sealed class ChatView : UserControl
                 b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
             }
             var captured = mode;
-            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); EndGhostOnSceneSwitch(); BuildConversation(); };
+            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); if (!EndGhostOnSceneSwitch()) BuildConversation(); };
             row.Children.Add(b);
         }
         return row;
@@ -1137,7 +1137,7 @@ public sealed class ChatView : UserControl
                     : mode == TranslationMode.FileTrans ? new FileTransPanel(ftSid)
                     : mode == TranslationMode.I18n ? BuildI18nPanel()
                     : (FrameworkElement)ReservedScenePlaceholder());
-                var only = ConvShell(body, isGhost, overlayBanner: false);
+                var only = ConvShell(body, isGhost);
                 if (spec.BottomAccessory is null) return only;
                 var wrap = new DockPanel { LastChildFill = true };
                 var acc = spec.BottomAccessory();
@@ -1197,7 +1197,7 @@ public sealed class ChatView : UserControl
                 rBody.Children.Add(chatHead);
                 rBody.Children.Add(new ReplyPanel());
                 // 走 ConvShell 而不是裸 ConvCard:幽灵会话的虚线框与提示在这一场景也得有
-                var rCard = ConvShell(rBody, isGhost, overlayBanner: false);
+                var rCard = ConvShell(rBody, isGhost);
                 // DockPanel 顺序纪律:Dock 的先 Add、LastChildFill 的最后 Add —— 写反了卡不填充
                 var rWrap = new DockPanel { LastChildFill = true };
                 var rBar = new ReplyBar { Margin = new Thickness(0, 10, 0, 0) };
@@ -1296,7 +1296,7 @@ public sealed class ChatView : UserControl
         }
 
         _wasEmptyState = heroNow;   // ★ 不是 !hasMsgs:贴底态永远没有"从居中滑下来"这一说
-        var card = ConvShell(inner, isGhost, overlayBanner: heroNow);
+        var card = ConvShell(inner, isGhost);
         if (spec.BottomAccessory is null) return card;
 
         var root = new DockPanel { LastChildFill = true };
@@ -1539,35 +1539,29 @@ public sealed class ChatView : UserControl
             new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(260)) { BeginTime = begin, EasingFunction = ease });
     }
 
-    // 会话面板外壳:普通=实心卡;幽灵=虚线边框 + 提示(不保留记录、不纳入记忆)。
-    // overlayBanner=true(空态):提示【浮】在顶部,不占布局、不顶动居中的输入框(用户裁定)。
-    FrameworkElement ConvShell(FrameworkElement inner, bool ghost, bool overlayBanner)
+    /// <summary>
+    /// 会话面板外壳:普通 = 实心卡;幽灵 = 虚线边框 + 一枚「不保留记录」的标。
+    ///
+    /// ★★ 进出幽灵态【一个像素都不许动】(用户裁定 2026-08-03:
+    ///   "幽灵会话多出来的提示会挤开功能切换按钮和其他板块,不应该。原本的聊天板块也有轻微的布局跳跃")。
+    ///   两处曾经在动:
+    ///   ① 提示原本是 Dock.Top 的一行,占布局 —— 进幽灵就把下面所有东西整体推下去;
+    ///      现在改成【压在上边框上的一枚标】(Grid 覆盖层 + 不参与命中),零布局代价。
+    ///   ② 更隐蔽的那 1px:普通卡走 Ui.Card,BorderThickness = 1;幽灵壳原来没有边框 ——
+    ///      内容盒因此左右各差 1px。虚线是画在覆盖层上的,所以这里补一圈【透明】边框把盒模型对齐。
+    /// </summary>
+    FrameworkElement ConvShell(FrameworkElement inner, bool ghost)
     {
         if (!ghost) return ConvCard(inner);
 
-        var banner = Ui.Caption("幽灵会话 · 不保留记录、不纳入记忆");
-        banner.HorizontalAlignment = HorizontalAlignment.Center;
-        banner.TextAlignment = TextAlignment.Center;
-        banner.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
-
-        FrameworkElement hostChild;
-        if (overlayBanner)
+        var host = new Border
         {
-            hostChild = inner;   // 提示不进布局流,改为在外层 Grid 顶部浮放
-        }
-        else
-        {
-            var d = new DockPanel { LastChildFill = true };
-            var bWrap = new Border { Child = banner, Margin = new Thickness(0, 0, 0, 8) };
-            DockPanel.SetDock(bWrap, Dock.Top);
-            d.Children.Add(bWrap);
-            d.Children.Add(inner);
-            hostChild = d;
-        }
-
-        var host = new Border { Child = hostChild, Padding = new Thickness(12) };
+            Child = inner, Padding = new Thickness(12),
+            BorderThickness = new Thickness(1), BorderBrush = Brushes.Transparent,   // 见上:对齐盒模型
+        };
         host.SetResourceReference(Border.BackgroundProperty, "BgSurface");
         host.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+
         var r = TryFindResource("RadiusMd") is CornerRadius cr ? cr.TopLeft : 8;
         var dash = new System.Windows.Shapes.Rectangle
         {
@@ -1575,15 +1569,24 @@ public sealed class ChatView : UserControl
             RadiusX = r, RadiusY = r, IsHitTestVisible = false,
         };
         dash.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "Accent");
+
+        var banner = Ui.Caption("幽灵会话 · 不保留记录、不纳入记忆");
+        banner.TextAlignment = TextAlignment.Center;
+        banner.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+        // 标压在上边框上(像图例):自己带一块与卡同色的底,把底下那截虚线盖掉;
+        // 居中摆 —— 场景切换条在左上角,两者不会打架。
+        var tag = new Border
+        {
+            Child = banner, Padding = new Thickness(8, 0, 8, 0), IsHitTestVisible = false,
+            VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, -7, 0, 0),
+        };
+        tag.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+
         var g = new Grid();
         g.Children.Add(host);
         g.Children.Add(dash);
-        if (overlayBanner)
-        {
-            // 顶部浮放的提示:不占布局(Grid 覆盖层),因此不会把居中输入框往下顶。
-            var floatWrap = new Border { Child = banner, VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 14, 0, 0), IsHitTestVisible = false };
-            g.Children.Add(floatWrap);
-        }
+        g.Children.Add(tag);
         return g;
     }
 
@@ -2202,12 +2205,15 @@ public sealed class ChatView : UserControl
     ///   新场景根据标记判不出它是自己的(各场景都是 "Find(sid)?.XXX == true" 判据),
     ///   于是屏幕上是新场景、手里拿着旧场景的幽灵,幽灵按钮还亮着。
     /// </summary>
-    void EndGhostOnSceneSwitch()
+    /// <returns>真的抹了一条幽灵(并且已经重画过)= true。</returns>
+    bool EndGhostOnSceneSwitch()
     {
-        if (!InGhost) return;
+        if (!InGhost) return false;
         TheApp.Chat.PurgeGhosts();
         _sessionId = null;
-        BuildSessions();   // 内部会跑 UpdateContext,幽灵按钮才会从实线回虚线
+        BuildSessions();      // 内部会跑 UpdateContext,幽灵按钮才会从实线回虚线
+        BuildConversation();  // ★ 必须重画:切场景那一下已经拿着旧会话画过一遍了,
+        return true;          //   不重画就会把一条【已经不存在的】幽灵会话继续摆在屏幕上
     }
 
     /// <summary>进入 / 退出幽灵会话。退出即抹除该会话并回到普通会话(可退出 —— 用户反馈"按下之后无法退出")。</summary>

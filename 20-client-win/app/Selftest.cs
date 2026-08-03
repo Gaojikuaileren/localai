@@ -406,15 +406,19 @@ public static class Selftest
                 Assert(chatSrc.Contains("_ghostHost.Content = inProject ? null : GhostButton(InGhost)"), "项目会话下不显示幽灵按钮");
                 // ★★ 幽灵外壳要罩住【每一个场景】(用户裁定 2026-08-03)。同传/文件翻译/多语表/回信
                 //   都是提前 return 的分支,以前用的是普通卡 —— 手里真拿着幽灵会话,屏幕上一点痕迹都没有。
-                Assert(chatSrc.Contains("var only = ConvShell(body, isGhost, overlayBanner: false);"),
+                Assert(chatSrc.Contains("var only = ConvShell(body, isGhost);"),
                        "★ 同传/文件翻译/多语表 走幽灵外壳");
-                Assert(chatSrc.Contains("ConvShell(rBody, isGhost, overlayBanner: false)"),
+                Assert(chatSrc.Contains("ConvShell(rBody, isGhost)"),
                        "★ 回信场景走幽灵外壳");
-                Assert(chatSrc.Contains("ConvShell(PlaceholderCenter(), InGhost, overlayBanner: false)"),
+                Assert(chatSrc.Contains("ConvShell(PlaceholderCenter(), InGhost)"),
                        "★ 占位空间也走幽灵外壳 —— 按钮已经在那儿了,按下去毫无反应比不给更假");
                 Assert(!chatSrc.Contains("NewGhostSession(_wsKey);"),
                        "★ 建幽灵必须带上当前场景标记,裸调用就是退化回「永远是普通文字会话」");
-                Assert(chatSrc.Contains("void EndGhostOnSceneSwitch()") && chatSrc.Contains("EndGhostOnSceneSwitch();"),
+                var shell = Slice(chatSrc, "FrameworkElement ConvShell(", "FrameworkElement PlaceholderCenter()");
+                Assert(shell is not null && shell.Contains("BorderThickness = new Thickness(1), BorderBrush = Brushes.Transparent")
+                       && !shell.Contains("DockPanel.SetDock(bWrap, Dock.Top)"),
+                       "★★ 进出幽灵态一个像素都不许动:提示压在边框上不占布局,且补一圈透明边框对齐 Ui.Card 的 1px");
+                Assert(chatSrc.Contains("bool EndGhostOnSceneSwitch()") && chatSrc.Contains("EndGhostOnSceneSwitch();"),
                        "★ 换场景 = 换了一次 —— 幽灵的承诺只管这一次,切场景就抹掉");
                 // ★ 幽灵按钮【每个工作空间都给】(2026-08-01 用户裁定)——
                 //   判据是"这个空间给不给新建会话",而 + 已经在所有空间都给了。
@@ -2851,7 +2855,7 @@ public static class Selftest
                 Assert(cvRO.Contains("继续此项目") && cvRO.Contains("开启此项目分支"), "已完成项目输入区 = 继续/开分支");
                 Assert(cvRO.Contains("BuildTrashBoard") && cvRO.Contains("‹ 返回会话") && !cvRO.Contains("Flyout.Show(anchor, \"已删除会话\""),
                        "已删除会话改成覆盖式板块(不再浮窗)");
-                Assert(cvRO.Contains("attachmentsBelow: heroNow") && cvRO.Contains("overlayBanner: heroNow"),
+                Assert(cvRO.Contains("attachmentsBelow: heroNow"),
                        "空态:附件放输入框下方、幽灵提示浮顶,不顶动居中框");
             }
 
