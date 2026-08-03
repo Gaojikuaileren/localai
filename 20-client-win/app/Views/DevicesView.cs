@@ -458,25 +458,42 @@ public sealed class DevicesView : UserControl
             return;
         }
 
+        // ★★ 用户要求:不要让人看见黑色命令框。可以 —— 但那个窗口本来担着【两件事】:
+        //   ① Edge 的命令台;② **唯一能看到失败原因的地方**(整晚我都在让人"去看那个黑窗口")。
+        //   ⇒ 藏窗口的前提是先给失败找到别的去处,否则就是把错误藏起来 —— 那正是今天一直在修的病。
+        //   做法:无窗口启动 + 把 stdout/stderr 收进日志文件,失败时把日志【原文摆到界面上】。
+        //   ★ 中枢那边配套改了:stdin 不可用时不进 REPL、也不退出 —— 否则它打完 banner 就死
+        //     (实测撞到过:重定向输出的那一次,中枢刚说"已监听"就没了)。
+        var logPath = Path.Combine(Path.GetTempPath(), "localai-edge.log");
+        try { if (File.Exists(logPath)) File.Delete(logPath); } catch { }
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = cmd,
                 Arguments = args ?? "",
-                // ★ UseShellExecute:让它开自己的控制台窗口 —— Edge 会把「拨号 …:8443」那行打在里面,
-                //   出问题时那个窗口就是唯一的现场。藏起来等于把证据丢掉。
-                UseShellExecute = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                RedirectStandardInput = true,   // ★ 让中枢看到"没有可用 stdin",走无命令台那条路
                 WorkingDirectory = Path.GetDirectoryName(cmd) ?? "",
-            });
+            };
+            var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) { Say("没能启动中枢进程。"); return; }
+            var sw = new StreamWriter(logPath, append: true) { AutoFlush = true };
+            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
+            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
         }
         catch (Exception ex)
         {
-            Say("没能拉起启动脚本(" + ex.GetType().Name + ":" + ex.Message + ")—— 请自己双击:" + cmd);
+            Say("没能启动中枢(" + ex.GetType().Name + ":" + ex.Message + ")—— 也可以自己双击:" + cmd);
             return;
         }
 
-        Say("已经拉起启动脚本,正在等中枢应答…");
+        Say("中枢正在启动(无窗口),正在等它应答…");
         var admin = TheApp.HubAdmin;
         for (int i = 0; i < StartEdgeWaitSeconds; i++)
         {
@@ -493,12 +510,32 @@ public sealed class DevicesView : UserControl
                 });
                 return;
             }
-            Say($"已经拉起启动脚本,正在等中枢应答…({i + 1}/{StartEdgeWaitSeconds} 秒)");
+            Say($"中枢正在启动(无窗口),正在等它应答…({i + 1}/{StartEdgeWaitSeconds} 秒)");
         }
-        // ★ 到点还没应答:如实说"没等到",并指向刚刚弹出来的那个窗口 —— 那里有真正的原因
-        Say($"{StartEdgeWaitSeconds} 秒内没等到中枢应答。请看刚弹出来的那个黑色窗口 —— "
-            + "它里面就是失败原因(常见:端口被占、绑的网卡地址已经不存在了、或当前身份打不开中枢密钥)。"
-            + "处理完点「角色检测」。");
+        // ★★ 到点还没应答:把中枢自己吐出来的话【原文摆出来】。
+        //   黑窗口藏掉了,但现场不能丢 —— 这一段就是那个窗口原来真正的作用。
+        var tail = "";
+        try
+        {
+            if (File.Exists(logPath))
+            {
+                var all = File.ReadAllLines(logPath);
+                tail = string.Join(Environment.NewLine, all.Reverse().Take(14).Reverse());
+            }
+        }
+        catch (Exception ex) { tail = "(读不到中枢日志:" + ex.Message + ")"; }
+        Dispatcher.Invoke(() =>
+        {
+            status.Text = $"{StartEdgeWaitSeconds} 秒内没等到中枢应答。下面是中枢自己打印的最后几行:";
+            Line(tail.Length > 0 ? tail : "(中枢没有留下任何输出)", muted: true);
+            Line("完整日志:" + logPath, muted: true);
+            Action(Ui.Secondary("打开完整日志", (_, _) =>
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(logPath) { UseShellExecute = true }); }
+                catch { }
+            }));
+            Retry();
+        });
     }
 
 

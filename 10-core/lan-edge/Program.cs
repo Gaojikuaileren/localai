@@ -315,6 +315,20 @@ static async Task<int> RunLan(string[] a)
     Console.WriteLine("命令:  list | approve <id> | deny <id> | open [分钟] | close | quit");
     Console.Write("> ");
 
+    // ★★ 无窗口运行(客户端帮你拉起、看不到黑框)时,stdin 是空的。
+    //   原来这里 `if (line is null) break;` 会让它【当场退出】——
+    //   中枢刚打印完"已监听"就死了,而人什么都看不见。(2026-08-04 实测撞到过。)
+    //   ⇒ 没有可用的 stdin 就【不进 REPL】,安静地一直跑下去;
+    //     设备管理走客户端的回环管理面,那本来就是正路。
+    if (Console.IsInputRedirected)
+    {
+        Console.WriteLine();
+        Console.WriteLine("(无控制台输入 —— 命令台已关闭。请在客户端的【设备】页里管理配对与设备。)");
+        Console.Out.Flush();
+        await System.Threading.Tasks.Task.Delay(System.Threading.Timeout.Infinite);
+        return 0;
+    }
+
     while (true)
     {
         var line = Console.ReadLine();

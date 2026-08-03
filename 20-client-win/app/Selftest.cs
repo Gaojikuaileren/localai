@@ -5066,15 +5066,27 @@ public static class Selftest
                     Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
                            "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
                            + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
-                    Assert(se is not null && se.Contains("UseShellExecute = true"),
-                           "★ 让 .cmd 开自己的控制台窗口 —— 出问题时那个窗口是唯一的现场,藏起来等于把证据丢掉");
+                    // ★★ 这条断言【翻面】了:用户要求不要黑窗口。可以藏 ——
+                    //   但前提是先给失败找到别的去处,否则就是把错误藏起来。
+                    //   ⇒ 现在要求:无窗口启动 + 收日志 + 失败时把日志原文摆到界面上。
+                    Assert(se is not null && se.Contains("CreateNoWindow = true"),
+                           "★ 不给用户看黑窗口");
+                    Assert(se is not null && se.Contains("RedirectStandardOutput = true")
+                           && se.Contains("RedirectStandardError = true"),
+                           "★★ 藏窗口就必须收日志 —— 那个窗口原来的真正作用是「唯一能看到失败原因的地方」");
+                    Assert(se is not null && se.Contains("RedirectStandardInput = true"),
+                           "★★ 还要让中枢看到「没有可用 stdin」,它才会走无命令台那条路 —— "
+                           + "否则它打完 banner 就当场退出(实测撞到过)");
+                    Assert(se is not null && se.Contains("logPath") && se.Contains("中枢自己打印的最后几行"),
+                           "★★ 失败时把中枢自己吐的话【原文】摆出来,并给一个打开完整日志的入口 —— "
+                           + "窗口可以藏,现场不能丢");
                     var iWait = se?.IndexOf("admin.ProbeAsync", StringComparison.Ordinal) ?? -1;
                     Assert(iSpawn >= 0 && iWait >= 0 && iSpawn < iWait
                            && se!.Contains("LastProbe == Services.AdminProbeResult.Ok"),
                            "★★ 拉起 ≠ 起来了:只有回环管理面真的答话才算数,"
                            + "不许因为 Process.Start 没抛异常就宣布成功");
                     Assert(se is not null && se.Contains("秒内没等到中枢应答"),
-                           "★ 到点没等到就如实说,并指向刚弹出来的那个窗口 —— 不无限转圈");
+                           "★ 到点没等到就如实说 —— 不无限转圈");
                     // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
                     var recheck = Slice(dv4, "UIElement RecheckRow()", "UIElement HubDownCard()");
                     Assert(recheck is not null && !recheck.Contains("Process.Start") && !recheck.Contains("StartEdgeAsync"),
@@ -5376,8 +5388,8 @@ public static class Selftest
                     //   真正的判据是【密钥打不打得开】(见 Elevation.DeviceKeyUsable 与
                     //   decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md)。
                     //   ⇒ 现在钉的是:失败时把【中枢自己吐出来的原因】原样带出来,而不是我们替它编一个。
-                    Assert(Body(dvSrc).Contains("请看刚弹出来的那个黑色窗口"),
-                           "★★ 中枢起不来时指向它自己的窗口 —— 那里才有真实原因,"
+                    Assert(Body(dvSrc).Contains("中枢自己打印的最后几行"),
+                           "★★ 中枢起不来时把它【自己吐出来的话】摆出来 —— "
                            + "别用我们猜的理由(「你是不是用管理员跑的」)去盖住它");
                     Assert(!Body(dvSrc).Contains("必须用【普通用户】双击"),
                            "★★ 不许再断言「必须普通用户」—— UAC 关闭的机器上根本没有普通身份的进程,"
