@@ -124,6 +124,18 @@ public sealed class DevicesView : UserControl
     /// </summary>
     async Task AutofillHubAddress(TextBox addr, TextBlock note)
     {
+        // ★ 这个方法是 fire-and-forget 调的(`_ = AutofillHubAddress(...)`)—— 一旦抛出,异常没人观察,
+        //   界面上那行提示就永远停在"正在…",用户以为还在找。所以整段兜住,并把失败【说出来】。
+        try { await AutofillCore(addr, note); }
+        catch (Exception ex)
+        {
+            Dispatcher.Invoke(() => note.Text = "自动查找失败(" + ex.GetType().Name + ")—— 请手填地址:"
+                                                + "照主机 Edge 窗口里那行「拨号 …:8443」。");
+        }
+    }
+
+    async Task AutofillCore(TextBox addr, TextBlock note)
+    {
         var admin = TheApp.HubAdmin;
         if (await admin.ProbeAsync(TheApp.Hub.Profile?.HubId))
         {

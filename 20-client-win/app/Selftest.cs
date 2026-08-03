@@ -4736,6 +4736,9 @@ public static class Selftest
                                  ("WeekTimeline",   () => new Views.WeekTimeline()),
                                  ("CalendarView",   () => new Views.CalendarView(Views.CalendarView.Mode.Month)),
                                  ("ChatView",       () => new Views.ChatView("chat")),
+                                 // ★ 配对页会在构造期起一个"自动找中枢"的后台任务。放进来是因为它构造期一抛,
+                                 //   用户点进设备页就是白屏 —— 而这条路径平时没人走(要等到真去配对第二台才发现)。
+                                 ("DevicesView",    () => new Views.DevicesView()),
                              })
                     {
                         try { _ = make(); Assert(true, $"{name} 能构造出来(构造期不抛)"); }
