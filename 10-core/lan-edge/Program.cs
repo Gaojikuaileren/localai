@@ -202,6 +202,34 @@ static bool IsElevated()
     catch { return false; }
 }
 
+// ★★ 2026-08-04:真正要回答的问题是【身份密钥这个进程打不打得开】,不是「我是不是管理员」。
+//   后者只是前者的代理指标,而在 UAC 关闭的机器上(EnableLUA=0)它对管理员账户**恒为真**:
+//   那种机器上桌面 explorer 自己就跑在 High,根本不存在普通身份的进程,
+//   身份当初也就是在 High 下铸的、在 High 下打得开。
+//   拿代理指标当门槛,等于把一台完全健康的机器判成不能用,而且给出的理由
+//   (「密钥集不存在」)是假的 —— 实测该机两把密钥在 High 进程里 CngKey.Open 都成功。
+//   ⇒ 直接试着打开 CA 私钥。打得开就放行(什么完整性等级都行);
+//     打不开才是真正要拦的情形,那时理由也是真的。
+//   见 00-docs/decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md
+static bool CaKeyUsable(string secretsDir, out string note)
+{
+    try
+    {
+        var locPath = Path.Combine(secretsDir, "identity-locators.json");
+        if (!File.Exists(locPath)) { note = "找不到 " + locPath; return false; }
+        var loc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(locPath)).RootElement;
+        var caKeyName = loc.GetProperty("ca_key_name").GetString()!;
+        var caProvider = loc.TryGetProperty("ca_provider", out var cp) ? cp.GetString()! : Ca.TpmProvider;
+        var prov = new System.Security.Cryptography.CngProvider(caProvider);
+        if (!System.Security.Cryptography.CngKey.Exists(caKeyName, prov))
+        { note = $"当前身份下看不到 CA 密钥「{caKeyName}」(provider: {caProvider})"; return false; }
+        using var k = System.Security.Cryptography.CngKey.Open(caKeyName, prov);
+        note = $"CA 密钥「{caKeyName}」打得开";
+        return true;
+    }
+    catch (Exception ex) { note = "打开 CA 密钥失败:" + ex.Message; return false; }
+}
+
 // S5: open the LAN by binding a selected NIC address (not loopback). The narrow firewall rule
 // (lan-firewall.ps1, run by the user, elevated) must already be in place -- until then the OS default
 // inbound block keeps the port unreachable, so there is no "listening but unprotected" window.
@@ -213,16 +241,22 @@ static async Task<int> RunLan(string[] a)
     var secDir = Paths.SecretsDir();
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: localai-identity init)"); return 1; }
 
-    // The identity keys (CA in TPM) live in the user's key-isolation context. A UAC-elevated (high
-    // integrity) process cannot open them -> `approve` fails with "Keyset does not exist" even though
-    // TLS (software key) still works. init runs as the normal user, so the Edge must too. Refuse early
-    // with a clear message rather than let the operator hit the cryptic failure at approve time.
-    if (IsElevated())
+    // ★★ 先问真问题:CA 私钥【这个进程】打不打得开。打得开就继续 —— 什么完整性等级都行。
+    //   (原来这里查的是 IsInRole(Administrator)。那只是代理指标,UAC 关闭的机器上恒为真,
+    //    会把一台密钥明明打得开的健康机器挡在门外,理由还是假的。见 CaKeyUsable 上方的说明。)
+    if (!CaKeyUsable(secDir, out var keyNote))
     {
-        Console.WriteLine("✗ 检测到以【管理员】身份运行 —— 本程序不能用管理员跑。");
-        Console.WriteLine("  身份密钥(CA)在你普通用户的 TPM 上下文里,管理员进程访问会报「密钥集不存在」。");
-        Console.WriteLine("  请用【普通】PowerShell,或直接双击  dist\\host\\启动Edge.cmd 。");
-        Console.WriteLine("  (开放端口的 lan-firewall.ps1 才需要管理员,且只需一次,已完成。)");
+        Console.WriteLine("✗ 打不开身份密钥(CA),中枢无法启动。");
+        Console.WriteLine("  " + keyNote);
+        if (IsElevated())
+        {
+            Console.WriteLine("  ★ 本进程是【管理员】身份 —— 而 TPM/CNG 用户密钥绑定【铸造时】的完整性等级。");
+            Console.WriteLine("    如果这套身份当初是用普通用户铸的,就要用普通用户跑。");
+        }
+        else
+        {
+            Console.WriteLine("  ★ 本进程是普通用户身份 —— 如果这套身份当初是用【管理员】铸的,那就要用管理员跑。");
+        }
         return 3;
     }
     var serverName = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(idDir, "hub.json"))).RootElement.GetProperty("server_name").GetString();
