@@ -424,7 +424,10 @@ public partial class App : Application
         _tray = new WinForms.NotifyIcon
         {
             // 暂用系统图标;墨白皮肤的自制黑白图标随视觉资源一起补(用户指定设计理念)。
-            Icon = System.Drawing.SystemIcons.Application,
+            // ★ 托盘用自家图标(Assets\iconavicon.ico 已作为 Win32 资源编进 exe):
+            //   从 exe 自身提取,发布后没有散落文件也照样有图标;取不到再退系统默认。
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "")
+                   ?? System.Drawing.SystemIcons.Application,
             Visible = true,
             Text = Strings.Get("app.title"),
         };

@@ -10,7 +10,8 @@
     <InvariantGlobalization>false</InvariantGlobalization>
     <AssemblyName>localai-client</AssemblyName>
     <RootNamespace>LocalAI.Client</RootNamespace>
-    <ApplicationIcon />
+    <!-- 客户端图标(用户提供,Assets\icon):exe/任务栏/托盘同一套 -->
+    <ApplicationIcon>Assets\iconavicon.ico</ApplicationIcon>
     <!-- 自定义入口:selftest 走无界面路径,正常启动才进 WPF(见 Program.cs) -->
     <StartupObject>LocalAI.Client.Program</StartupObject>
   </PropertyGroup>

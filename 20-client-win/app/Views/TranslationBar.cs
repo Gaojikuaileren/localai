@@ -454,7 +454,7 @@ public sealed class TranslationBar : UserControl
         _i18nTools.Margin = new Thickness(0, 0, 10, 0);
         row2.Children.Add(_i18nTools);
         toolsBody.Children.Add(row2);
-        var tip = Ui.Caption("键与译文在上方网格直接编辑;「JSON 源码」整表直编;「复制 Prompt」给别的 AI 产出同格式 JSON。");
+        var tip = Ui.Caption("「复制 Prompt」让 AI 生成表;回来的 JSON 用「JSON 源码」贴回。");
         tip.Margin = new Thickness(0, 4, 0, 0);
         toolsBody.Children.Add(tip);
         var toolsCard = Card(toolsBody, "工具", scroll: false);
@@ -554,10 +554,10 @@ public sealed class TranslationBar : UserControl
         var body = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         _fileToolsRow.VerticalAlignment = VerticalAlignment.Center;
         body.Children.Add(toolsRow);
-        var tip = Ui.Caption("左键:画框 / 点框选中 / 按住角标移动 / 拉边调大小(Del 删除,Ctrl+Z 撤回);右键拖拽平移,滚轮缩放。「双语对照」「行政翻译」引擎接入(P4)后生效。");
+        var tip = Ui.Caption("左键画框、点选、拖角标移动、拉边调大小;右键平移,滚轮缩放,Ctrl+Z 撤回。");
         tip.Margin = new Thickness(0, 4, 0, 0);
         body.Children.Add(tip);
-        return Card(body, "文件翻译工具", scroll: false);
+        return Card(body, "工具", scroll: false);   // 与第四场景统一叫「工具」(用户裁定 2026-08-03)
     }
 
     void RefreshFileTools()
@@ -623,10 +623,11 @@ public sealed class TranslationBar : UserControl
     /// <summary>工具栏的小胶囊(与 Chip 同族;on = 选中态,给"创建标注框"这类开关用)。</summary>
     FrameworkElement ToolChip(string text, bool on, Action onClick)
     {
+        // ★ 尺寸(用户反馈 2026-08-03):底部卡有整格高,小指甲盖按钮撑不起版面 ——
+        //   正文字号 + 大内边距,按钮当按钮看(第三/四场景的工具卡共用,一起变)。
         var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center };
         t.SetResourceReference(TextBlock.ForegroundProperty, on ? "FgOnAccent" : "FgSecondary");
-        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-        var b = new Border { Child = t, Padding = new Thickness(8, 4, 8, 4), Margin = new Thickness(0, 0, 6, 4),
+        var b = new Border { Child = t, Padding = new Thickness(13, 8, 13, 8), Margin = new Thickness(0, 0, 8, 6),
                              Cursor = Cursors.Hand, BorderThickness = new Thickness(1) };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
         if (on) { b.SetResourceReference(Border.BackgroundProperty, "Accent"); b.SetResourceReference(Border.BorderBrushProperty, "Accent"); }
