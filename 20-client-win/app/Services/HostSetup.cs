@@ -42,7 +42,11 @@ public static class HostSetup
     /// 铸身份不可回退,不能因为"旁边有个 host 目录"这条线索就替人做了。
     /// 判据用 `localai-identity status` 的退出码:0 = 有,非 0 = 没有。
     /// </summary>
-    public static bool IdentityExists()
+    /// ★★ 必须是 async。写成同步的那一版用 `.GetAwaiter().GetResult()` 等一个 async 方法,
+    ///   而它是从 UI 线程调的 —— 里面 await 的续体要回 UI 线程,而 UI 线程正卡在 GetResult 上,
+    ///   **整个程序当场死锁**(2026-08-04 实机卡死,就是这一行)。
+    ///   ⇒ sync-over-async 在 UI 线程上永远是错的。要么全程 await,要么先 Task.Run 把它挪出去。
+    public static async Task<bool> IdentityExistsAsync()
     {
         var dir = HubAdmin.HostToolsDir();
         if (dir is null) return false;
@@ -50,7 +54,7 @@ public static class HostSetup
         if (!File.Exists(exe)) return false;
         try
         {
-            var (code, _) = RunCapturedAsync(exe, "status", dir).GetAwaiter().GetResult();
+            var (code, _) = await RunCapturedAsync(exe, "status", dir);
             return code == 0;
         }
         catch { return false; }

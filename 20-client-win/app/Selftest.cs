@@ -5107,7 +5107,7 @@ public static class Selftest
 
                     // ⑪ 铸身份不是内部步骤 —— 不可回退,必须先问;而且要有"这台其实是副机"的出口
                     var auto = Slice(dv4, "async Task AutoSetupAsync", "/// <summary>身份就绪之后");
-                    Assert(auto is not null && auto.Contains("IdentityExists()"),
+                    Assert(auto is not null && auto.Contains("IdentityExistsAsync()"),
                            "★★ 没有身份时【先问再铸】—— 走到这张卡的判据只是「旁边有个 host 目录」,"
                            + "那是线索不是判据(把主机的 dist 整个拷过去就满足它),不问就铸 = 网段里悄悄多一个中枢");
                     Assert(auto is not null && auto.Contains("这台其实是副机"),
@@ -5115,6 +5115,25 @@ public static class Selftest
                            + "没有出口这台电脑【结构上】再也走不到配对,而界面从头到尾不会提「删掉那个 host 目录」");
                     Assert(auto is not null && auto.Contains("_role = HostRole.Client"),
                            "★ 出口要真的把角色改过去,不是只弹句话");
+
+                    // ⑫ UI 侧不许 sync-over-async —— 2026-08-04 实机卡死就是一行 .GetAwaiter().GetResult()
+                    //   在 UI 线程上等一个 async 方法:里面 await 的续体要回 UI 线程,而 UI 线程正卡着。
+                    //   ★ 允许的写法是先 Task.Run 把它挪出 UI 线程再 GetResult(App.xaml.cs 里那处就是)。
+                    foreach (var f in new[] { Path.Combine("Services", "HostSetup.cs"),
+                                              Path.Combine("Services", "HubAdmin.cs"),
+                                              Path.Combine("Services", "HubDiscovery.cs"),
+                                              Path.Combine("Views", "DevicesView.cs") })
+                    {
+                        var src = TryReadSource(f);
+                        if (src is null) continue;
+                        foreach (var line in Body(src).Split('\n'))
+                        {
+                            if (!line.Contains("GetAwaiter().GetResult()") && !line.Contains(".Wait()")) continue;
+                            Assert(line.Contains("Task.Run("),
+                                   $"★★ {Path.GetFileName(f)} 里有一处 sync-over-async 没先 Task.Run —— "
+                                   + "在 UI 线程上这会【直接死锁】(今天就卡死过一次):" + line.Trim());
+                        }
+                    }
 
                     // ⑨ 起中枢要绑【用户刚选的那张网卡】,不能靠 .cmd 里写死的地址
                     var step = Slice(dv4, "async Task StartEdgeStepAsync", "/// <summary>");

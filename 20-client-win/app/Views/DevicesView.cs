@@ -231,7 +231,7 @@ public sealed class DevicesView : UserControl
             //   把主机上整个 dist 拷到第二台电脑就会满足它。不问就铸 = 网段里悄悄多出一个中枢。
             //   ⇒ 已经有身份就静默继续(那才是真·内部步骤);没有就停下来问。
             Line("① 中枢身份:正在检查…", muted: true);
-            if (!Services.HostSetup.IdentityExists())
+            if (!await Services.HostSetup.IdentityExistsAsync())
             {
                 ResetLines();
                 Line("这台机器还没有中枢身份。");
