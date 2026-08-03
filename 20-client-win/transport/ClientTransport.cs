@@ -108,9 +108,17 @@ public static class Transport
         JsonElement en;
         using (var boot = Boot(dial, d => serverLeaf = d))
             // ★ clientVersion 是【自报的、未被六词覆盖的】信息 —— 与 displayName 同级:只作显示,
-            //   不做任何判断,永不进 prompt。真正决定"能不能配上"的是 protocolVersion(它进了 SAS 推导:
-            //   两边协议版本不同,六个词直接对不上)。
-            //   服务端忽略不认识的字段,所以多带这一个不会影响老主机。
+            //   不做任何判断,永不进 prompt。服务端忽略不认识的字段,所以多带这一个不会影响老主机。
+            //
+            // ★★ protocolVersion 同样是【自报】的 —— 别把它误读成"被六个词拦住了"。
+            //   它确实进了 SAS transcript(Sas.cs 的 `protocol_version` 一项),但**两边用的是同一个值**:
+            //   主机端 `Pairing.Enroll` 直接拿请求体里这个数去推导,自己不校验。
+            //   ∴ 客户端协议版本变了也不会让六个词对不上 —— 六词拦的是中间人
+            //   (hub_id / CA / 叶子证书 / 双方随机数),不是版本。
+            //   真正在查协议版本的是**连上之后**那一步:HubClient.NoteProtocol 拿
+            //   `X-LocalAI-Protocol` 响应头比对,不一致就置 ProtocolMismatch、不当在线。
+            //   让**配对那一刻**也 fail-closed(主机拒接不支持的 protoVer)属于 core 车道,
+            //   已写入 00-docs/decision-packets/client-version-visibility-2026-08-03.md。
             en = await Post(boot, edgeUrl + "/pair/enroll", new { csr = Convert.ToBase64String(csr), clientNonce = Convert.ToBase64String(clientNonce), claimSecretHash = Convert.ToBase64String(claimSecretHash), protocolVersion = 1, displayName, clientVersion = ClientVersion });
         if (serverLeaf is null) throw new InvalidOperationException("did not capture server leaf");
 

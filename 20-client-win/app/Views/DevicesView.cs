@@ -242,10 +242,15 @@ public sealed class DevicesView : UserControl
             ChangeDialRow(p),
             Ui.Body($"协议:{TheApp.Hub.ProtocolNote}", muted: true),
             Ui.Body($"本机客户端:{Services.BuildInfo.Display}", muted: true),
-            // ★ 三层版本别混为一谈:协议版本决定能不能对话(而且它已经写进六词推导,
-            //   两边不同就配不上);客户端版本戳只影响"功能是不是同一套",是提示不是拦截。
-            Ui.Caption("★ 两台客户端的【协议版本】不一致时,配对的六个词会直接对不上 "
-                       + "—— 因为词是从协议版本 + 双方随机数 + CSR 指纹推出来的。这一层不靠人去核。"),
+            // ★ 版本分两层,而且两层都【不靠六个词】—— 六词拦的是中间人,不是版本。
+            //   这里曾经写过"协议版本不一致六词就对不上",那是错的:主机直接拿客户端自报的
+            //   protocolVersion 去推导 SAS,两边用的是同一个值,自然永远一致。
+            Ui.Caption("★ 协议版本在【连上之后】才查:中枢每次响应都带自报的版本号,对不上就直接判成"
+                       + "「协议对不上」、不当作在线(不会拿可能误解的格式去解正文)。"),
+            Ui.Caption("★ 但【配对那一刻】不查:协议版本是客户端自报、主机照单全收的,"
+                       + "六个词不会因此对不上 —— 它们拦的是中间人,不是版本。"),
+            Ui.Caption("★ 客户端构建戳只是提示:同一协议下的不同构建完全可以互通,"
+                       + "把它升成硬拦 = 每发一版就必须两台同时升,否则整套停摆。"),
             Ui.Body($"状态:{Strings.Get(TheApp.Hub.State switch {
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",

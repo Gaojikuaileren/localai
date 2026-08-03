@@ -4769,11 +4769,20 @@ public static class Selftest
                            "★ 配对时上报本机版本戳(服务端忽略未知字段,不影响老主机)");
                     Assert(ctSrc.Contains("自报的、未被六词覆盖的】信息"),
                            "★★ 写明 clientVersion 是自报信息、不在六词覆盖范围内 —— 只作显示,不做判断");
+                    // ★★ 这条钉的是一个【已经写错过一次的断言】:此处曾写"协议版本不同则六词对不上"。
+                    //   事实是 Pairing.Enroll 拿请求体里的 protocolVersion 去推 SAS、自己不校验,
+                    //   两边用同一个自报值 ⇒ 永远一致。错误的安全声称比没有声称更坏。
+                    Assert(ctSrc.Contains("两边用的是同一个值"),
+                           "★★ 写明 protocolVersion 也是自报的、没被六词拦住 —— 不允许在代码里留错的安全声称");
                 }
                 var dv3 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
                 if (dv3 is not null)
-                    Assert(dv3.Contains("配对的六个词会直接对不上"),
-                           "★★ 界面要说清:协议版本不一致是【结构性】被六词拦住的,不靠人去核");
+                {
+                    Assert(dv3.Contains("它们拦的是中间人,不是版本"),
+                           "★★ 界面要说实话:六个词拦的是中间人,拦不住版本不一致");
+                    Assert(!Body(dv3).Contains("配对的六个词会直接对不上"),
+                           "★★ 那句错的安全声称不能再回到界面上");
+                }
             }
 
             // ---- 局域网自动找中枢(用户:「两边都开着就该一键连上」)----
