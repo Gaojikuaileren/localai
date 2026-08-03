@@ -62,6 +62,8 @@
   "status.revoked":       { "zh-CN": "本设备已被解除",      "en-US": "This device was removed",  "ja-JP": "このデバイスは解除されました" },
   "status.cert_expired":  { "zh-CN": "主机证书已过期",      "en-US": "Hub certificate expired",  "ja-JP": "ハブ証明書の期限切れ" },
   "status.unauthorized":  { "zh-CN": "中枢拒绝了请求",      "en-US": "Hub refused the request",  "ja-JP": "ハブがリクエストを拒否しました" },
+  "status.hub_error":     { "zh-CN": "中枢报错(它在)",     "en-US": "Hub error (it is up)",     "ja-JP": "ハブのエラー(起動中)" },
+  "status.proto_mismatch":{ "zh-CN": "协议对不上",          "en-US": "Protocol mismatch",        "ja-JP": "プロトコル不一致" },
 
   "pairing.title":        { "zh-CN": "与中枢配对",          "en-US": "Pair with the hub",       "ja-JP": "ハブとペアリング" },
   "pairing.start":        { "zh-CN": "开始配对",            "en-US": "Start pairing",           "ja-JP": "ペアリングを開始" },

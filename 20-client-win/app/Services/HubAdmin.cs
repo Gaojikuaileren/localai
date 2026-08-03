@@ -150,15 +150,26 @@ public sealed class HubAdmin
     }
 
     // ---------------------------------------------------------------- 配对(S4 的正题)
-    /// <summary>待批准的配对请求。到点(SecondsLeft ≤ 0)的由主机侧自己失效,界面只管别再显示。</summary>
-    public async Task<List<PendingPair>> PendingAsync()
+    /// <summary>
+    /// 待批准的配对请求。到点(SecondsLeft ≤ 0)的由主机侧自己失效,界面只管别再显示。
+    ///
+    /// ★★ 返回 (ok, list) 而不是光返回 list:取失败时列表**也是空的**,
+    ///   而"空"在界面上会被写成「现在没有等待批准的请求」—— 副机那边正卡着等批准,
+    ///   人看到这句就断定请求没发过来,回去把配对重来一遍。重配会删掉副机私钥,
+    ///   还在主机侧留下幽灵条目。所以这两件事**必须**在类型上就分开,不能靠调用方记得看 LastError。
+    /// </summary>
+    public async Task<(bool ok, List<PendingPair> list)> PendingAsync()
     {
-        var (st, body) = await Call(HttpMethod.Get, "/admin/pairing/pending");
         var list = new List<PendingPair>();
-        if (st != 200) { LastError = $"取待批准列表失败({st})"; return list; }
-        var j = JsonDocument.Parse(body).RootElement;
+        int st; string body;
+        try { (st, body) = await Call(HttpMethod.Get, "/admin/pairing/pending"); }
+        catch (Exception ex) { LastError = "取待批准列表失败:" + ex.Message; return (false, list); }
+        if (st != 200) { LastError = $"取待批准列表失败({st})"; return (false, list); }
+        JsonElement j;
+        try { j = JsonDocument.Parse(body).RootElement; }
+        catch (Exception ex) { LastError = "待批准列表读不懂:" + ex.Message; return (false, list); }
         PairingWindowOpen = j.TryGetProperty("pairingWindowOpen", out var w) && w.GetBoolean();
-        if (!j.TryGetProperty("pending", out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        if (!j.TryGetProperty("pending", out var arr) || arr.ValueKind != JsonValueKind.Array) return (true, list);
         foreach (var p in arr.EnumerateArray())
         {
             var sas = new List<string>();
@@ -170,7 +181,7 @@ public sealed class HubAdmin
                 sas.ToArray(),
                 p.TryGetProperty("secondsLeft", out var sl) ? sl.GetInt32() : 0));
         }
-        return list;
+        return (true, list);
     }
 
     public Task<(int status, string body)> ApproveAsync(string requestId)
@@ -187,20 +198,25 @@ public sealed class HubAdmin
         => Call(HttpMethod.Post, "/admin/pairing/window", new { open, minutes });
 
     // ---------------------------------------------------------------- 设备
-    public async Task<List<AdminDevice>> DevicesAsync()
+    /// <summary>已在册的设备。★ 同 PendingAsync:返回 (ok, list),不让"取不到"伪装成"一台都没有"。</summary>
+    public async Task<(bool ok, List<AdminDevice> list)> DevicesAsync()
     {
-        var (st, body) = await Call(HttpMethod.Get, "/admin/devices");
         var list = new List<AdminDevice>();
-        if (st != 200) { LastError = $"取设备列表失败({st})"; return list; }
-        var j = JsonDocument.Parse(body).RootElement;
-        if (!j.TryGetProperty("devices", out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        int st; string body;
+        try { (st, body) = await Call(HttpMethod.Get, "/admin/devices"); }
+        catch (Exception ex) { LastError = "取设备列表失败:" + ex.Message; return (false, list); }
+        if (st != 200) { LastError = $"取设备列表失败({st})"; return (false, list); }
+        JsonElement j;
+        try { j = JsonDocument.Parse(body).RootElement; }
+        catch (Exception ex) { LastError = "设备列表读不懂:" + ex.Message; return (false, list); }
+        if (!j.TryGetProperty("devices", out var arr) || arr.ValueKind != JsonValueKind.Array) return (true, list);
         foreach (var d in arr.EnumerateArray())
             list.Add(new AdminDevice(
                 d.GetProperty("deviceId").GetString() ?? "",
                 d.TryGetProperty("displayName", out var n) ? n.GetString() ?? "" : "",
                 d.TryGetProperty("status", out var s) ? s.GetString() ?? "" : "",
                 d.TryGetProperty("certSha256Short", out var f) ? f.GetString() : null));
-        return list;
+        return (true, list);
     }
 
     public Task<(int status, string body)> RevokeAsync(string deviceId)
@@ -216,24 +232,40 @@ public sealed class HubAdmin
     /// ★ 为什么不能填 `127.0.0.1:8443`:`run-lan &lt;ip&gt;` 把业务口**只绑在那张网卡的 IP 上**
     ///   (`k.Listen(cfg.Bind, 8443, …)`),回环上只有管理面(8442)。
     ///   往 127.0.0.1:8443 拨是连不上的 —— 这正是「主机上也要填一个看起来很奇怪的局域网 IP」的由来。
-    /// ★ 所以:枚举本机的 IPv4,挨个试 8443 能不能连上,谁应答就是它。
-    ///   拿的是**肯定证据**(TCP 连得上),不是"哪个 IP 看着像"。
-    /// ★ 探不到就返回 null —— 让界面如实说"没探到,请照 Edge 窗口里那行填",绝不猜一个填进去。
+    ///
+    /// ★★ "TCP 连得上"**不是**肯定证据 —— 这句话以前就写在这儿,是错的。它只证明
+    ///   「这个地址的 8443 上有个监听者」:8443 是最常见的备用 HTTPS 口,本机可能有别的东西占着
+    ///   (VirtualBox 之类的端口转发就常绑主机端口)。所以每个应答地址还要走一次 TLS 握手、
+    ///   读证书名,要求 hub_id 与本机这个中枢一致 —— 那才是肯定证据。
+    /// ★★ 而且**不替用户挑**:本机常有不止一张网卡(如 VirtualBox 的 192.168.56.1 仅主机适配器),
+    ///   撞上第一个能连的就 return,等于静默选了一个**只有本机看得见**的地址,
+    ///   还会被写进配对档案、被抄到副机上 —— 副机永远连不上,而人只会去查网线和路由器。
+    ///   全仓的规矩是"找到多个绝不替用户挑",这里以前是唯一的例外。
+    /// ★ 一个都探不到就返回空表 —— 界面如实说"没探到",绝不猜一个填进去。
     /// </summary>
-    public static async Task<string?> DiscoverEdgeDialAsync(int timeoutMs = 400)
+    public static async Task<List<string>> DiscoverEdgeDialsAsync(string? expectHubId, int timeoutMs = 400)
     {
+        var want = HubDiscovery.ShortHubId(expectHubId);
+        var hits = new List<string>();
         foreach (var ip in LocalIPv4())
         {
             try
             {
                 using var sock = new System.Net.Sockets.TcpClient();
                 var connect = sock.ConnectAsync(ip, EdgePort);
-                if (await Task.WhenAny(connect, Task.Delay(timeoutMs)) == connect && sock.Connected)
-                    return $"{ip}:{EdgePort}";
+                if (await Task.WhenAny(connect, Task.Delay(timeoutMs)) != connect || !sock.Connected) continue;
             }
-            catch { /* 这张网卡不通就换下一张 —— 探测失败不是错误 */ }
+            catch { continue; }   // 这张网卡不通就换下一张 —— 探测失败不是错误
+
+            // ★ 连得上还不够:读证书名,认出是我们这个中枢才算数
+            FoundHub? probed = null;
+            try { probed = await HubDiscovery.ProbeOneAsync(ip, EdgePort, timeoutMs); }
+            catch { /* 握手失败:8443 上蹲着的多半是别的东西 */ }
+            if (probed is null) continue;
+            if (want is not null && !string.Equals(probed.HubId, want, StringComparison.OrdinalIgnoreCase)) continue;
+            hits.Add($"{ip}:{EdgePort}");
         }
-        return null;
+        return hits;
     }
 
     // ---------------------------------------------------------------- 本机【能不能】当主机(线索,不是判据)
@@ -274,6 +306,9 @@ public sealed class HubAdmin
         var p = Path.Combine(d, "启动Edge.cmd");
         return File.Exists(p) ? p : null;
     }
+
+    /// <summary>本机当前启用的非回环 IPv4。★ 界面要把它摆出来供人和 Edge 窗口里那行对照。</summary>
+    public static List<string> LocalIPv4List() => LocalIPv4().ToList();
 
     /// <summary>本机的 IPv4(跳过回环与未启用的网卡)。</summary>
     static IEnumerable<string> LocalIPv4()

@@ -168,7 +168,9 @@ public partial class MainWindow : Window
 
         // ★ 中枢连接状态一变就刷顶栏(启动探测连上、配对成功、调用中被解除等任一路径)——
         //   否则右上角会停在启动时的"尚未配对/未连接",连上后也不改显 token 速率。
-        TheApp.Hub.Changed += () => Dispatcher.Invoke(() => { RefreshStatus(); TheApp.UpdateTrayTooltip(); });
+        // ★ 也要刷左下角那一格:配对成功 / 改了拨号地址 / 被解除之后,"主还是副"就变了,
+        //   以前只刷顶栏,这一格会一直停在上一轮的旧结论。
+        TheApp.Hub.Changed += () => Dispatcher.Invoke(() => { RefreshStatus(); RefreshMember(); TheApp.UpdateTrayTooltip(); });
 
         // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
         VramHost.Content = _vram;
@@ -798,6 +800,31 @@ public partial class MainWindow : Window
         RefreshMember();   // 状态块随收起/展开切换长短文案
     }
 
+    bool _hostProbeRunning;
+    DateTime _hostProbeAt = DateTime.MinValue;
+
+    /// <summary>
+    /// 给左下角那一格拿【肯定证据】:ping 一次本机回环管理面(见 HubAdmin)。
+    /// ★ 20 秒内不重复探 —— 这个方法在每次 RefreshMember 里被调,不设窗口就会每次刷新都打一枪。
+    /// ★ 探完再刷一次(不再触发新探测:窗口还没到点),所以不会自激。
+    /// </summary>
+    void EnsureHostProbe()
+    {
+        if (_hostProbeRunning || (DateTime.UtcNow - _hostProbeAt).TotalSeconds < 20) return;
+        _hostProbeRunning = true;
+        _hostProbeAt = DateTime.UtcNow;
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try { await TheApp.HubAdmin.ProbeAsync(TheApp.Hub.Profile?.HubId); }
+            catch { /* 探不到就是没证据,不是错误 */ }
+            finally
+            {
+                _hostProbeRunning = false;
+                Dispatcher.BeginInvoke(new Action(RefreshMember));
+            }
+        });
+    }
+
     public void RefreshStatus()
     {
         // ★ 连上中枢后,顶栏右上角改显【当前预期 token 输出速率】(用户裁定 2026-07-31)——
@@ -819,6 +846,10 @@ public partial class MainWindow : Window
             HubState.Revoked => ("status.revoked", "RiskDanger"),
             HubState.CertExpired => ("status.cert_expired", "RiskDanger"),   // ★ 证书过期≠连不上(处置不同)
             HubState.Unauthorized => ("status.unauthorized", "RiskWarning"),
+            // ★ 这两态以前都掉进下面那条 _ => "未连接" —— 而它们恰恰证明【中枢在】,
+            //   显示成"未连接"会把人支去重启 Edge / 查防火墙 / 改地址,整整一趟无用功。
+            HubState.HubServerError => ("status.hub_error", "RiskDanger"),
+            HubState.ProtocolMismatch => ("status.proto_mismatch", "RiskWarning"),
             _ => ("status.offline", "FgMuted"),
         };
         StatusText.Text = Strings.Get(key);
@@ -829,11 +860,30 @@ public partial class MainWindow : Window
     public void RefreshMember()
     {
         var paired = TheApp.Hub.IsPaired;
-        var isHub = paired && TheApp.Hub.ThisMachineIsHub();
+        // ★★ 这一格是全客户端唯一【始终在屏幕上】回答"这台是不是中枢主机"的地方,以前写成事实句,
+        //   而它的全部依据只是 ThisMachineIsHub():拿配对档案里的拨号 IP 跟本机网卡 IP 比一遍。
+        //   两个方向都会说谎:
+        //     · 主机换了网/换了 IP ⇒ 真主机上写「副机」,人据此跑去另一台找中枢,或点解除重配 —— 那会删掉本机私钥;
+        //     · 主机上 Edge 没启动 ⇒ 照样写「主机」,人从头到尾不会想到"中枢没起来"(2026-08-03 就是这样)。
+        //   ⇒ 只有回环管理面答过话(且 hubId 对得上)才算【肯定证据】,那时才敢写成定论;
+        //     否则照同一格 MemberText 对"推测的使用者"的成例:弱化字色 + 明说是推测。
+        var confirmedHub = TheApp.HubAdmin.LastProbe == Services.AdminProbeResult.Ok;
+        var guessHub = paired && TheApp.Hub.ThisMachineIsHub();
+        var isHub = confirmedHub || guessHub;
+        EnsureHostProbe();   // 没探过就探一次(回环,便宜),探完自己再刷一遍
         if (_collapsed)
             HostText.Text = !paired ? "—" : isHub ? "主" : "副";   // 收起时只留一个字
         else
-            HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client");
+            HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client")
+                            + (paired && !confirmedHub ? "(推测)" : "");
+        HostText.SetResourceReference(TextBlock.ForegroundProperty,
+                                      !paired || confirmedHub ? "FgPrimary" : "FgSecondary");
+        HostText.ToolTip = !paired
+            ? null
+            : confirmedHub
+                ? "已确认:本机的回环管理面答话了,而且 hub id 与本机配对档案一致。"
+                : "只是推测 —— 依据仅是配对时记下的拨号地址看起来属于本机,不代表中枢正在这台上运行。"
+                  + "换了网/换了 IP,或 Edge 没启动,这一格都可能说反。到「设备」页看确切结论。";
 
         // ---- 当前使用者(推测)----
         // ★ 用户裁定:这一格显示【推测的使用者身份】,不是连接状态 —— 连接状态只在右边 token 块里说,

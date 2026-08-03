@@ -4806,8 +4806,41 @@ public static class Selftest
                     Assert(hdSrc.Contains("发现不建立信任"),
                            "★★ 文件头必须写明【发现不建立信任】—— 这里故意不校验证书,"
                            + "不写清楚就会被后人读成「我们接受任意证书」");
-                    Assert(hdSrc.Contains("if (mask < 24) continue;"),
-                           "★ 只扫 /24 及更窄 —— 再宽就是几万个地址,扫它既慢又像在做端口扫描");
+                    Assert(hdSrc.Contains("skipped.Add($\"{ip}/{mask}\")"),
+                           "★★ 掩码宽于 /24 的网卡【跳过了要说】—— 静默跳过时界面会给出一串根本不是原因的原因");
+
+                    // ---- 扫描范围:逐个地址核,不满足于搜字符串 ----
+                    var h24 = Services.HubDiscovery.HostsOf("192.168.178.61", 24).ToList();
+                    Assert(h24.Count == 254 && h24[0] == "192.168.178.1" && h24[^1] == "192.168.178.254",
+                           "★ /24 = 去掉网络号与广播地址的 254 个");
+                    // ★★ 这条是本次修正的正题:掩码比 /24 窄时,以前扫的是【包住它的那个 /24】,
+                    //   大半地址经默认网关发去隔壁子网 —— 那才是真正像端口扫描的形状。
+                    var h25 = Services.HubDiscovery.HostsOf("192.168.178.61", 25).ToList();
+                    Assert(h25.Count == 126 && h25[0] == "192.168.178.1" && h25[^1] == "192.168.178.126",
+                           "★★ /25 只扫本子网的 126 个 —— 不许扫到隔壁半个 /24 去");
+                    var h25b = Services.HubDiscovery.HostsOf("192.168.178.200", 25).ToList();
+                    Assert(h25b.Count == 126 && h25b[0] == "192.168.178.129" && h25b[^1] == "192.168.178.254",
+                           "★★ 上半段的 /25 要扫上半段 —— 说明用的是真实掩码,不是拿前三段拼 /24");
+                    Assert(Services.HubDiscovery.HostsOf("10.1.2.3", 30).Count() == 2, "/30 上只有两台");
+                    Assert(!Services.HubDiscovery.HostsOf("10.1.2.3", 31).Any()
+                           && !Services.HubDiscovery.HostsOf("10.1.2.3", 32).Any(),
+                           "★ /31、/32 上没有别的主机 —— 空表,不抛");
+                    Assert(Services.HubDiscovery.Network("192.168.178.61", 22) == "192.168.176.0",
+                           "★ 网段号按真实掩码算 —— 界面要把「扫了哪个网段」如实说出来");
+
+                    // ---- hub_id 的两种形状 ----
+                    // ★★ 这条是审计没抓到、核源码时自己发现的:配对档案存的是 hub_id(UUID),
+                    //   而证书名里是 hub_id_short(UUID 前 80 位的小写 base32,16 字符)。
+                    //   直接拿 UUID 去比证书名里的短号【恒不相等】——「在局域网里找回它」会永远失败。
+                    //   下面这组是**真实数据**做的已知答案:本机 identity/hub.json 里就是这一对。
+                    Assert(Services.HubDiscovery.ShortHubId("d1218f2f-210f-4b24-87c5-d92920759f2a") == "f6hsduipeesexb6f",
+                           "★★ UUID 要换算成证书名里那个 16 位短号(已知答案取自真实的 hub.json)");
+                    Assert(Services.HubDiscovery.ShortHubId("f6hsduipeesexb6f") == "f6hsduipeesexb6f",
+                           "★ 已经是短号形状就原样返回");
+                    foreach (var bad in new[] { "", "   ", "not-a-guid", "F6HSDUIPEESEXB6F1", "f6hsduipeesexb61" })
+                        Assert(Services.HubDiscovery.ShortHubId(bad) is null,
+                               $"★ 认不出形状就返回 null,宁可不比也不瞎比(实得 {bad})");
+                    Assert(Services.HubDiscovery.ShortHubId(null) is null, "null 不抛异常");
                     Assert(hdSrc.Contains("MaxParallel"), "★ 并发有上限 —— 254 个地址不限并发会把网卡与防火墙日志淹了");
                 }
                 var hcSrc2 = TryReadSource(Path.Combine("Services", "HubClient.cs"));
@@ -4886,8 +4919,27 @@ public static class Selftest
                 var haSrc2 = TryReadSource(Path.Combine("Services", "HubAdmin.cs"));
                 if (haSrc2 is not null)
                 {
-                    Assert(haSrc2.Contains("DiscoverEdgeDialAsync") && haSrc2.Contains("return null;"),
-                           "★★ 探不到就返回 null —— 界面据此如实说「没探到」,绝不猜一个地址填进去");
+                    // ★★ 本机业务口探测:以前撞上第一个能连的 8443 就 return,还自称「肯定证据」。
+                    //   TCP 连得上只证明"这个地址的 8443 上有监听者";本机常有不止一张网卡
+                    //   (VirtualBox 的 192.168.56.x 仅主机适配器),静默挑一个 = 可能把
+                    //   【只有本机看得见】的地址写进配对档案、再被抄到副机上,而副机永远连不上。
+                    Assert(!haSrc2.Contains("DiscoverEdgeDialAsync("),
+                           "★★ 那个「撞上第一个就返回」的老接口不许再存在");
+                    Assert(haSrc2.Contains("DiscoverEdgeDialsAsync"),
+                           "★ 换成返回【全部】通过校验的地址,由界面让人自己挑");
+                    Assert(haSrc2.Contains("HubDiscovery.ProbeOneAsync"),
+                           "★★ 连得上还不够 —— 要读证书名认出是我们这个中枢,那才叫肯定证据");
+                    Assert(haSrc2.Contains("HubDiscovery.ShortHubId"),
+                           "★★ 比 hub_id 之前要先换算形状 —— UUID 与证书名里的 16 位短号不是同一个字符串");
+                    var hcRe = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                    if (hcRe is not null)
+                    {
+                        var re = Slice(hcRe, "public async Task<bool> RediscoverAsync", "public void UnpairLocal");
+                        Assert(re is not null && re.Contains("HubDiscovery.ShortHubId(Profile.HubId)"),
+                               "★★ 「在局域网里找回它」也要先换算 hub_id 形状 —— 不换算这个按钮永远失败");
+                        Assert(re is not null && re.Contains("scan.Scanned.Count == 0"),
+                               "★★ 一个网段都没扫 ≠ 没找到 —— 前者是结构性走不通,只能手填,说成「没找到」会让人一直重试");
+                    }
                     Assert(haSrc2.Contains("169.254."),
                            "★ 跳过 APIPA 自封地址 —— 没拿到 DHCP 的网卡上探不出业务口");
                 }
@@ -4904,6 +4956,18 @@ public static class Selftest
                            + "「回环管理面没应答」,不许把它塌缩成一个证明不了的结论");
                     Assert(Body(dvSrc).Contains("中枢没在这台机器上运行"),
                            "★★ 要说【观察到的事】:中枢没在这台机器上运行");
+                    // ★ [4] 管理面刚答过话就证明 Edge 在跑;这一步又是本机连本机、防火墙不参与。
+                    //   这两条恰好是代码刚排除掉的,不许再让人去查。
+                    Assert(!Body(dvSrc).Contains("先确认 Edge 起着、防火墙放行了。"),
+                           "★★ 已经证明 Edge 在跑、且防火墙不参与时,不许再支人去查这两样");
+                    Assert(Body(dvSrc).Contains("Edge 绑在了另一个地址上"),
+                           "★★ 要指向真原因:Edge 绑的地址不在本机当前的网卡表里");
+                    Assert(Body(dvSrc).Contains("LocalIPv4List()"),
+                           "★ 把本机当前网卡摆出来供人和 Edge 窗口里那行对照 —— 光说\"对不上\"没法照着做");
+                    // ★ [7] 已配对卡上唯一看起来能修连接的按钮,失败时也要提"本机的 Edge 没启动"
+                    var findSlice = Slice(dvSrc, "在局域网里找回它", "find.Margin");
+                    Assert(findSlice is not null && findSlice.Contains("HostToolsDir()"),
+                           "★★ 「找回它」失败也要走同一条线索 —— 人会先点它,远早于滚到第三张卡");
                     // ★ 钉到【那句报错原文】上 —— 只钉"普通用户"/"管理员"这两个词会被别处的文案蒙混过关
                     Assert(Body(dvSrc).Contains("密钥集不存在") && Body(dvSrc).Contains("【普通用户】双击"),
                            "★★ 必须先说管理员这条坑 —— Edge 一检测到管理员就退出,"
@@ -4956,8 +5020,20 @@ public static class Selftest
                 var hubC = new Services.HubClient();
                 Assert(Services.HubClient.ClientProtocol >= 1 && Services.HubClient.ProtocolHeader == "X-LocalAI-Protocol",
                        "客户端自报协议版本,头名两边一致");
-                Assert(hubC.HubProtocol is null && hubC.ProtocolNote.Contains("未协商"),
-                       "★ 中枢没报版本 = 【未协商】,如实说;不假装协商过,也不因此拒连(没有证据说它不兼容)");
+                // ★★ 这条以前写的是 ProtocolNote 含"未协商" —— 那把一个混淆钉死了:
+                //   HubProtocol 的 null 同时表示「连上了但它没报版本」和「压根没连上过」,
+                //   而 Edge 没启动时是后者,界面却只会说前者,读起来像"中枢版本太旧",
+                //   人就去查中枢是不是该重编 —— 它连一个字节都没回过。
+                Assert(hubC.HubProtocol is null && hubC.ProtocolNote.Contains("无从谈起"),
+                       "★★ 一个全新的、从没和中枢通过话的客户端要说【无从谈起】,不许说成\"中枢未声明版本\"");
+                var hcNote = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                if (hcNote is not null)
+                {
+                    Assert(hcNote.Contains("_protocolObserved = true;"),
+                           "★ 只有真的读到过一次响应头才置 observed —— 这之后 null 才是\"它没报\"");
+                    Assert(Body(hcNote).Contains("中枢未声明协议版本"),
+                           "★ 「连上了但它没报版本」这句仍要在 —— 分开说,不是删掉一半");
+                }
                 var hcSrc = TryReadSource(Path.Combine("Services", "HubClient.cs"));
                 if (hcSrc is not null)
                 {
@@ -4967,10 +5043,22 @@ public static class Selftest
                     // ★ 两个下标都得【先确认存在】再比大小:IndexOf 找不到返回 -1,
                     //   而 -1 恒小于任何下标 —— 照着写 a < b 的话,把那行删掉断言反而变绿。
                     //   (这条写下去时就先红了一次:我找的是一串根本不存在的文本。)
+                    // ★ 锚点换成"协议闸那一句"与"置在线那一句" —— 原来锚的是
+                    //   `HubState.Online : HubState.Offline` 这个三元式,5xx 单列成一态时它就没了,
+                    //   断言会因为【重构】而红,而不是因为顺序真的坏了。锚要锚在语义上,别锚在写法上。
                     var iNote = call?.IndexOf("NoteProtocol(r.headers)", StringComparison.Ordinal) ?? -1;
-                    var iOnline = call?.IndexOf("HubState.Online : HubState.Offline", StringComparison.Ordinal) ?? -1;
-                    Assert(iNote >= 0 && iOnline >= 0 && iNote < iOnline,
+                    var iGate = call?.IndexOf("if (State == HubState.ProtocolMismatch) return", StringComparison.Ordinal) ?? -1;
+                    var iOnline = call?.IndexOf("State = HubState.Online", StringComparison.Ordinal) ?? -1;
+                    Assert(iNote >= 0 && iGate >= 0 && iOnline >= 0 && iNote < iGate && iGate < iOnline,
                            "★★ 先过协议闸再判在线 —— 两边对格式的理解不一致时,解出来的东西本身就不可信");
+                    // ★★ 5xx 单列一态:走到那一行时 TCP 通了、mTLS 过了、响应都读到了 ——
+                    //   能确定的恰恰是"中枢在"。判成 Offline 会把人支去重启 Edge / 查防火墙 / 改地址。
+                    Assert(call is not null && call.Contains("HubState.HubServerError"),
+                           "★★ 中枢应答 5xx 要单列一态 —— 那证明中枢【在】,说成\"未连接\"是整整一趟无用功");
+                    var mwMap = TryReadSource("MainWindow.xaml.cs");
+                    if (mwMap is not null)
+                        Assert(mwMap.Contains("status.hub_error") && mwMap.Contains("status.proto_mismatch"),
+                               "★★ 这两态要有自己的顶栏文案 —— 掉进 _ => 未连接 等于没单列");
                     Assert(hcSrc.Contains("请更新【客户端】") && hcSrc.Contains("请更新【中枢】"),
                            "★ 说清该更新哪一端(D45 原话:「主机 v5,你 v3,请更新」),不只说\"版本不匹配\"");
                 }

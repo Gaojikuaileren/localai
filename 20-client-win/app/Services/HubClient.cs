@@ -17,7 +17,9 @@ namespace LocalAI.Client.Services;
 // (一个要在主机上续签,一个是等中枢开机)。混为一谈会让用户去点「重新配对」而销毁有效身份。
 // ProtocolMismatch 也单列一态:症状是"连不上",但处置是【去更新某一端】,
 // 与"中枢没开机"和"证书过期"都不同。混进 Offline 会让人一直去重启中枢。
-public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch }
+// HubServerError 也单列:症状是"用不了",但中枢明明在 —— 处置是【看中枢日志】,
+// 不是重启 Edge / 查防火墙 / 重新配对。混进 Offline 会把人支去做整整一趟无用功。
+public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch, HubServerError }
 
 /// <summary>主机成员库里的一台设备。DisplayName 是设备**自报**的,只作显示、永不进 prompt。</summary>
 public sealed record HubDevice(string DeviceId, string DisplayName, string Status);
@@ -58,9 +60,18 @@ public sealed class HubClient
     /// </summary>
     public int? HubProtocol { get; private set; }
 
+    /// <summary>
+    /// 有没有【真的读到过一次中枢的响应头】。★ 存在的理由:HubProtocol 的 null 本来同时表示两件事 ——
+    /// 「连上了但它没报版本」和「压根没连上过」。Edge 没启动时是后者,而界面只会说前者,
+    /// 读起来像"中枢版本太旧",人就去查中枢是不是该重编了 —— 它连一个字节都没回过。
+    /// </summary>
+    bool _protocolObserved;
+
     /// <summary>协商结论。给界面用一句话说清楚现在是哪种情形。</summary>
     public string ProtocolNote => HubProtocol is null
-        ? $"中枢未声明协议版本(本机 v{ClientProtocol})—— 未协商"
+        ? (_protocolObserved
+            ? $"中枢未声明协议版本(本机 v{ClientProtocol})—— 未协商"
+            : $"还没和中枢通过话,协议版本无从谈起(本机 v{ClientProtocol})")
         : HubProtocol == ClientProtocol
             ? $"协议 v{ClientProtocol} 一致"
             : HubProtocol > ClientProtocol
@@ -72,6 +83,8 @@ public sealed class HubClient
     {
         int? v = null;
         if (headers is not null && headers.TryGetValue(ProtocolHeader, out var raw) && int.TryParse(raw, out var n)) v = n;
+        // ★ 走到这儿就说明【确实收到过一次响应】—— 这之后 HubProtocol 的 null 才是"它没报"
+        _protocolObserved = true;
         HubProtocol = v;
         if (v is { } got && got != ClientProtocol)
         {
@@ -166,10 +179,19 @@ public sealed class HubClient
                     ? "本设备已被主机解除,需要重新配对"
                     : "中枢拒绝了这次请求(401)。可能是权限或网关策略,不一定是被解除 —— 先别重新配对。";
             }
+            else if (r.status >= 500)
+            {
+                // ★ 走到这一行意味着:TCP 通了、mTLS 拿钉住的 CA 校验过了、响应连头带正文都读到了。
+                //   能确定的事恰恰相反 —— 中枢【在】,是它这次请求内部出错了。
+                //   判成 Offline 会让人去做"连不上"该做的事:跑到主机看 Edge 起没起、查防火墙、
+                //   改拨号地址、甚至解除重配(那会删掉本机私钥)。真正该做的是去看中枢日志。
+                State = HubState.HubServerError;
+                LastError = $"中枢应答了,但返回 {r.status} —— 不是连不上,是中枢内部出错,请看中枢日志。";
+            }
             else
             {
-                State = r.status is >= 200 and < 500 ? HubState.Online : HubState.Offline;
-                if (State == HubState.Online) LastError = null;
+                State = HubState.Online;
+                LastError = null;
             }
             return (r.status, r.body);
         }
@@ -325,9 +347,23 @@ public sealed class HubClient
     public async Task<bool> RediscoverAsync(CancellationToken ct = default)
     {
         if (Profile is null || string.IsNullOrWhiteSpace(Profile.HubId)) return false;
-        var hits = await HubDiscovery.ScanAsync(ct: ct);
-        var mine = hits.Where(h => string.Equals(h.HubId, Profile.HubId, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (mine.Count != 1) { LastError = mine.Count == 0 ? "局域网里没找到这个中枢" : "找到多台同 id 的中枢,请手动选"; return false; }
+        // ★★ 配对档案里的 HubId 是 **UUID**,而证书名里是它的 **16 位短号** —— 直接比永远不相等,
+        //   这个按钮会永远失败而且毫无线索。必须先换算(见 HubDiscovery.ShortHubId)。
+        var want = HubDiscovery.ShortHubId(Profile.HubId);
+        if (want is null) { LastError = $"认不出本机档案里的 hub id 形状({Profile.HubId})—— 没法比对,请手填地址"; return false; }
+        var scan = await HubDiscovery.ScanAsync(ct: ct);
+        var mine = scan.Hits.Where(h => string.Equals(h.HubId, want, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (mine.Count != 1)
+        {
+            LastError = mine.Count > 1
+                ? "找到多台同 id 的中枢,请手动选"
+                : scan.Scanned.Count == 0
+                    // ★ 一个网段都没扫 = 这条路【结构上】走不通,不是"没找到" —— 说成没找到会让人一直重试
+                    ? $"本机的网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),自动查找覆盖不到 —— 只能手填地址"
+                    : $"扫过 {string.Join("、", scan.Scanned)} 都没找到这个中枢"
+                      + (scan.SkippedTooWide.Count > 0 ? $";另有 {string.Join("、", scan.SkippedTooWide)} 因掩码太宽没扫" : "");
+            return false;
+        }
         return SetDial(mine[0].Dial);
     }
 

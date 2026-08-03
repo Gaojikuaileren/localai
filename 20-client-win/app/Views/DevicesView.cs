@@ -139,12 +139,36 @@ public sealed class DevicesView : UserControl
         var admin = TheApp.HubAdmin;
         if (await admin.ProbeAsync(TheApp.Hub.Profile?.HubId))
         {
-            var own = await Services.HubAdmin.DiscoverEdgeDialAsync();
+            var owns = await Services.HubAdmin.DiscoverEdgeDialsAsync(admin.HubId);
+            var own = owns.Count == 1 ? owns[0] : null;
             Dispatcher.Invoke(() =>
             {
+                if (owns.Count > 1)
+                {
+                    // ★ 本机有不止一个地址在 8443 上应答且都是这个中枢(run-lan 绑了 0.0.0.0 就会这样)。
+                    //   绝不替他挑:里面可能有 VirtualBox 那种【只有本机看得见】的仅主机网段,
+                    //   挑错了会被抄到副机上,而副机永远连不上。
+                    note.Text = $"本机就是主机,而且有 {owns.Count} 个地址都在 8443 上应答 —— 请自己挑一个"
+                              + "(带 192.168.56.x 之类的多半是虚拟机的仅主机网卡,副机看不见它):";
+                    foreach (var d in owns)
+                    {
+                        var pick = Ui.Secondary(d, (_, _) => { addr.Text = d; });
+                        pick.Margin = new Thickness(0, 4, 0, 0);
+                        pick.HorizontalAlignment = HorizontalAlignment.Left;
+                        if (note.Parent is Panel ph) ph.Children.Insert(ph.Children.IndexOf(note) + 1, pick);
+                    }
+                    return;
+                }
                 if (own is null)
                 {
-                    note.Text = "本机就是主机,但没探到业务口(8443)—— 先确认 Edge 起着、防火墙放行了。";
+                    // ★★ 这里【不能】说"先确认 Edge 起着、防火墙放行了" —— 这两条恰好是上一行刚排除掉的:
+                    //   管理面答了话就证明 lan-edge 正在跑(管理口与业务口是同一个进程里的两个 Listen);
+                    //   而这一步是本机连本机,防火墙那条入站规则管的是副机过来的流量,不参与。
+                    //   代码此刻观察到的只有一件事:Edge 绑的地址不在"本机当前启用的非回环 IPv4"这张表里。
+                    note.Text = "本机就是主机(管理面答话了,Edge 正在跑)。但本机当前的网卡地址上都没人在 8443 上听 "
+                              + "—— 说明 Edge 绑在了另一个地址上(常见:开着 Edge 换了网/换了 IP,或启动时传的是 127.0.0.1)。"
+                              + "请看 Edge 窗口里那行「已监听 …:8443」照它填;跟当前网卡对不上就用当前网卡 IP 重启 Edge。"
+                              + " 本机当前网卡:" + string.Join("、", Services.HubAdmin.LocalIPv4List());
                     return;
                 }
                 if (addr.Text.Trim().Length == 0) addr.Text = own;
@@ -155,17 +179,26 @@ public sealed class DevicesView : UserControl
         }
 
         Dispatcher.Invoke(() => note.Text = "正在局域网里找中枢(扫本网段的 8443)…");
-        var hits = await Services.HubDiscovery.ScanAsync();
+        var scan = await Services.HubDiscovery.ScanAsync();
+        var hits = scan.Hits;
         Dispatcher.Invoke(() =>
         {
             if (hits.Count == 0)
             {
-                // ★ 本机装着主机端程序却又扫不到 —— 那多半就是"这台是主机,但 Edge 没启动",直说。
-                note.Text = Services.HubAdmin.HostToolsDir() is not null
-                    ? "没找到中枢 —— 而本机装着主机端程序,所以多半是这台的 Edge 还没启动。"
-                      + "去主机端目录双击 启动Edge.cmd(用普通用户,别用管理员)。"
-                    : "没找到中枢。请确认主机上的 Edge 起着、两台在同一个网段、防火墙放行了 8443;"
-                      + "或照主机窗口里那行「拨号 …:8443」手填。";
+                // ★★ 「没找到」有两种,下一步完全不同,不许混着说:
+                //   · 一个网段都没扫(网卡掩码全宽于 /24)⇒ 这条路【结构上】走不通,只能手填;
+                //   · 扫过了没找到 ⇒ 才轮到查 Edge / 网段 / 防火墙。
+                var skipNote = scan.SkippedTooWide.Count > 0
+                    ? $" 另有 {string.Join("、", scan.SkippedTooWide)} 因掩码宽于 /24 没扫。" : "";
+                note.Text = scan.Scanned.Count == 0
+                    ? $"一个网段都没扫 —— 本机的网卡掩码都宽于 /24({string.Join("、", scan.SkippedTooWide)}),"
+                      + "自动查找结构上覆盖不到这种网段。请照主机 Edge 窗口里那行「拨号 …:8443」手填。"
+                    : Services.HubAdmin.HostToolsDir() is not null
+                        // ★ 本机装着主机端程序却又扫不到 —— 多半就是"这台是主机,但 Edge 没启动",直说。
+                        ? $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢 —— 而本机装着主机端程序,"
+                          + "所以多半是这台的 Edge 还没启动。去主机端目录双击 启动Edge.cmd(用普通用户,别用管理员)。" + skipNote
+                        : $"扫过 {string.Join("、", scan.Scanned)} 都没找到中枢。请确认主机那台的 Edge 起着、"
+                          + "两台在同一个网段、防火墙放行了 8443;或照主机窗口里那行「拨号 …:8443」手填。" + skipNote;
                 return;
             }
             if (hits.Count == 1)
@@ -273,7 +306,11 @@ public sealed class DevicesView : UserControl
                 HubState.Revoked => "status.revoked",
                 HubState.CertExpired => "status.cert_expired",   // ★ 就在“解除本机配对”红按钮上方:说清“是证书过期、别解除”最要紧
                 HubState.Unauthorized => "status.unauthorized",
+                HubState.HubServerError => "status.hub_error",       // ★ 中枢在,是它内部出错 —— 别读成"连不上"
+                HubState.ProtocolMismatch => "status.proto_mismatch",
                 _ => "status.offline" })}"),
+            // ★ 状态行只有一个词,处置办法在 LastError 里 —— 不显示出来等于没说
+            TheApp.Hub.LastError is { Length: > 0 } lastWhy ? Ui.Caption(lastWhy) : new Border { Height = 0 },
             new Border { Height = 12 },
             Ui.Caption("已记住这次配对 —— 以后启动会自动连接,不会再要求配对。"),
             new Border { Height = 12 },
@@ -316,8 +353,17 @@ public sealed class DevicesView : UserControl
                 else if (find_host is not null)
                 {
                     find_host.Children.Clear();
-                    find_host.Children.Add(Ui.Caption("没找到:" + (TheApp.Hub.LastError ?? "未知原因")
-                        + " —— 确认主机上 Edge 起着、两台在同一网段、防火墙放行了 8443。"));
+                    // ★ 这是已配对卡上唯一一个看起来能修连接的按钮,人会先点它 —— 远早于滚到第三张卡。
+                    //   所以这条失败路径必须和另外两条(AutofillCore / LoadAdminPanel)说同一套话,
+                    //   否则它会把人支去查路由器/网段/防火墙,而真正要做的只是把本机的 Edge 起起来。
+                    var hd = Services.HubAdmin.HostToolsDir();
+                    find_host.Children.Add(Ui.Caption(hd is not null
+                        ? "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
+                          + " —— 而本机装着主机端程序,多半是这台的 Edge 还没启动。去双击 "
+                          + (Services.HubAdmin.StartEdgeCmd() ?? Path.Combine(hd, "启动Edge.cmd"))
+                          + "(用普通用户,别用管理员)。"
+                        : "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
+                          + " —— 确认主机那台的 Edge 起着、两台在同一网段、防火墙放行了 8443。"));
                 }
             });
         });
@@ -363,10 +409,15 @@ public sealed class DevicesView : UserControl
         var ok = await admin.ProbeAsync(TheApp.Hub.Profile?.HubId);
         List<PendingPair> pending = new();
         List<AdminDevice> devices = new();
+        // ★ 分开记"取到了没有":取失败时列表也是空的,而空会被写成"没有请求 / 没有别的电脑"。
+        bool pendOk = false, devOk = false;
+        string? pendWhy = null, devWhy = null;
         if (ok)
         {
-            try { pending = await admin.PendingAsync(); devices = await admin.DevicesAsync(); }
-            catch (Exception ex) { admin_err = ex.Message; }
+            (pendOk, pending) = await admin.PendingAsync();
+            if (!pendOk) pendWhy = admin.LastError;
+            (devOk, devices) = await admin.DevicesAsync();
+            if (!devOk) devWhy = admin.LastError;
         }
 
         Dispatcher.Invoke(() =>
@@ -419,7 +470,12 @@ public sealed class DevicesView : UserControl
             // ---- 待批准的配对请求(S4 的正题)----
             list.Children.Add(new Border { Height = 10 });
             list.Children.Add(Ui.Body("待批准的配对请求"));
-            if (pending.Count == 0)
+            if (!pendOk)
+                // ★★ 「没取到」绝不能写成「没有请求」—— 副机那边可能正卡着等批准,
+                //   人看到"没有请求"就回去重配,而重配会删掉副机私钥、在主机侧留下幽灵条目。
+                list.Children.Add(Ui.Caption("没能从管理面取到待批准列表(" + (pendWhy ?? "原因不明")
+                                             + ")—— 这【不等于】没有请求。先别让对方重新配对。"));
+            else if (pending.Count == 0)
                 list.Children.Add(Ui.Caption(admin.PairingWindowOpen ? "现在没有等待批准的请求。" : "窗口关着,不会有新请求进来。"));
             foreach (var p in pending) list.Children.Add(PendingRow(p));
 
@@ -427,12 +483,16 @@ public sealed class DevicesView : UserControl
             list.Children.Add(new Border { Height = 10 });
             list.Children.Add(Ui.Body("已配对的电脑"));
             var live = devices.Where(d => d.Status != "revoked").ToList();
-            if (live.Count == 0) list.Children.Add(Ui.Caption("还没有别的电脑配对进来。"));
+            if (!devOk)
+                list.Children.Add(Ui.Caption("没能取到设备列表(" + (devWhy ?? "原因不明")
+                                             + ")—— 这【不等于】没有别的电脑在册,别据此重复配对。"));
+            else if (live.Count == 0) list.Children.Add(Ui.Caption("还没有别的电脑配对进来。"));
             foreach (var d in live) list.Children.Add(DeviceRow(d));
         });
     }
 
-    string? admin_err;
+    // ★ 这里原来有个 `string? admin_err;`:全仓只写、从没读过 —— 一个【看起来有、其实没有】的错误通道。
+    //   取数失败现在由 PendingAsync/DevicesAsync 的 ok 位如实带出来并显示,这个字段没有存在的理由。
     StackPanel? find_host;
 
     /// <summary>
