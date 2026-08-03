@@ -1,0 +1,599 @@
+{
+  "$schema": "./loading-cow-cat-animation-manifest-v1.schema.json",
+  "format": "cowcat-pixel-animation@1",
+  "stage": "requirements",
+  "fps": 6,
+  "tick_ms_display": 166.667,
+  "timing_source_of_truth": "ticks / fps",
+  "canvas": {
+    "width": 128,
+    "height": 128,
+    "ground_y": 112,
+    "pivot": [64, 112]
+  },
+  "axes": {
+    "x_positive": "right",
+    "y_positive": "down",
+    "root_delta_semantics": "current_tick_to_next_tick"
+  },
+  "palette": ["#000000", "#FFFFFF", "#00000000"],
+  "tracks": {
+    "body": {
+      "atlas": "atlas/cow-cat-body-v1.png",
+      "parallel": false,
+      "full_body": true
+    },
+    "loading": {
+      "atlas": "fx/loading-spinner-v1.png",
+      "parallel": true,
+      "full_body": false
+    }
+  },
+  "direction_policy": {
+    "authoring_direction": "left",
+    "right_direction": "runtime_mirror",
+    "turn_clip": "turn_180",
+    "turn_authored": "left_to_right",
+    "seated_or_loaf_turn": "stand_first"
+  },
+  "clips": {
+    "loading_spinner": {
+      "group": "loading",
+      "track": "loading",
+      "independent_frames": 12,
+      "ticks": 12,
+      "duration_ms": 2000.0,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "none", "to": "none", "runtime_mirror": false },
+      "frames": []
+    },
+    "idle_stand": {
+      "group": "idle",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 24,
+      "duration_ms": 4000.0,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "idle_sit": {
+      "group": "idle",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 30,
+      "duration_ms": 5000.0,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "idle_loaf": {
+      "group": "idle",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 36,
+      "duration_ms": 6000.0,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "sleep": {
+      "group": "idle",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 36,
+      "duration_ms": 6000.0,
+      "loop": true,
+      "v1a": false,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "blink_stand": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 1,
+      "ticks": 1,
+      "duration_ms": 166.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "blink_sit": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 1,
+      "ticks": 1,
+      "duration_ms": 166.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "blink_loaf": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 1,
+      "ticks": 1,
+      "duration_ms": 166.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "ear_twitch_sit": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 3,
+      "duration_ms": 500.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "ear_twitch_loaf": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 3,
+      "duration_ms": 500.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "tail_flick_sit": {
+      "group": "idle_insert",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "walk": {
+      "group": "locomotion",
+      "track": "body",
+      "independent_frames": 8,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "trot": {
+      "group": "locomotion",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": true,
+      "v1a": false,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "run": {
+      "group": "locomotion",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": true,
+      "v1a": false,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "stalk": {
+      "group": "locomotion",
+      "track": "body",
+      "independent_frames": 8,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": true,
+      "v1a": false,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "stand_to_walk": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 2,
+      "ticks": 2,
+      "duration_ms": 333.333,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "walk_to_stop": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "turn_180": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "right", "runtime_mirror": true },
+      "frames": []
+    },
+    "stand_to_sit": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "sit_to_stand": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "sit_to_loaf": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 5,
+      "ticks": 5,
+      "duration_ms": 833.333,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "loaf_to_sit": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 5,
+      "ticks": 5,
+      "duration_ms": 833.333,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "loaf_to_sleep": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "sleep_to_loaf": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "stand_to_stalk": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "stalk_to_stand": {
+      "group": "transition",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "groom_sit": {
+      "group": "performance",
+      "track": "body",
+      "independent_frames": 14,
+      "ticks": 18,
+      "duration_ms": 3000.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "stretch": {
+      "group": "performance",
+      "track": "body",
+      "independent_frames": 9,
+      "ticks": 10,
+      "duration_ms": 1666.667,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "startle_stand": {
+      "group": "performance",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 3,
+      "duration_ms": 500.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "startle_sit": {
+      "group": "performance",
+      "track": "body",
+      "independent_frames": 3,
+      "ticks": 3,
+      "duration_ms": 500.0,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "pounce": {
+      "group": "performance",
+      "track": "body",
+      "independent_frames": 8,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": false,
+      "v1a": false,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "wake_from_hidden": {
+      "group": "spawn",
+      "track": "body",
+      "independent_frames": 5,
+      "ticks": 6,
+      "duration_ms": 1000.0,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "scratch_door": {
+      "group": "door",
+      "track": "body",
+      "independent_frames": 6,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "door_enter": {
+      "group": "door",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "door_exit": {
+      "group": "door",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "grab_start": {
+      "group": "drag",
+      "track": "body",
+      "independent_frames": 2,
+      "ticks": 2,
+      "duration_ms": 333.333,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "dangle": {
+      "group": "drag",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 8,
+      "duration_ms": 1333.333,
+      "loop": true,
+      "v1a": true,
+      "must_finish": false,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    },
+    "drop_land": {
+      "group": "drag",
+      "track": "body",
+      "independent_frames": 4,
+      "ticks": 4,
+      "duration_ms": 666.667,
+      "loop": false,
+      "v1a": true,
+      "must_finish": true,
+      "direction": { "from": "left", "to": "left", "runtime_mirror": true },
+      "frames": []
+    }
+  },
+  "states": {
+    "suspended": {},
+    "behind_door": {},
+    "stand": {
+      "loop_clip": "idle_stand",
+      "insert_clips": ["blink_stand", "startle_stand", "stretch"]
+    },
+    "walk": { "loop_clip": "walk", "insert_clips": [] },
+    "trot": { "loop_clip": "trot", "insert_clips": [] },
+    "run": { "loop_clip": "run", "insert_clips": [] },
+    "sit": {
+      "loop_clip": "idle_sit",
+      "insert_clips": ["blink_sit", "ear_twitch_sit", "tail_flick_sit", "startle_sit", "groom_sit"]
+    },
+    "loaf": {
+      "loop_clip": "idle_loaf",
+      "insert_clips": ["blink_loaf", "ear_twitch_loaf"]
+    },
+    "sleep": { "loop_clip": "sleep", "insert_clips": [] },
+    "stalk": { "loop_clip": "stalk", "insert_clips": [] },
+    "scratch_door": { "loop_clip": "scratch_door", "insert_clips": [] },
+    "dangle": { "loop_clip": "dangle", "insert_clips": [] }
+  },
+  "edges": [
+    { "from": "suspended", "to": "stand", "clip": "wake_from_hidden", "must_finish": true, "priority": 30 },
+    { "from": "stand", "to": "walk", "clip": "stand_to_walk", "must_finish": true, "priority": 30 },
+    { "from": "walk", "to": "stand", "clip": "walk_to_stop", "must_finish": true, "priority": 30 },
+    { "from": "walk", "to": "trot", "clip": null, "must_finish": false, "at_event": "shared_paw_down", "priority": 30 },
+    { "from": "trot", "to": "run", "clip": null, "must_finish": false, "at_event": "shared_paw_down", "priority": 30 },
+    { "from": "run", "to": "trot", "clip": null, "must_finish": false, "at_event": "shared_paw_down", "priority": 30 },
+    { "from": "trot", "to": "walk", "clip": null, "must_finish": false, "at_event": "shared_paw_down", "priority": 30 },
+    { "from": "stand", "to": "stand", "clip": "turn_180", "must_finish": true, "priority": 30 },
+    { "from": "stand", "to": "sit", "clip": "stand_to_sit", "must_finish": true, "priority": 30 },
+    { "from": "sit", "to": "stand", "clip": "sit_to_stand", "must_finish": true, "priority": 30 },
+    { "from": "sit", "to": "loaf", "clip": "sit_to_loaf", "must_finish": true, "priority": 30 },
+    { "from": "loaf", "to": "sit", "clip": "loaf_to_sit", "must_finish": true, "priority": 30 },
+    { "from": "loaf", "to": "sleep", "clip": "loaf_to_sleep", "must_finish": true, "priority": 30 },
+    { "from": "sleep", "to": "loaf", "clip": "sleep_to_loaf", "must_finish": true, "priority": 30 },
+    { "from": "stand", "to": "stalk", "clip": "stand_to_stalk", "must_finish": true, "priority": 30 },
+    { "from": "stalk", "to": "stand", "clip": "stalk_to_stand", "must_finish": true, "priority": 30 },
+    { "from": "stalk", "to": "stand", "clip": "pounce", "must_finish": true, "priority": 30 },
+    { "from": "stand", "to": "scratch_door", "clip": null, "must_finish": false, "at_event": "can_exit", "priority": 30 },
+    { "from": "scratch_door", "to": "stand", "clip": null, "must_finish": false, "at_event": "exit_seam", "priority": 30 },
+    { "from": "scratch_door", "to": "behind_door", "clip": "door_enter", "must_finish": true, "priority": 30 },
+    { "from": "behind_door", "to": "stand", "clip": "door_exit", "must_finish": true, "priority": 30 },
+    { "from": "*visible", "to": "dangle", "clip": "grab_start", "must_finish": true, "preempt": false, "at_event": "grab_eligible", "request_mode": "defer_until_current_must_finish", "priority": 90 },
+    { "from": "dangle", "to": "stand", "clip": "drop_land", "must_finish": true, "preempt": true, "priority": 90 },
+    { "from": "*any", "to": "suspended", "clip": null, "must_finish": false, "preempt": true, "priority": 100 }
+  ],
+  "event_priority": [
+    "suspend_exclusive_fullscreen_lease_lost_or_exit",
+    "loading_layer_event",
+    "drag_lifecycle",
+    "current_must_finish_clip",
+    "door_transaction",
+    "explicit_behavior_or_assistant_request",
+    "locomotion_facing_or_posture_target",
+    "idle_insert"
+  ],
+  "parallel_layers": ["loading_spinner"],
+  "loading_contract": {
+    "activation": "active_loading_ids set is non-empty",
+    "body_queue_independent": true,
+    "anchor_field": "fx_anchor",
+    "hidden_in_states": ["suspended", "behind_door"],
+    "resume_phase": "monotonic_clock_sync_no_catch_up"
+  },
+  "runtime_contracts": {
+    "scratch_door_cancel": "leave only at exit_seam; frame must match idle_stand ground contact",
+    "grab_sources": "one shared grab_start; v1a accepts at most one tick of pose normalization",
+    "grab_eligibility": "stable idle next tick; walk at paw_down; scratch_door at exit_seam; defer while must_finish",
+    "sitting_or_loaf_turn": "return to stand before turn_180",
+    "system_suspend": "cancel door transaction and resume through wake_from_hidden"
+  },
+  "budgets": {
+    "input_declared_v1a_body_frames": 82,
+    "audited_v1a_body_frames": 84,
+    "v1a_loading_frames": 12,
+    "audited_full_body_frames": 168,
+    "full_loading_frames": 12,
+    "full_sleep_reuse_body_frames": 159,
+    "full_mobility_cut_body_frames": 142,
+    "full_sleep_reuse_and_mobility_cut_body_frames": 133
+  },
+  "optimizations": {
+    "sleep_reuse": {
+      "reuse_sprite": "blink_loaf_closed",
+      "omit_clips": ["sleep", "loaf_to_sleep", "sleep_to_loaf"],
+      "saved_body_frames": 9,
+      "changes_v1a_total": false
+    },
+    "mobility_cut": {
+      "omit_clips": ["trot", "run", "stalk", "pounce"],
+      "saved_body_frames": 26,
+      "changes_v1a_total": false
+    },
+    "hard_82_option": {
+      "clip": "stand_to_walk",
+      "rule": "reference idle_stand final sprite and walk first sprite; author zero new sprites",
+      "requires_manifest_change": true
+    }
+  }
+}

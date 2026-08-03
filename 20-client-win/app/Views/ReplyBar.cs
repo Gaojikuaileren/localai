@@ -357,9 +357,11 @@ public sealed class ReplyBar : UserControl
     /// 删除入口就应该在看得见它的地方,藏在「+」浮窗里等于没有。
     /// 内置条目不给 × —— 那不是用户加的。
     /// </summary>
-    ComboBoxItem CustomAwareItem(ComboBox cb, string text, bool greeting)
+    ComboBoxItem CustomAwareItem(ComboBox cb, string text, int index, bool greeting)
     {
-        if (!TheApp.Reply.IsCustom(greeting, text)) return new ComboBoxItem { Content = text };
+        // ★ 按【下标】判,不按文字(复核 2026-08-03):自定义写了一句与内置一模一样的话时,
+        //   按文字判会让【内置那一行】也长出 ×,点它删掉的却是清单末尾那条 —— 屏幕上那行纹丝不动。
+        if (!ReplyState.IsCustomIndex(index)) return new ComboBoxItem { Content = text };
 
         var it = new ComboBoxItem { HorizontalContentAlignment = HorizontalAlignment.Stretch };
         var row = new DockPanel { LastChildFill = true };
@@ -425,7 +427,7 @@ public sealed class ReplyBar : UserControl
             void FillCombo(ComboBox cb, string[] items, int sel, bool greeting)
             {
                 cb.Items.Clear();
-                foreach (var x in items) cb.Items.Add(CustomAwareItem(cb, x, greeting));
+                for (int i = 0; i < items.Length; i++) cb.Items.Add(CustomAwareItem(cb, items[i], i, greeting));
                 cb.SelectedIndex = Math.Clamp(sel, 0, items.Length - 1);
             }
             // 问候/祝福跟随【语言 + 语气】(用户裁定):换语言就换那门语言的说法

@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loading-cow-cat-animation-manifest-v1.schema.json",
+  "title": "Loading Cow Cat pixel animation manifest",
+  "type": "object",
+  "required": [
+    "format",
+    "stage",
+    "fps",
+    "canvas",
+    "palette",
+    "tracks",
+    "clips",
+    "states",
+    "edges",
+    "budgets"
+  ],
+  "properties": {
+    "format": { "const": "cowcat-pixel-animation@1" },
+    "stage": { "enum": ["requirements", "production"] },
+    "fps": { "const": 6 },
+    "tick_ms_display": { "type": "number", "exclusiveMinimum": 0 },
+    "timing_source_of_truth": { "const": "ticks / fps" },
+    "canvas": {
+      "type": "object",
+      "required": ["width", "height", "ground_y", "pivot"],
+      "properties": {
+        "width": { "const": 128 },
+        "height": { "const": 128 },
+        "ground_y": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "pivot": { "$ref": "#/$defs/intPoint" }
+      },
+      "additionalProperties": false
+    },
+    "palette": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "#000000" },
+        { "const": "#FFFFFF" },
+        { "const": "#00000000" }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "tracks": {
+      "type": "object",
+      "required": ["body", "loading"],
+      "properties": {
+        "body": { "$ref": "#/$defs/track" },
+        "loading": { "$ref": "#/$defs/track" }
+      },
+      "additionalProperties": false
+    },
+    "clips": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/clip" }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/state" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "budgets": { "type": "object" }
+  },
+  "$defs": {
+    "intPoint": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer" },
+        { "type": "integer" }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "track": {
+      "type": "object",
+      "required": ["atlas", "parallel", "full_body"],
+      "properties": {
+        "atlas": { "type": "string", "minLength": 1 },
+        "parallel": { "type": "boolean" },
+        "full_body": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "direction": {
+      "type": "object",
+      "required": ["from", "to", "runtime_mirror"],
+      "properties": {
+        "from": { "enum": ["left", "right", "none"] },
+        "to": { "enum": ["left", "right", "none"] },
+        "runtime_mirror": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "clip": {
+      "type": "object",
+      "required": [
+        "group",
+        "track",
+        "independent_frames",
+        "ticks",
+        "duration_ms",
+        "loop",
+        "v1a",
+        "must_finish",
+        "direction",
+        "frames"
+      ],
+      "properties": {
+        "group": {
+          "enum": [
+            "loading",
+            "idle",
+            "idle_insert",
+            "locomotion",
+            "transition",
+            "performance",
+            "spawn",
+            "door",
+            "drag"
+          ]
+        },
+        "track": { "enum": ["body", "loading"] },
+        "independent_frames": { "type": "integer", "minimum": 1 },
+        "ticks": { "type": "integer", "minimum": 1 },
+        "duration_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "loop": { "type": "boolean" },
+        "v1a": { "type": "boolean" },
+        "must_finish": { "type": "boolean" },
+        "direction": { "$ref": "#/$defs/direction" },
+        "frames": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/frame" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "contact": {
+      "type": "object",
+      "required": ["part", "surface", "at"],
+      "properties": {
+        "part": { "enum": ["fore_near", "fore_far", "hind_near", "hind_far"] },
+        "surface": { "enum": ["ground", "door"] },
+        "at": { "$ref": "#/$defs/intPoint" }
+      },
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "required": [
+        "sprite",
+        "hold",
+        "pivot",
+        "fx_anchor",
+        "root_delta",
+        "contacts",
+        "events",
+        "can_exit"
+      ],
+      "properties": {
+        "sprite": { "type": "string", "minLength": 1 },
+        "hold": { "type": "integer", "minimum": 1 },
+        "pivot": { "$ref": "#/$defs/intPoint" },
+        "fx_anchor": {
+          "oneOf": [
+            { "$ref": "#/$defs/intPoint" },
+            { "type": "null" }
+          ]
+        },
+        "root_delta": { "$ref": "#/$defs/intPoint" },
+        "contacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contact" }
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "can_exit": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "loop_clip": { "type": "string", "minLength": 1 },
+        "insert_clips": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from", "to", "clip", "must_finish", "priority"],
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "clip": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "must_finish": { "type": "boolean" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "at_event": { "type": "string", "minLength": 1 },
+        "preempt": { "type": "boolean" },
+        "request_mode": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

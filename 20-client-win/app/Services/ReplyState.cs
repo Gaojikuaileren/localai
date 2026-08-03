@@ -214,16 +214,24 @@ public sealed class ReplyState
     public string[] Closings(string lang, ReplyTone t)
         => new[] { NoClosing }.Concat(BuiltinClosings(lang, t)).Concat(Profile.CustomClosings).ToArray();
 
-    /// <summary>自定义追加(跨会话共用)。重复/空不加;返回它在当前清单里的下标(-1 = 没加成)。</summary>
+    /// <summary>
+    /// 自定义追加(跨会话共用)。重复/空不加;返回它在当前清单里的下标(-1 = 没加成)。
+    /// ★ 下标从【自定义那一段】里算,不用 Array.IndexOf 全表找(复核 2026-08-03):
+    ///   与内置重名时全表找命中的是内置那一条,于是"刚加完选中的是内置、新加的那条从没被选中过"。
+    /// </summary>
     public int AddCustom(bool greeting, string text, string lang, ReplyTone t)
     {
         text = text.Trim();
         if (text.Length == 0) return -1;
         var list = greeting ? Profile.CustomGreetings : Profile.CustomClosings;
-        if (!list.Contains(text)) list.Add(text);
+        var j = list.IndexOf(text);
+        if (j < 0) { list.Add(text); j = list.Count - 1; }
         Changed?.Invoke();
-        return Array.IndexOf(greeting ? Greetings(lang, t) : Closings(lang, t), text);
+        return CustomBase + j;
     }
+
+    /// <summary>这个【下标】指的是不是用户自己加的那一段(内置的不给删)。</summary>
+    public static bool IsCustomIndex(int index) => index >= CustomBase;
 
     // ---------------------------------------------------------------- 格式装配(现在就真干活的部分)
     /// <summary>
@@ -375,9 +383,16 @@ public sealed class ReplyState
     /// </summary>
     public Func<string, bool>? IsGhostSession { get; set; }
 
-    /// <summary>会话没了(删除或幽灵被抹),它的文档一起清掉。</summary>
+    /// <summary>
+    /// 会话没了(删除或幽灵被抹),它的文档一起清掉。
+    /// ★ 顺手把指着它的 SessionId 断开(复核 2026-08-03):Doc 这个取值器是【取不到就新建一格】,
+    ///   而 Drop 之后紧接着的 Changed 会让面板去读 Doc —— 刚删掉的键当场复活,
+    ///   且此时 Chat.Find(它) 已经是 null、幽灵过滤器认不出它,这条空记录就这么进了存档。
+    ///   两层"双保险"在这个次序下会同时失效,断开引用才是闭合的写法。
+    /// </summary>
     public void Drop(string sessionId)
     {
+        if (SessionId == sessionId) SessionId = null;
         if (_docs.Remove(sessionId)) Changed?.Invoke();
     }
 

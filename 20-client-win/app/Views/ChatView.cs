@@ -1101,7 +1101,15 @@ public sealed class ChatView : UserControl
                 b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
             }
             var captured = mode;
-            b.MouseLeftButtonUp += (_, e) => { e.Handled = true; TheApp.Interpret.SetMode(captured); if (!EndGhostOnSceneSwitch()) BuildConversation(); };
+            b.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                // ★ 只有【真的换了档】才算"换了一次"(复核 2026-08-03):点已经高亮的那一枚,
+                //   SetMode 自己会早退、场景一动没动,这时候把幽灵连内容一起抹掉是无妄之灾。
+                var was = TheApp.Interpret.Mode;
+                TheApp.Interpret.SetMode(captured);
+                if (was == captured || !EndGhostOnSceneSwitch()) BuildConversation();
+            };
             row.Children.Add(b);
         }
         return row;
@@ -1178,7 +1186,14 @@ public sealed class ChatView : UserControl
                     c.MouseEnter += (_, _) => c.SetResourceReference(Border.BackgroundProperty, "BgHover");
                     c.MouseLeave += (_, _) => c.Background = Brushes.Transparent;
                 }
-                c.MouseLeftButtonUp += (_, e) => { e.Handled = true; click(); EndGhostOnSceneSwitch(); };
+                c.MouseLeftButtonUp += (_, e) =>
+                {
+                    e.Handled = true;
+                    var was = TheApp.Reply.SceneReply;
+                    click();
+                    // 同上:点已经高亮的那一枚 = 什么都没换,不该抹幽灵
+                    if (was != TheApp.Reply.SceneReply) EndGhostOnSceneSwitch();
+                };
                 chatHead.Children.Add(c);
             }
             SceneChip(IconName.Chat, "聊天", !_replyScene, () => TheApp.Reply.SetScene(false));
@@ -1783,6 +1798,7 @@ public sealed class ChatView : UserControl
         if (f.Kind == FallbackKind.Ask)
         {
             if (f.Options.Count == 0) return false;       // 没得选就别问,交回上面那条"发不出去"的解释
+            _justSent = true;
             TheApp.Chat.Send(_sessionId, draft);          // 原文照常入会话,不然用户白打一遍
             TheApp.Chat.AskChoice(_sessionId, TranslationFallbacks.Explain(f, plan.InputLang!), f.Options);
             return true;
@@ -1816,12 +1832,16 @@ public sealed class ChatView : UserControl
             TheApp.Chat.AskChoice(_sessionId, $"好 —— 已把{Languages.NameOf(code)}加进目标池,开始翻译。", Array.Empty<string>());
     }
 
-    /// <summary>刚刚点了发送 —— 见 BuildConversation 里那段说明(焦点已被"点空白"停走,不能再靠嗅探)。</summary>
+    /// <summary>
+    /// 刚刚用鼠标做了一件「做完还该待在输入框里」的事(发送 / 加附件 / 删附件)——
+    /// 见 BuildConversation 里那段说明:焦点已被"点空白"停走,不能再靠嗅探当前焦点。
+    /// ★ 必须【紧挨着真正会重建会话区的那一步】置位:置早了(比如放在 SendCurrent 第一行)
+    ///   遇到空输入那条早退就永远清不掉,这面旗子会在很久以后的某次无关重建里把焦点抢走。
+    /// </summary>
     bool _justSent;
 
     void SendCurrent()
     {
-        _justSent = true;
         var text = _input.Text;
         if (string.IsNullOrWhiteSpace(text) && _pending.Count == 0) return;   // 空且无附件不发
 
@@ -1851,6 +1871,7 @@ public sealed class ChatView : UserControl
         //   若此时 _pending 还没清,重建就会把【已经发出去】的附件又挂回输入框上(用户反馈的 bug)。
         _pending.Clear();
         _draft = "";
+        _justSent = true;          // ★ 就置在这儿:上面每一条早退都不该留下这面旗子
         TheApp.Chat.Send(_sessionId, text, atts);
     }
 
@@ -1920,6 +1941,10 @@ public sealed class ChatView : UserControl
     // 统一入库:文件按扩展名分图片/普通,目录记为文件夹;去重;超过 99 个截断并提示。
     void AddPaths(IEnumerable<string> paths)
     {
+        // ★ 与"鼠标发送"同一类(复核 2026-08-03 抓到的漏网):点「+」是点在一个 Border 上,
+        //   隧道层先把焦点停走了,重建后再嗅探焦点恒为 false —— 表现就是
+        //   "打半句话去加个附件,回来光标没了,得再点一次输入框"。记意图,不嗅探。
+        _justSent = true;
         var existing = _pending.Select(p => p.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var dropped = false;
         foreach (var raw in paths)
@@ -2039,7 +2064,7 @@ public sealed class ChatView : UserControl
         count.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         count.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         head.Children.Add(count);
-        head.Children.Add(Chip("清空", "RiskDanger", () => { _pending.Clear(); BuildConversation(); }));
+        head.Children.Add(Chip("清空", "RiskDanger", () => { _pending.Clear(); _justSent = true; BuildConversation(); }));
         box.Children.Add(head);
 
         // 只展开前 5 个;其余折叠成一个"+N"卡(避免占满输入区)。
@@ -2048,7 +2073,7 @@ public sealed class ChatView : UserControl
         for (int k = 0; k < shown; k++)
         {
             var item = _pending[k];   // 按对象移除,不按下标(下标闭包越界曾致闪退)
-            wrap.Children.Add(AttachChip(item, onRemove: () => { _pending.Remove(item); BuildConversation(); }));
+            wrap.Children.Add(AttachChip(item, onRemove: () => { _pending.Remove(item); _justSent = true; BuildConversation(); }));
         }
         if (_pending.Count > shown)
             wrap.Children.Add(MoreChip(_pending.Count - shown));

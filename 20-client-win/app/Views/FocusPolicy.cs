@@ -107,6 +107,36 @@ public static class FocusPolicy
     }
 
     /// <summary>
+    /// 标记「这一块自己拿着键盘焦点收快捷键」—— 点别处【不要】把它的焦点停走。
+    ///
+    /// ★ 为什么需要它:文件翻译面板把 Del(删所选标注框)与 Ctrl+Z(撤回)挂在自身 KeyDown 上,
+    ///   靠"点了预览就抓焦点"来收键。而「点输入框以外 = 取消聚焦」这条新规矩会在点工具栏、
+    ///   点右键平移、点任何非输入控件时把焦点停到停车位 —— 于是那两个快捷键【无声地】失效,
+    ///   而提示条还在承诺「Ctrl+Z 撤回」。这不是它自己的锅:旧规矩下按钮全都 Focusable=False,
+    ///   点它们不夺焦点,面板一直吃得到键。加规矩的人要负责把这个前提补上。
+    /// ★ 只影响「点空白/点别的控件」这一路:点真的输入框照常把焦点交出去(输入框天生会夺焦点)。
+    /// </summary>
+    public static readonly DependencyProperty KeepsKeyboardFocusProperty =
+        DependencyProperty.RegisterAttached("KeepsKeyboardFocus", typeof(bool), typeof(FocusPolicy),
+            new PropertyMetadata(false));
+
+    public static void SetKeepsKeyboardFocus(DependencyObject el, bool value) => el.SetValue(KeepsKeyboardFocusProperty, value);
+    public static bool GetKeepsKeyboardFocus(DependencyObject el) => (bool)el.GetValue(KeepsKeyboardFocusProperty);
+
+    /// <summary>当前拿着键盘焦点的那一块有没有声明「我要留着焦点收快捷键」。</summary>
+    public static bool FocusedKeepsFocus()
+    {
+        var node = Keyboard.FocusedElement as DependencyObject;
+        while (node is not null)
+        {
+            if (node is FrameworkElement fe && GetKeepsKeyboardFocus(fe)) return true;
+            var vp = node is Visual v ? VisualTreeHelper.GetParent(v) : null;
+            node = vp ?? LogicalTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    /// <summary>
     /// 这个节点是不是落在【输入控件】里。★ 按【类型白名单】而不是按 Focusable:
     /// Control 的 Focusable 默认就是 true,ContentControl 这种纯板块容器会全部误判 ——
     /// 那正是本文件开头否掉的打地鼠路线。ComboBox 必须在名单里(否则点开下拉就丢焦点),
@@ -149,7 +179,10 @@ public static class FocusPolicy
             Next(ring, Keyboard.FocusedElement, back)?.Focus();
             return;
         }
-        var input = ring.Count == 1 ? ring[0] : FindChatInput(scope);
+        // ring 为空 = 树里没有任何登记过的输入框(Ring 的谓词包含 IsChatInput、
+        //   整枝条件也与 FindChatInput 逐条相同),所以这里【不再回头调 FindChatInput】——
+        //   那是死代码,读起来却像还有第二条查找路径(复核 2026-08-03)。
+        var input = ring.Count == 1 ? ring[0] : null;
         var target = Toggle(input, Keyboard.FocusedElement);
         if (target is not null) { target.Focus(); return; }
         Park(scope, park);

@@ -128,8 +128,12 @@ public partial class MainWindow : Window
         //   ③ Tab、Esc、点击吞噬三条焦点/输入规矩已经全在这个构造函数里,再分一层就是两套规则互不知情。
         //   ★ 注册在上面那个"吞掉第一次点击"的处理器【之后】:C# 的 += 等价 handledEventsToo:false,
         //     那一下被吞掉时这里根本不会被调到 —— "一次点击只做一件事"自动成立。
-        //   ★ 浮窗(Popup,独立 hwnd)里的点击要放行:回信页的「自定义问候」就是一个浮窗里的输入框,
-        //     把焦点硬拽回主窗口会让它失去激活、整个关掉,用户填了一半的字当场没。
+        //   ★ 浮窗(Popup,独立 hwnd)里的点击放行 —— 回信页的「自定义问候」就是浮窗里的输入框,
+        //     把焦点硬拽回主窗口会让它失去激活、整个关掉。
+        //     ★★ 诚实说一句:这一支有可能根本走不到 —— 无父节点的 Popup,其隧道事件到
+        //     Popup 本身就到头了(不像 ComboBox 的下拉 —— 那个长在模板里,路由能走到窗口,
+        //     所以下拉那条守卫是真有用的)。留着是因为上面两处拦截各留了一份同样的特判,
+        //     少这一份反而看着像漏了。
         PreviewMouseDown += (_, me) =>
         {
             if (me.OriginalSource is not DependencyObject d) return;
@@ -137,6 +141,10 @@ public partial class MainWindow : Window
             //   先把焦点停走会把下拉当场关掉 —— 回信页那个【删自定义问候的 ×】就再也点不中了。
             if (AnyDropDownOpen(this)) return;
             if (Flyout.IsInside(d) || FocusPolicy.IsInsideInput(d)) return;
+            // ★ 拿着焦点收快捷键的那一块(文件翻译面板的 Del / Ctrl+Z)不许被点别处顺手停掉 ——
+            //   旧规矩下按钮全是 Focusable=False,点它们不夺焦点,那个面板一直吃得到键;
+            //   新规矩把这个前提拆了,不补的话快捷键会【无声】失效,而提示条还在承诺它。
+            if (FocusPolicy.FocusedKeepsFocus()) return;
             FocusPolicy.Park(this, FocusPark);
         };
         StateChanged += (_, _) => SyncMaxButton();
@@ -526,7 +534,7 @@ public partial class MainWindow : Window
             Foreground = (Brush)FindResource("FgPrimary"),
             Cursor = System.Windows.Input.Cursors.Hand,
         };
-        b.Click += (_, _) => { ResetSceneOf(item.Key); Navigate(item.Key); };
+        b.Click += (_, _) => Navigate(item.Key, fromNavBar: true);
         if (visible) target.Children.Add(b);
         _nav.Add((item, b));   // ★ 不显示也登记 —— 见 BuildNav 里的说明
     }
@@ -563,7 +571,13 @@ public partial class MainWindow : Window
     /// </summary>
     string ActiveKey => _systemKey ?? _currentKey;
 
-    public void Navigate(string key)
+    /// <param name="fromNavBar">
+    /// 从【左栏那一排按钮】点进来的。★ 只有它才重置场景 —— 跳会话/跳项目/换语言重建都不该被顺手重置。
+    /// ★★ 而且必须排在下面两条守卫【之后】(复核 2026-08-03):系统页盖着时点左栏里底下那一页自己
+    ///   只是收起覆盖层、什么都不重建,这时候重置场景就等于"返回箭头原样返回、左栏同一项却把
+    ///   正在进行的同传静默停掉" —— 同一个目的地两条路两种结果,那正是这条守卫要防的事。
+    /// </param>
+    public void Navigate(string key, bool fromNavBar = false)
     {
         var hit = _nav.FirstOrDefault(n => n.item.Key == key);
         if (hit.item is null) return;
@@ -588,6 +602,7 @@ public partial class MainWindow : Window
         }
 
         CloseSystemPage();
+        if (fromNavBar) ResetSceneOf(key);   // 见上:排在两条守卫之后,只对"真的重建这一页"生效
         _currentKey = key;
         ContentHost.Content = hit.item.Build();
         // 主页右上角已经有日历板块了,顶栏就不再重复放按钮(用户裁定)。

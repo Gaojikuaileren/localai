@@ -9,6 +9,8 @@
 - 本文件是美术与运行时规范，不代表 P8 已实现。实际资源占用仍须通过 A7-pet 测量。
 - 当前造型基准：`loading-cow-cat-character-model-sheet-pixel-low-v2.png`。
 - 旧文件 `loading-cow-cat-pixel-rig-spec-v1.md` 已废止，禁止作为实现依据。
+- 本版动作清单以 2026-08-03 提交的 `v1a` 需求为权威输入；机器可读镜像见 `loading-cow-cat-animation-manifest-v1.json`。
+- 经逐项复核，`v1a` 是 **84 张角色帧 + 12 张加载环**；输入表尾的 82 少计了 `stand_to_walk` 的 2 张。
 
 ## 1. 为什么选逐帧
 
@@ -73,6 +75,7 @@ loading-cow-cat/
   "rect": [384, 0, 128, 128],
   "ticks": 1,
   "pivot": [64, 112],
+  "fx_anchor": [64, 26],
   "root_delta": [2, 0],
   "contacts": ["fore_far", "hind_near"],
   "events": ["paw_down_hind_near"],
@@ -82,6 +85,7 @@ loading-cow-cat/
 
 - `ticks`：该图保持多少个 6 fps tick；静止动作可复用同一张图并延长 ticks，避免重复纹理。
 - `pivot`：统一世界锚点，不能依赖 atlas 裁切后的左上角。
+- `fx_anchor`：加载环的整数像素锚点；每张可显示身体帧都要提供，拖拽时仍能跟随头部。
 - `root_delta`：本 tick 结束时的整数逻辑像素位移。
 - `contacts`：当前锁地的爪，用于验证是否滑步。
 - `events`：落脚、起跳、落地、闭眼、加载步进等离散事件。
@@ -101,89 +105,249 @@ loading-cow-cat/
 ```mermaid
 stateDiagram-v2
     [*] --> Suspended
-    Suspended --> Wake: resume / show
-    Wake --> Stand
+    Suspended --> WakeFromHidden: wake_from_hidden
+    WakeFromHidden --> Stand
 
-    Stand --> Walk: move
-    Walk --> Trot: speed_up @ contact
-    Trot --> Run: speed_up @ contact
-    Run --> Trot: slow_down @ contact
-    Trot --> Walk: slow_down @ contact
-    Walk --> Stand: stop transition
+    Stand --> StandToWalk: stand_to_walk
+    StandToWalk --> Walk
+    Walk --> WalkToStop: stop
+    WalkToStop --> Stand
+    Walk --> Trot: shared paw_down
+    Trot --> Run: shared paw_down
+    Run --> Trot: shared paw_down
+    Trot --> Walk: shared paw_down
 
-    Stand --> Sit: stand_to_sit
-    Sit --> Loaf: sit_to_loaf
-    Loaf --> Sleep: settle
-    Sleep --> Loaf: wake
-    Loaf --> Sit: unfold
-    Sit --> Stand: sit_to_stand
+    Stand --> Turn180: turn request
+    Turn180 --> Stand
+    Stand --> StandToSit: stand_to_sit
+    StandToSit --> Sit
+    Sit --> SitToStand: sit_to_stand
+    SitToStand --> Stand
+    Sit --> SitToLoaf: sit_to_loaf
+    SitToLoaf --> Loaf
+    Loaf --> LoafToSit: loaf_to_sit
+    LoafToSit --> Sit
+    Loaf --> LoafToSleep: loaf_to_sleep
+    LoafToSleep --> Sleep
+    Sleep --> SleepToLoaf: sleep_to_loaf
+    SleepToLoaf --> Loaf
 
-    Stand --> Groom
-    Sit --> Groom
-    Groom --> Stand
+    Stand --> StandToStalk: stand_to_stalk
+    StandToStalk --> Stalk
+    Stalk --> StalkToStand: stalk_to_stand
+    StalkToStand --> Stand
+    Stalk --> Pounce
+    Pounce --> Stand
+
+    Sit --> GroomSit
+    GroomSit --> Sit
     Stand --> Stretch
     Stretch --> Stand
+    Stand --> StartleStand
+    StartleStand --> Stand
+    Sit --> StartleSit
+    StartleSit --> Sit
 
-    Stand --> Stalk
-    Walk --> Stalk
-    Stalk --> Pounce
-    Pounce --> Air
-    Stand --> Air: jump
-    Air --> Land
-    Land --> Stand
+    Stand --> ScratchDoor
+    ScratchDoor --> ScratchDoor: hold / loop
+    ScratchDoor --> DoorEnter: door opens
+    ScratchDoor --> Stand: cancel @ exit_seam
+    DoorEnter --> BehindDoor
+    BehindDoor --> DoorExit: return
+    DoorExit --> Stand
 
-    Stand --> Turn180
-    Walk --> Turn180: decelerate
-    Turn180 --> Stand
-    Stand --> Suspended: fullscreen / suspend
+    state "任一可见身体状态" as AnyVisible
+    AnyVisible --> GrabStart: drag request @ grab_eligible
+    GrabStart --> Dangle
+    Dangle --> Dangle: held
+    Dangle --> DropLand: released
+    DropLand --> Stand
+
+    AnyVisible --> Suspended: immediate hide
 ```
 
 ### 状态机规则
 
-- 禁止 cross-fade。姿态差异大的状态必须有显式过渡 clip。
+- 禁止 cross-fade。表 4 的姿态过渡都是图上的边，进入后必须完整播放。
 - 行走类循环只能在兼容的 `paw_down` 接触帧之间切换。
-- 事件到达时先排队，在下一个 `can_exit=true` 帧响应；紧急隐藏除外。
-- 转向必须播放 `turn_180`，由侧视 → 3/4 → 正面/背面 → 3/4 → 反向侧视，禁止一帧镜像。
-- 加载状态不替换基础姿态：猫继续当前 idle，独立 `loading_spinner` 在额头上方以 6 fps 播放。
-- 真实猫大部分时间静止观察。随机动作必须有冷却，不连续卖萌。
+- 普通事件在下一个 `can_exit=true` 帧响应；系统挂起立即隐藏，拖拽以用户输入优先级抢占身体轨。
+- `turn_180` 唯一母版是 L→R，镜像得到 R→L。坐姿与趴姿不得直接转身，必须先回到 Stand。
+- `pounce` 一条 clip 内含蓄力、起跳、腾空和落地，不再引用没有素材的 Air/Land 状态。
+- `scratch_door` 必须有一个四爪落地、可无缝接 `idle_stand` 的 `exit_seam`；取消时不新增 `scratch_to_stand`。
+- `door_enter` 的终点是 `BehindDoor`；`door_exit` 从门后起步并回到 Stand。`BehindDoor` 与系统 `Suspended` 是两个状态。
+- 系统挂起会取消门事务；恢复后统一走 `wake_from_hidden`，不续播被打断的门动画。
+- `grab_start` 只有一个版本。v1a 接受从站、坐、趴、走或扒门进入时最多一 tick 的姿态归一跳变，不为每个来源新增 grab 变体。
+- 除系统立即隐藏外，grab 不打断 must-finish clip：请求先 pending；Walk 在接触帧、ScratchDoor 在 `exit_seam`、稳定 idle 在下一 tick 进入。
+- 图中的 `AnyVisible` 不包含 `Suspended` 与 `BehindDoor`；猫在门后或系统隐藏时不可拖拽。
+- 加载环是唯一并行层：身体维持当前 clip，通过每帧 `fx_anchor` 跟随头部；身体隐藏时加载环也隐藏。
+- 真实猫大部分时间静止观察。idle 插入是身体轨短 clip，不是第二条身体动画层。
 
-## 7. v1 动作清单
+### 加载层正交状态
 
-帧数指**独立绘制帧**；某些帧可通过 `ticks > 1` 延长。
+```mermaid
+stateDiagram-v2
+    [*] --> LoadingOff
+    LoadingOff --> LoadingOn: active_loading_ids becomes non-empty
+    LoadingOn --> LoadingOff: active_loading_ids becomes empty
+    LoadingOn --> LoadingOn: 12-tick loop
+```
 
-| Clip | 独立帧 | 时长参考 | 说明 |
-|---|---:|---:|---|
-| `wake` | 4–6 | 0.67–1.0 s | 从隐藏/睡眠进入稳定站姿或趴姿 |
-| `idle_stand` | 3–4 | 3–5 s | 少量呼吸帧，大量 hold |
-| `idle_sit` | 3–4 | 3–6 s | 尾巴贴地，避免钟摆式摆动 |
-| `idle_loaf` | 2–3 | 4–8 s | 近乎静止 |
-| `sleep` | 2–3 | 4–8 s | 缓慢呼吸，可长时间停在一帧 |
-| `blink` | 1–2 | 0.17–0.33 s | idle 已提供开眼帧；绘制闭眼，必要时增加半闭帧 |
-| `ear_twitch` | 3 | 0.50 s | 单耳为主 |
-| `tail_flick` | 6–10 | 1.0–1.67 s | 尾尖滞后，不做狗式摇尾 |
-| `walk` | 8 | 1.33 s / cycle | 四拍，后爪落在同侧前爪足迹附近 |
-| `trot` | 6 | 1.0 s / cycle | 对角肢成对 |
-| `run` | 4 | 0.67 s / cycle | 明显脊柱收缩/伸展和腾空相位 |
-| `walk_to_stop` | 3–4 | 0.50–0.67 s | 先落稳前爪再停止 root motion |
-| `turn_180` | 5–6 | 0.83–1.0 s | 头先转、前足踏步、后躯跟进 |
-| `stand_to_sit` | 5–6 | 0.83–1.0 s | 骨盆先下沉，前肢支撑 |
-| `sit_to_stand` | 5–6 | 0.83–1.0 s | 先建立前肢支撑，再抬起后躯 |
-| `sit_to_loaf` | 4–5 | 0.67–0.83 s | 两前爪依次收进胸下 |
-| `loaf_to_sit` | 4–5 | 0.67–0.83 s | 两前爪依次伸出；不可默认倒放 |
-| `groom_short` | 12–18 | 2–3 s | 舔爪或擦脸；可组合为长动作 |
-| `stretch` | 8–10 | 1.33–1.67 s | 前爪固定，胸口下沉，骨盆抬高 |
-| `stalk` | 8 | 1.33 s / cycle | 腹部低、步幅短、头部稳定 |
-| `pounce` | 6–8 | 1.0–1.33 s | 蓄力、起跳、腾空、落地分相 |
-| `startle` | 3 | 0.50 s | 僵住、抬肩、转耳；不做人类夸张反应 |
-| `loading_spinner` | 12 | 2.0 s / cycle | 每 tick 推进一格，独立 UI atlas |
+- 不能用单一 Boolean；并发任务以 `active_loading_ids` 集合计数，集合非空才显示。
+- `Suspended` 与 `BehindDoor` 不绘制加载环，但逻辑加载可继续。
+- 重新可见时按单调时钟同步到当前相位，不快速补播错过的帧。
+- 加载开始与结束不等待身体 `can_exit`，也不进入身体事件队列。
 
-### v1 预算
+### 事件优先级
 
-- 核心交付目标：约 `100–140` 张独立角色帧，加 `12` 张加载环帧。
-- 先完成站立、行走、转身、坐下、趴卧、加载六条闭环，再扩展跑跳和理毛。
-- 若核心 atlas 超过单张 2K，先删除低价值变体或增加 hold，不直接升级为多张 4K。
+1. `suspend / exclusive_fullscreen / lease_lost / exit`：唯一可打断 must-finish 的事件；立即隐藏、释放鼠标捕获并清队列。
+2. 加载层事件：正交处理，不与身体轨竞争。
+3. 拖拽生命周期：请求可 pending；进入 Dangle 后忽略门、移动和 idle 请求，release 只走 `drop_land`。
+4. 当前 must-finish clip：除立即隐藏外必须完整播完。
+5. 门事务：`door_enter / door_exit` 开始后必须闭合。
+6. 显式行为与助手请求。
+7. 移动、朝向与姿态目标：同类只保留最新目标。
+8. `blink / ear_twitch / tail_flick`：最低优先级，忙时直接丢弃。
 
-## 8. 三层行为映射
+## 7. 动画需求清单
+
+按 6 fps 口径，`1 tick = 1/6 s`。**独立帧**是要绘制的图张数，**ticks**是单轮总步数（含 hold）。`v1a` 的 `●` 是家用最小闭环。
+
+### 7.0 加载环 · 唯一独立并行层
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `loading_spinner` | 12 | 12 | 2.000 s / 循环 | ● |
+
+### 7.1 静止姿态
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `idle_stand` | 3 | 24 | 4.000 s / 轮 | ● |
+| `idle_sit` | 4 | 30 | 5.000 s / 轮 | ● |
+| `idle_loaf` | 3 | 36 | 6.000 s / 轮 | ● |
+| `sleep` | 3 | 36 | 6.000 s / 轮 |  |
+
+### 7.2 idle 插入变体 · 身体轨
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `blink_stand` | 1 | 1 | 0.167 s | ● |
+| `blink_sit` | 1 | 1 | 0.167 s | ● |
+| `blink_loaf` | 1 | 1 | 0.167 s | ● |
+| `ear_twitch_sit` | 3 | 3 | 0.500 s |  |
+| `ear_twitch_loaf` | 3 | 3 | 0.500 s |  |
+| `tail_flick_sit` | 6 | 8 | 1.333 s |  |
+
+### 7.3 移动循环
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `walk` | 8 | 8 | 1.333 s / 循环 | ● |
+| `trot` | 6 | 6 | 1.000 s / 循环 |  |
+| `run` | 4 | 4 | 0.667 s / 循环 |  |
+| `stalk` | 8 | 8 | 1.333 s / 循环 |  |
+
+### 7.4 姿态过渡 · 必须播完
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `stand_to_walk` | 2 | 2 | 0.333 s | ● |
+| `walk_to_stop` | 4 | 4 | 0.667 s | ● |
+| `turn_180` | 6 | 6 | 1.000 s | ● |
+| `stand_to_sit` | 6 | 6 | 1.000 s | ● |
+| `sit_to_stand` | 6 | 6 | 1.000 s | ● |
+| `sit_to_loaf` | 5 | 5 | 0.833 s | ● |
+| `loaf_to_sit` | 5 | 5 | 0.833 s | ● |
+| `loaf_to_sleep` | 3 | 6 | 1.000 s |  |
+| `sleep_to_loaf` | 3 | 6 | 1.000 s |  |
+| `stand_to_stalk` | 4 | 4 | 0.667 s |  |
+| `stalk_to_stand` | 4 | 4 | 0.667 s |  |
+
+### 7.5 表演动作
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `groom_sit` | 14 | 18 | 3.000 s |  |
+| `stretch` | 9 | 10 | 1.667 s |  |
+| `startle_stand` | 3 | 3 | 0.500 s |  |
+| `startle_sit` | 3 | 3 | 0.500 s |  |
+| `pounce` | 8 | 8 | 1.333 s |  |
+
+### 7.6 出场
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `wake_from_hidden` | 5 | 6 | 1.000 s | ● |
+
+退场不画。挂起和独占全屏立即隐藏。
+
+### 7.7 门
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `scratch_door` | 6 | 8 | 1.333 s / 循环 | ● |
+| `door_enter` | 4 | 4 | 0.667 s | ● |
+| `door_exit` | 4 | 4 | 0.667 s | ● |
+
+### 7.8 拖拽
+
+| Clip | 独立帧 | ticks | 时长 | v1a |
+|---|---:|---:|---:|:--:|
+| `grab_start` | 2 | 2 | 0.333 s | ● |
+| `dangle` | 4 | 8 | 1.333 s / 循环 | ● |
+| `drop_land` | 4 | 4 | 0.667 s | ● |
+
+## 8. 帧预算与削减方案
+
+| 方案 | 角色帧 | 加载环 | 全部独立图 |
+|---|---:|---:|---:|
+| **v1a 最小集 · 推荐** | **84** | **12** | **96** |
+| 完整集 | 168 | 12 | 180 |
+| 完整集，仅复用 sleep | 159 | 12 | 171 |
+| 完整集，仅砍 `trot/run/stalk/pounce` | 142 | 12 | 154 |
+| 完整集，两项都做 | **133** | **12** | **145** |
+
+复核算式：
+
+```text
+v1a = 静止 10 + blink 3 + walk 8 + 过渡 34 + 出场 5 + 门 14 + 拖拽 10 = 84
+完整 = 静止 13 + idle变体 15 + 移动 26 + 过渡 48 + 表演 37 + 出场 5 + 门 14 + 拖拽 10 = 168
+```
+
+- 输入表尾的 82 恰好少计 `stand_to_walk` 的 2 张。建议保留这 2 张，以 **84** 为生产预算。
+- 若 82 是硬上限，唯一明确方案是让 `stand_to_walk` 的 2 tick 分别引用 `idle_stand` 终帧与 `walk` 首帧，并把它的“新增独立帧”改成 0；不能一边声明 2 张独立帧、一边按 0 张计数。
+- sleep 复用会省 `sleep 3 + loaf_to_sleep 3 + sleep_to_loaf 3 = 9` 张，但这些原本都不属于 v1a，因此不会改变 v1a 合计。
+- 若 v1a 需要“睡着”的逻辑语义，可把 Loaf 切成闭眼子模式：复用 `blink_loaf` 闭眼帧无限 hold，唤醒时切回 `idle_loaf`，仍不新增这 9 张。
+- 只砍四个高移动 clip 会得到 142，仍超出 140；与 sleep 复用同时执行才得到 133，回到原预算内。
+
+### v1a 出图批次
+
+| 批次 | 内容 | 新增角色帧 | 累计 |
+|---|---|---:|---:|
+| A · 身份锁定 | 三个 idle + 三个 blink | 13 | 13 |
+| B · 基础移动 | `walk`、起步、停止、转身 | 20 | 33 |
+| C · 姿态闭环 | 站坐趴双向四条过渡 | 22 | 55 |
+| D · 出场 | `wake_from_hidden` | 5 | 60 |
+| E · 家门 | `scratch_door`、`door_enter`、`door_exit` | 14 | 74 |
+| F · 拖拽 | `grab_start`、`dangle`、`drop_land` | 10 | 84 |
+
+加载环 12 张单独出图和验收，不计入角色帧累计。每一批先通过花纹、ground line 和状态缝合检查，再进入下一批，避免 84 张全部画完后才发现基准漂移。
+
+## 9. 给生成方的硬约束
+
+1. 全部按左向绘制，右向运行时镜像。`turn_180` 例外：只画 L→R，镜像即得 R→L。
+2. 坐姿和趴姿没有转身 clip；必须先起身，再播放 `turn_180`。
+3. 使用 128×128 透明画布；所有地面动作共享同一 ground line，pivot 与 `fx_anchor` 都取整数像素。
+4. 色板只有 `#000000`、`#FFFFFF`、透明；无抗锯齿、灰边或半透明像素。
+5. 额纹宽度、胸腹白区、白袜高度、白尾尖长度必须跨全部 clip 一致。
+6. 移动帧必须标整数 `root_delta` 和接触爪；接触相位锁地，不滑步。
+7. 禁止双足站立、挥手摊手、点头致意、拿物品、人类口型和可爱化表情。
+8. `grab_start / dangle` 中四肢自然垂下，禁止变成人形吉祥物被举起。
+9. `scratch_door` 是四足猫后足落地、前爪扒门；不是双足站立扒墙。
+10. 每个过渡 clip 都必须完整播放；不得用 cross-fade 或运行时补间代替缺帧。
+11. `scratch_door` 至少有一个指定 `exit_seam`，该帧四爪落地并可直接接 `idle_stand`。
+
+## 10. 三层行为映射
 
 ### 表演层 · 0 token
 
@@ -197,17 +361,18 @@ stateDiagram-v2
 
 只接收“移动、观察、休息、开口”等高层意图。宠物没有专属常驻模型，LLM 不参与 6 fps 播放循环。
 
-## 9. 运行与安全边界
+## 11. 运行与安全边界
 
 - 宠物是纯输出面，不读取屏幕内容、窗口标题或输入焦点决定动作。
 - 加载圈是 UI 状态，不是额头皮肤，也不能成为永久花纹。
 - 资源只从内置白名单加载；未来换肤必须限制 atlas 尺寸、帧数、文件大小和引用路径。
 - 6 fps 与单张 2K atlas 只是设计方向，不等于性能已通过。A7-pet 仍需测稳态显存、CPU、GPU、帧时间、DWM、多显示器、DPI、挂起/恢复。
 
-## 10. 验收清单
+## 12. 验收清单
 
 - [ ] 所有角色帧只有纯黑、纯白与透明，无灰边和半透明像素。
 - [ ] 所有 clip 固定 6 fps，帧保持时间是整数 tick。
+- [ ] manifest 自动复核为 v1a 84 角色帧、完整集 168 角色帧、加载环 12 帧。
 - [ ] 没有骨骼、网格、运行时肢体旋转或自动补间。
 - [ ] 四足落脚标记正确，移动时无滑步、漂脚或反关节。
 - [ ] 额纹、胸腹白区、白袜和白尾尖跨所有帧一致。

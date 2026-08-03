@@ -150,6 +150,9 @@ public sealed class FileTransPanel : UserControl
         Content = root;
 
         Focusable = true;
+        // ★ 声明「这一块自己拿着焦点收快捷键」—— 点工具栏/右键平移/点空白都不许把它停走
+        //   (见 FocusPolicy.KeepsKeyboardFocus 的说明)。
+        FocusPolicy.SetKeepsKeyboardFocus(this, true);
         KeyDown += (_, e) =>
         {
             // Ctrl+Z 撤回(用户裁定)—— 与工具栏「撤回」同一动作

@@ -372,6 +372,12 @@ public partial class App : Application
         Reply.IsGhostSession = IsGhost;
         Chat.GhostsPurged += ids =>
         {
+            // ★★ 正在进行的同传若跑在这条幽灵上,必须当场结束(复核 2026-08-03):
+            //   续写护栏放开成"幽灵也能续写"之后,RunningSessionId 第一次可能指向幽灵;
+            //   而抹幽灵只发 Chat.Changed,ChatView 里那条"会话没了就结束"的护栏挂在
+            //   Interpret.Changed 上,一次也不会跑 —— 结果是底部横条还显示【进行中】、
+            //   转写却被静默丢进一条不存在的会话。那正是"假开关"。
+            if (Interpret.RunningSessionId is { } rid && ids.Contains(rid)) Interpret.Stop();
             foreach (var id in ids) { FileTrans.Drop(id); I18n.Drop(id); Reply.Drop(id); }
         };
     }

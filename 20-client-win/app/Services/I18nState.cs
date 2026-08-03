@@ -238,9 +238,16 @@ public sealed class I18nState
     /// </summary>
     public Func<string, bool>? IsGhostSession { get; set; }
 
-    /// <summary>会话没了(删除或幽灵被抹),它的文档一起清掉。</summary>
+    /// <summary>
+    /// 会话没了(删除或幽灵被抹),它的文档一起清掉。
+    /// ★ 顺手把指着它的 SessionId 断开(复核 2026-08-03):Doc 这个取值器是【取不到就新建一格】,
+    ///   而 Drop 之后紧接着的 Changed 会让面板去读 Doc —— 刚删掉的键当场复活,
+    ///   且此时 Chat.Find(它) 已经是 null、幽灵过滤器认不出它,这条空记录就这么进了存档。
+    ///   两层"双保险"在这个次序下会同时失效,断开引用才是闭合的写法。
+    /// </summary>
     public void Drop(string sessionId)
     {
+        if (SessionId == sessionId) SessionId = null;
         if (_docs.Remove(sessionId)) Changed?.Invoke();
     }
 

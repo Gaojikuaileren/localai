@@ -340,21 +340,30 @@ public static class Selftest
             // ★★ 全功能幽灵会话(用户裁定 2026-08-03):幽灵得跟当前场景【同型】——
             //   以前 NewGhostSession 只吃 workspaceKey,建出来永远是一条普通文字会话,
             //   于是在同传/文件翻译/多语表/回信里按幽灵,要么被踢回文字翻译,要么按钮亮着但什么也没发生。
-            foreach (var (mk, name) in new (Func<Services.ChatSession>, string)[]
+            // ★ 判据【逐个对号】,不能写成"四个标记里有任意一个"(复核 2026-08-03):
+            //   那样把 fileTrans 接到 Interpret 上也照样全绿 —— 而参数接错正是这次新引入、最容易错的一段。
+            foreach (var (mk, name, pick) in new (Func<Services.ChatSession>, string, Func<Services.ChatSession, bool>)[]
                      {
-                         (() => cc.NewGhostSession("translation", interpret: true), "同传"),
-                         (() => cc.NewGhostSession("translation", fileTrans: true), "文件翻译"),
-                         (() => cc.NewGhostSession("translation", i18nTable: true), "多语表"),
-                         (() => cc.NewGhostSession("chat", replyLetter: true), "回信"),
+                         (() => cc.NewGhostSession("translation", interpret: true), "同传",
+                          g => g.Interpret && !g.FileTrans && !g.I18nTable && !g.ReplyLetter),
+                         (() => cc.NewGhostSession("translation", fileTrans: true), "文件翻译",
+                          g => g.FileTrans && !g.Interpret && !g.I18nTable && !g.ReplyLetter),
+                         (() => cc.NewGhostSession("translation", i18nTable: true), "多语表",
+                          g => g.I18nTable && !g.Interpret && !g.FileTrans && !g.ReplyLetter),
+                         (() => cc.NewGhostSession("chat", replyLetter: true), "回信",
+                          g => g.ReplyLetter && !g.Interpret && !g.FileTrans && !g.I18nTable),
                      })
             {
                 var g2 = mk();
-                var flagged = g2.Interpret || g2.FileTrans || g2.I18nTable || g2.ReplyLetter;
-                Assert(g2.Ghost && flagged, $"★ 幽灵会话能建成【{name}】那一型(不是一律普通文字会话)");
+                Assert(g2.Ghost && pick(g2), $"★ 幽灵会话建成的【正好是{name}】那一型(参数接错会当场红)");
                 Assert(!cc.NormalSessions(g2.WorkspaceKey!).Any(x => x.SessionId == g2.SessionId),
                        $"{name}幽灵照旧不进列表");
             }
+            // ★ 主角要在【这次】显式清除里才消失:上面那个循环里每次 NewGhostSession 都会先清一遍,
+            //   ghost 早就不在了 —— 拿它验"显式 PurgeGhosts 有效"是验了个空(复核抓到)。这里另起一只。
+            var ghost2 = cc.NewGhostSession("chat");
             cc.PurgeGhosts();
+            Assert(cc.Find(ghost2.SessionId) is null, "★ 显式 PurgeGhosts 真的抹掉刚建的那只幽灵");
             Assert(cc.Find(ghost.SessionId) is null, "PurgeGhosts 抹掉幽灵会话");
 
             // 接线
@@ -786,6 +795,23 @@ public static class Selftest
                     store.GhostsPurged += ids => purged = ids.Contains(gid);
                     store.PurgeGhosts();
                     Assert(purged, "★ PurgeGhosts 会广播 id —— 场景文档靠它才知道该清谁");
+                    // ★★ 上面这些都是自检自己把钩子接上再验的;【生产里谁接的钩子】必须单独盯 ——
+                    //   删掉 App 里那一句 AttachGhostDiscipline(),幽灵内容会照常落盘而上面全绿。
+                    //   这正是"函数还在、调用点没了"那一类,编译与行为断言都抓不到。
+                    // ★ 看【去注释后的正文】:把调用注掉也能骗过 Contains —— 这个坑本仓栗过(注释里提到那个词)
+                    var appGhost = TryReadSource("App.xaml.cs") is { } _ag ? Body(_ag) : null;
+                    if (appGhost is not null)
+                    {
+                        Assert(appGhost.Contains("void AttachGhostDiscipline()") && appGhost.Contains("AttachGhostDiscipline();"),
+                               "★★ 幽灵纪律在 App 里【真的接上了】(定义 + 调用点都在,注掉也算没接)");
+                        var ag = Slice(appGhost, "void AttachGhostDiscipline()", "void AttachAutoSave()");
+                        Assert(ag is not null && ag.Contains("FileTrans.IsGhostSession = IsGhost")
+                               && ag.Contains("I18n.IsGhostSession = IsGhost") && ag.Contains("Reply.IsGhostSession = IsGhost")
+                               && ag.Contains("Chat.GhostsPurged +="),
+                               "★ 三张场景文档表【都】接了过滤,且订阅了抹除广播 —— 少接一张就是少一条毁约路径");
+                        Assert(ag is not null && ag.Contains("Interpret.Stop()"),
+                               "★★ 幽灵被抹时正在进行的同传要当场结束 —— 否则横条还说【进行中】,转写却写进不存在的会话");
+                    }
                 }
 
                 // JSON 往返:枚举存名字、可空时间戳、附件都要能还原
@@ -900,7 +926,7 @@ public static class Selftest
                 Assert(!cvAtt.Contains("上下文会吃紧"), "去掉橙黄的上下文吃紧提醒(用户裁定)");
                 Assert(cvAtt.Contains("附件 {_pending.Count} 个"), "附件栏只显示【附件 X 个】计数");
                 Assert(cvAtt.Contains("MoreChip"), "超出 5 个折叠成 +N,不铺满输入区");
-                Assert(cvAtt.Contains("_pending.Clear(); BuildConversation();") && cvAtt.Contains("\"清空\""), "有一键清空附件");
+                Assert(cvAtt.Contains("_pending.Clear(); _justSent = true; BuildConversation();") && cvAtt.Contains("\"清空\""), "有一键清空附件(且清完焦点还在输入框)");
                 // 按类型预览
                 Assert(cvAtt.Contains("IconName.Pdf") && cvAtt.Contains("IconName.File") && cvAtt.Contains("AttachKind.Folder"),
                        "按类型预览:图片缩略图 / PDF 图标 / 文件图标 / 文件夹图标");
@@ -2474,10 +2500,13 @@ public static class Selftest
                     // ★ 邮编+地区跟其余输入框一样左对齐(用户裁定 2026-08-03)
                     Assert(rbSrc.Contains("Cell(line2, ph2, right: false)"),
                            "★ 邮编+地区左对齐,不再独一份右对齐");
-                    Assert(rbSrc.Contains("CustomAwareItem(cb, x, greeting)") && rbSrc.Contains("PreviewMouseLeftButtonDown"),
+                    Assert(rbSrc.Contains("CustomAwareItem(cb, items[i], i, greeting)") && rbSrc.Contains("PreviewMouseLeftButtonDown"),
                            "★ 自定义那几条【在下拉里】各带一个 × ——删除入口要在看得见它的地方");
-                    Assert(rbSrc.Contains("RemoveCustom(greeting, text)"),
-                           "★ 自定义浮窗里列出已加的并给得了删(用户反馈:加得进删不掉)");
+                    // ★ 老断言的措辞已经不成立了:浮窗现在【只管加】,删除入口搬进了下拉里那一条自己后面。
+                    //   继续用同一串字符命中新代码 = 一条没有独立判据的僵尸断言(复核 2026-08-03)。
+                    var rbAsk = Slice(rbSrc, "void AskCustom(bool greeting", "static FrameworkElement Labeled(");
+                    Assert(rbAsk is not null && !rbAsk.Contains("RemoveCustom("),
+                           "★ 自定义浮窗只管【加】—— 删在下拉里那一条自己后面,一件事不留两个入口");
                 }
                 var rpSrc = TryReadSource(Path.Combine("Views", "ReplyPanel.cs"));
                 if (rpSrc is not null)
@@ -2514,9 +2543,15 @@ public static class Selftest
                     Assert(!rpSrc.Contains("_resultBtns.Children.Clear()"),
                            "★★ 生成键那一排只建一次,刷新只改 Visibility/IsEnabled");
                     var rpCtor = Slice(rpSrc, "void BuildActionsOnce()", "void PickSignDate()");
-                    Assert(rpCtor is not null && rpCtor.Contains("_dateWrap.Children.Add(_dateField)")
-                           && Slice(rpSrc, "void RefreshActions(", "void BuildLog(")?.Contains("Children.Add(") != true,
-                           "★ 署名日期那一格只在装配那一次进树;刷新那段一个 Children.Add 都不许有");
+                    Assert(rpCtor is not null && rpCtor.Contains("_dateWrap.Children.Add(_dateField)"),
+                           "★ 署名日期那一格只在装配那一次进树");
+                    // ★★ 这条护栏此前是【假的】(复核 2026-08-03):结束标记 void BuildLog( 在起点
+                    //   void RefreshActions( 的【前面】,Slice 从起点往后找不到它 -> 恒 null ->
+                    //   `null?.Contains(...) != true` 恒真。切片必须先断言取到了,再断言内容。
+                    var rpRefresh = Slice(rpSrc, "void RefreshActions(ReplyDoc d, bool busy)", "\n    }");
+                    Assert(rpRefresh is not null, "★ 切片得真的取到(取不到就跳过 = 一条永远绿的假断言)");
+                    Assert(rpRefresh is null || !rpRefresh.Contains("Children.Add("),
+                           "★★ 刷新那段一个 Children.Add 都不许有 —— 带焦点的控件在刷新期被重挂 = FailFast");
                     // ★ 署名日期不再是自由输入(用户裁定 2026-08-03):点开是日期选择浮窗,
                     //   滚轮复用日程/待办那一套 WheelPicker.Date —— 不另造一种日期控件。
                     Assert(!rpSrc.Contains("TextBox _signDate") && rpSrc.Contains("WheelPicker.Date(picked"),
@@ -2559,7 +2594,10 @@ public static class Selftest
                     rst2.Doc.TheirName = "改个对方称呼";
                     rst2.Doc.Medium = Services.ReplyMedium.Paper;
                     rst2.Touch();
-                    Assert(rst2.SessionId is null, "★ 改设置/填对方信息【不】建会话 —— 只有按下生成才建");
+                    // 诚实说明:这一条只能证明【状态层本身】不会因为编辑而建会话
+                    //   (Doc 取值器与 Touch 本来就没有建会话的代码路径)。用户报的那个 bug
+                    //   在 ReplyBar.SaveDoc/Txt 里多调了一句 EnsureSession —— 守它的是下一条源码断言。
+                    Assert(rst2.SessionId is null, "状态层:改设置/填对方信息本身不建会话(真正的护栏是下一条)");
                 }
                 var rbSrc0 = TryReadSource(Path.Combine("Views", "ReplyBar.cs"));
                 Assert(rbSrc0 is null || !rbSrc0.Contains("EnsureSession()"),
@@ -4717,7 +4755,7 @@ public static class Selftest
             var mwSys = TryReadSource("MainWindow.xaml.cs");
             if (mwSys is not null)
             {
-                var nav = Slice(mwSys, "public void Navigate(string key)", "HighlightNav(key);");
+                var nav = Slice(mwSys, "public void Navigate(string key, bool fromNavBar = false)", "HighlightNav(key);");
                 Assert(nav is not null && nav.Contains("if (IsSystemPage(key))") && nav.Contains("OpenSystemPage(key);"),
                        "★ 进系统页 = 盖上来,不替换底下的工作页(否则回来时会话/滚动/草稿全没了)");
                 Assert(mwSys.Contains("TheApp.Hub.State == HubState.Online") && mwSys.Contains("ExpectedOutputRate is { } r")
@@ -4773,6 +4811,65 @@ public static class Selftest
                        "旧的透明覆盖层已撤掉");
             }
 
+            // ---- Tab 圈:三个纯函数的【行为】断言(复核 2026-08-03:此前只有源码文本 grep)----
+            // ★ 它们的注释各自写着"抽成纯函数,好让无头自检直接验顺序" —— 那就真的验。
+            //   下面每一条都对应一种改坏的方式:去掉排序 / 去掉整枝 / 把 Shift 忽略掉。
+            {
+                static System.Windows.Controls.TextBox Box(int order)
+                {
+                    var t = new System.Windows.Controls.TextBox();
+                    Views.FocusPolicy.SetTabOrder(t, order);
+                    return t;
+                }
+                // 树序【故意反着排】:设置条(20+)先进树、会话卡(10+)后进树 —— 与回信页真实结构同型
+                var bar = new System.Windows.Controls.StackPanel();
+                var b20 = Box(20); var b21 = Box(21);
+                bar.Children.Add(b20); bar.Children.Add(b21);
+                var card = new System.Windows.Controls.StackPanel();
+                var b10 = Box(10); var b11 = Box(11);
+                card.Children.Add(b10); card.Children.Add(b11);
+                var hiddenHost = new System.Windows.Controls.StackPanel { Visibility = System.Windows.Visibility.Collapsed };
+                var bHidden = Box(12); hiddenHost.Children.Add(bHidden);
+                var offHost = new System.Windows.Controls.StackPanel { IsEnabled = false };
+                var bOff = Box(13); offHost.Children.Add(bOff);
+                var root = new System.Windows.Controls.StackPanel();
+                root.Children.Add(bar); root.Children.Add(card);
+                root.Children.Add(hiddenHost); root.Children.Add(offHost);
+                root.Measure(new System.Windows.Size(400, 400));
+                root.Arrange(new System.Windows.Rect(0, 0, 400, 400));
+
+                var ring = Views.FocusPolicy.Ring(root);
+                Assert(ring.Count == 4, $"★ 圈里只收【登记过】的输入框(实得 {ring.Count} 个)");
+                Assert(ring.Count == 4 && ReferenceEquals(ring[0], b10) && ReferenceEquals(ring[1], b11)
+                       && ReferenceEquals(ring[2], b20) && ReferenceEquals(ring[3], b21),
+                       "★★ 顺序按 TabOrder 而不是树序 —— 回信页设置条在树里排在会话卡【前面】,"
+                       + "靠树序走出来的 Tab 是自下而上的");
+                Assert(!ring.Contains(bHidden), "★ 声明为 Collapsed 的分支整枝跳过(藏起来的框不该被 Tab 到)");
+                Assert(!ring.Contains(bOff), "★ IsEnabled=false 的分支整枝跳过(生成中被禁用的框不该被 Tab 到)");
+
+                Assert(ReferenceEquals(Views.FocusPolicy.Next(ring, b10, back: false), b11), "Tab 往后一个");
+                Assert(ReferenceEquals(Views.FocusPolicy.Next(ring, b21, back: false), b10), "★ 走到末尾绕回第一个");
+                Assert(ReferenceEquals(Views.FocusPolicy.Next(ring, b11, back: true), b10), "★★ Shift+Tab 往【回】转(忽略 back 的话这条会红)");
+                Assert(ReferenceEquals(Views.FocusPolicy.Next(ring, b10, back: true), b21), "★ 往回走到头绕到最后一个");
+                Assert(ReferenceEquals(Views.FocusPolicy.Next(ring, null, back: false), b10), "焦点不在圈里 -> 落到第一个");
+                Assert(Views.FocusPolicy.Next(new List<System.Windows.FrameworkElement>(), b10, back: false) is null, "空圈 -> null");
+
+                // IsInsideInput:按【类型白名单】上溯,ComboBox/PasswordBox 都得认
+                Assert(Views.FocusPolicy.IsInsideInput(b10), "输入框自己算在输入里");
+                var inner = new System.Windows.Controls.Border();
+                var cb = new System.Windows.Controls.ComboBox();
+                Assert(Views.FocusPolicy.IsInsideInput(cb), "★ ComboBox 算输入(否则点开下拉就丢焦点)");
+                Assert(Views.FocusPolicy.IsInsideInput(new System.Windows.Controls.PasswordBox()),
+                       "★ PasswordBox 不是 TextBoxBase 的子类,得单列");
+                Assert(!Views.FocusPolicy.IsInsideInput(inner), "★ 纯板块容器不算输入 —— 按 Focusable 判会把它们全误判(那正是被否掉的打地鼠路线)");
+
+                // KeepsKeyboardFocus:声明了的那一块,点别处不许把它的焦点停走
+                var keeper = new System.Windows.Controls.Border();
+                Views.FocusPolicy.SetKeepsKeyboardFocus(keeper, true);
+                Assert(Views.FocusPolicy.GetKeepsKeyboardFocus(keeper) && !Views.FocusPolicy.GetKeepsKeyboardFocus(inner),
+                       "★ 收快捷键的那一块认得出来(文件翻译的 Del / Ctrl+Z 靠它保住焦点)");
+            }
+
             var mwTab = TryReadSource("MainWindow.xaml.cs");
             if (mwTab is not null)
             {
@@ -4787,9 +4884,14 @@ public static class Selftest
                 Assert(mwPark is not null && mwPark.Contains("FocusPolicy.IsInsideInput(d)") && mwPark.Contains("Flyout.IsInside(d)")
                        && mwPark.Contains("FocusPolicy.Park(this, FocusPark)"),
                        "★ 点输入框以外的地方取消聚焦;浮窗内部放行(否则浮窗里的输入框会被清掉)");
-                Assert(mwPark is not null && mwPark.IndexOf("AnyDropDownOpen(this)", StringComparison.Ordinal)
-                       < mwPark.IndexOf("FocusPolicy.Park(this, FocusPark)", StringComparison.Ordinal),
+                // ★ 先确认两串都【在】,再比顺序:IndexOf 找不到返回 -1,而 -1 恒小于任何下标 ——
+                //   照着写"a < b"的话,把守卫整行删掉断言反而变绿(复核 2026-08-03 抓到)。
+                var iDrop = mwPark?.IndexOf("AnyDropDownOpen(this)", StringComparison.Ordinal) ?? -1;
+                var iPark = mwPark?.IndexOf("FocusPolicy.Park(this, FocusPark)", StringComparison.Ordinal) ?? -1;
+                Assert(iDrop >= 0 && iPark >= 0 && iDrop < iPark,
                        "★ 下拉开着时不停焦点 —— 选项在独立 Popup 里,停一下就把下拉关了(删自定义的 × 当场失效)");
+                Assert(mwPark is not null && mwPark.Contains("FocusPolicy.FocusedKeepsFocus()"),
+                       "★★ 自己拿着焦点收快捷键的那一块(文件翻译的 Del / Ctrl+Z)不许被点别处顺手停掉");
             }
             var cvMark = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvMark is not null)
