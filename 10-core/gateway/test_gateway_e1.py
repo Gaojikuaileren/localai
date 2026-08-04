@@ -11,6 +11,43 @@ import gateway
 # 本测试针对 E1(不是认证),故旁路认证桩,当作本机可信。
 gateway.classify_caller = lambda req: "trusted-local"
 
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-05:把「后端不可达」【注入】,不再依赖它碰巧没起。
+#
+#  本文件原来的判据(见开头 docstring)是:「无后端时 chat 转发会 ConnectError → 503,
+#  正好证明 E1 放行了」。**那个前提是环境,不是代码。**
+#  当晚模型第一次真的接进来、llama-server 起在 18081 之后,这些 503 变成了 200,
+#  两个套件当场红/崩。
+#
+#  ★ 比显存闸那条(ASSERTION-PITFALLS 第 5 条)更刺眼的地方:
+#    这条断言**整天是绿的,恰恰因为产品还不能用**。
+#    它把「后端没起」当成了判据的一部分 —— 于是产品做成的那一刻它就坏了。
+#    ⇒ 一条断言若会因为"功能终于能用了"而变红,它测的就不是它自称在测的东西。
+#
+#  修法与 vram_gate 同款:注入,不读环境。让上游调用**恒定**不可达,
+#  于是 503 依然精确表示「E1 放行了、转发被尝试了」,而与谁在跑无关。
+# ══════════════════════════════════════════════════════════════════════
+import httpx as _httpx
+
+
+class _AlwaysUnreachable:
+    """恒定不可达的上游。★ 只在测试里存在 —— 生产的 _client 一个字没改。"""
+
+    def build_request(self, *a, **k):
+        raise _httpx.ConnectError("注入:上游恒定不可达(测试用)")
+
+    async def send(self, *a, **k):
+        raise _httpx.ConnectError("注入:上游恒定不可达(测试用)")
+
+    async def post(self, *a, **k):
+        raise _httpx.ConnectError("注入:上游恒定不可达(测试用)")
+
+
+gateway._client = _AlwaysUnreachable()
+# ★ 元断言:注入要是没生效(比如将来改名了),下面那一堆 503 会退回依赖环境。
+assert not isinstance(gateway._client, _httpx.AsyncClient), "上游注入没生效"
+
+
 client = TestClient(gateway.app, raise_server_exceptions=True)
 _p = _f = 0
 

@@ -141,7 +141,7 @@ check("★★ 提取器没有静默失灵(块数 == 源码里的出现次数)",
 
 ---
 
-## 5. ★★ 会随环境漂移的断言 —— 已踩 1 次,但代价特别大
+## 5. ★★★ 会随环境漂移的断言 —— 已踩 2 次(第 2 次尤其刺眼)
 
 **症状**
 门禁判红,红的却是**与本次改动无关**的一条;换个时间跑又绿了。
@@ -169,6 +169,40 @@ check("★★ 提取器没有静默失灵(块数 == 源码里的出现次数)",
 **★ 一条走过的弯路,省得下一个人再走**:
 Windows 上想用「PATH 里放一个桩 `nvidia-smi.cmd`」来伪造 —— **不成立**。
 `CreateProcess` **不执行 `.cmd`**,`nvidia-smi` 仍然解析到 System32 里的真 exe。
+
+### ★★★ 第 2 次(2026-08-05):**它整天是绿的,恰恰因为产品还不能用**
+
+`test_gateway_e1.py` / `test_lan_edge_policy.py` 里有 11 条断言写成 `status_code == 503`。
+文件开头的 docstring 把理由写得明明白白:
+
+> 「**无后端时** chat 转发会 ConnectError → 503,正好证明「E1 放行了」。」
+
+判据是「E1 有没有放行」,而 503 只是个**顺手拿来的信号** —— 它成立的前提是
+**后端没起**。那天晚上模型第一次真的接进来、`llama-server` 起在 18081 之后,
+这些 503 全变成 200,两个套件当场红/崩(还带 `Event loop is closed` 的收尾噪声,
+让退出码变成 1,运行器报「应该跑却没有汇总行」)。
+
+**为什么这一次比第 1 次更值得记:**
+第 1 次(显存闸)是桌面占用波动弄红的 —— 那是"环境有噪声"。
+这一次是**功能终于能用了**弄红的。它把「产品还没做好」焊进了判据里。
+
+> **⇒ 判据:一条断言若会因为「功能终于能用了」而变红,它测的就不是它自称在测的东西。**
+
+**修法**(与显存闸同款,注入而非读环境):
+
+```python
+class _AlwaysUnreachable:          # 只在测试里存在,生产的 _client 一个字没改
+    def build_request(self, *a, **k): raise httpx.ConnectError("注入:上游恒定不可达")
+    async def send(self, *a, **k):    raise httpx.ConnectError("注入:上游恒定不可达")
+    async def post(self, *a, **k):    raise httpx.ConnectError("注入:上游恒定不可达")
+gateway._client = _AlwaysUnreachable()
+assert not isinstance(gateway._client, httpx.AsyncClient), "上游注入没生效"   # ★ 元断言
+```
+
+于是 503 依然精确表示「E1 放行了、转发被尝试了」,**而与谁在跑无关**。
+
+**★ 自查一遍的办法**:把栈起起来(`start-stack.ps1`)再跑一次全套。
+凡是"只在系统没跑起来时才绿"的断言,那一刻会全部现形。
 
 ---
 

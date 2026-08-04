@@ -245,7 +245,9 @@ public static class Transport
     ///   与"一直没有变化"一模一样,那正是本项目最恨的形状。
     /// </summary>
     public static async Task OpenStream(ClientProfile p, IPEndPoint dial, string path,
-                                        Func<string, Task> onLine, CancellationToken ct)
+                                        Func<string, Task> onLine, CancellationToken ct,
+                                        HttpMethod? method = null, object? body = null,
+                                        Action<int, string>? onNonSuccess = null)
     {
         var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
         var candidate = Cert(Convert.FromBase64String(p.DeviceCertB64));
@@ -253,12 +255,21 @@ public static class Transport
         using var clientCert = candidate.CopyWithPrivateKey(key);
         using var cli = Trusted(dial, caPublic, clientCert);
         cli.Timeout = Timeout.InfiniteTimeSpan;
-        using var req = new HttpRequestMessage(HttpMethod.Get, p.EdgeUrl + path);
+        using var req = new HttpRequestMessage(method ?? HttpMethod.Get, p.EdgeUrl + path);
+        if (body is not null)
+            req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
         req.Headers.TryAddWithoutValidation("X-LocalAI-Protocol", "1");
         using var r = await cli.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!r.IsSuccessStatusCode)
-            throw new HttpRequestException($"推送流被拒:{(int)r.StatusCode}");
+        {
+            // ★★ 非 2xx 时**先把正文读出来再抛**。网关在这条路径上回的是带归因的 JSON
+            //   (哪个别名、什么类型、去哪看日志),丢掉它等于把"后端没起"退化成"连不上",
+            //   而这两件事的下一步完全不同。
+            var raw = await r.Content.ReadAsStringAsync(ct);
+            onNonSuccess?.Invoke((int)r.StatusCode, raw);
+            throw new HttpRequestException($"流式请求被拒:{(int)r.StatusCode}");
+        }
         using var stream = await r.Content.ReadAsStreamAsync(ct);
         using var rd = new StreamReader(stream, Encoding.UTF8);
         while (!ct.IsCancellationRequested)

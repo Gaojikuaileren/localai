@@ -1872,7 +1872,32 @@ public sealed class ChatView : UserControl
         _pending.Clear();
         _draft = "";
         _justSent = true;          // ★ 就置在这儿:上面每一条早退都不该留下这面旗子
-        TheApp.Chat.Send(_sessionId, text, atts);
+
+        // ══════════════════════════════════════════════════════════════
+        //  P4-S11:真的发给模型(流式)。
+        //
+        //  ★★ 两条路径,判据是【中枢在不在】,不是"接没接入":
+        //    · 配对了 → 走真链路 SendAndAskAsync;失败逐种给不同的下一步(见 ChatOutcome.Advice)。
+        //    · 没配对 → 仍走 Send 那条**诚实占位**路径(记消息 + 说明),绝不伪造回复。
+        //  ★ 不在这里判"后端起没起" —— 那要发出去才知道,而猜一个"起了吧"再显示成功
+        //    正是本项目最恨的形状。让它真的失败,再如实说该做什么。
+        // ══════════════════════════════════════════════════════════════
+        if (!TheApp.Hub.IsPaired)
+        {
+            TheApp.Chat.Send(_sessionId, text, atts);
+            return;
+        }
+
+        var sid = _sessionId;
+        // ★ 中枢当前驻留的组件 → 上下文窗口。读不到就由 TokenBudget 按最小档保守估(见那边的说明)。
+        var committed = TheApp.Gpu.Snapshot?.Committed;
+        _ = TheApp.Chat.SendAndAskAsync(
+                sid, text, TheApp.Hub, committed, atts,
+                // ★ onTick 在后台线程被调 —— 必须切回 UI 线程再刷,
+                //   而且用 BeginInvoke(非阻塞):流式一秒能来几十帧,同步 Invoke 会把它自己堵死。
+                onTick: () => Dispatcher.BeginInvoke(new Action(BuildConversation)))
+            .ContinueWith(_ => Dispatcher.BeginInvoke(new Action(BuildConversation)),
+                          TaskScheduler.Default);
     }
 
     // 附件上限与"上下文吃紧"阈值(用户裁定):最多 99 个;超过 5 个提示、且只展开显示前 5 个。

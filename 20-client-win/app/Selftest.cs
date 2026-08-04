@@ -4227,6 +4227,120 @@ public static class Selftest
                 }
             }
 
+            // ══════════════════════════════════════════════════════════════
+            //  P4-S11:接入模型(流式 + token 预算截断)
+            //
+            //  ★★★ 这一组守的是「绝不伪造回复」在**每一条失败路径上**都成立。
+            //    模型接进来之后,最危险的新形状是:某条失败路径悄悄写下一条 Assistant 消息,
+            //    于是"模型说的"和"客户端编的"分不开了。
+            // ══════════════════════════════════════════════════════════════
+            {
+                // ① token 估算必须【估高不估低】—— 估低会撞上下文窗口,而用户只看到"它忘了前面"
+                Assert(Services.TokenBudget.Estimate("你好世界") == 4, "CJK 按 1 token 估");
+                Assert(Services.TokenBudget.Estimate("abcdefghi") >= 3, "英文按 3 字符 1 token(常见口径是 4 = 估高)");
+                Assert(Services.TokenBudget.Estimate("abcd") == 2, "★ 向上取整 = 估高");
+                Assert(Services.TokenBudget.Estimate("") == 0 && Services.TokenBudget.Estimate(null) == 0,
+                       "空文本 0 token");
+
+                // ② 窗口从组件 id 推,推不出来取【最小】那一档
+                Assert(Services.TokenBudget.WindowOf("llm.assistant.8b@16k") == 16384, "16k 解析对");
+                Assert(Services.TokenBudget.WindowOf("llm.assistant.30b-a3b@32k") == 32768, "32k 解析对");
+                Assert(Services.TokenBudget.WindowOf("speech.lite") == 0, "没有 @ 的组件推不出窗口");
+                var (w1, g1) = Services.TokenBudget.WindowFrom(new[] { "llm.assistant.8b@32k", "llm.assistant.8b@8k" });
+                Assert(w1 == 8192 && !g1,
+                       "★★ 多个 llm 同时驻留取【最小】—— 请求落到哪个由中枢的别名路由决定,客户端猜不了");
+                var (w2, g2) = Services.TokenBudget.WindowFrom(new[] { "speech.lite" });
+                Assert(w2 == Services.TokenBudget.FallbackWindow && g2,
+                       "★★ 一个都推不出来 → 回落到最小档【并标记 isGuess】,不拿个大数蒙混");
+                var (w3, g3) = Services.TokenBudget.WindowFrom(null);
+                Assert(w3 == Services.TokenBudget.FallbackWindow && g3, "读不到中枢数据也是保守 + 标记");
+
+                // ③ 截断:从最近往回装,丢掉的必须是【最早的】
+                var s11hist = new List<Services.ChatMessage>();
+                for (int i = 0; i < 200; i++)
+                    s11hist.Add(new Services.ChatMessage("s", i % 2 == 0 ? Services.ChatRole.User : Services.ChatRole.Assistant,
+                                                        new string('字', 200), DateTime.Now, null, "m" + i));
+                var s11plan = Services.TokenBudget.Plan(s11hist, "现在这条", new[] { "llm.assistant.8b@8k" });
+                Assert(s11plan.Truncated, "200 条 × 200 字装不进 8K 窗口 ⇒ 必然截断");
+                Assert(s11plan.Included.Count > 0 && s11plan.Included.Count < 200, "带了一部分");
+                Assert(s11plan.Included[^1].MessageId == "m199",
+                       "★★ 留下的是【最近的】—— 丢中间会让对话逻辑断裂,而用户完全看不出来");
+                Assert(s11plan.EstimatedTokens <= s11plan.BudgetTokens,
+                       "★ 估算总量不超预算(预算已扣掉给回答的余量)");
+                Assert(s11plan.BudgetTokens == 8192 - Services.TokenBudget.ReplyReserve,
+                       "★ 预算 = 窗口 − 回答余量:装不下答案的上下文等于没装");
+
+                // ★★ 截断必须【看得见】
+                Assert(s11plan.Caption.Contains("/") && s11plan.Caption.Contains("估算"),
+                       "★★ 界面文案写明「带了 N / 共 M」且标【估算】—— 不能读起来像精确 token 数");
+                Assert(s11plan.Caption.Contains("更早的没带上"),
+                       "★★ 静默丢历史 = 用户以为它记得而它没有;必须说出来");
+
+                // ★ System 消息不上行 —— 那是我们自己的界面文案
+                var s11mixed = new List<Services.ChatMessage> {
+                    new("s", Services.ChatRole.User, "问", DateTime.Now, null, "a"),
+                    new("s", Services.ChatRole.System, "AI 模型尚未接入(P4)", DateTime.Now, null, "b"),
+                    new("s", Services.ChatRole.Assistant, "答", DateTime.Now, null, "c"),
+                };
+                var s11p2 = Services.TokenBudget.Plan(s11mixed, "再问", null);
+                Assert(s11p2.Included.All(m => m.Role != Services.ChatRole.System),
+                       "★★ System 消息不发给模型 —— 那是客户端自己的说明,发上去等于让模型读我们的界面文案");
+                Assert(s11p2.TotalCandidates == 2, "候选只数 User/Assistant");
+
+                // ④ 失败路径:每种给不同的下一步,且【绝不伪造回复】
+                string S11Adv(string code) => new Services.ChatOutcome(false, code, "m").Advice;
+                var s11codes = new[] { "not_paired", "backend_unavailable", "backend_error",
+                                       "denied_quota", "hub_offline", "stream_broken", "e1_blocked" };
+                Assert(s11codes.Select(S11Adv).Distinct().Count() == s11codes.Length,
+                       "★★ 七种失败七种说法 —— 合并成「发送失败」会让用户无从判断下一步");
+                Assert(S11Adv("backend_unavailable").Contains("start-stack"),
+                       "★★ 后端没起要说清【怎么起】,而不是只说连不上");
+                Assert(S11Adv("backend_error").Contains("不是连不上"),
+                       "★ 后端应答了但报错 ≠ 连不上:前者去看日志,后者去看进程");
+                Assert(S11Adv("stream_broken").Contains("真的说过") && S11Adv("stream_broken").Contains("没说完"),
+                       "★★ 半截回答要说清【上面那段是模型真说的,但没说完】");
+                Assert(S11Adv("e1_blocked").Contains("之前") && S11Adv("e1_blocked").Contains("没有发出去"),
+                       "★ 凭证被 E1 拦下要说清是在【送进模型之前】拦的");
+
+                // ⑤ 源码级:失败路径不得写 Assistant 消息
+                var s11cc = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                if (s11cc is not null)
+                {
+                    var ask = Slice(s11cc, "public async Task<ChatOutcome> SendAndAskAsync", "播种/导入用");
+                    Assert(ask is not null && ask.Contains("_messages.RemoveAt(idx)"),
+                           "★★★ 一个字都没收到时【删掉那条空回复】—— 不留一条空 Assistant 冒充回答");
+                    Assert(ask is not null && ask.Contains("res.Partial.Length > 0"),
+                           "★★ 半截保留(模型真说过的不能丢)");
+                    Assert(!CodeOnly(ask ?? "").Contains("ChatRole.Assistant, res.Advice"),
+                           "★★★ 失败说明走 System,绝不写成 Assistant");
+                }
+                var s11cli = TryReadSource(Path.Combine("Services", "ChatClient.cs"));
+                if (s11cli is not null)
+                {
+                    Assert(s11cli.Contains("sb.Length == 0") && s11cli.Contains("stream_broken"),
+                           "★★ 流正常结束却一个字都没有 ⇒ 不当成成功(那是「200 + 空 body」的另一种形态)");
+                    Assert(s11cli.Contains("errStatus != 0") && s11cli.Contains("ParseError"),
+                           "★★ 非 2xx 时读出网关的归因,别退化成「连接失败」");
+                    Assert(s11cli.Contains("assistant.fast"),
+                           "★ 客户端点【别名】不点组件 —— 换模型时客户端一行都不用改(§8.1)");
+                    Assert(!CodeOnly(s11cli).Contains("llm.assistant"),
+                           "★ 客户端调用路径里不得出现显存组件 id(那是中枢的词汇,客户端只认别名)");
+                }
+                var s11cv = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                if (s11cv is not null)
+                {
+                    Assert(s11cv.Contains("SendAndAskAsync"), "★ 发送按钮走真链路");
+                    Assert(s11cv.Contains("TheApp.Hub.IsPaired"),
+                           "★ 没配对时仍走那条诚实占位路径(不伪造回复)");
+                    Assert(s11cv.Contains("Dispatcher.BeginInvoke"),
+                           "★★ 流式回调在后台线程:必须切回 UI 且用 BeginInvoke —— "
+                           + "一秒几十帧,同步 Invoke 会把自己堵死");
+                }
+                var s11tr = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
+                Assert(s11tr is null || s11tr.Contains("onNonSuccess"),
+                       "★★ 流式非 2xx 时先把正文读出来 —— 丢掉它等于把「后端没起」退化成「连不上」");
+            }
+
             // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----
             {
                 var hv = TryReadSource(Path.Combine("Views", "HomeView.cs"));

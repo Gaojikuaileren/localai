@@ -552,6 +552,105 @@ public sealed class ChatCenter
         return true;
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  P4-S11 · 真的把消息发给模型
+    //
+    //  ★★★ 三条硬规矩(都是「失败必须长得和成功不一样」的具体形态):
+    //    ① **任何失败路径都不写 Assistant 消息** —— 写了就分不清"模型说的"和"客户端编的"。
+    //       失败一律走 System 说明。
+    //    ② 流式中途断了,**已经吐出来的半截保留**(那是模型真说的),
+    //       但后面必须补一条系统说明写清"这条没说完"。
+    //       丢掉 = 用户以为没发生过;不说明 = 用户以为它就说这么多。
+    //    ③ **未配对 / 后端没起时,回到那条诚实占位说明** —— 不是显示"发送失败"就完了,
+    //       要说清该做什么(见 ChatOutcome.Advice)。
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>正在流式接收的那条回复的 MessageId(null = 没有在进行的请求)。</summary>
+    public string? StreamingMessageId { get; private set; }
+
+    /// <summary>
+    /// 发一条用户消息并向中枢请求回复(流式)。返回本轮结局。
+    /// ★ 与 <see cref="Send"/> 的分工:Send 是"模型没接入"那条路径上的诚实占位,
+    ///   本方法是真链路。两者都**不伪造回复**。
+    /// </summary>
+    public async Task<ChatOutcome> SendAndAskAsync(
+        string sessionId, string text, HubClient hub,
+        IEnumerable<string>? committedComponents,
+        IReadOnlyList<ChatAttachment>? attachments = null,
+        Action? onTick = null, CancellationToken ct = default)
+    {
+        text = text?.Trim() ?? "";
+        var hasAtt = attachments is { Count: > 0 };
+        if (text.Length == 0 && !hasAtt) return new ChatOutcome(false, "empty", "空消息");
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i < 0) return new ChatOutcome(false, "no_session", "会话不存在");
+
+        var first = !_messages.Any(m => m.SessionId == sessionId && m.Role == ChatRole.User);
+        _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments, NewMsgId()));
+
+        // ★ 历史取【本会话的、这条用户消息之前的】—— 刚加进去的那条由 Plan 单独计入
+        var history = _messages
+            .Where(m => m.SessionId == sessionId)
+            .Take(Math.Max(0, _messages.Count(m => m.SessionId == sessionId) - 1))
+            .ToList();
+        var plan = TokenBudget.Plan(history, text, committedComponents);
+
+        // ★ 先占一条空的 Assistant 消息作为流式落点。★ 它**不是伪造** ——
+        //   它是"正在说"的容器;失败时会被删掉,绝不留下一条空回复冒充回答。
+        var replyId = NewMsgId();
+        _messages.Add(new ChatMessage(sessionId, ChatRole.Assistant, "", DateTime.Now, null, replyId));
+        StreamingMessageId = replyId;
+        _sessions[i] = _sessions[i] with
+        {
+            LastActive = DateTime.Now,
+            Title = first && text.Length > 0 ? Trim(text) : _sessions[i].Title,
+        };
+        Changed?.Invoke();
+
+        var buf = new System.Text.StringBuilder();
+        ChatOutcome res;
+        try
+        {
+            res = await ChatClient.StreamAsync(hub, history, text, committedComponents,
+                delta =>
+                {
+                    buf.Append(delta);
+                    var k = _messages.FindIndex(m => m.MessageId == replyId);
+                    if (k >= 0) _messages[k] = _messages[k] with { Text = buf.ToString() };
+                    onTick?.Invoke();
+                    return Task.CompletedTask;
+                }, ct);
+        }
+        finally { StreamingMessageId = null; }
+
+        var idx = _messages.FindIndex(m => m.MessageId == replyId);
+        if (res.Ok)
+        {
+            if (idx >= 0) _messages[idx] = _messages[idx] with { Text = res.Text() };
+        }
+        else if (res.Partial.Length > 0)
+        {
+            // ★ 半截保留(模型真说过),后面补一条说明它没说完
+            if (idx >= 0) _messages[idx] = _messages[idx] with { Text = res.Partial };
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System, res.Advice,
+                                          DateTime.Now, null, NewMsgId()));
+        }
+        else
+        {
+            // ★★ 一个字都没有 ⇒ **把那条空回复删掉**,不留一条空 Assistant 冒充回答
+            if (idx >= 0) _messages.RemoveAt(idx);
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System, res.Advice,
+                                          DateTime.Now, null, NewMsgId()));
+        }
+        // ★ 截断了就说出来 —— 静默丢历史 = 用户以为它记得,而它没有
+        if (plan.Truncated || plan.WindowIsGuess)
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System,
+                                          plan.Caption + "。" + plan.Note,
+                                          DateTime.Now, null, NewMsgId()));
+        Changed?.Invoke();
+        return res;
+    }
+
     /// <summary>
     /// 播种/导入用:直接写一条消息,【不】附带"AI 未接入"的系统说明。
     /// ★ 只给示例数据和(将来的)同传转写用 —— 用户发消息仍然走 Send,
