@@ -60,4 +60,50 @@ EOF
   exit 1
 fi
 
+# =============================================================================
+#  ② 自检门禁(2026-08-04 加)
+#
+#  ★ 起因:此前【没有任何东西】会自动跑这个项目的断言 —— 而项目的质量模型完全
+#    建立在断言上。按项目自己的标准,没人跑的断言就是假断言。
+#
+#  ★ 只在【本次提交真的动了相关代码】时才跑:
+#    20 秒的钩子如果每次提交都跑,人会开始习惯性 --no-verify —— 那等于没有钩子。
+#    改文档、改客户端不碰这两个目录时,这一段直接跳过。
+#
+#  ★ 只跑 fast 层(gateway / gpu-broker,纯逻辑无外部状态)。
+#    记忆套件连真实库且需 ai-mem 身份、dotnet 与客户端自检要数分钟 ——
+#    两者都由 90-ops\run-tests.ps1 -Full 显式跑,不进提交钩子。
+# =============================================================================
+changed_core=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^10-core/(gateway|gpu-broker)/' || true)
+
+if [ -n "$changed_core" ]; then
+  echo "→ 动了 10-core/gateway 或 gpu-broker,跑一遍自检…"
+  if command -v powershell >/dev/null 2>&1; then
+    powershell -ExecutionPolicy Bypass -NoProfile -File "90-ops/run-tests.ps1" >/tmp/localai-precommit.log 2>&1
+    rc=$?
+  else
+    echo "  ! 找不到 powershell —— 无法跑自检。"
+    echo "    ★ 这【不算通过】:跑不了和跑过了必须长得不一样。"
+    exit 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo ""
+    tail -40 /tmp/localai-precommit.log
+    cat <<'EOF'
+
+────────────────────────────────────────────────────────────
+提交被拒绝 — 自检没过。
+
+  完整输出:  /tmp/localai-precommit.log
+  自己复跑:  powershell -File 90-ops\run-tests.ps1
+  连 dotnet 与客户端一起:  powershell -File 90-ops\run-tests.ps1 -Full
+
+确需绕过(不建议):  git commit --no-verify
+────────────────────────────────────────────────────────────
+EOF
+    exit 1
+  fi
+  echo "  √ 自检通过($(grep -oE 'PASS=[0-9]+ FAIL=0' /tmp/localai-precommit.log | tail -1))"
+fi
+
 exit 0
