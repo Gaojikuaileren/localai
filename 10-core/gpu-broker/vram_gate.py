@@ -190,40 +190,117 @@ def evaluate(component_ids: List[str],
     )
 
 
-def preview(component_ids: List[str], cfg: Optional[Config] = None) -> str:
+_UNSET = object()
+
+
+def preview(component_ids: List[str], cfg: Optional[Config] = None,
+            free=_UNSET, verdict: Optional[Verdict] = None) -> str:
     """三段预览(§8.1)。★ 缺一段就是在骗人 —— 只显示「装得下」是不够的:
-    桌面占用是**波动**的,你需要知道自己离墙有多远,而不是知道此刻没撞墙。"""
+    桌面占用是**波动**的,你需要知道自己离墙有多远,而不是知道此刻没撞墙。
+
+    ★★ 2026-08-04:新增 free / verdict 两个可注入参数。原实现自己采一次 NVML,
+      而 `__main__` 随后又调 `evaluate()` 采第二次 —— **打印出来的判定与退出码来自两次
+      独立采样**,中间桌面占用一变,二者就能互相矛盾(§8.1 规则 18「预览与准入必须是同一段
+      代码」当时只满足一半)。现在调用方可以把同一次采样与同一个 Verdict 传进来。
+
+    ★ 判定符用 ASCII 的 [OK]/[XX],不用 ✓/✗:承重的那个 token 不该依赖控制台编码 ——
+      cp936 打不出 U+2713,而这正是本文件唯一的生产入口一直崩在的地方(见 __main__)。
+    """
     cfg = cfg or load_config()
-    free = nvml_free_gib()
-    total = round(sum(cfg.peak(c) for c in component_ids if c in cfg.components), 4)
-    v = evaluate(component_ids, cfg, free=free)
+    if free is _UNSET:
+        free = nvml_free_gib()
+    if verdict is None:
+        verdict = evaluate(component_ids, cfg, free=free)
+    v = verdict
+    known = [c for c in component_ids if c in cfg.components]
+    unknown = [c for c in component_ids if c not in cfg.components]
+    total = round(sum(cfg.peak(c) for c in known), 4)
+    # ★ 未登记组件不再被静默过滤掉:那会让①段显示一个偏小的合计、甚至标成"装得下",
+    #   而准入白名单其实已经拒了它 —— 预览与准入在**恰好是白名单存在理由**的那个输入上
+    #   给出相反结论。现在显式标出来。
+    seg1 = "① 已选组件   " + "  ".join(f"{c} {cfg.peak(c):.2f}" for c in known) + f"   = {total:.2f}"
+    if unknown:
+        seg1 += "   ⟨未登记: " + "、".join(unknown) + "⟩"
     lines = [
-        "① 已选组件   " + "  ".join(f"{c} {cfg.peak(c):.2f}" for c in component_ids if c in cfg.components)
-        + f"   = {total:.2f}",
+        seg1,
         f"② 桌面预留   desktop_floor {cfg.budget.desktop_floor:.2f}  →  vram_budget = {cfg.budget.vram_budget:.2f}"
         + (f"   [标定: {cfg.budget.calibrated}]" if cfg.budget.calibrated != "true" else ""),
         f"③ 此刻可用   NVML free {free:.2f}" if free is not None else "③ 此刻可用   (读不到)",
-        "─" * 62,
-        ("  可以确定 ✓  " + v.message) if v.ok else ("  不能确定 ✗\n  " + v.message.replace("\n", "\n  ")),
+        "-" * 62,
+        ("  可以确定 [OK]  " + v.message) if v.ok else ("  不能确定 [XX]\n  " + v.message.replace("\n", "\n  ")),
     ]
     return "\n".join(lines)
 
 
+# ── CLI ───────────────────────────────────────────────────────────
+#  退出码是【三态】的,不是两态。★★ 2026-08-04:这是本次修复的核心。
+#
+#  原实现只有 0/1,于是「闸判定为拒」与「闸自己崩了」在退出码这一位上**完全不可分辨**,
+#  而 start-stack.ps1 只看退出码。实测后果(自 2026-07-28 集成起一直如此):
+#    在没有 PYTHONIOENCODING 的干净 PowerShell(cp936)里,连**通过**的路径也会在
+#    `print(preview(...))` 处抛 UnicodeEncodeError —— 因为判定符是 U+2713 ✓,GBK 里没有。
+#    stdout 为空、退出码 1 ⇒ start-stack 打印「拒绝启动」。
+#    ⇒ 这台机器上要么起不了栈,要么每次靠 -Force,而 **-Force 把三道闸整个跳过**。
+#      那道「无 Broker 期显存过渡措施」因此实际上一天都没生效过。
+#
+#  形状与 2026-08-04 早些时候修掉的出包门禁同源:**失败与成功长得一模一样**。
+EXIT_OK      = 0   # 判定:通过
+EXIT_REFUSED = 1   # 判定:拒绝(三道闸之一说不行)—— 这是闸在正常工作
+EXIT_BROKEN  = 2   # 闸【没能跑起来】:配置坏了 / 解析失败 / 自身异常。调用方不得当成"被拒"
+
+def main(argv: List[str]) -> int:
+    """CLI 主体。★ 抽成函数是为了让「闸崩了 → 退出码 2」这条**可测** ——
+    留在 `if __name__` 里的话,只能靠篡改真实配置文件来触发异常路径。"""
+    import sys
+
+    # ★ 双保险之一:显式把 stdout 拉到 utf-8。判定符已改 ASCII(双保险之二),
+    #   但组件 id、note、中文文案仍可能超出 cp936;errors='replace' 保证**永远打得出字**。
+    #   宁可看到一个 '?',也不要让一道安全闸因为控制台编码而变成"拒绝"。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    try:
+        args = [a for a in argv if not a.startswith("-")]
+        cfg = load_config()
+
+        if not args:
+            print("可用组件:")
+            for cid, c in sorted(cfg.components.items(), key=lambda kv: kv[1]["peak"]):
+                print(f"  {cid:32} {float(c['peak']):5.2f}  {c.get('note','')}")
+            print(f"\nvram_budget = {cfg.budget.total_vram} - {cfg.budget.desktop_floor}"
+                  f" - {cfg.budget.safety_margin} = {cfg.budget.vram_budget:.2f} GiB")
+            print("\n推荐组合:")
+            for name, p in cfg.presets.items():
+                ids = p["components"]
+                # ★ 预设里引用未登记组件时不再静默过滤:那会打出一个偏小的合计并可能标 [OK],
+                #   而真去申请会被准入白名单拒 —— 又一处"预览与准入结论相反"。
+                bad = [i for i in ids if i not in cfg.components]
+                tot = sum(cfg.peak(i) for i in ids if i in cfg.components)
+                mark = "[XX]" if bad else ("[OK]" if tot <= cfg.budget.vram_budget else "[XX]")
+                tail = ("  <未登记: " + "、".join(bad) + ">") if bad else ""
+                print(f"  {p['label']:8} {tot:5.2f}  {mark}  {'、'.join(ids)}{tail}")
+            return EXIT_OK
+
+        # ★ 只采样一次 NVML,预览与退出码共用同一个 Verdict —— 见 preview() 的说明。
+        free = nvml_free_gib()
+        v = evaluate(args, cfg, free=free)
+        print(preview(args, cfg, free=free, verdict=v))
+        return EXIT_OK if v.ok else EXIT_REFUSED
+
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 闸自己坏了 —— 必须与"被拒"分开,否则调用方会把一次崩溃当成一次正常拒绝,
+        #   而"正常拒绝"是可以用 -Force 覆盖的。崩溃不可以。
+        import traceback
+        print(f"[闸自身异常] {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc()
+        print("  -> 这【不是】判定为拒,是显存闸没能跑起来。不得据此 -Force 强行启动:"
+              "没拿到判定就装 = §12.3 禁止的静默降级。", file=sys.stderr)
+        return EXIT_BROKEN
+
+
 if __name__ == "__main__":
     import sys
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args:
-        cfg = load_config()
-        print("可用组件:")
-        for cid, c in sorted(cfg.components.items(), key=lambda kv: kv[1]["peak"]):
-            print(f"  {cid:32} {float(c['peak']):5.2f}  {c.get('note','')}")
-        print(f"\nvram_budget = {cfg.budget.total_vram} − {cfg.budget.desktop_floor}"
-              f" − {cfg.budget.safety_margin} = {cfg.budget.vram_budget:.2f} GiB")
-        print("\n推荐组合:")
-        for name, p in cfg.presets.items():
-            ids = p["components"]
-            tot = sum(cfg.peak(i) for i in ids if i in cfg.components)
-            print(f"  {p['label']:8} {tot:5.2f}  {'✓' if tot <= cfg.budget.vram_budget else '✗'}  {'、'.join(ids)}")
-        sys.exit(0)
-    print(preview(args))
-    sys.exit(0 if evaluate(args).ok else 1)
+    sys.exit(main(sys.argv[1:]))

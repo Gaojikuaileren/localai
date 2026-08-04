@@ -105,5 +105,157 @@ for name, p in cfg.presets.items():
         check(f"preset {name} 注释与算术一致(Σ={tot})", fits == claimed_fit,
               f"算术 fits={fits} 注释={'✓' if claimed_fit else '✗'}")
 
+# ══════════════════════════════════════════════════════════════════════
+#  S0 · 闸复活(2026-08-04)
+#
+#  起因:实测发现 vram_gate 的【唯一生产集成】一直是坏的 —— 在没有 PYTHONIOENCODING
+#  的干净 PowerShell(cp936)里,连**通过**的路径也会在 print(preview(...)) 抛
+#  UnicodeEncodeError(判定符是 U+2713 ✓,GBK 里没有),stdout 为空、退出码 1,
+#  而 start-stack.ps1 只看退出码 ⇒ 打印「拒绝启动」。
+#  ⇒ 这台机器上要么起不了栈、要么靠 -Force,而 -Force 把三道闸整个跳过。
+#
+#  ★ 上面那 38 条断言全绿却没发现它 —— 因为它们是【进程内】跑的,
+#    而坏掉的恰好是那条唯一的、跨进程的生产路径。这一节专治这个盲区。
+# ══════════════════════════════════════════════════════════════════════
+import os
+import re
+import subprocess
+import tomllib
+from pathlib import Path
+
+import vram_gate
+
+_HERE = Path(__file__).resolve().parent
+_REPO = _HERE.parents[1]
+
+print("=== 9. ★ 反向全表:组件表必须【逐字】等于期望的 9 项,且每项 peak 单独钉住 ===")
+#   正向逐项测只守得住已知项;新增一个组件会**静默进入准入白名单并参与算术**,
+#   而准入白名单正是"漏了会响亮报错"的那道闸 —— 它自己反而没人守。
+EXPECTED_PEAKS = {
+    "llm.assistant.8b@8k":       5.31,   # ★ 2026-08-04 由 5.0 更正(见 toml 内注释)
+    "llm.assistant.8b@16k":      5.92,
+    "llm.assistant.8b@32k":      7.19,
+    "llm.assistant.30b-a3b@32k": 11.9,
+    "speech.lite":               2.07,
+    "speech.full":               4.05,
+    "vlm.small":                 4.35,
+    "comfyui.sdxl":              8.14,
+    "comfyui.sdxl.lowvram":      7.8,
+}
+check("组件集合逐字相等(新增/删除组件必须改这里)",
+      set(cfg.components) == set(EXPECTED_PEAKS),
+      f"多出 {sorted(set(cfg.components) - set(EXPECTED_PEAKS))} 少了 {sorted(set(EXPECTED_PEAKS) - set(cfg.components))}")
+for cid, want in EXPECTED_PEAKS.items():
+    if cid in cfg.components:
+        check(f"{cid} peak = {want}", abs(cfg.peak(cid) - want) < 1e-9, f"实得 {cfg.peak(cid)}")
+
+print("=== 10. ★ 跨文档对拍:toml 的 peak 必须等于方案书 §8.1.2 NUM-1 表的同名行 ===")
+#   NUM-1 自称「v2.2 唯一权威表」。两处各写一份数字,迟早会漂 —— 事实上已经漂了一处:
+#   8b@8k 在 toml 里是 5.0,而那是 NUM-1 同行的【权重】列,不是 peak 列(peak 是 5.31)。
+_plan = (_REPO / "00-docs" / "PROJECT_PLAN_v3.0.md").read_text(encoding="utf-8")
+_num1 = {}
+for m in re.finditer(r"^\|\s*\**`([a-z0-9._@\-]+)`\**[^|]*\|(.+)$", _plan, re.M):
+    cid, rest = m.group(1), m.group(2)
+    cells = [c.strip() for c in rest.split("|")]
+    if len(cells) < 4:
+        continue
+    # peak 是第 4 个单元格(权重 | KV | CUDA ctx | peak)。
+    # ★ 该列里有「旧值划掉 → 新值」的写法,例如 `~~11.0~~ → **8.14** ★实测`、
+    #   `~~**3.2**~~ → **实测 4.35**`。取箭头【后】的那个数,取前面的会拿到已作废的估算值
+    #   (第一版就栽在这儿:comfyui.sdxl 读成 11.0、vlm.small 读成 3.2,报了两条假红)。
+    cell = cells[3]
+    if "→" in cell:
+        cell = cell.rsplit("→", 1)[1]
+    mm = re.search(r"(\d+\.?\d*)", cell.replace("~~", ""))
+    if mm and cid not in _num1:
+        _num1[cid] = float(mm.group(1))
+_checked = 0
+for cid, peak in sorted(cfg.components.items()):
+    if cid in _num1:
+        _checked += 1
+        check(f"{cid}:toml {cfg.peak(cid)} == NUM-1 {_num1[cid]}",
+              abs(cfg.peak(cid) - _num1[cid]) < 1e-9,
+              f"toml={cfg.peak(cid)} NUM-1={_num1[cid]} —— 两处数字漂了,先定哪个对再改")
+check("对拍确实覆盖到了组件(否则正则没匹配上,这一组是空转)", _checked >= 6, f"只对上 {_checked} 个")
+
+print("=== 11. ★ 动态闸 fail-closed 必须【真的被执行过】(此前是恒真断言)===")
+#   原第 5 组在本机总是走 else 分支(nvidia-smi 能跑),那条 fail-closed 从没被执行过。
+v = evaluate(["llm.assistant.8b@16k"], cfg, free=None, skip_dynamic=False,
+             ) if False else None
+_saved = vram_gate.nvml_free_gib
+try:
+    vram_gate.nvml_free_gib = lambda: None          # 模拟 nvidia-smi 挂了
+    v = vram_gate.evaluate(["llm.assistant.8b@16k"], cfg)
+    check("NVML 读不到 → 拒绝(不是放行)", not v.ok)
+    check("归因到 dynamic", v.gate == "dynamic", v.gate)
+    check("消息说清是读不到,不是装不下", "读不到" in v.message)
+    check("消息点名这是拒绝执行", "拒绝执行" in v.message)
+finally:
+    vram_gate.nvml_free_gib = _saved
+
+print("=== 12. ★ 退出码三态:通过 0 / 被拒 1 / 闸自己坏了 2 ===")
+#   原来只有 0/1,于是「闸崩了」与「闸判定为拒」不可分辨,而后者可以被 -Force 覆盖、前者不能。
+check("EXIT_OK/REFUSED/BROKEN 三个常量存在且互不相等",
+      len({vram_gate.EXIT_OK, vram_gate.EXIT_REFUSED, vram_gate.EXIT_BROKEN}) == 3)
+check("main() 通过 → 0", vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_OK)
+check("main() 超预算 → 1",
+      vram_gate.main(["llm.assistant.30b-a3b@32k", "comfyui.sdxl"]) == vram_gate.EXIT_REFUSED)
+_saved_load = vram_gate.load_config
+try:
+    def _boom():
+        raise RuntimeError("配置坏了")
+    vram_gate.load_config = _boom
+    check("main() 闸自身异常 → 2(不是 1)",
+          vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_BROKEN)
+finally:
+    vram_gate.load_config = _saved_load
+
+print("=== 13. ★★ 跨进程:干净 cp936 控制台下,通过与拒绝【两条路径都要打得出字】 ===")
+#   ★ 这一条必须以【子进程】方式跑,并显式删掉 PYTHONIOENCODING / PYTHONUTF8 ——
+#     开发用的 shell 往往注入 utf-8,进程内断言会恒真通过,那本身就是一条假断言。
+_env = {k: val for k, val in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+
+
+def _run_cli(*args):
+    r = subprocess.run([sys.executable, str(_HERE / "vram_gate.py"), *args],
+                       capture_output=True, env=_env, cwd=str(_HERE), timeout=60)
+    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+
+_rc, _out, _err = _run_cli("llm.assistant.8b@16k", "speech.lite")
+check("通过路径:退出码 0", _rc == 0, f"实得 {_rc};stderr={_err[:120]}")
+check("通过路径:stdout 非空(修复前这里是空的)", len(_out.strip()) > 0)
+check("通过路径:三段预览齐全", all(s in _out for s in ("① 已选组件", "② 桌面预留", "③ 此刻可用")))
+check("通过路径:判定符是 ASCII 的 [OK]", "[OK]" in _out, _out[:120])
+check("通过路径:没有 UnicodeEncodeError", "UnicodeEncodeError" not in _err, _err[:160])
+
+_rc2, _out2, _err2 = _run_cli("llm.assistant.30b-a3b@32k", "comfyui.sdxl")
+check("拒绝路径:退出码 1", _rc2 == 1, f"实得 {_rc2}")
+check("拒绝路径:stdout 非空", len(_out2.strip()) > 0)
+check("拒绝路径:判定符 [XX] 且给了归因", "[XX]" in _out2 and "静态闸" in _out2)
+check("拒绝路径:没有 UnicodeEncodeError", "UnicodeEncodeError" not in _err2)
+
+_rc3, _out3, _err3 = _run_cli()
+check("无参数(列表模式):退出码 0 且列得出组件", _rc3 == 0 and "vram_budget" in _out3)
+
+print("=== 14. 预览与准入必须是同一段代码(§8.1 规则 18)===")
+#   原 __main__ 采样两次 NVML:preview 里一次、exit 判定里一次 —— 中间桌面一变就能互相矛盾。
+_v = vram_gate.evaluate(["llm.assistant.8b@16k"], cfg, free=9.0)
+_txt = vram_gate.preview(["llm.assistant.8b@16k"], cfg, free=9.0, verdict=_v)
+check("preview 接受注入的 verdict,不再自己重算", "[OK]" in _txt if _v.ok else "[XX]" in _txt)
+check("preview 用的是注入的 free,不重新采样", "9.00" in _txt, _txt[:200])
+
+print("=== 15. 预览不得静默吞掉未登记组件(否则预览与准入结论相反)===")
+_txt2 = vram_gate.preview(["llm.assistant.8b@16k", "llm.bogus"], cfg, free=15.0)
+check("未登记组件在预览里被显式标出", "llm.bogus" in _txt2, _txt2[:200])
+check("同一输入下准入闸确实拒绝",
+      not vram_gate.evaluate(["llm.assistant.8b@16k", "llm.bogus"], cfg, free=15.0).ok)
+
+print("=== 16. start-stack 必须把退出码 2 与 1 分开处理,且 -Force 不能覆盖 2 ===")
+_ss = (_REPO / "90-ops" / "start-stack.ps1").read_text(encoding="utf-8")
+check("start-stack 读的是三态退出码", "$gateCode" in _ss and "-eq 2" in _ss)
+_seg2 = _ss.split("-eq 2", 1)[1].split("elseif", 1)[0] if "-eq 2" in _ss else ""
+check("退出码 2 的分支里【没有】 -Force 逃生口", "$Force" not in _seg2, _seg2[:160])
+check("退出码 2 的文案与「被拒」不同", "没能跑起来" in _seg2)
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

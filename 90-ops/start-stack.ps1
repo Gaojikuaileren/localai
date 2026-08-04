@@ -73,9 +73,22 @@ if (-not $NoBackend) {
   if (-not (Test-Path $py)) { $py = 'python' }
   Write-Host "[0] 显存闸(§8.1 三层检查)…"
   $gateOut = & $py $gate @wanted 2>&1
-  $gateOk = ($LASTEXITCODE -eq 0)
+  $gateCode = $LASTEXITCODE
   $gateOut | ForEach-Object { "    $_" }
-  if (-not $gateOk) {
+
+  # ★★ 2026-08-04:退出码按【三态】读,不再是 0/非0。
+  #   原来把 2(闸自己崩了)和 1(闸判定为拒)混为一谈,而闸在 cp936 控制台下
+  #   连**通过**的路径都会崩成退出码 1 ⇒ 这里一直打印「拒绝启动」,
+  #   于是要么起不了栈、要么靠 -Force —— 而 -Force 把三道闸整个跳过。
+  #   ⇒ 「闸说不行」可以被 -Force 覆盖(你明知故犯);
+  #     「闸没跑起来」**不可以** —— 没拿到判定就装,是 §12.3 禁止的静默降级。
+  if ($gateCode -eq 2) {
+    Write-Host "  X 显存闸【没能跑起来】(退出码 2)—— 这不是「被拒绝」,是闸本身坏了。" -ForegroundColor Red
+    Write-Host "    上面是它的异常。先修闸,再谈启动。" -ForegroundColor Red
+    Write-Host "    ★ -Force 不能覆盖这一种:没拿到判定就装 = 静默降级。" -ForegroundColor Red
+    exit 1
+  }
+  elseif ($gateCode -ne 0) {
     if ($Force) {
       Write-Host "  ! -Force:明知被上面那道闸拒绝仍继续。OOM 后果自负。" -ForegroundColor Yellow
     } else {

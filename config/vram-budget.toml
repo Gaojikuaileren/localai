@@ -59,10 +59,16 @@ port = 18081
 note = "长上下文。q8_0 省 2.04,使 32K 从「日常用不了」变可用(B3b 零质量损失)"
 
 [components."llm.assistant.8b@8k"]
-peak = 5.0
+# ★ 2026-08-04 更正:原值 5.0 是转抄错误 —— 5.0 是 NUM-1 表里这一行的【权重】列,
+#   不是 peak 列。peak 列写的是 5.31 ★实测(权重 5.0 + q8 KV 0.61 + CUDA ctx 0.4 的实测结果)。
+#   证据:toml 其余 8 个组件的 peak 与 NUM-1 peak 列【逐字相等】,唯独这一行不等,
+#   而它不等的那个值恰好等于同行的权重列。⇒ 转抄错误,不是判据分歧。
+#   方向也是 fail-safe 的:5.31 > 5.0,闸变更保守(原值会低估 0.31 GiB,可能放行本该拒的申请)。
+#   ★ 该组件在 start-stack -Ctx≤8192 的生产路径上,不是冷门项。
+peak = 5.31
 kind = "llm"
 port = 18081
-note = "语音场景(assistant.voice 契约)"
+note = "语音场景(assistant.voice 契约)。P1 实测 5.31(F16 下 5.83)"
 
 [components."llm.assistant.30b-a3b@32k"]
 peak = 11.9
