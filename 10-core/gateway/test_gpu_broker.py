@@ -941,6 +941,12 @@ import warnings as _warnings
 _warnings.filterwarnings("ignore")
 from starlette.testclient import TestClient as _TC   # noqa: E402
 
+# ★★ P4-S10 之后必须【显式声明档位】。此前这一段是在"人人都能改"的世界里写的:
+#   GPU 面只挡 remote-unauthenticated,于是测试跑成什么档位都无所谓。
+#   六元组落地后,本机账户若不在 caller-accounts.toml 的 allowlist 里会落 unregistered-local
+#   ⇒ 变更端点 403。让测试显式说明"我以哪个档位在测",比依赖环境凑巧更结实。
+_cc_saved = gateway.classify_caller
+gateway.classify_caller = lambda r: "trusted-local"
 with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
     _cat = _c.get("/v1/gpu/components")
     _catj = _cat.json()
@@ -997,6 +1003,8 @@ with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
           _r_ok_path.json()["snapshot"]["committed"] == [],
           _r_ok_path.json()["snapshot"]["committed"])
 
+gateway.classify_caller = _cc_saved
+
 _gi = _nodoc(gateway.gpu_intended)
 check("★ 失败码不合并:四类失败在源码里各自成条",
       all(k in _gi for k in ("missing_if_generation", "missing_components",
@@ -1024,8 +1032,15 @@ check("assert_helpers 里三个工具都在",
 _DOC_P = _HERE_T.parents[1] / "00-docs" / "ASSERTION-PITFALLS.md"
 check("★ 文档在(记下来才算防复发,光改代码不算)", _DOC_P.exists())
 _doc = _DOC_P.read_text(encoding="utf-8") if _DOC_P.exists() else ""
-check("★ 文档记了【已踩几次】—— 次数是判断要不要装护栏的依据",
-      "已踩 5 次" in _doc and "已踩 2 次" in _doc)
+# ★★ 判据盯【形状】不盯数字:次数本来就会涨(5 → 7 就红过一次,而那不是缺陷,是记录在更新)。
+#   把具体数字写进断言 = 每记一次新实例都要改断言,而"改断言让它绿"正是本项目最该避免的动作。
+_counted = re.findall(r"—— 已踩 (\d+) 次", _doc)
+_headings = re.findall(r"^## \d+\.", _doc, re.M)
+check("★★ 每一条都标了【已踩几次】(次数是判断要不要装护栏的依据,不是修辞)",
+      len(_counted) == len(_headings) and len(_headings) >= 5,
+      f"{len(_counted)} 条标了次数 / 共 {len(_headings)} 条")
+check("★ 至少有一条是重复踩到 3 次以上的(那正是 D85 的收录门槛)",
+      any(int(n) >= 3 for n in _counted), _counted)
 check("★ 文档给每条写了护栏(没有护栏的条目等于没记)",
       _doc.count("护栏") >= 3, f"只有 {_doc.count('护栏')} 处")
 check("★ 文档写明了两种【不许的修法】(删断言 / 改注释迁就测试)",

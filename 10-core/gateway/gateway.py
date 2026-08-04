@@ -28,6 +28,7 @@ import e1_detector as e1
 import e4_egress as e4
 import caller_identity
 import gpu_broker
+import gpu_policy
 import membership
 
 # §6.8 隔离服务账户 —— 绝不允许经网关触达记忆(D30 混淆代理防护)
@@ -546,6 +547,59 @@ def resolve_lan_principal(cert_sha256: str):
             "cert_sha256": cert_sha256, "generation": dev["generation"]}
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S10 · GPU 面的主体解析 + 六元组判定(**唯一**入口)
+#
+#  ★★ 此前 GPU 面每个端点只有一行 `classify_caller(request) == "remote-unauthenticated"`,
+#     于是 `denied-account`(§6.8 明文「绝不放行」)与 `trusted-local` 权限完全相同 ——
+#     实跑确认过。根因是 `chat_completions` 里那套主体解析(denied-account 403 +
+#     证书指纹封顶 lan-device)**只长在那一条路径上**,GPU 面各写各的。
+#  ⇒ 抽成一个函数,GPU 面全部走它;并断言 GPU 面**不得再有散落的 classify_caller 比较**。
+#     这就是方案书「权限按档位**挂载**而非运行时判断」在 HTTP 面上的等价形态。
+# ══════════════════════════════════════════════════════════════════════
+
+def gpu_principal(request: Request) -> str:
+    """解出这次请求在 GPU 面上的**有效档位**。
+
+    ★ 与 chat 那条路径同一套判据,顺序也一样:
+      ① denied-account 直接封死(§6.8)· ② 带证书指纹 → 成员表反查 → **封顶** lan-device ·
+      ③ 否则就是 classify_caller 的档位。
+    ★ 指纹解析不出成员 → 返回 `remote-unauthenticated`(fail-closed),
+      不退回 caller 档 —— 退回会让一个伪造指纹的本机进程拿到比 lan-device 更多的权限。
+    """
+    caller = classify_caller(request)
+    if caller == "denied-account":
+        return "denied-account"
+    fp = request.headers.get("x-localai-cert-sha256", "")
+    if fp:
+        return "lan-device" if resolve_lan_principal(fp) is not None else "remote-unauthenticated"
+    return caller
+
+
+def gpu_guard(request: Request, action: str, *, components=None, lease_kind: str = "",
+              ttl_s=None, holder: str = "", count_quota: bool = True):
+    """判一次。通过返回 (tier, None);不通过返回 (tier, JSONResponse)。
+
+    ★ 拒绝响应里带 `dimension` —— 六元组的哪一维拦的必须点名。
+      合并成一句「权限不足」会让人去改错的东西:撞额度的人会去申请提权,
+      而他其实只要等一分钟。(与 §8.1「两种撞墙必须分开说」同一条纪律。)
+    """
+    tier = gpu_principal(request)
+    d = gpu_policy.check(tier, action, components=components, lease_kind=lease_kind,
+                         ttl_s=ttl_s, holder=holder, count_quota=count_quota)
+    if d.ok:
+        return tier, None
+    # 401 = 你是谁没确定;403 = 知道你是谁,但不给;429 = 太快了
+    status = 401 if tier == "remote-unauthenticated" else (429 if d.code == "denied_quota" else 403)
+    return tier, JSONResponse(
+        status_code=status,
+        content={"error": {"message": d.message, "type": d.code,
+                           # ★ 点名是哪一维 —— 这决定用户下一步该做什么
+                           "dimension": d.dimension, "tier": tier, "action": action},
+                 "detail": d.detail},
+    )
+
+
 # ★ P3b S3:每条路由必须显式归类;新增未归类路由 → unclassified_routes() 非空 → 元测试失败(§S3)。
 ROUTE_TIERS = {
     ("GET", "/health"): "public-minimal",
@@ -654,12 +708,9 @@ async def gpu_snapshot(request: Request):
     ★ 快照带 stale / sampler_error:采样器死了必须**看得见**,
       而不是让调用方拿着一个永远不变的数字以为它是新的。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    _tier, _deny = gpu_guard(request, "read")
+    if _deny is not None:
+        return _deny
     try:
         snap = gpu_broker.BROKER.snapshot()
     except Exception as e:                                   # noqa: BLE001
@@ -686,12 +737,9 @@ async def gpu_events(request: Request):
       不做字段级 diff 是有意的:diff/apply 两侧不一致是一整类难查的 bug,
       而这里省下的带宽可以忽略。不假装做了增量。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    _tier, _deny = gpu_guard(request, "read")
+    if _deny is not None:
+        return _deny
 
     async def gen():
         try:
@@ -735,12 +783,11 @@ async def gpu_lease(request: Request):
     ★ 对不上时回 **409 + 最新快照**(不是裸 409):D37 明写「对不上即拒**并回最新状态**」。
       只回 409 会让客户端必须再发一次请求才知道现在是什么样 —— 那就又变成轮询了。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    # ★ 先判档位与动作(不计额度);参数维要等 kind / ttl 解析出来才判得了,
+    #   所以在下面第二次调用里连参数一起判 —— count_quota 只在那一次为真,不重复扣。
+    _tier, _deny = gpu_guard(request, "lease", count_quota=False)
+    if _deny is not None:
+        return _deny
     try:
         body = await request.json()
     except Exception:                                        # noqa: BLE001
@@ -765,6 +812,13 @@ async def gpu_lease(request: Request):
     holder = _short_echo(body.get("holder"))
     components = [str(c) for c in (body.get("components") or [])][:16]
     ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
+
+    # ★ 参数维 + 额度维:kind / ttl / 组件数解析出来之后才判得了。
+    #   ttl 不封顶 = 一份**永不过期**的租约,而租约的全部意义就是会过期。
+    _tier2, _deny2 = gpu_guard(request, "lease", components=components,
+                               lease_kind=kind, ttl_s=ttl, holder=holder)
+    if _deny2 is not None:
+        return _deny2
 
     try:
         snap = gpu_broker.BROKER.snapshot()
@@ -807,12 +861,11 @@ async def session_end(request: Request):
     ★ 语义是**尽力而为但如实回话**:没有活跃租约不是错误(客户端可能从没申请过),
       但要在响应里说清"释放了几条",而不是一律回 200 空体让调用方无从分辨。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    # ★ 只释放**自己持有**的租约,不改驻留集合 ⇒ 归 read 档,不占变更额度。
+    #   否则一次正常退出会吃掉用户的变更配额,而退出是客户端每次都做的事。
+    _tier, _deny = gpu_guard(request, "read")
+    if _deny is not None:
+        return _deny
     try:
         body = await request.json()
     except Exception:                                        # noqa: BLE001
@@ -858,12 +911,9 @@ async def gpu_components(request: Request):
     ★ `display` 缺失时**回落到 id 本身**,不是跳过、也不是空字符串:
       一个没起名字的组件仍然占显存,它必须出现在面板上。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    _tier, _deny = gpu_guard(request, "read")
+    if _deny is not None:
+        return _deny
     try:
         snap = gpu_broker.BROKER.snapshot()
         cfg = gpu_broker.BROKER.cfg
@@ -934,12 +984,11 @@ async def gpu_intended(request: Request):
       · load_failed_rolled_back / rollback_failed
       合并成一个失败码会让客户端只能弹一句"失败",而这四种的下一步动作**完全不同**。
     """
-    if classify_caller(request) == "remote-unauthenticated":
-        return JSONResponse(
-            status_code=401,
-            content={"error": {"message": "远程访问需认证;本机请走 loopback",
-                               "type": "unauthenticated"}},
-        )
+    # ★ 同 lease:动作要看 components 才定得了(空数组 = 卸掉全部,是**另一个动作**),
+    #   所以这里先只判档位,解析完再连动作与参数一起判。
+    _tier, _deny = gpu_guard(request, "read", count_quota=False)
+    if _deny is not None:
+        return _deny
     try:
         body = await request.json()
     except Exception:                                        # noqa: BLE001
@@ -969,6 +1018,16 @@ async def gpu_intended(request: Request):
                                "type": "missing_components"}})
     components = [str(c) for c in body["components"]][:32]
     interrupt = bool(body.get("interrupt_running") or False)
+
+    # ★★★ 六元组的参数维在这里落地:`components == []` 与 `components == [x]`
+    #   走同一个端点、同一段代码,HTTP 上**长得一模一样** —— 但前者的意思是**卸掉全部**。
+    #   所以它被映射成【另一个动作】(unload_all),而不是同一个动作的一个取值。
+    #   §6.2 原话:「同一个『写文件』工具,路径参数决定它是安全还是灾难」。
+    _act = gpu_policy.resolve_action(components, is_change=True)
+    _tier2, _deny2 = gpu_guard(request, _act, components=components,
+                               holder=_short_echo(body.get("holder")))
+    if _deny2 is not None:
+        return _deny2
 
     try:
         snap = gpu_broker.BROKER.snapshot()

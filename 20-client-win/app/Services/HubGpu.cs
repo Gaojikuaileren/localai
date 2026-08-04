@@ -69,6 +69,18 @@ public sealed record ApplyOutcome(bool Ok, string Code, string Message, string S
         "load_failed_rolled_back" => "装载失败,已经回滚到上一次成功的组合。",
         "rollback_failed" =>
             "装载失败且回滚也失败,中枢已进入安全停用状态。需要在主机上重新开启。",
+        // ★★ P4-S10 六元组:拒绝时中枢会点名是**哪一维**拦的,这里逐维给不同的下一步 ——
+        //   合并成一句「权限不足」会让人去改错的东西:撞额度的只要等一分钟,
+        //   而他会跑去申请提权。(与「两种撞墙必须分开说」同一条纪律。)
+        "denied_quota" =>
+            "变更太频繁了(每分钟有上限)。★ 这不是权限不够 —— 等一分钟再试即可,不必去要权限。",
+        "denied_action" =>
+            "这台设备不能做这个操作。★ 最常见的一种:把组件**全部取消勾选** = 卸掉中枢上的全部模型,"
+            + "那只能在主机上做 —— 它和一次普通变更长得一模一样,只差参数。",
+        "denied_param" =>
+            "请求里有个参数超出了这台设备的允许范围(比如租约时长上限、或独占型租约)。" + Message,
+        "denied_tier" =>
+            "这台设备/账户在 GPU 面上没有权限。" + Message,
         _ when Code.StartsWith("gate_") => Message,   // 闸的拒绝理由本身就写好了该怎么办
         _ => Message,
     };
