@@ -74,6 +74,50 @@ def _logs_dir() -> Path:
         return Path(tempfile.gettempdir()) / "localai-hub-logs-FALLBACK"
 
 
+def _short_echo(s, limit: int = 64) -> str:
+    """把调用方自报的值回显给它自己之前,先截断 + 剔控制字符。
+
+    ★ 与配对规格对 `displayName` 的处置同一条纪律(服务端截断 64 字 + 剔控制字符):
+      自报值只作显示,且**不得成为一条无界回显通道** —— 无界回显会让错误响应变成
+      「把任意内容塞进一个将要发出的载荷」的入口。今天回给的是它自己,
+      但**将来接上出境 sink 时,这条路径会跟着一起出境**。
+    """
+    s = "" if s is None else str(s)
+    s = "".join(ch for ch in s if ch.isprintable())
+    return s[:limit]
+
+
+def log_upstream_problem(alias: str, backend: str, kind: str, detail: str) -> None:
+    """上游异常的诊断落**服务端日志**,不回给调用方。
+
+    ★★ 2026-08-04 加。此前 502 分支把 `r.text[:500]`(**上游原始字节**)、
+      503 分支把**后端 URL** 直接放进回给调用方的 JSON 里。两处都不是"给用户看的错误",
+      而是**内部拓扑与上游响应内容的披露**:
+        · 别名全表(404 分支曾把 REGISTRY 里所有 chat 别名列出来)
+        · 后端地址(`http://127.0.0.1:18081` 之类)
+        · 上游返回的原文(可能含堆栈、配置片段、甚至半截生成内容)
+      而 D30「降档不断连」有意让 `unregistered-local` 账户仍能走 chat ——
+      2026-08-03 实测机器上就有两个未登记的外部 AI 沙箱账户。**对它们,这些是侦察材料。**
+
+    ⇒ 判据:**错误响应不得携带调用方本来无权获得的内容。** 诊断信息不是删掉,是**换地方**:
+      落到 `{state}/logs`(强 ACL,已加固)。排查照样查得到,调用方拿不到。
+    """
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "alias": alias,
+        "backend": backend,
+        "kind": kind,          # bad_upstream_response | upstream_error | backend_unavailable
+        "detail": (detail or "")[:2000],
+    }
+    try:
+        d = _logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "upstream_problem.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # 诊断落盘失败不能反过来把请求搞挂
+
+
 def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
     """E1 命中记账。§6.9.8:【只】记 类别 · 时间 · 会话id · 结果,
     绝不记 body / 片段 / 哈希(定长凭证的哈希可爆破)。
@@ -603,9 +647,11 @@ async def chat_completions(request: Request):
     # ---- 别名解析 ----
     entry = REGISTRY.get(alias)
     if entry is None:
+        # ★ 不再枚举别名全表:那等于把 REGISTRY 的 chat 面摊给任何能走到这里的调用方
+        #   (含 D30 有意保留连接的 unregistered-local)。要列表就走 /v1/models —— 它是认证过的。
         return JSONResponse(
             status_code=404,
-            content={"error": {"message": f"未知别名 '{alias}'。可用:{sorted(k for k,v in REGISTRY.items() if v['kind'] in CHAT_KINDS)}",
+            content={"error": {"message": f"未知别名 '{_short_echo(alias)}'。可用别名见 /v1/models。",
                                "type": "unknown_alias"}},
         )
     # ---- E4 出境载荷强制点(§5.6.2 · 五强制点 E4 · 在 kind 路由分类【之前】)----
@@ -653,7 +699,7 @@ async def chat_completions(request: Request):
     if entry["kind"] not in CHAT_KINDS:
         return JSONResponse(
             status_code=400,
-            content={"error": {"message": f"别名 '{alias}' 是 {entry['kind']},不走 chat 路由",
+            content={"error": {"message": f"别名 '{_short_echo(alias)}' 是 {entry['kind']},不走 chat 路由",
                                "type": "wrong_plane"}},
         )
 
@@ -678,12 +724,15 @@ async def chat_completions(request: Request):
             if r.status_code >= 400:                     # 上游错误:读完转发真实状态码,不吞
                 raw = await r.aread()
                 await r.aclose()
+                # ★ 上游原文与后端地址【落服务端日志】,不回给调用方(见 log_upstream_problem)。
+                log_upstream_problem(alias, backend, "upstream_error",
+                                     raw.decode("utf-8", "replace"))
                 return JSONResponse(
                     status_code=r.status_code, headers=hdrs,
                     content={"error": {"message": f"后端返回 {r.status_code}",
                                        "type": "backend_error",
-                                       "alias": alias, "backend": backend,
-                                       "detail": raw.decode("utf-8", "replace")[:500]}},
+                                       "alias": alias,
+                                       "hint": "详细诊断已记入主机日志 upstream_problem.jsonl"}},
                 )
 
             async def gen():
@@ -699,12 +748,18 @@ async def chat_completions(request: Request):
             try:
                 data = r.json()
             except Exception:                            # 上游返回非 JSON/空体:不静默变成 200
+                # ★ 原先这里回 `detail: r.text[:500]` —— 上游【原始字节】直接转给调用方。
+                #   换成非内容型诊断(状态码/类型/长度),原文落服务端日志。
+                log_upstream_problem(alias, backend, "bad_upstream_response", r.text)
                 return JSONResponse(
                     status_code=502, headers=hdrs,
                     content={"error": {"message": "后端返回的不是合法 JSON",
                                        "type": "bad_upstream_response",
-                                       "alias": alias, "backend": backend,
-                                       "detail": r.text[:500]}},
+                                       "alias": alias,
+                                       "upstream_status": r.status_code,
+                                       "upstream_content_type": r.headers.get("content-type", ""),
+                                       "upstream_bytes": len(r.content),
+                                       "hint": "原文已记入主机日志 upstream_problem.jsonl"}},
                 )
             # 契约回写(§8.1.4):响应 model 字段回写真实契约
             if isinstance(data, dict):
@@ -714,12 +769,16 @@ async def chat_completions(request: Request):
         # ★ 用 RequestError 而非 ConnectError:ConnectTimeout / ReadTimeout /
         #   RemoteProtocolError 等都【不是】ConnectError 的子类,原来会裸奔成 500。
         #   §8.1.4:503 带缺口,不静默降级。
+        # ★ 后端 URL 与 fallback 是内部拓扑,落服务端日志;回给调用方的只有别名与原因类型。
+        #   §8.1.4「503 带缺口,不静默降级」仍然成立 —— 缺的是【哪个别名】,不是【哪个地址】。
+        log_upstream_problem(alias, backend, "backend_unavailable",
+                             f"{type(e).__name__}: {e}; fallback={entry.get('fallback')}")
         return JSONResponse(
             status_code=503, headers=hdrs,
-            content={"error": {"message": f"别名 '{alias}' 的后端 {backend} 未响应"
+            content={"error": {"message": f"别名 '{_short_echo(alias)}' 的后端未响应"
                                           f"(无 Broker 期需先静态启动该后端)",
                                "type": "backend_unavailable",
                                "reason": type(e).__name__,
-                               "alias": alias, "backend": backend,
-                               "fallback": entry.get("fallback")}},
+                               "alias": alias,
+                               "hint": "后端地址与 fallback 已记入主机日志 upstream_problem.jsonl"}},
         )
