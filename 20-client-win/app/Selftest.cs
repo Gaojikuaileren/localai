@@ -117,6 +117,34 @@ public static class Selftest
             Assert(new ShutdownCoordinator().PerStepBudget < new ShutdownCoordinator().Budget,
                    "★ 单步上限必须严格小于总预算,否则它形同虚设");
 
+            // ★★ 2026-08-04:退出善后必须留痕。此前它【一个字都不写】——
+            //   唯一的调用点 App.RunCleanup 调 RunOnceAsync(reason) 时没传 log 回调。
+            //   代价当场吃到:用户报「关闭卡一段时间」,修完想核实好没好,却没有任何可测的东西;
+            //   落盘文件的 mtime 还不能当判据(SaveStores 同时挂在会话中的防抖定时器上,
+            //   分不出"退出时存的"和"用着用着自动存的")。
+            //   ⇒ 与自配对那条同一句纪律:静默的自动流程必须留痕,没有日志就是查不了的黑箱。
+            var coTraceLog = Path.Combine(tmp, "shutdown-trace.log");
+            var coTrace = new ShutdownCoordinator
+            {
+                LogPath = coTraceLog,
+                Budget = TimeSpan.FromSeconds(5),
+                PerStepBudget = TimeSpan.FromMilliseconds(150),
+            };
+            coTrace.Register("fast-step", () => { });
+            coTrace.Register("slow-step", async ct => await Task.Delay(TimeSpan.FromSeconds(30), ct));
+            coTrace.Register("after-slow", () => { });
+            coTrace.RunOnceAsync("trace-test").GetAwaiter().GetResult();
+            var coTraceTxt = File.Exists(coTraceLog) ? File.ReadAllText(coTraceLog) : "";
+            Assert(coTraceTxt.Contains("fast-step") && coTraceTxt.Contains("slow-step") && coTraceTxt.Contains("after-slow"),
+                   "★★ 善后留痕:每个步骤都进日志 —— 不传 log 回调也要写(唯一调用点当初就忘了传,"
+                   + "整条退出路径因此静默了几个月,修完根本无从核实)");
+            Assert(coTraceTxt.Contains("TIMEOUT") && coTraceTxt.Contains("slow-step"),
+                   "★★ 被掐断的步骤要**指名道姓**记下来 —— 否则只知道慢,不知道慢在哪一步");
+            Assert(System.Text.RegularExpressions.Regex.IsMatch(coTraceTxt, @"done in \d+ms"),
+                   "★ 总耗时要落在日志里 —— 「关闭卡不卡」得能拿数字说话,不靠人感觉");
+            Assert(new ShutdownCoordinator().LogPath.Length > 0,
+                   "★ 默认就有落点:留痕不能依赖调用方记得配置它(这正是当初漏掉的形状)");
+
             var co3 = new ShutdownCoordinator();
             var reached = false;
             co3.Register("boom", () => throw new InvalidOperationException("x"));
