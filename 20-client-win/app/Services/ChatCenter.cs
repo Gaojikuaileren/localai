@@ -149,11 +149,85 @@ public sealed class ChatCenter
     /// 提升为共享 —— 单向。成功返回 true。
     /// ★ 这里只改【标记】;真正上传到主机要等中枢接入(P4+),界面须如实说明"接入后上传"。
     /// </summary>
+    // ══════════════════════════════════════════════════════════════
+    //  P4-S13(D86):共享会话走内网同步。
+    //
+    //  ★★ D86 裁定②:**提升为共享的那一刻就同步,此后内容更新也实时**。
+    //    所以这里不只推会话本身,还要把**整段消息**一起推 ——
+    //    D52 规则 A 写着「整段对话一起上去,只共享片段的话对方读不懂上下文」。
+    //  ★ 只推 Shared == true 的。普通会话继续本机独立(D52「默认只在本机」)。
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>同步器。★ 由宿主注入 —— 全进程只有一条流。</summary>
+    public SyncClient? Sync { get; set; }
+
+    void PushSession(ChatSession s)
+    {
+        if (Sync is null || !s.Shared) return;
+        Sync.Enqueue(new SyncItem("sessions", new
+        {
+            id = s.SessionId, title = s.Title, shared = true,
+            workspace = s.WorkspaceKey, owner = s.OwnerMemberId,
+            last_active = s.LastActive.ToString("o"),
+        }));
+    }
+
+    void PushMessage(ChatMessage m)
+    {
+        if (Sync is null) return;
+        var s = _sessions.FirstOrDefault(x => x.SessionId == m.SessionId);
+        if (s is null || !s.Shared) return;      // ★ 只推共享会话里的消息
+        Sync.Enqueue(new SyncItem("messages", new
+        {
+            id = m.MessageId ?? (m.SessionId + "-" + m.At.Ticks),
+            session_id = m.SessionId, role = m.Role.ToString(),
+            text = m.Text, at = m.At.ToString("o"),
+        }));
+    }
+
+    /// <summary>把一条共享会话的**全部消息**推上去。★ 提升那一刻用(D52 规则 A:整段一起上)。</summary>
+    void PushWholeSession(string sessionId)
+    {
+        foreach (var m in _messages.Where(x => x.SessionId == sessionId)
+                                   .Where(x => x.Role != ChatRole.System))
+            PushMessage(m);
+        // ★ System 消息不推:那是客户端自己的界面文案(「未同步」「本轮带了 N 条」之类),
+        //   推过去等于让另一台机器看我们的 UI 提示。与 TokenBudget 里那条同一judgment。
+    }
+
     public bool ShareSession(string sessionId)
     {
         var i = _sessions.FindIndex(x => x.SessionId == sessionId);
         if (i < 0 || !CanShare(_sessions[i])) return false;
         _sessions[i] = _sessions[i] with { Shared = true };
+        // ★★ 立刻同步(D86 裁定②)—— 不是"下次打开时拉一下"。
+        PushSession(_sessions[i]);
+        PushWholeSession(sessionId);
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>合并一条来自中枢的共享会话。返回是否真的变了。</summary>
+    public bool AbsorbRemoteSession(ChatSession s)
+    {
+        if (!s.Shared) return false;             // ★ 中枢不该发来未共享的;真发来了也不收
+        var i = _sessions.FindIndex(x => x.SessionId == s.SessionId);
+        if (i < 0) { _sessions.Add(s); Changed?.Invoke(); return true; }
+        if (_sessions[i].Shared && _sessions[i].Title == s.Title) return false;
+        // ★ 只覆盖【共享相关】的字段,不动本机独有的(比如本机的归档状态)——
+        //   整条替换会把本机的东西也冲掉,而那些字段中枢上根本没有。
+        _sessions[i] = _sessions[i] with { Shared = true, Title = s.Title };
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>合并一条来自中枢的消息。★ 同 id 已存在就不重复插。</summary>
+    public bool AbsorbRemoteMessage(ChatMessage m)
+    {
+        var s = _sessions.FirstOrDefault(x => x.SessionId == m.SessionId);
+        if (s is null || !s.Shared) return false;
+        if (_messages.Any(x => x.MessageId == m.MessageId)) return false;
+        _messages.Add(m);
         Changed?.Invoke();
         return true;
     }
@@ -591,6 +665,7 @@ public sealed class ChatCenter
 
         var first = !_messages.Any(m => m.SessionId == sessionId && m.Role == ChatRole.User);
         _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments, NewMsgId()));
+        PushMessage(_messages[^1]);        // ★ 共享会话:一条新消息就推(D86 裁定②「实时」)
 
         // ★ 历史取【本会话的、这条用户消息之前的】—— 刚加进去的那条由 Plan 单独计入
         var history = _messages
@@ -630,7 +705,7 @@ public sealed class ChatCenter
         var idx = _messages.FindIndex(m => m.MessageId == replyId);
         if (res.Ok)
         {
-            if (idx >= 0) _messages[idx] = _messages[idx] with { Text = res.Text() };
+            if (idx >= 0) { _messages[idx] = _messages[idx] with { Text = res.Text() }; PushMessage(_messages[idx]); }
         }
         else if (res.Partial.Length > 0)
         {

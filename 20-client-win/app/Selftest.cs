@@ -4382,14 +4382,18 @@ public static class Selftest
                     Assert(!code.Contains("中枢尚未接入"),
                            "★★★ 不得再用笼统的「中枢尚未接入」—— 中枢已经能对话了,"
                            + "这句话会让用户以为别的功能也好了(实测:共享提升后主机看不见)");
-                    Assert(code.Contains("会话同步还没有做"),
-                           "★★ 改成【指名道姓】:缺的是会话同步,不是笼统的「中枢」");
-                    Assert(code.Contains("中枢上没有存放共享会话的地方")
-                           || code.Contains("中枢上目前没有存放共享会话的地方"),
-                           "★ 并说清为什么缺(中枢上没有那个地方),而不只是说缺");
-                    Assert(code.Contains("别的设备还看不到"),
-                           "★★ 把「家里其他设备都能看到」降级为将来时 —— 它今天不成立,"
-                           + "写成确凿后果比不说更坏");
+                    // ★★★ 2026-08-05:这三条**自己过期了**。
+                    //   它们当时在守「会话同步还没有做」这句话在场 —— 而同一晚 D86/S13
+                    //   把同步做出来之后,守住那句话就等于**守住一句谎言**。
+                    //   ⇒ 这是「每做成一件事就回头查谁说过『这件事还没有』」的第五次实例,
+                    //     而这一次过期的是**断言本身**。断言也会说假话。
+                    Assert(code.Contains("立刻") && code.Contains("上传到中枢"),
+                           "★★ 同步做出来了:改成如实说「整段会立刻上传到中枢」");
+                    Assert(code.Contains("未同步"),
+                           "★★ 并说清主机不在线时会排队、界面会显示「未同步」");
+                    Assert(code.Contains("只影响这台机器"),
+                           "★ 删共享会话仍然只影响这台 —— 中枢那份不删"
+                           + "(删了会让另一台上的会话凭空消失,而那台的用户没做过任何事)");
                     Assert(code.Contains("还没有配对到中枢") && code.Contains("主机未开启"),
                            "★★ 输入框提示按【真实前提】分层:没配对 / 主机不在线");
                 }
@@ -4400,10 +4404,11 @@ public static class Selftest
                 if (s12te is not null)
                 {
                     var t = NoComments(s12te);
-                    Assert(t.Contains("不是同步范围"),
-                           "★★★ 选可见范围处必须说清「家庭」是归属、不是同步范围");
-                    Assert(t.Contains("只存在这台电脑上"),
-                           "★★ 并说清它只在这台机器上(D57)—— 原来这句只在归档页,用户很少去");
+                    // ★★★ 同上:这两条也过期了 —— D86 之后家庭待办**真的会同步**。
+                    Assert(t.Contains("会同步到其它已配对设备"),
+                           "★★★ 家庭待办现在真的同步了,选范围处要如实说");
+                    Assert(t.Contains("只在这台电脑上") || t.Contains("不同步"),
+                           "★★ 并逐档说清个人的不同步 —— 笼统的说法失信最快");
                 }
                 var s12todo = TryReadSource(Path.Combine("Services", "TodoCenter.cs"));
                 if (s12todo is not null)
@@ -4437,6 +4442,161 @@ public static class Selftest
                                + "文案说没上传而代码偷偷传了,或反过来,都是骗人");
                     }
                 }
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  P4-S13 客户端半边:内网同步(D86)
+            //
+            //  ★★★ 这一组守两件事:
+            //    ① **私人数据不能被推出去** —— 把个人待办 / 未共享会话送到另一台机器上
+            //       是**不可撤销**的错误(数据已经在对方硬盘里了)。客户端这道是第一关,
+            //       服务端 sync_store.in_scope 是第二关 —— 两关都要在。
+            //    ② **未同步必须看得见** —— 主机不在线时本地照常改,但不标出来的话,
+            //       用户会以为另一台也看得到,而那边什么都没有
+            //       (这正是他报的那件事)。
+            // ══════════════════════════════════════════════════════════════
+            {
+                // ① 范围判据:客户端这一关
+                Assert(Services.TodoCenter.ShouldSync(
+                           new Services.TodoItem("a", "买菜", Services.TodoKind.Chore, Scope: "家庭")),
+                       "家庭待办要同步");
+                Assert(!Services.TodoCenter.ShouldSync(
+                           new Services.TodoItem("b", "私事", Services.TodoKind.Personal, Scope: "个人")),
+                       "★★★ 个人待办【不推】—— 推出去是不可撤销的错误");
+                var tcSrc = TryReadSource(Path.Combine("Services", "TodoCenter.cs"));
+                if (tcSrc is not null)
+                {
+                    var code = CodeOnly(tcSrc);
+                    Assert(code.Contains("ShouldSync"), "推之前过范围判据");
+                    Assert(code.Contains("PushIfShared"), "★ 写入口统一走一个推送函数,不各写各的");
+                    // ★★ 反向全表:每个改内容的入口都要推,漏一个就是"改了不同步"
+                    // ★ 结束标记用【下一个方法签名】,不用 "}" ——
+                    //   方法体里的  自带一个 }, 用它做终点会把切片截得太短,
+                    //   于是断言在代码明明推了的情况下判红(ASSERTION-PITFALLS 第 4 条:判据比想判的宽/窄)。
+                    foreach (var (entry, endMark) in new[] {
+                        ("public string Add", "public void Update"),
+                        // ★ 终点标记必须是【CodeOnly 之后还在】的东西 —— 用注释里的字样会切不出来
+                        ("public void Update", "public readonly List<string> DowngradedWhileShared"),
+                        ("public void Toggle", "public static string NewId") })
+                    {
+                        var seg = Slice(code, entry, endMark);
+                        Assert(seg is not null && seg.Contains("PushIfShared"),
+                               $"★★ {entry.Split(' ')[^1]} 也要推 —— 漏一个入口就是「改了但不同步」");
+                    }
+                    Assert(code.Contains("AbsorbRemote"), "能合并远端来的家庭待办");
+                    Assert(code.Contains("DowngradedWhileShared"),
+                           "★★ 家庭→个人降级时中枢那份【不删】,如实记着待裁 —— "
+                           + "删了会让另一台机器上的条目凭空消失,而那台的用户没做过任何事");
+                }
+
+                // ② 会话侧:只推共享的,且整段一起
+                var ccSync = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                if (ccSync is not null)
+                {
+                    var code = CodeOnly(ccSync);
+                    Assert(code.Contains("PushWholeSession"),
+                           "★★ 提升为共享时【整段对话一起上】(D52 规则 A:只共享片段对方读不懂)");
+                    Assert(code.Contains("if (Sync is null || !s.Shared) return;")
+                           || code.Contains("!s.Shared"),
+                           "★★★ 只推 Shared 的会话 —— 普通会话继续本机独立(D52)");
+                    var pw = Slice(code, "void PushWholeSession", "public bool ShareSession");
+                    Assert(pw is null || pw.Contains("ChatRole.System"),
+                           "★ System 消息不推 —— 那是客户端自己的界面文案,"
+                           + "推过去等于让另一台机器看我们的 UI 提示");
+                    Assert(code.Contains("AbsorbRemoteSession") && code.Contains("AbsorbRemoteMessage"),
+                           "能合并远端来的会话与消息");
+                    var abs = Slice(code, "public bool AbsorbRemoteSession", "public bool AbsorbRemoteMessage");
+                    Assert(abs is null || abs.Contains("with {"),
+                           "★★ 合并而不是整条替换 —— 本地有些字段中枢上根本没有,替换会把它们冲掉");
+                }
+
+                // ③ 未同步必须看得见
+                var sc = new Services.SyncClient(new Services.HubClient());
+                Assert(sc.StatusLine() == "",
+                       "★★ 一切正常时【什么都不说】—— 常驻的「已同步」会被当成背景噪声,"
+                       + "真出事那天也就没人看了");
+                sc.Enqueue(new Services.SyncItem("todos", new { id = "x" }));
+                Assert(sc.PendingCount == 1, "排进待推队列");
+                Assert(sc.StatusLine().Length > 0, "★★★ 有没推上去的东西时【必须说出来】");
+                // ★★ 判据要盯【关键情形】,不能用 || 放宽:
+                //   「没连上 + 有积压」是最危险的一种 —— 用户以为另一台也看得到,而那边什么都没有。
+                //   ★ 我第一版写的是 Contains("看不到") || Contains("同步"),
+                //     红测时把那条分支整个去掉,回退文案「正在同步 N 项…」含「同步」照样过 ——
+                //     一条**放宽到抓不住东西**的断言(ASSERTION-PITFALLS 第 4 条)。
+                Assert(!sc.IsLive && sc.PendingCount > 0, "构造的就是「没连上 + 有积压」");
+                Assert(sc.StatusLine().Contains("看不到"),
+                       "★★★ 没连上又有积压时,必须说清【别的设备现在看不到】—— "
+                       + "只说「正在同步」会让人以为马上就好了");
+                sc.Enqueue(new Services.SyncItem("todos", new { id = "x" }));
+                Assert(sc.PendingCount == 1,
+                       "★ 同一条只留最后一版 —— 连改十次,补推时推一条就够");
+                sc.Enqueue(new Services.SyncItem("todos", new { id = "y" }));
+                Assert(sc.PendingCount == 2, "不同记录各算一条");
+                Assert(!sc.IsLive, "★ 没连上就不是 Live —— 界面据此说话");
+                Assert(Services.SyncClient.StaleAfter.TotalSeconds > 15,
+                       "★ 判活阈值大于服务端心跳(15 秒),否则正常心跳也会被判死");
+                // ★★★ 「推不上去【不丢】」是离线行为的承重条款,而行为断言在自检里够不到
+                //   (没有 hub 时 FlushAsync 在进 try 之前就 return 了,catch 根本不执行)。
+                //   ⇒ 用源码级断言守住:catch 块里**不得**有任何清空/移除待推队列的动作。
+                //   ★ 这条是 2026-08-05 红测时发现的漏洞:我注入「catch 里清空队列」,
+                //     一条断言都没红 —— 说明那条性质当时**根本没被测到**。
+                var syncSrc = TryReadSource(Path.Combine("Services", "SyncClient.cs"));
+                if (syncSrc is not null)
+                {
+                    var flush = Slice(CodeOnly(syncSrc), "public async Task<SyncPushResult?> FlushAsync",
+                                      "public static SyncPushResult ParsePush");
+                    Assert(flush is not null, "取得 FlushAsync 的源码(提取器没静默失灵)");
+                    var catchPart = flush is null ? null : Slice(flush, "catch (Exception ex)", "}");
+                    Assert(catchPart is not null
+                           && !catchPart.Contains("_pending.Clear")
+                           && !catchPart.Contains("_pending.RemoveAll"),
+                           "★★★ 推失败的分支里【绝不清队列】—— 清了就是静默丢掉用户的改动,"
+                           + "而他以为已经同步了");
+                    Assert(flush is null || flush.Contains("res.Items"),
+                           "★★ 只把服务端【明确处理过】的出队 —— 网络失败的留着下次补推");
+                }
+
+                // ④ 推送结果逐条解析(一批里有的收有的拒)
+                var pr = Services.SyncClient.ParsePush(
+                    "{\"accepted\":1,\"total\":2,\"results\":[" +
+                    "{\"kind\":\"todos\",\"id\":\"a\",\"ok\":true,\"superseded\":true}," +
+                    "{\"kind\":\"todos\",\"id\":\"b\",\"ok\":false,\"message\":\"个人待办不同步\"}]}");
+                Assert(pr.Accepted == 1 && pr.Total == 2, "逐条计数对");
+                Assert(pr.Items.Count == 2, "★★ 逐条回结果 —— 合成一个布尔会让客户端不知道哪条没上去");
+                Assert(pr.Items.Any(x => !x.ok && x.why.Contains("个人")),
+                       "★ 被拒那条的理由留着(不当成推成功了)");
+                Assert(pr.Superseded,
+                       "★★ 服务端说被覆盖了就记下来 —— 界面据此提示「这条被另一台改过」");
+                var badPr = Services.SyncClient.ParsePush("这不是 json");
+                Assert(badPr.Accepted == 0 && badPr.Items.Count == 0,
+                       "★ 解析不了就当没收到,**不假装成功**");
+
+                // ⑤ 措辞:同步做出来之后,那些「还没做」的话必须跟着改
+                var cvSync = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                if (cvSync is not null)
+                {
+                    var t = NoComments(cvSync);
+                    Assert(!t.Contains("会话同步还没有做"),
+                           "★★★ 同步做出来了,那句「还没有做」必须跟着改 —— "
+                           + "这是同一晚同一类问题的第四次");
+                    Assert(t.Contains("立刻") && t.Contains("上传到中枢"),
+                           "★ 改成如实说:整段会立刻上传");
+                    Assert(t.Contains("未同步"),
+                           "★★ 并说清主机不在线时会排队、界面会显示未同步");
+                }
+                var teSync = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
+                if (teSync is not null)
+                {
+                    var t = NoComments(teSync);
+                    Assert(!t.Contains("待办只存在这台电脑上"),
+                           "★★★ 家庭待办现在真的同步了,那句「只存在这台电脑上」必须改");
+                    Assert(t.Contains("会同步到其它已配对设备") && t.Contains("不同步"),
+                           "★★ 逐档说清:家庭会同步 / 个人不同步 —— 笼统的说法失信最快");
+                }
+                var hvSync = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                if (hvSync is not null)
+                    Assert(hvSync.Contains("StatusLine()"),
+                           "★★ 待办面板上有同步状态行(未同步必须看得见)");
             }
 
             // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----

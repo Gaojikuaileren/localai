@@ -58,11 +58,41 @@ public sealed class TodoCenter
     /// </summary>
     public event Action? Changed;
 
+    // ══════════════════════════════════════════════════════════════
+    //  P4-S13(D86):家庭待办走内网同步。
+    //
+    //  ★★ 只推 Scope == 家庭 的。个人待办**继续只在本机** ——
+    //    D52「默认只在本机」那条原则没变,变的是"家庭"那一档终于真的共享了。
+    //  ★ 客户端这道判据不是唯一一道:服务端还会再判一次(sync_store.in_scope)。
+    //    这里过一遍只是**少发一次就少一次出错机会** —— 把私人东西推到另一台机器
+    //    是**不可撤销**的错误,不能只靠一处把关。
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>同步器。★ 由宿主注入 —— 不在这里 new,否则会出现两条各自订阅的流。</summary>
+    public SyncClient? Sync { get; set; }
+
+    /// <summary>该不该同步这一条。★ 判据只看 Scope,不看别的(别的字段一变就漏推)。</summary>
+    public static bool ShouldSync(TodoItem t) => t.Scope == "家庭";
+
+    void PushIfShared(TodoItem t)
+    {
+        if (Sync is null || !ShouldSync(t)) return;
+        Sync.Enqueue(new SyncItem("todos", new
+        {
+            id = t.Id, title = t.Title, kind = t.Kind.ToString(), done = t.Done,
+            due = t.Due?.ToString("o"), due_has_time = t.DueHasTime, flagged = t.Flagged,
+            priority = t.Priority.ToString(), notes = t.Notes,
+            owner = t.Owner, scope = t.Scope,
+            completed_at = t.CompletedAt?.ToString("o"), created_by_ai = t.CreatedByAi,
+        }));
+    }
+
     /// <summary>新增。Id 为空则自动生成;返回最终 Id。</summary>
     public string Add(TodoItem t)
     {
         var it = string.IsNullOrEmpty(t.Id) ? t with { Id = NewId() } : t;
         _items.Add(it);
+        PushIfShared(it);
         Changed?.Invoke();
         return it.Id;
     }
@@ -71,13 +101,35 @@ public sealed class TodoCenter
     {
         var i = _items.FindIndex(x => x.Id == t.Id);
         if (i < 0) return;
+        var was = _items[i];
         _items[i] = t;
+        PushIfShared(t);
+        // ★ 从「家庭」改成「个人」时:它已经在中枢上了,而现在不该再共享。
+        //   ★★ 但**不删中枢那份** —— 删了会让另一台机器上的条目凭空消失,
+        //     而那台机器的用户没做过任何事。这条留作**待裁**,如实记在这里,
+        //     不假装已经处理好了。(降级共享与 D52「共享不可收回」是同一类问题。)
+        if (ShouldSync(was) && !ShouldSync(t)) DowngradedWhileShared.Add(t.Id);
         Changed?.Invoke();
     }
+
+    /// <summary>曾经共享、后来被改成个人的待办 id。★ 中枢上那份**还在** —— 见 Update 里的说明。</summary>
+    public readonly List<string> DowngradedWhileShared = new();
 
     public void Remove(string id)
     {
         if (_items.RemoveAll(x => x.Id == id) > 0) Changed?.Invoke();
+    }
+
+    /// <summary>合并一条来自中枢的家庭待办。★ 返回是否真的变了(没变就不刷界面)。</summary>
+    public bool AbsorbRemote(TodoItem t)
+    {
+        if (!ShouldSync(t)) return false;          // ★ 中枢不该发来个人的;真发来了也不收
+        var i = _items.FindIndex(x => x.Id == t.Id);
+        if (i < 0) { _items.Add(t); Changed?.Invoke(); return true; }
+        if (_items[i] == t) return false;          // 一模一样就别刷
+        _items[i] = t;
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>勾选 / 取消勾选完成 —— 提醒事项那一下点圈。完成时打上时间戳,取消则清掉。</summary>
@@ -87,6 +139,7 @@ public sealed class TodoCenter
         if (i < 0) return;
         var done = !_items[i].Done;
         _items[i] = _items[i] with { Done = done, CompletedAt = done ? DateTime.Now : null };
+        PushIfShared(_items[i]);       // ★ 勾选也是内容变更,家庭待办要实时同步(D86 裁定②)
         Changed?.Invoke();
     }
 

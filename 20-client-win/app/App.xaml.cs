@@ -34,6 +34,11 @@ public partial class App : Application
     /// 谁需要 GPU 状态都从这里读,不各自去订阅;两条流会让"哪份是权威"没有答案。
     /// </summary>
     public HubGpu Gpu { get; private set; } = null!;
+    /// <summary>
+    /// 内网同步(D86):家庭待办 + 共享会话。★ 全进程**只有这一条**流 ——
+    /// 两条流会让"哪份是权威"没有答案(与 Gpu 同一条纪律)。
+    /// </summary>
+    public SyncClient Sync { get; private set; } = null!;
     /// <summary>「正在进行的项目」——主页田字格的数据源;点方块深链到对应工作空间。</summary>
     public ProjectCenter Projects { get; } = new();
     /// <summary>「待办与家务」——主页待办板块的数据源(中枢自有数据,手动增删改当场生效)。</summary>
@@ -101,6 +106,15 @@ public partial class App : Application
         Gpu.Start();
         Lifecycle.Register("stop-gpu-stream", () => Gpu.Stop());
 
+        // ★ P4-S13(D86):内网同步。这里只【建】不【起】——
+        //   Start() 必须等本地存档读完(见下方 LoadStores 之后那一行)。
+        //   顺序反了的话,启动瞬间收到的远端数据会被随后加载的本地存档覆盖掉。
+        Sync = new SyncClient(Hub);
+        Todos.Sync = Sync;
+        Chat.Sync = Sync;
+        Sync.Remote += AbsorbRemote;
+        Lifecycle.Register("stop-sync-stream", () => Sync.Stop());
+
         RegisterCleanupSteps();
 
         // Windows 关机/注销:系统只给有限时间,善后必须有预算上限(见 ShutdownCoordinator)。
@@ -121,6 +135,9 @@ public partial class App : Application
         // ★★ 示例数据【已停止播种】(用户要求 2026-07-31):真实的日历/待办已经能从 Apple 拉进来,
         //   再摆一堆"(示例)"只会和真数据混在一起,分不清哪条是真的 —— 那本身就是一种误导。
         //   下面这一次性清理会把此前播下的示例删掉;清过之后记档,不再重复扫。
+        // ★★ 存档读完了,现在才起同步流(见上面建它时的说明:顺序反了远端数据会被存档冲掉)。
+        Sync.Start();
+
         PurgeDemoDataOnce();
         // 同传示例同样【独立判断】:这台机器上已经有存档的用户,也该看得到这条记录长什么样。
         // 判据是"一条同传会话都没有",而不是"是不是首次运行" —— 删掉之后不会再冒出来。
@@ -333,6 +350,71 @@ public partial class App : Application
             catch { }
         }
     }
+
+    /// <summary>
+    /// 把中枢推来的共享数据合并进本地(P4-S13 / D86)。
+    ///
+    /// ★★ 合并而不是替换:本地有些字段中枢上根本没有(归档状态、本机偏好),
+    ///   整表替换会把它们冲掉。各 Center 的 AbsorbRemote* 只动共享相关的字段。
+    /// ★ 在 UI 线程上做 —— 各 Center 的 Changed 会直接触发界面重建。
+    /// </summary>
+    void AbsorbRemote(string kind, IReadOnlyList<System.Text.Json.JsonElement> items)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            foreach (var x in items)
+            {
+                try
+                {
+                    if (kind == "todos")
+                    {
+                        var t = new TodoItem(
+                            Id: S(x, "id"), Title: S(x, "title"),
+                            Kind: Enum.TryParse<TodoKind>(S(x, "kind"), out var tk) ? tk : TodoKind.Chore,
+                            Done: B(x, "done"),
+                            Due: DateTime.TryParse(S(x, "due"), out var du) ? du : null,
+                            DueHasTime: B(x, "due_has_time"), Flagged: B(x, "flagged"),
+                            Priority: Enum.TryParse<TodoPriority>(S(x, "priority"), out var pr) ? pr : TodoPriority.None,
+                            Notes: S(x, "notes") is { Length: > 0 } nn ? nn : null,
+                            Owner: S(x, "owner") is { Length: > 0 } ow ? ow : "我",
+                            Scope: S(x, "scope") is { Length: > 0 } sc ? sc : "家庭",
+                            CompletedAt: DateTime.TryParse(S(x, "completed_at"), out var ca) ? ca : null,
+                            CreatedByAi: B(x, "created_by_ai"));
+                        Todos.AbsorbRemote(t);
+                    }
+                    else if (kind == "sessions")
+                    {
+                        var sid = S(x, "id");
+                        var existing = Chat.Sessions.FirstOrDefault(z => z.SessionId == sid);
+                        var sess = existing is not null
+                            ? existing with { Shared = true, Title = S(x, "title") }
+                            : new ChatSession(sid, S(x, "title"), null, ProjectScope.Personal,
+                                              DateTime.TryParse(S(x, "last_active"), out var la) ? la : DateTime.Now,
+                                              WorkspaceKey: S(x, "workspace") is { Length: > 0 } wk ? wk : "chat",
+                                              OwnerMemberId: S(x, "owner"), Shared: true);
+                        Chat.AbsorbRemoteSession(sess);
+                    }
+                    else if (kind == "messages")
+                    {
+                        Chat.AbsorbRemoteMessage(new ChatMessage(
+                            S(x, "session_id"),
+                            Enum.TryParse<ChatRole>(S(x, "role"), out var rr) ? rr : ChatRole.User,
+                            S(x, "text"),
+                            DateTime.TryParse(S(x, "at"), out var at) ? at : DateTime.Now,
+                            null, S(x, "id")));
+                    }
+                }
+                catch { /* ★ 单条解析不了就跳过这一条,不整批丢 —— 别的条是好的 */ }
+            }
+        }));
+    }
+
+    static string S(System.Text.Json.JsonElement e, string n) =>
+        e.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+            ? (v.GetString() ?? "") : "";
+
+    static bool B(System.Text.Json.JsonElement e, string n) =>
+        e.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.True;
 
     bool LoadStores()
     {

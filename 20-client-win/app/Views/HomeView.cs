@@ -255,6 +255,36 @@ public sealed class HomeView : UserControl
         todoBody.Children.Add(footer);
         todoBody.Children.Add(todoScroll);
 
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ P4-S13(D86):同步状态必须【看得见】。
+        //
+        //  主机不在线时本地照常改(不能让人干不了活),但**必须标出来** ——
+        //  不标就是又一次「看着好了实际没有」,而这一次的代价特别具体:
+        //  用户以为另一台机器也看得到,实际那边什么都没有
+        //  (这正是他报的那件事:「我这边添加的共享家庭待办也无法在对方应用显示」)。
+        //
+        //  ★ 一切正常时 StatusLine() 返回**空串**,这一行整个不出现 ——
+        //    常驻的"已同步"绿字会被当成背景噪声,真出事那天也就没人看了。
+        // ══════════════════════════════════════════════════════════════
+        var syncLine = Ui.Caption("");
+        syncLine.Margin = new Thickness(2, 0, 2, 4);
+        syncLine.TextWrapping = TextWrapping.Wrap;
+        void RefreshSyncLine()
+        {
+            var t = TheApp.Sync?.StatusLine() ?? "";
+            syncLine.Text = t;
+            syncLine.Visibility = t.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            syncLine.SetResourceReference(TextBlock.ForegroundProperty,
+                                          t.StartsWith("★") ? "RiskWarning" : "FgMuted");
+        }
+        RefreshSyncLine();
+        if (TheApp.Sync is not null)
+        {
+            TheApp.Sync.Changed += RefreshSyncLine;
+            Unloaded += (_, _) => TheApp.Sync.Changed -= RefreshSyncLine;
+        }
+        todoBody.Children.Add(syncLine);
+
         _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
             headerAction: Ui.PlusButton(() => OpenTodoEditor(null), "新增待办事项"),
