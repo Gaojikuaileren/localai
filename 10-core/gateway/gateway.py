@@ -14,6 +14,7 @@
     先起后端:  llama-server -m <8b> --port 18081 ...
     再起网关:  uvicorn gateway:app --host 127.0.0.1 --port 8080
 """
+import asyncio          # P4-S13:同步面的 SSE 自己等事件(GPU 面那条是 Broker 在等)
 import json
 import tomllib
 import time
@@ -29,6 +30,8 @@ import e4_egress as e4
 import caller_identity
 import gpu_broker
 import gpu_policy
+import sync_policy
+import sync_store
 import system_prompt
 import membership
 
@@ -626,6 +629,11 @@ ROUTE_TIERS = {
     # P4-S9:★ 「点确定」= 一次事务(S8 的 apply_intended 的对外落点)。
     #   与 lease 同款:if_generation **必填**,对不上 409 + 最新快照。
     ("POST", "/v1/gpu/intended"): "authenticated",
+    # P4-S13(D86):内网同步 —— 家庭待办 + 共享会话。
+    #   ★ 这是 D52「真正的上传/同步要等中枢接入(P4+)」那半边的落点。
+    ("GET", "/v1/sync/snapshot"): "authenticated",
+    ("POST", "/v1/sync/push"): "authenticated",
+    ("GET", "/v1/sync/events"): "authenticated",
 }
 
 
@@ -900,6 +908,162 @@ async def session_end(request: Request):
 #     它的注释自己写着「接入 GPU Broker(P4)后以中枢下发的清单为准替换这份占位」。
 #     ⇒ 现在就是那个"接入后"。清单只能有一份权威,就是准入白名单本身。
 # ══════════════════════════════════════════════════════════════════════
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S13 · 内网同步(D86):家庭待办 + 共享会话
+#
+#  ★ D52 写着「★ 真正的上传/同步要等中枢接入(P4+)」—— 这里就是那半边。
+#  ★ 触发它的是两条实测反馈:「副机提升为共享,主机看不见」「共享家庭待办对方看不到」。
+#    查清后都不是 bug,是**从来没做过**。
+#
+#  ★★ 三条裁定(D86)在这一层的落点:
+#    ① 只收「家庭/共享」的 —— 判据在 sync_store.in_scope,**服务端**说了算;
+#    ② 实时:变更即推,订阅方走 SSE(与 GPU 面同一手法,D37 ②);
+#    ③ 冲突后到的赢,**但被覆盖的那一版存起来** —— 响应里如实回报 superseded。
+# ══════════════════════════════════════════════════════════════════════
+
+# 同步面的变更通知。★ 与 Broker 的世代号同款:订阅者等事件,不轮询。
+_sync_waiters: list = []
+
+
+def _sync_notify() -> None:
+    """★ 非阻塞地叫醒所有订阅者。写完就叫,不攒批 ——
+    D86 裁定②要求"内容更新也要实时",攒批就不实时了。"""
+    global _sync_waiters
+    for w in _sync_waiters:
+        w.set()
+    _sync_waiters = []
+
+
+def sync_guard(request: Request, action: str, *, batch: int = 0, holder: str = "",
+               count_quota: bool = True):
+    """同步面的档位判定。★ 复用 gpu_principal 解主体 —— 主体解析只有一套,
+    否则又会出现「两条路径各写各的档位判断」(S10 那个洞的根因)。"""
+    tier = gpu_principal(request)
+    d = sync_policy.check(tier, action, batch=batch, holder=holder, count_quota=count_quota)
+    if d.ok:
+        return tier, None
+    status = 401 if tier == "remote-unauthenticated" else (429 if d.code == "denied_quota" else 403)
+    return tier, JSONResponse(
+        status_code=status,
+        content={"error": {"message": d.message, "type": d.code,
+                           "dimension": d.dimension, "tier": tier, "action": action},
+                 "detail": d.detail or {}},
+    )
+
+
+@app.get("/v1/sync/snapshot")
+async def sync_snapshot(request: Request):
+    """共享数据的全量/增量快照。`since_rev` 省略即全量(重连后拿它对齐)。"""
+    _tier, _deny = sync_guard(request, "sync_read")
+    if _deny is not None:
+        return _deny
+    try:
+        since = int(request.query_params.get("since_rev", "0"))
+    except Exception:                                        # noqa: BLE001
+        since = 0
+    try:
+        return sync_store.store().snapshot(since_rev=since)
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 存储坏了要**说出来**(sync_store 对坏档是抛而不是当空表 —— 当空会让
+        #   下一次推送把全部共享数据整个覆盖掉)。
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "共享数据不可用", "type": "sync_store_unavailable",
+                               "reason": type(e).__name__, "detail": str(e)[:200]}},
+        )
+
+
+@app.post("/v1/sync/push")
+async def sync_push(request: Request):
+    """推一批变更。逐条判范围、逐条回结果。
+
+    ★★ **逐条**回结果,不是一个总的 ok —— 一批里有的收了有的被拒(个人待办),
+      合成一个布尔值会让客户端不知道哪条没上去,于是它要么全部重推、要么静默丢。
+    """
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+    items = body.get("items")
+    if not isinstance(items, list):
+        # ★ 与 /v1/gpu/intended 同一条:缺字段不当成空 —— 那会把一次手滑变成一次空推。
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "缺少 items 数组", "type": "missing_items"}})
+    device = _short_echo(body.get("device")) or "unknown"
+    _tier, _deny = sync_guard(request, "sync_write", batch=len(items), holder=device)
+    if _deny is not None:
+        return _deny
+
+    results = []
+    accepted = 0
+    try:
+        st = sync_store.store()
+        # ★ 先收 sessions 再收 messages:messages 的范围判据要查它所属会话在不在共享里。
+        #   顺序反了的话,同一批里"新共享的会话 + 它的消息"会因为会话还没进表而被拒。
+        order = {"sessions": 0, "todos": 1, "messages": 2}
+        for it in sorted(items, key=lambda x: order.get(str(x.get("kind")), 9)):
+            kind = str(it.get("kind") or "")
+            rec = it.get("record") or {}
+            r = st.put(kind, rec, device)
+            if r.get("ok"):
+                accepted += 1
+            results.append({"kind": kind, "id": rec.get("id"), **r})
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "写共享数据失败", "type": "sync_store_unavailable",
+                               "reason": type(e).__name__, "detail": str(e)[:200]}})
+    if accepted:
+        _sync_notify()
+    return {"accepted": accepted, "total": len(items), "results": results,
+            "generation": sync_store.store().snapshot()["generation"]}
+
+
+@app.get("/v1/sync/events")
+async def sync_events(request: Request):
+    """共享数据的推送流。★ D86 裁定②:内容更新要**实时**同步。
+
+    ★ 与 GPU 面同款三条:连上先给全量(重连即对齐)· 每帧盖 generation ·
+      15 秒心跳(**没有心跳的话,一条死掉的长连接与"一直没变化"长得一模一样**)。
+    """
+    _tier, _deny = sync_guard(request, "sync_read")
+    if _deny is not None:
+        return _deny
+
+    async def gen():
+        try:
+            snap = sync_store.store().snapshot()
+            yield "event: snapshot\ndata: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
+            last = snap["generation"]
+            while True:
+                if await request.is_disconnected():
+                    break
+                ev = asyncio.Event()
+                cur = sync_store.store().snapshot(since_rev=last)
+                if cur["generation"] != last:
+                    last = cur["generation"]
+                    yield "event: update\ndata: " + json.dumps(cur, ensure_ascii=False) + "\n\n"
+                    continue
+                _sync_waiters.append(ev)
+                try:
+                    await asyncio.wait_for(ev.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if ev in _sync_waiters:
+                        _sync_waiters.remove(ev)   # ★ 超时摘掉自己,否则无界增长
+                    yield f": heartbeat gen={last}\n\n"
+        except Exception as e:                               # noqa: BLE001
+            # ★ 推送流崩了要说出来 —— 静默断开会被客户端当成"没有变化"。
+            yield ("event: error\ndata: "
+                   + json.dumps({"type": type(e).__name__, "detail": str(e)[:200]},
+                                ensure_ascii=False) + "\n\n")
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
 @app.get("/v1/gpu/components")
 async def gpu_components(request: Request):
