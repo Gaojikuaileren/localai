@@ -137,6 +137,18 @@ public static class Transport
 
         await onSas(reqId, sas);   // human compares the six words; host approves out of band
 
+        // ★★ 从这里起的连接是【对钉住的 CA 校验】的 —— 而 Trusted() 只换了根信任,
+        //   **没有**关掉主机名校验。服务器证书的 SAN 是 `localai-<hubShort>.local`,
+        //   所以 URL 里必须用那个名字;继续用 `https://<ip>:8443` 会直接
+        //   "The SSL connection could not be established"。
+        //   ⇒ enroll 的响应里带了 hubId,到这一步我们已经知道该用什么名字了,换过来。
+        //   实际连到哪儿仍由 ConnectCallback 定向到 dial(IP),名字只用于 SNI 与证书校验。
+        //   ★ 2026-08-04 实测:不换名字的话 enroll 能过、自己批准也能过,然后
+        //     /pair/status 第一次握手就失败 —— 设备永远停在 provisioning,而图形界面这条
+        //     配对路径【从来没有走完过】(P3b 那次两台实机是走控制台的,绕开了这段)。
+        var serverName = "localai-" + LocalAI.Identity.HubId.Short(Guid.Parse(hubId)) + ".local";
+        edgeUrl = $"https://{serverName}:{dial.Port}";
+
         using var cli = Trusted(dial, caPublic, null);
         // 3 min: enough for the operator to compare the six words across two screens and type `approve`.
         // ★★ 这里原来是 180 秒,而主机侧 Pairing 的 ExpiresAt 是 **5 分钟**(identity/Pairing.cs)。

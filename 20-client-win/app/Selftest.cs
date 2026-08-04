@@ -5149,6 +5149,21 @@ public static class Selftest
                            + "第二个会撞 address already in use,在黑窗口里吐一整屏异常栈,"
                            + "而人根本读不出「你已经开着一个了」");
 
+                    // ㉔ 配对后半程必须用【证书名】而不是 IP,否则对钉住 CA 的那条连接握不上手
+                    var ctName = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
+                    if (ctName is not null)
+                    {
+                        var body5 = Body(ctName);
+                        Assert(body5.Contains("var serverName = \"localai-\" + LocalAI.Identity.HubId.Short"),
+                               "★★ enroll 之后要把 edgeUrl 换成证书名 localai-<hubShort>.local —— "
+                               + "Trusted() 只换了根信任、没关主机名校验,继续用 https://<ip> 会直接握手失败;"
+                               + "表现是设备永远停在 provisioning(图形界面这条配对路径本来从没走完过)");
+                        var iSas = body5.IndexOf("await onSas(", StringComparison.Ordinal);
+                        var iName = body5.IndexOf("var serverName =", StringComparison.Ordinal);
+                        var iTrust = body5.IndexOf("Trusted(dial, caPublic, null)", StringComparison.Ordinal);
+                        Assert(iSas >= 0 && iName >= 0 && iTrust >= 0 && iSas < iName && iName < iTrust,
+                               "★ 换名字要在【建可信连接之前】");
+                    }
                     // ㉒ 用户终版规格(decision-packets/pairing-ux-final-spec-2026-08-04.md)
                     //   主机未连接就【自动连自己】,不给按钮;角色检测只在【还没配好】时出现;
                     //   已配对列表里自己那条【不给移除】。
