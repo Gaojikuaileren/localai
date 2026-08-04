@@ -257,5 +257,68 @@ _seg2 = _ss.split("-eq 2", 1)[1].split("elseif", 1)[0] if "-eq 2" in _ss else ""
 check("退出码 2 的分支里【没有】 -Force 逃生口", "$Force" not in _seg2, _seg2[:160])
 check("退出码 2 的文案与「被拒」不同", "没能跑起来" in _seg2)
 
+# ══════════════════════════════════════════════════════════════════════
+#  S4a · 三集合动态闸(2026-08-04 裁定)
+#
+#  判据关键:哪些显存**已经被 NVML free 反映了**。
+#    loaded   已装载   → free 里已扣掉 ⇒ 再减一次 = 重复计
+#    reserved 已批未装 → free 里还看得见 ⇒ 不减的话别人会把它再批一次(D37 ④ 的竞态)
+#    incoming 本次新占 → 必须减
+#  ⇒ free − incoming − Σpeak(reserved \ loaded \ 本次请求集) ≥ safety_margin
+# ══════════════════════════════════════════════════════════════════════
+print("=== 17. 三集合:向后兼容(不传 reserved 时行为逐字节不变)===")
+_a = evaluate(["llm.assistant.8b@16k"], cfg, free=9.0)
+_b = evaluate(["llm.assistant.8b@16k"], cfg, free=9.0, reserved=[])
+check("不传 reserved 与传空表结论相同", _a.ok == _b.ok and _a.message == _b.message)
+check("冷启动仍按 incoming 算", _a.ok)
+
+print("=== 18. ★ 别人的预留会占掉名额(不减它 = D37 ④ 的双批竞态)===")
+#   free=9.0;我要 8b@16k(5.92);别人预留了 speech.full(4.05) 但还没装。
+#   9.0 − 5.92 − 4.05 = -0.97 < 0.8 ⇒ 必须拒。
+_v = evaluate(["llm.assistant.8b@16k"], cfg, free=9.0, reserved=["speech.full"])
+check("别处的预留会把我挡住", not _v.ok, _v.message[:80])
+check("归因到 dynamic", _v.gate == "dynamic", _v.gate)
+check("★ 文案点名这是【预留】而不是桌面占用", "预留" in _v.message and "speech.full" in _v.message,
+      _v.message[:160])
+check("★ 文案明说这一部分关程序没用(处境不同,处置也不同)",
+      "关程序没用" in _v.message, _v.message[:200])
+#   同样的 free,没有别人的预留时应当通过 —— 证明差的就是那 4.05
+_v2 = evaluate(["llm.assistant.8b@16k"], cfg, free=9.0, reserved=[])
+check("没有别人的预留时同一请求通过", _v2.ok)
+
+print("=== 19. ★★ 双重扣减陷阱:已算进 incoming 的预留【不得】再减第二次 ===")
+#   这是本片最容易写错、且写错就是"两个客户端双双获批"的那一处。
+#   场景:我自己先预留了 8b@16k,现在真去装它。
+#     正确:incoming 已含 5.92,reserved 里的同一项必须被差集排除 ⇒ 只减一次。
+#     错误:再减一遍 ⇒ 5.92×2 = 11.84,本来装得下也会被误拒。
+_v3 = evaluate(["llm.assistant.8b@16k"], cfg, free=7.0, reserved=["llm.assistant.8b@16k"])
+check("自己的预留不被重复扣减(7.0 − 5.92 = 1.08 ≥ 0.8 ⇒ 通过)", _v3.ok,
+      _v3.message[:160])
+#   反证:若真被扣两遍,7.0 − 11.84 < 0 必拒 —— 上面那条通过即证明没有重复扣。
+_v4 = evaluate(["llm.assistant.8b@16k"], cfg, free=7.0,
+               reserved=["llm.assistant.8b@16k", "speech.lite"])
+check("只有【不在本次请求集里】的那部分预留被减(speech.lite 2.07:7.0−5.92−2.07<0.8 ⇒ 拒)",
+      not _v4.ok)
+
+print("=== 20. ★ 已装载的组件不得因为也在 reserved 里而被减 ===")
+#   loaded 的显存已经从 free 里扣过了;它若同时出现在 reserved(还没来得及清理),
+#   差集必须把它排除,否则又是一次重复计。
+_v5 = evaluate(["llm.assistant.8b@16k", "speech.lite"], cfg, free=3.0,
+               resident=["llm.assistant.8b@16k"], reserved=["llm.assistant.8b@16k"])
+#   incoming = speech.lite 2.07;others_reserved 应为 0(8b@16k 既 loaded 又在请求集里)
+#   3.0 − 2.07 = 0.93 ≥ 0.8 ⇒ 通过
+check("既已装载又在预留表里的组件不被重复扣减(3.0−2.07=0.93 ⇒ 通过)", _v5.ok,
+      _v5.message[:160])
+
+print("=== 21. 源码级:差集必须是【双重】的,不能只排除一边 ===")
+#   只排除 loaded 会让"自己的预留"被扣两遍;只排除请求集会让"已装载的预留"被扣两遍。
+import inspect as _inspect
+_ev = _inspect.getsource(vram_gate.evaluate)
+check("差集排除了 loaded(resident)", "c not in resident" in _ev)
+check("差集排除了本次请求集(component_ids)", "c not in component_ids" in _ev)
+check("两者在同一个推导式里(而不是分两步、留下中间态)",
+      "if c not in resident and c not in component_ids" in _ev,
+      "分两步写容易在维护时丢掉一半")
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

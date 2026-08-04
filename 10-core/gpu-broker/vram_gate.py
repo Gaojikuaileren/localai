@@ -100,11 +100,31 @@ def evaluate(component_ids: List[str],
              cfg: Optional[Config] = None,
              free: Optional[float] = None,
              skip_dynamic: bool = False,
-             resident: Optional[List[str]] = None) -> Verdict:
+             resident: Optional[List[str]] = None,
+             reserved: Optional[List[str]] = None) -> Verdict:
     """对【申请后的完整 AI 驻留集合】跑三层检查。
 
     component_ids 是「这次操作之后应当驻留的全部组件」,不是增量 ——
     §8.1 静态闸的定义就是 Σpeak(申请后的驻留集合)。
+
+    ── 三集合(2026-08-04 · P4-S4a 裁定)────────────────────────────────
+    判据的全部关键是:**哪些显存已经被 NVML free 反映了**。
+
+      resident(=loaded) 已装载   → 物理上已占,**已经**从 free 里扣掉了 ⇒ 再减一次就是重复计
+      reserved          已批准未装载 → **还没**占,free 里看得见 ⇒ 不显式减的话,
+                                       别人会把这块"空闲"再批给自己 —— 那正是 D37 ④ 要关的竞态
+      incoming          本次新占     → 还没占 ⇒ 必须减
+
+    ⇒ 动态闸 = `free − incoming − Σpeak(reserved \\ loaded \\ 本次请求集) ≥ safety_margin`
+
+    ★★ 最后那个**双重差集**是承重的,不是洁癖:已经算进 incoming 的那些预留
+      **不能再减第二次**。把 `loaded ∪ reserved` 一股脑塞进旧的单一 `resident` 参数,
+      会让每个"已批准但尚未装载"的组件被扣两遍(既被排除在 incoming 外、又还没出现在
+      NVML free 里)⇒ 闸误判成"更空",**两个客户端双双获批** ——
+      D37 ④ 要关的那个竞态,会从关它的那个参数里重新打开。本函数用差集在结构上堵死它。
+
+    ★ 静态闸不受影响:它取 Σpeak(申请后的完整集合),管的是**预算**,与物理占用无关(D37 原式)。
+    ★ 向后兼容:不传 reserved 时行为与 2026-07-31 版逐字节相同(reserved 为空集,差集为空)。
     """
     cfg = cfg or load_config()
     budget = cfg.budget.vram_budget
@@ -153,8 +173,21 @@ def evaluate(component_ids: List[str],
         resident = resident or []
         pending = [c for c in component_ids if c not in resident]
         incoming = round(sum(cfg.peak(c) for c in pending), 4)
-        margin_after = round(free - incoming, 4)
+        # ★★ 别人已预留、但【尚未装载】、且【不在本次请求集里】的那部分 ——
+        #   它还占着 free 的名额却没占物理显存。双重差集见函数头:
+        #   `- loaded` 排除已装载(已在 free 里扣过);`- component_ids` 排除已算进 incoming 的。
+        _res = reserved or []
+        others_reserved_ids = [c for c in _res if c not in resident and c not in component_ids]
+        others_reserved = round(sum(cfg.peak(c) for c in others_reserved_ids if c in cfg.components), 4)
+        margin_after = round(free - incoming - others_reserved, 4)
         if margin_after < cfg.budget.safety_margin:
+            # ★ 被别人的【预留】挡住,与被桌面占用挡住,是两种完全不同的处境 ——
+            #   前者要等/协商,后者要关程序。文案混在一起会把人支去关浏览器,而真正占着的是另一台客户端。
+            res_note = ""
+            if others_reserved > 0:
+                res_note = (f"其中 {others_reserved:.2f} 是**别处已批准但尚未装载**的预留"
+                            f"({'、'.join(others_reserved_ids)})—— 它还没占物理显存,但名额已被占下。\n"
+                            f"  → 这一部分**关程序没用**:要么等它装完/释放,要么让它先撤销预留。\n")
             if resident:
                 ai_now = round(sum(cfg.peak(c) for c in resident if c in cfg.components), 2)
                 desktop_now = round(cfg.budget.total_vram - free - ai_now, 2)
@@ -165,6 +198,7 @@ def evaluate(component_ids: List[str],
                              f"桌面等正占约 {desktop_now:.2f}(推算),中枢已驻留 {ai_now}"
                              f"({'、'.join(resident)}),本次要新增 {incoming:.2f}，"
                              f"装完只剩 {margin_after:.2f} < 安全余量 {cfg.budget.safety_margin:.2f}。\n"
+                             + res_note +
                              f"  → 卸掉某个已驻留组件,**或**关掉占显存的程序(浏览器/游戏/UE5)。"),
                 )
             desktop_now = round(cfg.budget.total_vram - free, 2)
@@ -173,6 +207,7 @@ def evaluate(component_ids: List[str],
                 total_peak=total, vram_budget=budget, free=free,
                 message=(f"动态闸:此刻只有 {free:.2f} GiB 可用(桌面等正占 {desktop_now:.2f})，"
                          f"这组要 {incoming:.2f}，装完只剩 {margin_after:.2f} < 安全余量 {cfg.budget.safety_margin:.2f}。\n"
+                         + res_note +
                          f"  → **改桌面预留没用** —— 撞的是物理墙。关掉占显存的程序(浏览器/游戏/UE5)再试。"),
             )
 
