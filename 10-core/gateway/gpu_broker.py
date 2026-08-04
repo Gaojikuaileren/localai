@@ -142,6 +142,49 @@ class Lease:
         }
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S7 · 四个集合 · 状态机 · 不变式 I2/I3/I4 · RECONCILE_WATCH
+#
+#  方案书 §8.1(行 1546-1604)原文。四个集合是**不变式的锚点**:
+#    intended_resident_set    你在主机面板勾选并点了确定的   —— 只有主机变更面能写
+#    committed_resident_set   Broker 事务成功后写入的实际目标 —— committed := intended
+#    actual_resident_set      租约账本 + NVML 反映的**真实**驻留
+#    permitted_on_demand_set  授权「允许在需要时申请」的按需槽 —— 只有主机变更面能写
+#
+#  ★ permitted_on_demand 与 intended 是**两个字段,不合并** ——
+#    合并会让 intended 里出现永远不参与 I2 判定的成员,三元组语义就脏了。
+# ══════════════════════════════════════════════════════════════════════
+
+STATE_STARTING      = "STARTING"
+STATE_READY         = "READY"
+STATE_STAGING       = "STAGING"
+STATE_PRECHECK      = "PRECHECK"
+STATE_APPLYING      = "APPLYING"
+STATE_RECONCILING   = "RECONCILING"
+STATE_DEGRADED_SAFE = "DEGRADED_SAFE"
+
+ALL_STATES = (STATE_STARTING, STATE_READY, STATE_STAGING, STATE_PRECHECK,
+              STATE_APPLYING, STATE_RECONCILING, STATE_DEGRADED_SAFE)
+
+# I2 不等时,state 必须是这三个之一(方案书行 1566)
+I2_TOLERATED_STATES = (STATE_STARTING, STATE_RECONCILING, STATE_DEGRADED_SAFE)
+
+
+@dataclass(frozen=True)
+class InvariantReport:
+    invariant: str          # I2 / I3 / I4
+    holds: bool
+    detail: str
+    # ★★ 置信度必须如实标注,否则这就是个假检测器。
+    #   "structural"    —— 判据的输入是结构性可观测的
+    #   "self_reported" —— 输入来自 Broker 自己的账本,**不是独立观测**
+    confidence: str = "structural"
+
+    def to_json(self) -> Dict:
+        return {"invariant": self.invariant, "holds": self.holds,
+                "detail": self.detail, "confidence": self.confidence}
+
+
 @dataclass(frozen=True)
 class Snapshot:
     """给外面看的**副本**。frozen —— 拿到它的人改不了权威状态。"""
@@ -162,6 +205,13 @@ class Snapshot:
     # P4-S4b:当前租约(拒绝信息要含【占用者】—— 谁持有、何时拿的、是否可驱逐)
     leases: Tuple[Dict, ...] = ()
     reserved: Tuple[str, ...] = ()
+    # P4-S7:四个集合 + 状态 + 不变式检测结果
+    intended: Tuple[str, ...] = ()
+    permitted_on_demand: Tuple[str, ...] = ()
+    actual: Tuple[str, ...] = ()
+    state: str = STATE_STARTING
+    power_on: bool = True
+    invariants: Tuple[Dict, ...] = ()
     inferred: bool = True
 
     def to_json(self) -> Dict:
@@ -171,6 +221,20 @@ class Snapshot:
             # ★ 已被租约占下但尚未装载的组件 —— 喂给闸的 reserved 集合(见 vram_gate 三集合)
             "reserved": list(self.reserved),
             "leases": [dict(l) for l in self.leases],
+            # ★ 四个集合是不变式的锚点(§8.1 行 1546)。permitted_on_demand 与 intended
+            #   是**两个字段不合并** —— 合并会让 intended 里出现永远不参与 I2 判定的成员。
+            "sets": {
+                "intended_resident": list(self.intended),
+                "committed_resident": list(self.committed),
+                "actual_resident": list(self.actual),
+                "permitted_on_demand": list(self.permitted_on_demand),
+            },
+            "state": self.state,
+            "power_on": self.power_on,
+            # ★ RECONCILE_WATCH 的结果:**只报告不修复**。每条自带 confidence ——
+            #   actual 今天不是独立观测(无装载器 + WDDM 不暴露逐进程显存),
+            #   所以 I2/I3 标 self_reported。不标就是个假检测器。
+            "invariants": [dict(i) for i in self.invariants],
             "vram": {
                 "free_gib": self.free_gib,
                 "total_gib": self.total_gib,
@@ -206,6 +270,13 @@ class Broker:
         #   每个订阅者持一个自己的 Event;状态变更时在锁内一次性全部 set。
         #   set() 是非阻塞的,放在锁里安全(不违反"锁内不得跨 await I/O")。
         self._waiters: List[asyncio.Event] = []
+
+        # ── P4-S7:四个集合 + 状态 + 电源轴 ──────────────────────
+        self._intended: List[str] = []            # 只有主机变更面能写
+        self._permitted_on_demand: List[str] = []  # 只有主机变更面能写(与 intended 分开)
+        self._state: str = STATE_STARTING
+        self._power_on: bool = True                # I4 的电源轴,与意图轴分离
+        self._last_watch: Tuple[InvariantReport, ...] = ()
 
     # ── 配置 ──────────────────────────────────────────────────────
     @property
@@ -244,6 +315,10 @@ class Broker:
                 # ★ 不在锁内做 I/O(见模块头硬约束)。nvml_free_gib 会起子进程,
                 #   在锁里跑会把整个网关(含 300s 流式聊天)卡住。
                 await asyncio.get_running_loop().run_in_executor(None, self._sample_once)
+                # ── RECONCILE_WATCH(P4-S7)★★ 只报告,不修复 ──
+                #   修复即"自动触发",而那正是 D10 存活下来的那半条明令禁止的。
+                #   这里只把结果记下来放进快照;要不要动手,是人的决定。
+                self._last_watch = self.check_invariants()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -283,6 +358,12 @@ class Broker:
         return Snapshot(
             leases=tuple(l.to_json() for l in _live),
             reserved=tuple(self.reserved_components()),
+            intended=tuple(self._intended),
+            permitted_on_demand=tuple(self._permitted_on_demand),
+            actual=tuple(self.actual_resident),
+            state=self._state,
+            power_on=self._power_on,
+            invariants=tuple(r.to_json() for r in (self._last_watch or self.check_invariants())),
             generation=self._generation,
             committed=committed,
             free_gib=free,
@@ -418,6 +499,90 @@ class Broker:
         async with self._lock:
             self._sweep_expired_locked()
             return list(self._leases.values())
+
+    # ══════════════════════════════════════════════════════════════
+    #  P4-S7 · 不变式检测器
+    #
+    #  ★★ 「没有检测器的不变式等于没有」(方案书行 1588)。
+    #     而方案书行 1593-1594 说得更具体:全文今天**没有任何机制能发现
+    #     「3 个装了 2 个却仍报 READY」** —— 那正是 I2 本来要禁止的事。
+    #
+    #  ★★ RECONCILE_WATCH **只报告,不修复** —— 修复即"自动触发",
+    #     而那正是 D10 存活下来的那半条明令禁止的。
+    # ══════════════════════════════════════════════════════════════
+
+    @property
+    def actual_resident(self) -> List[str]:
+        """真实驻留集合。
+
+        ★★ **今天它不是独立观测**,而是 Broker 自己的账本(committed)。
+          原因有二,都是结构性的、不是没做完:
+            ① 装载器还不存在(装载/卸载端点属于后续片),没有"谁真的把模型装进去了"这个事实源;
+            ② WDDM 不暴露逐进程显存(本机实测 nvidia-smi --query-compute-apps 对全部进程
+               都是 [N/A]),所以也没法从 NVML 反推"现在装着哪几个"。
+          ⇒ 因此 I2 今天的置信度只能标 self_reported。**不标的话它就是个假检测器** ——
+            用自己的账本跟自己的账本比,永远相等。
+        """
+        return list(self._committed)
+
+    def check_invariants(self) -> Tuple[InvariantReport, ...]:
+        """求值 I2 / I3 / I4。★ 纯读,不改任何状态 —— 检测器不许有副作用。"""
+        actual = set(self.actual_resident)
+        committed = set(self._committed)
+        intended = set(self._intended)
+        permitted = set(self._permitted_on_demand)
+        out: List[InvariantReport] = []
+
+        # ── I2 · 该在的都在 ──────────────────────────────────
+        #  ★★ 必须保留【蕴含】形态:state == READY ⟹ actual == committed。
+        #     DEGRADED_SAFE 不是 READY ⇒ 前件为假 ⇒ I2 自动成立。
+        #     写成双条件会造出「永久违反不变式、告警无法消解」的状态,
+        #     进而逼着系统去自动改写锚点 —— 而那恰好违反「不做自动触发」。
+        if self._state == STATE_READY:
+            ok = (actual == committed)
+            detail = ("READY 且 actual == committed" if ok else
+                      f"READY 却不等:缺 {sorted(committed - actual)} 多 {sorted(actual - committed)}"
+                      f" ⇒ state 必须是 {I2_TOLERATED_STATES} 之一,且 UI 须常驻显示差异")
+        else:
+            ok = True
+            detail = f"state={self._state} 不是 READY ⇒ 前件为假,I2 自动成立(这是设计,不是放水)"
+        out.append(InvariantReport("I2", ok, detail, confidence="self_reported"))
+
+        # ── I3 · 在的都该在(★ 无状态前件,任何状态下恒成立)──
+        #  这条才是接住「某个 bug 装了不该装的」的那一条。
+        #  它是准入白名单的**运行期**版本:白名单只在申请那一刻把关。
+        stray = sorted(actual - (committed | permitted))
+        out.append(InvariantReport(
+            "I3", not stray,
+            ("没有不该在的组件" if not stray else
+             f"★ 出现了既不在 committed 也不在 permitted_on_demand 的驻留:{stray} —— §9.3 告警"),
+            confidence="self_reported"))
+
+        # ── I4 · 电源轴与意图轴分离 ──────────────────────────
+        #  power == off ⟹ actual == ∅ ∧ intended 不变。
+        #  ★ ON/OFF 总开关**不写 intended** —— 否则一次 OFF 就吞掉用户的勾选,
+        #    等价于系统改写了用户配置;ON 回来时按 intended 重新装载,不需要重勾。
+        if not self._power_on:
+            ok4 = (len(actual) == 0)
+            d4 = ("power=off 且 actual 为空" if ok4 else
+                  f"★ power=off 却仍有驻留:{sorted(actual)}")
+        else:
+            ok4 = True
+            d4 = f"power=on ⇒ 前件为假,I4 自动成立(intended 现有 {len(intended)} 项,未被电源轴改写)"
+        out.append(InvariantReport("I4", ok4, d4, confidence="structural"))
+
+        return tuple(out)
+
+    async def set_power(self, on: bool) -> int:
+        """电源轴。★ I4:**绝不触碰 intended** —— 关机不该吞掉用户的勾选。"""
+        async with self._lock:
+            self._power_on = on
+            if not on:
+                self._committed = []          # 关电 ⇒ 实际驻留清空
+                # ★ self._intended 一个字都不动 —— 这就是 I4 的全部要点
+            self._generation += 1
+            self._notify_locked()
+            return self._generation
 
     def reserved_components(self) -> List[str]:
         """当前被租约占下、但**尚未装载**的组件 —— 喂给闸的 `reserved` 那一集合。

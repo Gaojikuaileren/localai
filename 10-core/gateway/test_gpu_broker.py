@@ -424,5 +424,140 @@ async def _conflict_test():
 _g0, _g1 = asyncio.run(_conflict_test())
 check("每次发租约世代号都变(客户端手上的旧号会失效)", _g1 != _g0, f"{_g0} -> {_g1}")
 
+##########################################################################
+#  P4-S7 · 四个集合 · I2/I3/I4 · RECONCILE_WATCH
+##########################################################################
+
+print("=== 24. 四个集合齐备,且 permitted_on_demand 与 intended 【不合并】 ===")
+_sj = gpu_broker.BROKER.snapshot().to_json()
+for _k in ("intended_resident", "committed_resident", "actual_resident", "permitted_on_demand"):
+    check(f"快照含 {_k}", _k in _sj["sets"])
+check("★ permitted_on_demand 是独立字段,不是塞进 intended",
+      hasattr(gpu_broker.BROKER, "_permitted_on_demand") and
+      gpu_broker.BROKER._permitted_on_demand is not gpu_broker.BROKER._intended,
+      "合并会让 intended 里出现永远不参与 I2 判定的成员,三元组语义就脏了")
+check("状态机七态齐备", len(gpu_broker.ALL_STATES) == 7)
+check("初始态是 STARTING(不是直接 READY)",
+      gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg).snapshot().state == gpu_broker.STATE_STARTING)
+
+print("=== 25. ★★ I2 必须保留【蕴含】形态 ===")
+#   state == READY ⟹ actual == committed。DEGRADED_SAFE 不是 READY ⇒ 前件为假 ⇒ 自动成立。
+#   写成双条件会造出「永久违反、告警无法消解」的状态,逼系统去自动改写锚点 ——
+#   而那恰好违反「不做自动触发」。
+
+
+def _inv(b, name):
+    return next(r for r in b.check_invariants() if r.invariant == name)
+
+
+_b7 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_b7._state = gpu_broker.STATE_READY
+_b7._committed = ["llm.assistant.8b@16k"]
+check("READY 且相等 → I2 成立", _inv(_b7, "I2").holds)
+_b7._committed = ["llm.assistant.8b@16k", "speech.lite"]   # actual 跟着 committed(见 actual_resident 说明)
+check("READY 且相等(两项)→ I2 仍成立", _inv(_b7, "I2").holds)
+_b7._state = gpu_broker.STATE_DEGRADED_SAFE
+_r2 = _inv(_b7, "I2")
+check("★★ DEGRADED_SAFE 下 I2 自动成立(前件为假)", _r2.holds)
+check("★ 而且明说这是设计不是放水", "前件为假" in _r2.detail and "不是放水" in _r2.detail)
+_i2src = inspect.getsource(gpu_broker.Broker.check_invariants)
+check("★ I2 判据带状态前件(不是无条件相等)", 'self._state == STATE_READY' in _i2src)
+check("★ 源码写明了为什么不能写成双条件", "双条件" in _i2src)
+check("不等时列出容忍状态集", "I2_TOLERATED_STATES" in _i2src)
+check("I2_TOLERATED_STATES 恰为三态(§8.1 行 1566)",
+      set(gpu_broker.I2_TOLERATED_STATES) ==
+      {gpu_broker.STATE_STARTING, gpu_broker.STATE_RECONCILING, gpu_broker.STATE_DEGRADED_SAFE})
+
+print("=== 26. ★★ I3 【无状态前件】——任何状态下恒成立 ===")
+#   这条才是接住「某个 bug 装了不该装的」的那一条,是准入白名单的【运行期】版本
+#   ——白名单只在申请那一刻把关。
+_b8 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_b8._committed = ["llm.assistant.8b@16k"]
+for _st in gpu_broker.ALL_STATES:
+    _b8._state = _st
+    check(f"I3 在 {_st} 下也被求值且成立", _inv(_b8, "I3").holds)
+check("★ I3 判据里【没有】状态前件",
+      "I3" in _i2src and "stray = sorted(actual - (committed | permitted))" in _i2src)
+#   构造违反:actual 里有既不在 committed 也不在 permitted 的
+_b9 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_b9._committed = ["llm.assistant.8b@16k"]
+
+
+class _FakeActual(gpu_broker.Broker):
+    @property
+    def actual_resident(self):
+        return ["llm.assistant.8b@16k", "comfyui.sdxl"]      # 多出一个没人授权的
+
+
+_bf = _FakeActual(cfg=gpu_broker.BROKER.cfg)
+_bf._committed = ["llm.assistant.8b@16k"]
+_r3 = _inv(_bf, "I3")
+check("★★ 出现未授权驻留 → I3 判违反", not _r3.holds, _r3.detail[:100])
+check("点名是哪个组件", "comfyui.sdxl" in _r3.detail)
+check("指向 §9.3 告警", "9.3" in _r3.detail or "告警" in _r3.detail)
+#   permitted_on_demand 里的不算违反 —— 这正是两个字段不能合并的理由
+_bf._permitted_on_demand = ["comfyui.sdxl"]
+check("★ 在 permitted_on_demand 里的不算违反(按需槽是被授权的)", _inv(_bf, "I3").holds)
+
+print("=== 27. ★★ I4 电源轴与意图轴分离:关电【不吞掉】用户的勾选 ===")
+
+
+async def _power_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    b._intended = ["llm.assistant.8b@16k", "speech.lite"]
+    b._committed = ["llm.assistant.8b@16k", "speech.lite"]
+    before = list(b._intended)
+    await b.set_power(False)
+    return before, list(b._intended), list(b._committed), b.snapshot()
+
+
+_before, _after_intended, _after_committed, _snap4 = asyncio.run(_power_test())
+check("★★ 关电后 intended 一个字没动(否则等于系统改写了用户配置)",
+      _after_intended == _before, f"{_before} -> {_after_intended}")
+check("关电后 committed 清空", _after_committed == [])
+check("I4 成立", next(r for r in _snap4.invariants if r["invariant"] == "I4")["holds"])
+_p4src = inspect.getsource(gpu_broker.Broker.set_power)
+# ★ 只看会执行的代码:去 docstring、去注释。第一版栽在注释里那句
+#   「self._intended 一个字都不动」上 —— 它正是在说明"不碰",却被当成了"碰了"。
+#   与本文件第 20 组、e4_egress、Body() 是同一条纪律。
+_p4code = re.sub(r'"""(?:.|\n)*?"""', "", _p4src)
+_p4code = "\n".join(l for l in _p4code.splitlines() if not l.lstrip().startswith("#"))
+check("★ set_power 的【代码】里绝不给 _intended 赋值",
+      not re.search(r"self\._intended\s*=[^=]", _p4code), _p4code[:160])
+check("源码写明 ON 回来按 intended 重装、不需重勾",
+      "不该吞掉" in _p4src or "重新装载" in inspect.getsource(gpu_broker.Broker.check_invariants))
+
+print("=== 28. ★★ RECONCILE_WATCH:只报告,【不修复】 ===")
+_loop = inspect.getsource(gpu_broker.Broker._sampler_loop)
+check("watch 挂在采样循环里", "check_invariants" in _loop)
+check("★★ 只把结果记下来(赋值给 _last_watch),不做任何修正动作",
+      "_last_watch = self.check_invariants()" in _loop)
+check("★ watch 里没有任何写状态集合的动作(修复即『自动触发』,D10 明令禁止)",
+      not any(w in _loop for w in ("_committed =", "_intended =", "_permitted_on_demand =",
+                                   "set_power", "grant(", "release(")))
+_ci = inspect.getsource(gpu_broker.Broker.check_invariants)
+# ★ 判据要排除【比较】:`self._state == STATE_READY` 里含有 `self._state =` 这个前缀,
+#   第一版因此误红。用 =[^=] 把赋值与比较分开。
+check("★ 检测器本身是纯读的(不许有副作用)",
+      not re.search(r"self\.(_committed|_intended|_permitted_on_demand|_state|_generation)\s*=[^=]", _ci),
+      "检测器有副作用就不再是检测器")
+check("源码写明「只报告不修复」的理由", "不做自动触发" in _loop or "只报告" in _loop)
+
+print("=== 29. ★★ 置信度必须如实:actual 今天不是独立观测 ===")
+#   没有装载器 + WDDM 不暴露逐进程显存 ⇒ actual 只能是 Broker 自己的账本。
+#   用自己的账本跟自己的账本比,永远相等 —— 不标 confidence 就是个假检测器。
+_reports = {r.invariant: r for r in gpu_broker.BROKER.check_invariants()}
+check("I2 标为 self_reported", _reports["I2"].confidence == "self_reported", _reports["I2"].confidence)
+check("I3 标为 self_reported", _reports["I3"].confidence == "self_reported")
+check("★ I4 是 structural(电源轴是我们自己的状态,确实可观测)",
+      _reports["I4"].confidence == "structural")
+_asrc = inspect.getsource(type(gpu_broker.BROKER).actual_resident.fget)
+check("★ actual_resident 的文档写明它今天不是独立观测", "不是独立观测" in _asrc)
+check("★ 并写明两条结构性原因(无装载器 + WDDM)",
+      "装载器" in _asrc and "WDDM" in _asrc)
+check("★ 并写明不标 confidence 就是假检测器", "假检测器" in _asrc)
+check("快照里每条不变式都带 confidence",
+      all("confidence" in i for i in _sj["invariants"]))
+
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)
