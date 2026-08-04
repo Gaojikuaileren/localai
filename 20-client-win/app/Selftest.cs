@@ -6102,7 +6102,42 @@ public static class Selftest
         }
 
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
+        WriteSentinel(pass, fail);
         return fail > 0 ? 1 : 0;
+    }
+
+    /// <summary>环境变量:出包门禁用它指定「自检结果哨兵」的落点。</summary>
+    public const string SentinelEnvVar = "LOCALAI_SELFTEST_SENTINEL";
+
+    /// <summary>
+    /// 把自检结果写进哨兵文件。★★ 2026-08-04 加,因为**退出码不足以当门禁判据**。
+    ///
+    /// 实测事故(worklog 2026-08-04):`build-client.ps1` 第二形状自检因文件被占用
+    /// (`error 32`,刚 Copy-Item 完就跑,多半是杀软持锁)**根本没启动** ——
+    /// bundle 映射就失败了,一条断言都没跑;而门禁只看 `$LASTEXITCODE`,那一位上
+    /// **「exe 没起来」与「跑完且全绿」长得一模一样**,于是照样打印「两种安装位置均通过」并出包。
+    ///
+    /// ⇒ 判据必须是「**跑过的证据**」而不是「没有失败的迹象」:
+    ///   哨兵只可能由 <see cref="Run"/> 跑到最后一行写出来。进程没起来 / 中途崩了 / 被杀,
+    ///   都不会有这个文件 —— 门禁看不见它就判红,与退出码无关。
+    ///   这与本项目「假断言」整节同源:**该红的时候必须红,而不是查不出问题就算过。**
+    ///
+    /// ★ 没设环境变量时什么都不做 —— 人手跑 `--selftest` 不该在磁盘上留东西。
+    /// ★ 写失败**不改变**自检结论(不吞掉真实的 FAIL),但会在控制台明说,
+    ///   免得门禁那边红了却不知道是写不进去还是真没跑。
+    /// </summary>
+    static void WriteSentinel(int pass, int fail)
+    {
+        var path = Environment.GetEnvironmentVariable(SentinelEnvVar);
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            File.WriteAllText(path, $"PASS={pass} FAIL={fail}\n");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  (哨兵写入失败,门禁会因此判红:{ex.GetType().Name}: {ex.Message})");
+        }
     }
 
     /// <summary>
