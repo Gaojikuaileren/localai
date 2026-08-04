@@ -320,5 +320,104 @@ check("两者在同一个推导式里(而不是分两步、留下中间态)",
       "if c not in resident and c not in component_ids" in _ev,
       "分两步写容易在维护时丢掉一半")
 
+# ══════════════════════════════════════════════════════════════════════
+#  S6 · 硬件指纹(GPU 半边)+ B10④ 预算诊断
+#
+#  ★ P4-S6 之前:load_config 从不读 raw['calibration'](Config 里连字段都没有),
+#    而 toml 注释写着「P4 起由 vram_gate 在启动期比对」。budget.calibrated 确实被读了,
+#    但只在 preview 第②段当标签打印,**不门禁任何东西** ——
+#    读了不用比不读更危险:它让人以为标定状态已经在把关。
+# ══════════════════════════════════════════════════════════════════════
+print("=== 22. [calibration] 真的被读进来了(此前整段被静默丢弃)===")
+_cal = cfg.calibration
+check("Config 有 calibration 字段", hasattr(cfg, "calibration"))
+check("gpu_name 读到了", _cal.gpu_name == "NVIDIA GeForce RTX 5080", _cal.gpu_name)
+check("gpu_total_vram 读到了", abs(_cal.gpu_total_vram - 15.92) < 1e-9)
+check("driver 读到了", _cal.driver == "610.62", _cal.driver)
+check("measured_at 读到了", _cal.measured_at == "2026-07-27", _cal.measured_at)
+
+print("=== 23. ★★ 口径必须与写入端同源(nvidia-smi,不是 WMI)===")
+#   实测同一张卡:nvidia-smi 报 610.62,WMI 报 32.0.16.1062。
+#   若比对端改用 WMI,会得到【永远不相等 → 永远拒绝启动】——
+#   一个 fail-closed 机制最难查的失效方式(它看起来像"硬件真的变了")。
+_probe_src = _inspect.getsource(vram_gate.probe_gpu_identity)
+check("★ 探测走 nvidia-smi", "nvidia-smi" in _probe_src)
+check("★ 不走 WMI / CIM / Win32_VideoController",
+      not any(w in _probe_src for w in ("Win32_VideoController", "Get-CimInstance", "wmi", "WMI")))
+check("查询的字段与 toml 记的对得上",
+      all(k in _probe_src for k in ("name", "memory.total", "driver_version", "uuid", "vbios_version")))
+
+print("=== 24. 标定一致时通过;不一致时【拒绝并说清要重测什么】===")
+_ok = vram_gate.check_calibration(cfg)
+check("本机当前标定一致", _ok.ok, _ok.message[:120])
+check("归因到 calibration", _ok.gate == "calibration")
+
+_fake = {"name": "NVIDIA GeForce RTX 4090", "total_mib": "24564",
+         "driver": "610.62", "uuid": _cal.gpu_uuid, "vbios": _cal.vbios}
+_bad = vram_gate.check_calibration(cfg, probe=_fake)
+check("★ 换了卡 → 拒绝", not _bad.ok)
+check("消息点名型号变了", "型号" in _bad.message and "4090" in _bad.message)
+check("消息点名总显存变了", "总显存" in _bad.message)
+check("★ 说清要重测的是【组件 peak 里与硬件相关的部分】(B10②)",
+      "CUDA context" in _bad.message or "P1-A1" in _bad.message)
+check("★ 说清 desktop_floor 由显示配置决定、换卡不换显示器时可移植(B10②)",
+      "desktop_floor" in _bad.message and "显示配置" in _bad.message)
+check("★ 警告不要只改指纹放行", "不要只改指纹" in _bad.message)
+
+_uuid_swap = {"name": _cal.gpu_name, "total_mib": "16303", "driver": _cal.driver,
+              "uuid": "GPU-ffffffff-0000-0000-0000-000000000000", "vbios": _cal.vbios}
+_bad2 = vram_gate.check_calibration(cfg, probe=_uuid_swap)
+check("★ 同型号换另一张卡(仅 UUID 不同)→ 也拒绝", not _bad2.ok)
+check("消息说明这是换了同型号的另一张卡", "同型号" in _bad2.message)
+
+_no_probe = vram_gate.check_calibration(cfg, probe=None) if False else None
+check("读不到 GPU 身份 → fail-closed(源码里有这条分支)",
+      "读不到 GPU 身份" in _inspect.getsource(vram_gate.check_calibration))
+check("★ 缺基准 ≠ 一致:没有 gpu_name 时拒绝",
+      "无从比对" in _inspect.getsource(vram_gate.check_calibration))
+
+print("=== 25. ★ UUID/VBIOS 是补录的,必须诚实标注且【只有存了值才比】 ===")
+check("uuid_recorded_at 存在且晚于 measured_at",
+      _cal.uuid_recorded_at == "2026-08-04" and _cal.uuid_recorded_at > _cal.measured_at,
+      f"{_cal.uuid_recorded_at} vs {_cal.measured_at}")
+_cc = _inspect.getsource(vram_gate.check_calibration)
+check("★ 只有 toml 里存了值才参与比对(不能拿今天的值反推当年测的是哪张卡)",
+      "if cal.gpu_uuid and" in _cc and "if cal.vbios and" in _cc)
+
+print("=== 26. ★★ 显示指纹:明写【未标定】,且【不得】填今天的配置 ===")
+check("display_calibrated 为 false", _cal.display_calibrated is False)
+_toml_txt = (_REPO / "config" / "vram-budget.toml").read_text(encoding="utf-8")
+check("★ toml 里写明不可回填", "不可回填" in _toml_txt)
+check("★ toml 里明写必须拒绝『读今天的配置填进去』", "追认" in _toml_txt and "捏造" in _toml_txt)
+check("★ 没有偷偷填入分辨率(那会把今天的配置追认为 A7 的测量条件)",
+      "2560x1440" not in _toml_txt.split("display_note")[0].split("display_calibrated")[0]
+      or "故意不填" in _toml_txt)
+check("提到运行期改显示配置不被检测(不让人以为有运行期强制)",
+      "运行期" in _toml_txt)
+
+print("=== 27. B10④ 预算诊断:报「路线不成立」而不是逐个静默拒绝 ===")
+check("当前预算正常,不报警", vram_gate.diagnose_budget(cfg) is None)
+import copy as _copy
+_small = _copy.deepcopy(cfg)
+_small.budget.total_vram = 8.0          # 换成 8GB 卡:8 − 6.6 − 0.8 = 0.60
+_msg = vram_gate.diagnose_budget(_small)
+check("★ 8GB 卡 → 报「GPU 路线不成立」", _msg is not None and "不成立" in _msg, str(_msg)[:100])
+check("消息给出具体数字(预算 vs 最小组件)", _msg and "0.60" in _msg and "GiB" in _msg)
+check("★ 明说这不是『选错了组合』", _msg and "选错了组合" in _msg)
+check("给出三条真实出路(换卡/降预留/只跑 CPU 档)",
+      _msg and "换卡" in _msg and "CPU" in _msg)
+
+print("=== 28. ★★ 标定不符 → 退出码 2(不可被 -Force 覆盖),不是 1 ===")
+#   1 是「闸看了你的申请,说不行」—— 可以被 -Force 覆盖(你明知故犯);
+#   2 是「闸的基准本身不作数」—— 硬件换了还沿用旧数字,强行放行得到的每个判定都无意义。
+_main_src = _inspect.getsource(vram_gate.main)
+check("main 里有标定门禁", "check_calibration" in _main_src)
+check("★ 标定不符返回 EXIT_BROKEN(2)而非 EXIT_REFUSED(1)",
+      "_cal.ok" in _main_src and "return EXIT_BROKEN" in _main_src.split("_cal.ok")[1][:200])
+check("B10④ 诊断也在 main 里且同样返回 2",
+      "diagnose_budget" in _main_src and "_diag" in _main_src)
+check("门禁排在列表模式【之前】(基准不作数时,连列表都不该给出)",
+      _main_src.index("check_calibration") < _main_src.index("if not args:"))
+
 print(f"\n=== {_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

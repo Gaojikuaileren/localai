@@ -45,10 +45,31 @@ class Budget:
 
 
 @dataclass
+class Calibration:
+    """标定指纹(B10)。★ P4-S6 之前这一整段被 load_config **静默丢弃** ——
+    Config 里连承载它的字段都没有,而 toml 的注释写着「P4 起由 vram_gate 在启动期比对」。
+    读了不用比不读更危险:它会让人以为标定状态已经在把关。"""
+    gpu_name: str = ""
+    gpu_total_vram: float = 0.0
+    driver: str = ""
+    measured_at: str = ""
+    # ★ 以下两项【不是】2026-07-27 那次测量时记下来的,是 2026-08-04 补录的。
+    #   ⇒ 它们只能检测「08-04 之后」的换卡;07-27~08-04 之间若换过卡,我们不知道,
+    #     而且**不能假装知道** —— 把今天的值追认为当时的测量条件,就是一次伪装成"补录"的捏造。
+    #     (与显示指纹那半边同一条纪律,见 display_calibrated。)
+    gpu_uuid: str = ""
+    vbios: str = ""
+    uuid_recorded_at: str = ""
+    # 显示指纹:P1-A7 那轮没有记录分辨率/显示器数量,**不可回填**。
+    display_calibrated: bool = False
+
+
+@dataclass
 class Config:
     budget: Budget
     components: Dict[str, dict]
     presets: Dict[str, dict] = field(default_factory=dict)
+    calibration: Calibration = field(default_factory=Calibration)
 
     def peak(self, cid: str) -> float:
         return float(self.components[cid]["peak"])
@@ -58,6 +79,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
     b = raw["budget"]
+    c = raw.get("calibration", {})
     return Config(
         budget=Budget(
             total_vram=float(b["total_vram"]),
@@ -67,7 +89,125 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         ),
         components=raw.get("components", {}),
         presets=raw.get("presets", {}),
+        calibration=Calibration(
+            gpu_name=str(c.get("gpu_name", "")),
+            gpu_total_vram=float(c.get("gpu_total_vram", 0.0) or 0.0),
+            driver=str(c.get("driver", "")),
+            measured_at=str(c.get("measured_at", "")),
+            gpu_uuid=str(c.get("gpu_uuid", "")),
+            vbios=str(c.get("vbios", "")),
+            uuid_recorded_at=str(c.get("uuid_recorded_at", "")),
+            display_calibrated=bool(c.get("display_calibrated", False)),
+        ),
     )
+
+
+# ── B10 · 硬件指纹(GPU 半边)────────────────────────────────────
+#
+#  ★★ 口径必须与【写入端】同源。实测:同一张卡
+#       nvidia-smi → driver 610.62
+#       WMI        → driver 32.0.16.1062
+#     toml 记的是 nvidia-smi 那套。若比对端改用 WMI,会得到**永远不相等 → 永远拒绝启动**
+#     —— 一个 fail-closed 机制最难查的失效方式(它看起来像"硬件真的变了")。
+#     故本函数写死走 nvidia-smi,并有断言钉住。
+
+def probe_gpu_identity() -> Optional[Dict[str, str]]:
+    """实测 GPU 身份。取不到返回 None —— 调用方 fail-closed。"""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,memory.total,driver_version,uuid,vbios_version",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip().splitlines()[0]
+        parts = [p.strip() for p in out.split(",")]
+        if len(parts) < 5:
+            return None
+        return {"name": parts[0], "total_mib": parts[1], "driver": parts[2],
+                "uuid": parts[3], "vbios": parts[4]}
+    except Exception:
+        return None
+
+
+def check_calibration(cfg: Optional[Config] = None,
+                      probe: Optional[Dict[str, str]] = None) -> "Verdict":
+    """B10:启动期比对 GPU 指纹。不一致 → 拒绝,并**说清要重测什么**。
+
+    ★ 只比【当时真的记下来了】的那几项。gpu_uuid / vbios 是 2026-08-04 补录的,
+      只有在 toml 里存了值时才参与比对 —— 不能拿今天的值去反推当年测的是哪张卡。
+
+    ★ B10② 的分工:GPU 指纹不符 → 重测**组件 peak 里与硬件相关的部分**(主要是 CUDA context,P1-A1);
+      显示指纹不符 → 重测 **desktop_floor**(A7)。两者驱动不同的重测项,因为可移植性不同。
+    """
+    cfg = cfg or load_config()
+    cal = cfg.calibration
+    if probe is None:
+        probe = probe_gpu_identity()
+    if probe is None:
+        return Verdict(
+            ok=False, gate="calibration",
+            message=("标定比对:读不到 GPU 身份(nvidia-smi 失败)。\n"
+                     "  → 拒绝。不能在『不知道这是哪张卡』的前提下沿用一套实测数字。"),
+        )
+    if not cal.gpu_name:
+        return Verdict(
+            ok=False, gate="calibration",
+            message=("标定比对:config/vram-budget.toml 缺 [calibration].gpu_name。\n"
+                     "  → 拒绝。没有基准就无从比对,而『无从比对』不等于『一致』。"),
+        )
+
+    diffs = []
+    if probe["name"] != cal.gpu_name:
+        diffs.append(f"型号:记录 {cal.gpu_name} → 实测 {probe['name']}")
+    try:
+        live_total = round(int(probe["total_mib"]) / 1024.0, 2)
+        if abs(live_total - round(cal.gpu_total_vram, 2)) > 0.02:
+            diffs.append(f"总显存:记录 {cal.gpu_total_vram} GiB → 实测 {live_total} GiB")
+    except Exception:                                        # noqa: BLE001
+        diffs.append(f"总显存:实测值解析不了({probe['total_mib']})")
+    if cal.driver and probe["driver"] != cal.driver:
+        diffs.append(f"驱动:记录 {cal.driver} → 实测 {probe['driver']}(nvidia-smi 口径)")
+    # ★ 只有存了值才比 —— 见函数头
+    if cal.gpu_uuid and probe["uuid"] != cal.gpu_uuid:
+        diffs.append(f"GPU UUID:记录 {cal.gpu_uuid} → 实测 {probe['uuid']}(**换了另一张同型号卡**)")
+    if cal.vbios and probe["vbios"] != cal.vbios:
+        diffs.append(f"VBIOS:记录 {cal.vbios} → 实测 {probe['vbios']}")
+
+    if diffs:
+        return Verdict(
+            ok=False, gate="calibration",
+            message=("标定比对:硬件与标定时**不一致**,拒绝启动。\n  "
+                     + "\n  ".join(diffs)
+                     + f"\n  (标定于 {cal.measured_at or '未记录'})\n"
+                       "  → 要重测的是【组件 peak 里与硬件相关的部分】,主要是 CUDA context(P1-A1);\n"
+                       "    desktop_floor 由**显示配置**决定,换卡不换显示器时它大体可移植(B10②)。\n"
+                       "  ★ 确认硬件就该是这样 ⇒ 更新 config/vram-budget.toml 的 [calibration] 并重测,\n"
+                       "    不要只改指纹放行 —— 那等于把一套别的卡上的实测数字当成本机的。"),
+        )
+    return Verdict(ok=True, gate="calibration",
+                   message=f"标定比对:GPU 指纹一致({cal.gpu_name} · 驱动 {cal.driver} · 标定于 {cal.measured_at})")
+
+
+def diagnose_budget(cfg: Optional[Config] = None) -> Optional[str]:
+    """B10④:预算连**最小**的组件都装不下时,要报「GPU 路线不成立」而不是逐个静默拒绝。
+
+    ★ 症状很具体:换成 8GB 卡后 vram_budget = 8 − 6.6 − 0.8 = 0.60,
+      于是勾什么都被拒、而且每次给的都是同一条正确但无用的建议(「取消组件或改桌面预留」)。
+      人会以为是自己选错了组合,而真相是这条路线在这台机器上不成立。
+    """
+    cfg = cfg or load_config()
+    if not cfg.components:
+        return None
+    smallest = min(cfg.peak(c) for c in cfg.components)
+    who = min(cfg.components, key=lambda c: cfg.peak(c))
+    if cfg.budget.vram_budget < smallest:
+        return (f"★ GPU 路线在这台机器上不成立:vram_budget 只有 {cfg.budget.vram_budget:.2f} GiB,"
+                f"而**最小**的组件 {who} 也要 {smallest:.2f} GiB。\n"
+                f"  总显存 {cfg.budget.total_vram:.2f} − 桌面预留 {cfg.budget.desktop_floor:.2f}"
+                f" − 安全余量 {cfg.budget.safety_margin:.2f} = {cfg.budget.vram_budget:.2f}。\n"
+                "  → 这不是「选错了组合」,是**没有任何组合能成立**。要么换卡,要么把桌面预留降下来\n"
+                "    (但 desktop_floor 是实测值,降它意味着接受桌面卡顿),要么这台机器只跑 CPU 档。")
+    return None
 
 
 # ── 实测可用显存 ──────────────────────────────────────────────────
@@ -300,6 +440,22 @@ def main(argv: List[str]) -> int:
     try:
         args = [a for a in argv if not a.startswith("-")]
         cfg = load_config()
+
+        # ── B10 · 启动期标定门禁(P4-S6)────────────────────────────
+        #  ★ 退出码用 2(EXIT_BROKEN)而不是 1(EXIT_REFUSED),这不是措辞问题:
+        #    1 是「闸看了你的申请,说不行」—— 可以被 -Force 覆盖(你明知故犯);
+        #    2 是「闸的**基准本身**不作数」—— 不可覆盖。硬件换了还沿用旧的实测数字,
+        #    强行放行得到的每个判定都是无意义的,那比不放行更危险。
+        _cal = check_calibration(cfg)
+        if not _cal.ok:
+            print("[标定门禁] " + _cal.message, file=sys.stderr)
+            return EXIT_BROKEN
+
+        # ── B10④ · 预算连最小组件都装不下 → 报「路线不成立」而非逐个静默拒绝 ──
+        _diag = diagnose_budget(cfg)
+        if _diag:
+            print("[预算诊断] " + _diag, file=sys.stderr)
+            return EXIT_BROKEN
 
         if not args:
             print("可用组件:")
