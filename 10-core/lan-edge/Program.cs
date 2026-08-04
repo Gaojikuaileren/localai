@@ -413,6 +413,22 @@ static async Task<int> ClientE2E()
         ub.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, upPort));
         upstream = ub.Build();
         upstream.Map("/{**r}", (HttpContext c) => { seenFp = c.Request.Headers["X-LocalAI-Cert-Sha256"].ToString(); return Results.Text("up"); });
+        // ★ P4-S5 前置实测:代理到底能不能【流式】直通。
+        //   代理用了 ResponseHeadersRead(不缓冲整体),但随后是 CopyToAsync 到 Response.Body,
+        //   而且显式 Remove("transfer-encoding") —— 「能流式」此前是从这两行**推断**出来的,
+        //   从没测过。若其实不能,S5 的推送就只能退回轮询,而**轮询正是 D37 ② 点名的失效模式**。
+        //   这个 stub 每 200ms 吐一帧,共 3 帧;客户端按到达时刻判断是"边到边发"还是"攒完一起发"。
+        upstream.MapGet("/__sse_probe", async (HttpContext c) =>
+        {
+            c.Response.Headers["Content-Type"] = "text/event-stream";
+            c.Response.Headers["Cache-Control"] = "no-cache";
+            for (int i = 0; i < 3; i++)
+            {
+                await c.Response.WriteAsync($"data: frame{i}\n\n");
+                await c.Response.Body.FlushAsync();
+                await Task.Delay(200);
+            }
+        });
         await upstream.StartAsync();
 
         edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upPort}", 18444), pairingOverride: pairing);
@@ -476,6 +492,36 @@ static async Task<int> ClientE2E()
 
         using (var rb = await mtls.GetAsync(baseUrl + "/v1/models"))
             Assert((int)rb.StatusCode == 200 && seenFp == Convert.ToHexString(SHA256.HashData(candidate.RawData)), "business call as active member -> proxied with verified fingerprint");
+
+        // ── ★★ P4-S5 前置:代理能否流式直通(实测,不是推断)──────────────────
+        //   判据:三帧每隔 200ms 由上游吐出。若代理是**流式**的,第一帧会在
+        //   最后一帧之前明显到达(间隔 ≳ 300ms);若它把整个响应**缓冲**完再发,
+        //   三帧会几乎同时到达(间隔 ≈ 0)。
+        //   ★ 这条测的是**代理**,不是上游 —— 上游自己已经 FlushAsync 过了。
+        {
+            using var sreq = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/__sse_probe");
+            using var sresp = await mtls.SendAsync(sreq, HttpCompletionOption.ResponseHeadersRead);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var arrivals = new List<long>();
+            using (var stream = await sresp.Content.ReadAsStreamAsync())
+            {
+                var buf = new byte[256];
+                int n;
+                while ((n = await stream.ReadAsync(buf)) > 0)
+                {
+                    arrivals.Add(sw.ElapsedMilliseconds);
+                    if (arrivals.Count >= 3) break;
+                }
+            }
+            var spread = arrivals.Count >= 2 ? arrivals[^1] - arrivals[0] : 0;
+            Assert((int)sresp.StatusCode == 200, "SSE 探针:状态码 200 (" + (int)sresp.StatusCode + ")");
+            Assert(arrivals.Count >= 2, $"SSE 探针:收到多个数据块(实得 {arrivals.Count} 块)");
+            // ★★ 承重的一条。它红,就意味着 S5 的推送不能走 lan-edge 直通,
+            //   必须另想办法(而不是默默退回轮询 —— 那是 D37 ② 点名的失效模式)。
+            Assert(spread >= 300,
+                   $"★★ 代理是【流式】直通:首末块间隔 {spread}ms ≥ 300ms " +
+                   "(若 ≈0 说明代理把整个响应缓冲完才发,S5 推送不能走这条路)");
+        }
     }
     finally
     {
