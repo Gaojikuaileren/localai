@@ -186,6 +186,12 @@ ALLOWED_TRANSITIONS: Dict[str, frozenset] = {
 SERVING_STATES = frozenset({STATE_READY, STATE_STAGING, STATE_PRECHECK,
                             STATE_APPLYING, STATE_RECONCILING})
 
+# ★★ 能【发起】一次事务的状态。必须含 STAGING —— 预检不过的落点就是 STAGING,
+#   只收 READY 会让"改完再点一次确定"永远得到 busy(2026-08-04 S9 实测撞出)。
+#   反过来也别放宽:PRECHECK/APPLYING 表示已有一笔在跑,RECONCILING/DEGRADED_SAFE/STARTING
+#   表示还没站稳 —— 那几个进来就是双写者。
+ACCEPTS_TRANSACTION = frozenset({STATE_READY, STATE_STAGING})
+
 BLOCKING_SET = frozenset({BLOCKING_USER, BLOCKING_ASYNC, BLOCKING_RESIDENT})
 
 DRAIN_WINDOW_S          = 5.0    # 方案书 §8.1.6:先给 5 秒排空窗口
@@ -392,6 +398,39 @@ class Broker:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(self._sampler_loop())
+
+    async def finish_startup(self) -> str:
+        """P4-S9:`STARTING` 的出口。★ 此前**没有任何代码**能离开 STARTING ——
+        于是 `apply_intended` 永远返回 `busy`,整条事务路径从来走不到。
+
+        ★★ 放行条件**就是 I2 的后件**:`actual == committed`。
+          这不是巧合而是设计 —— `READY` 的全部含义就是"账面上装着的,真的装着了"。
+          若开机装载没完成就宣布 READY,I2 会立刻被违反,
+          而那正是方案书行 1594 点名要禁的「3 个装了 2 个却仍报 READY」。
+          ⇒ **不给"启动阶段先放过"这条例外**:例外一开,I2 在最需要它的那一刻恰好不管用。
+
+        ★★★ 诚实边界,必须写在这里而不是藏进注释:
+          **今天这个判据是恒真式。** `actual_resident` 就是 `_committed` 本身
+          (见该 property 的说明:没有装载器 + WDDM 不暴露逐进程显存),
+          于是 `actual == committed` 等价于 `committed == committed`。
+          ⇒ 它**今天不是一个检测器**,是一个**为 P5 预留的形状**。
+          这样写的价值只有一个:P5 接上装载器、`actual` 变成独立观测的那一刻,
+          它**立刻**就是承重的,不需要有人记得回来补。
+          测试里钉住了这条恒真性 —— 等它不再恒真时那条断言会红,提醒把它当真检测器复核一遍。
+          走 RECONCILING 那条分支的用例用**注入独立 actual** 的方式真跑过,不留"从没执行过的分支"。
+        """
+        async with self._lock:
+            if self._state != STATE_STARTING:
+                return self._state
+            actual, committed = set(self.actual_resident), set(self._committed)
+            if actual == committed:
+                await self._transition(STATE_READY, "开机装载完成(actual == committed)")
+            else:
+                # 装载没齐 —— 不宣布 READY。按 §8.1 行 1606:RECONCILING **仍然提供服务**,
+                # 按 actual 那一份对外说话,而不是把还活着的一并判死。
+                await self._transition(STATE_RECONCILING,
+                                       f"开机装载未齐:actual={sorted(actual)} ⊊ committed={sorted(committed)}")
+            return self._state
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -790,9 +829,16 @@ class Broker:
           3. 装载中途失败 → 回滚上一个成功集合;回滚也失败 → DEGRADED_SAFE。
           4. 有任务在跑 → 先给 5 秒排空窗口,再让调用方选"优雅中断"或"等它跑完"。
         """
-        # ── ① 进 STAGING(只能从 READY 进;别的状态说明有另一笔事务在跑)──
+        # ── ① 进 STAGING。可从 READY 或 STAGING 进;别的状态说明有另一笔事务在跑 ──
+        #   ★★ 2026-08-04 S9 实测补的一条:原来这里只收 READY,而**预检不过的落点是 STAGING**
+        #     ⇒ 用户改完选择再点一次确定,得到的是 `busy`,**重试路径整条是断的**。
+        #     S8 的测试每个 broker 只跑一次事务,恰好把它盖住了 —— 典型的"测试形状盲区":
+        #     不是断言写错,是**根本没构造第二次**。现在补了连续两次的用例。
+        #   ★ STAGING **不是锁**:它同时接受新事务、且在 SERVING_STATES 里照常提供服务。
+        #     所以"面板开着没提交"不会卡住任何人,不需要给它加超时或取消端点 ——
+        #     加了反而会在用户正在挑选时把他的选择清掉。
         async with self._lock:
-            if self._state != STATE_READY:
+            if self._state not in ACCEPTS_TRANSACTION:
                 return ApplyResult(False, "busy", self._state,
                                    f"当前状态 {self._state} 不接受新事务(单写者)")
             await self._transition(STATE_STAGING, "点确定")

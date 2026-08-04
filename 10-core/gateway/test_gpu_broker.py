@@ -44,16 +44,21 @@ check("/v1/gpu/snapshot 已登记且是 authenticated",
 #   于是它被**有意地**改成显式方法表 —— 那是一次语义变更,应当在 diff 里看得见,
 #   而不是把断言删掉了事。新增任何 GPU 路由若不改这里,必红。
 _EXPECTED_GPU_ROUTES = {
-    ("GET", "/v1/gpu/snapshot"),   # S3:只读快照
-    ("GET", "/v1/gpu/events"),     # S5:推送流(SSE)
-    ("POST", "/v1/gpu/lease"),     # S5:★ 第一个变更端点
+    ("GET", "/v1/gpu/snapshot"),     # S3:只读快照
+    ("GET", "/v1/gpu/events"),       # S5:推送流(SSE)
+    ("POST", "/v1/gpu/lease"),       # S5:★ 第一个变更端点
+    ("GET", "/v1/gpu/components"),   # S9:组件目录 —— 挑选面板的数据源(只读)
+    ("POST", "/v1/gpu/intended"),    # S9:★ 第二个变更端点 = 「点确定」那一次事务
 }
 _gpu_routes = {(m, p) for (m, p) in gateway.ROUTE_TIERS if p.startswith("/v1/gpu")}
 check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
       _gpu_routes == _EXPECTED_GPU_ROUTES,
       f"多出 {sorted(_gpu_routes - _EXPECTED_GPU_ROUTES)} 少了 {sorted(_EXPECTED_GPU_ROUTES - _gpu_routes)}")
-check("★ 变更端点只有一个(每多一个都该是一次有意的决定)",
-      len([1 for m, _ in _gpu_routes if m != "GET"]) == 1)
+# ★ S5 时这条写的是"变更端点只有一个";S9 加了 POST /v1/gpu/intended,于是它被**有意地**
+#   改成逐条列名 —— 数量断言只拦得住"多了几个",拦不住"换了一个"。改成集合相等更严,不更松。
+check("★ 变更端点逐条列名(每多一个都该是一次有意的决定)",
+      {p for m, p in _gpu_routes if m != "GET"} == {"/v1/gpu/lease", "/v1/gpu/intended"},
+      f'{sorted(p for m, p in _gpu_routes if m != "GET")}')
 
 print("=== 2. 快照形状:该有的字段一个不少 ===")
 snap = gpu_broker.BROKER.snapshot()
@@ -852,6 +857,169 @@ check("blocking_set 恰好是方案书那三个",
       gpu_broker.BLOCKING_SET == frozenset({gpu_broker.BLOCKING_USER,
                                             gpu_broker.BLOCKING_ASYNC,
                                             gpu_broker.BLOCKING_RESIDENT}))
+
+print("\n=== 16. P4-S9 · STARTING 的出口(此前根本没有)===")
+# ★ 实测撞出来的:Broker 从建好那一刻起就停在 STARTING,而 apply_intended 只接受 READY
+#   ⇒ 整条事务路径【从来走不到】,线上表现是恒返回 busy。
+
+
+class _BrokerWithRealActual(gpu_broker.Broker):
+    """★ 注入一个**独立于账本**的 actual —— 这是 P5 接上装载器之后的形状。
+    今天生产代码里 actual_resident 就是 _committed 本身,所以只有这样才能
+    真的把 STARTING → RECONCILING 那条分支执行到(不留"从没跑过的分支")。"""
+
+    fake_actual: list = []
+
+    @property
+    def actual_resident(self):
+        return list(self.fake_actual)
+
+
+async def _startup_test():
+    o = {}
+    b1 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)          # 空集合:actual == committed
+    o["empty"] = await b1.finish_startup()
+    b2 = _BrokerWithRealActual(cfg=gpu_broker.BROKER.cfg)
+    b2._committed = [_small]
+    b2.fake_actual = []                                         # 账面装了一个,实际一个都没装
+    o["short"] = await b2.finish_startup()
+    o["short_serves"] = b2.serves_requests()
+    b3 = _BrokerWithRealActual(cfg=gpu_broker.BROKER.cfg)
+    b3._committed = [_small]
+    b3.fake_actual = [_small]                                   # 装齐了
+    o["match"] = await b3.finish_startup()
+    b4 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    await b4.finish_startup()
+    o["idem"] = await b4.finish_startup()                        # 二次调用不该再动
+    return o
+
+
+_su = asyncio.run(_startup_test())
+check("★ 空集合 ⇒ actual == committed ⇒ 进 READY", _su["empty"] == gpu_broker.STATE_READY, _su)
+check("★★ 装载没齐时【不宣布 READY】—— 放行条件就是 I2 的后件,不给启动阶段开例外",
+      _su["short"] == gpu_broker.STATE_RECONCILING, _su)
+check("★ 且装载没齐时仍然对外提供服务(不把还活着的一并判死)", _su["short_serves"] is True)
+check("装齐了才进 READY", _su["match"] == gpu_broker.STATE_READY, _su)
+check("finish_startup 幂等(已离开 STARTING 就不再动)", _su["idem"] == gpu_broker.STATE_READY)
+_fs = _nodoc(gpu_broker.Broker.finish_startup)
+check("★ 放行判据确实是 actual 与 committed 相等,不是「反正启动阶段先放过」",
+      "actual == committed" in _fs and "STATE_READY" in _fs)
+
+# ★★★ 钉住那条【恒真性】本身。
+#   今天 actual_resident 就是 _committed(S7 已如实标注:无装载器 + WDDM 不暴露逐进程显存),
+#   所以 finish_startup 的判据等价于 committed == committed —— **它今天不是检测器,是形状**。
+#   这条断言的用处是:P5 让 actual 变成独立观测的那天,它会红,提醒回来把它当真检测器复核。
+_probe = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_probe._committed = [_small]
+check("★★★ 记录事实:actual_resident 今天【就是】committed(判据恒真,等 P5 才成为真检测器)",
+      list(_probe.actual_resident) == list(_probe._committed),
+      "若这条红了 = actual 已变成独立观测 ⇒ 回去复核 finish_startup / I2 / I3 的 confidence 标注")
+check("★ 而 I2/I3 的 confidence 仍如实标着 self_reported(与上一条是同一个事实的两面)",
+      {r.invariant: r.confidence for r in _probe.check_invariants()}.get("I2") == "self_reported")
+
+print("\n=== 17. P4-S9 · 事务可【重试】—— S8 漏掉的那条路径 ===")
+# ★★ 这一组是补 S8 的洞:预检不过的落点是 STAGING,而 apply_intended 原来只收 READY
+#   ⇒ 用户改完选择再点一次确定,得到的是 busy。
+#   S8 的测试每个 broker 只跑一次事务,**恰好把它盖住了** —— 不是断言写错,是没构造第二次。
+check("★ ACCEPTS_TRANSACTION 恰好是 READY 与 STAGING 两个",
+      gpu_broker.ACCEPTS_TRANSACTION == frozenset({gpu_broker.STATE_READY,
+                                                   gpu_broker.STATE_STAGING}),
+      sorted(gpu_broker.ACCEPTS_TRANSACTION))
+check("★ 正在跑的那几个状态一律不许再发起(否则就是双写者)",
+      not (gpu_broker.ACCEPTS_TRANSACTION & {gpu_broker.STATE_PRECHECK, gpu_broker.STATE_APPLYING,
+                                             gpu_broker.STATE_RECONCILING,
+                                             gpu_broker.STATE_DEGRADED_SAFE,
+                                             gpu_broker.STATE_STARTING}))
+check("★ STAGING 不是锁:它同时在 SERVING_STATES 里(面板开着不该把服务停掉)",
+      gpu_broker.STATE_STAGING in gpu_broker.SERVING_STATES)
+
+
+async def _retry_test():
+    b = _mkbroker(free=0.05, loader=_FakeLoader())
+    r1 = await b.apply_intended([_small])                       # 预检不过 → STAGING
+    r2 = await b.apply_intended([_small])                       # ★ 改完再点一次
+    b._free = 64.0
+    r3 = await b.apply_intended([_small])                       # 这次该过
+    return (r1.code, r1.state), (r2.code, r2.state), (r3.ok, r3.state)
+
+
+_rt = asyncio.run(_retry_test())
+check("第一次预检不过 → STAGING", _rt[0][1] == gpu_broker.STATE_STAGING, _rt[0])
+check("★★ 第二次【不是 busy】—— 重试路径通(S8 的洞)",
+      _rt[1][0] != "busy", _rt[1])
+check("★ 第二次拿到的是它自己的判据(仍是闸拒,不是被状态挡住)",
+      _rt[1][0].startswith("gate_"), _rt[1])
+check("★ 条件变好后同一个 broker 能把事务走完", _rt[2][0] and _rt[2][1] == gpu_broker.STATE_READY, _rt[2])
+
+print("\n=== 18. P4-S9 · 组件目录:准入白名单本身,不是它的摘抄 ===")
+import json as _json
+import warnings as _warnings
+
+_warnings.filterwarnings("ignore")
+from starlette.testclient import TestClient as _TC   # noqa: E402
+
+with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
+    _cat = _c.get("/v1/gpu/components")
+    _catj = _cat.json()
+    _cfg = gpu_broker.BROKER.cfg
+    check("目录端点 200", _cat.status_code == 200, _cat.status_code)
+    check("★★ 反向全表:目录逐条列出准入白名单的【全部】成员,一个不漏",
+          {i["id"] for i in _catj["components"]} == set(_cfg.components),
+          f'少了 {sorted(set(_cfg.components) - {i["id"] for i in _catj["components"]})}')
+    check("★ 不做任何过滤 —— 装不下的组件也必须出现(否则「我没勾它」与「闸说装不下」无从对账)",
+          len(_catj["components"]) == len(_cfg.components))
+    check("每项的 peak 直接来自同一份配置,不另抄一遍数字",
+          all(abs(i["peak_gib"] - _cfg.peak(i["id"])) < 1e-9 for i in _catj["components"]))
+    check("★ display 缺失时回落到 id 本身(不跳过、不空串)",
+          all(i["display"] for i in _catj["components"]))
+    check("★ 测量出处 note 原样带出(界面照抄,不改写)",
+          any("实测" in i["note"] for i in _catj["components"]))
+    check("★ 别名映射由服务端下发(客户端不得自己再猜一遍 id ↔ 功能)",
+          "aliases_by_component" in _catj and _catj["aliases_by_component"])
+    check("★ 预算段带 safety_margin —— 面板要靠它区分两种撞墙(改预留有用 / 没用)",
+          _catj["budget"]["safety_margin"] == _cfg.budget.safety_margin
+          and _catj["budget"]["safety_margin"] is not None, _catj["budget"])
+    check("目录带 stale / sampler_error(采样器死了必须看得见)",
+          "stale" in _catj and "sampler_error" in _catj)
+
+    print("\n=== 19. P4-S9 · 「点确定」端点:每种失败有自己的 code,且不得回 200 ===")
+    _g = _c.get("/v1/gpu/snapshot").json()["generation"]
+    _r_miss_gen = _c.post("/v1/gpu/intended", json={"components": []})
+    _r_miss_comp = _c.post("/v1/gpu/intended", json={"if_generation": _g})
+    _r_conflict = _c.post("/v1/gpu/intended", json={"if_generation": _g + 999, "components": []})
+    _r_over = _c.post("/v1/gpu/intended",
+                      json={"if_generation": _c.get("/v1/gpu/snapshot").json()["generation"],
+                            "components": ["llm.assistant.30b-a3b@32k"]})
+    _r_ok_path = _c.post("/v1/gpu/intended",
+                         json={"if_generation": _c.get("/v1/gpu/snapshot").json()["generation"],
+                               "components": ["speech.lite"]})
+    check("★ if_generation 必填(省略不等于「我不在乎」,那是 fail-open)",
+          _r_miss_gen.status_code == 400
+          and _r_miss_gen.json()["error"]["type"] == "missing_if_generation", _r_miss_gen.status_code)
+    check("★★ components 必填 —— 省略【不】当成空集合(空集合意味着卸掉全部,必须写明)",
+          _r_miss_comp.status_code == 400
+          and _r_miss_comp.json()["error"]["type"] == "missing_components", _r_miss_comp.status_code)
+    check("★ 世代号对不上 → 409 且【回带最新快照】(只回 409 会逼客户端再问一次 = 又变轮询)",
+          _r_conflict.status_code == 409 and "snapshot" in _r_conflict.json(), _r_conflict.status_code)
+    check("★ 超预算 → 422 且 code 指出是哪道闸(不是笼统的「失败了」)",
+          _r_over.status_code == 422 and _r_over.json()["error"]["type"].startswith("gate_"),
+          _json.dumps(_r_over.json().get("error"), ensure_ascii=False)[:120])
+    check("★★★ 装载器缺席 → 422 loader_absent,**不是** 200 —— 失败必须长得和成功不一样",
+          _r_ok_path.status_code == 422
+          and _r_ok_path.json()["error"]["type"] == "loader_absent",
+          f'{_r_ok_path.status_code} {_json.dumps(_r_ok_path.json().get("error"), ensure_ascii=False)[:120]}')
+    check("★ 每种失败都回带变更后的快照(客户端一次就拿到重试所需的一切)",
+          all("snapshot" in r.json() for r in (_r_over, _r_ok_path)))
+    check("★ 事务没成时状态没被写坏:committed 仍为空",
+          _r_ok_path.json()["snapshot"]["committed"] == [],
+          _r_ok_path.json()["snapshot"]["committed"])
+
+_gi = _nodoc(gateway.gpu_intended)
+check("★ 失败码不合并:四类失败在源码里各自成条",
+      all(k in _gi for k in ("missing_if_generation", "missing_components",
+                             "generation_conflict", "broker_unavailable")))
+check("★ 不成功时【绝不回 200】(源码里显式按 code 分 409/422)",
+      "409 if res.code in" in _gi and "422" in _gi)
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

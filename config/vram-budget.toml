@@ -61,13 +61,21 @@ display_note   = "P1-A7 测于当时的显示配置;分辨率/显示器数量未
 #        start-stack.ps1 里的端口是【写死的】(18081 / 8080),不来自这里;null 表示该组件不监听端口。
 #        同一份端口事实目前散在本文件、start-stack.ps1、各服务默认值三处,接 Broker 时收敛到一处。
 # =============================================================================
+# ★ 2026-08-04(P4-S9)新增 display:组件的【人话名】。
+#   起因:客户端 Views/ModelCatalog.cs 自造了一份清单(chat.8b / speech / image),
+#   那是**第三套词汇** —— 跟网关别名对不上,跟这里的组件 id 也对不上,谁也映射不到谁。
+#   ⇒ 名字收进唯一数据源,由 GET /v1/gpu/components 下发。
+#   ★ display **可以缺**:缺了目录会回落到 id 本身,而不是把该组件从面板上藏掉 ——
+#     一个没起名字的组件仍然占显存,用户必须看得见它。
 [components."llm.assistant.8b@16k"]
+display = "日常对话 · 8B"
 peak = 5.92
 kind = "llm"
 port = 18081
 note = "日常主力。P1-A2 实测(q8_0 KV;F16 下是 6.97)"
 
 [components."llm.assistant.8b@32k"]
+display = "长上下文 · 8B / 32K"
 peak = 7.19
 kind = "llm"
 port = 18081
@@ -80,42 +88,49 @@ note = "长上下文。q8_0 省 2.04,使 32K 从「日常用不了」变可用(B
 #   而它不等的那个值恰好等于同行的权重列。⇒ 转抄错误,不是判据分歧。
 #   方向也是 fail-safe 的:5.31 > 5.0,闸变更保守(原值会低估 0.31 GiB,可能放行本该拒的申请)。
 #   ★ 该组件在 start-stack -Ctx≤8192 的生产路径上,不是冷门项。
+display = "日常对话 · 8B(短上下文)"
 peak = 5.31
 kind = "llm"
 port = 18081
 note = "语音场景(assistant.voice 契约)。P1 实测 5.31(F16 下 5.83)"
 
 [components."llm.assistant.30b-a3b@32k"]
+display = "深度模式 · 30B-A3B"
 peak = 11.9
 kind = "llm"
 port = 18082
 note = "深度模式。ngl30 · 38% offload · 57.5 tok/s(MoE 只 3B 活跃,offload 几乎免费)"
 
 [components."speech.lite"]
+display = "语音 · 听写 + 朗读(轻)"
 peak = 2.07
 kind = "speech"
 port = 18085
 note = "turbo ASR 2.07 GPU + Piper CPU TTS 0(原估 1.4 偏低)"
 
 [components."speech.full"]
+display = "语音 · 听写 + 朗读(全)"
 peak = 4.05
 kind = "speech"
 port = 18085
 note = "large-v3 ASR + Piper CPU TTS"
 
 [components."vlm.small"]
+display = "视觉 · 看图理解"
 peak = 4.35
 kind = "vlm"
 port = 18083
 note = "Qwen2.5-VL-3B。★ 实测比原估 2.5 重 74% —— 原估漏算 mmproj f16 1.25"
 
 [components."comfyui.sdxl"]
+display = "绘图 · SDXL"
 peak = 8.14
 kind = "image"
 port = 0
 note = "P1-D1 实测 1024²(原估 11.0 偏高)。JOB 平面,不由 start-stack 管"
 
 [components."comfyui.sdxl.lowvram"]
+display = "绘图 · SDXL(省显存)"
 peak = 7.8
 kind = "image"
 port = 0

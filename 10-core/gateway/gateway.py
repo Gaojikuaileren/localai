@@ -563,6 +563,14 @@ ROUTE_TIERS = {
     #   而客户端 HubClient.cs:230 每次退出都在调它、失败还被吞掉:
     #   一次伪装成成功的静默失败。现在它真的存在了。
     ("POST", "/v1/session/end"): "authenticated",
+    # P4-S9:组件目录 —— 挑选面板的数据源。
+    #   ★ 它必须存在,否则客户端只能自己编一份清单;而客户端**已经编过一份**
+    #     (`Views/ModelCatalog.cs` 的 chat.8b / speech / image),那是**第三套词汇**:
+    #     跟网关别名对不上,跟显存组件 id 也对不上,谁也映射不到谁。
+    ("GET", "/v1/gpu/components"): "authenticated",
+    # P4-S9:★ 「点确定」= 一次事务(S8 的 apply_intended 的对外落点)。
+    #   与 lease 同款:if_generation **必填**,对不上 409 + 最新快照。
+    ("POST", "/v1/gpu/intended"): "authenticated",
 }
 
 
@@ -628,6 +636,13 @@ async def _start_gpu_broker():
         gpu_broker.BROKER.start()
     except Exception:                                        # noqa: BLE001
         pass   # 采样器起不来不该拖垮网关启动;快照会以 stale=True + sampler_error 如实呈现
+    try:
+        # P4-S9:结束 STARTING。★ 不加这一步的话 Broker **永远停在 STARTING**,
+        #   而 apply_intended 只接受 READY ⇒ 整条事务路径从来走不到(实测 409 busy)。
+        #   放行条件就是 I2 的后件(actual == committed),见 finish_startup 的说明。
+        await gpu_broker.BROKER.finish_startup()
+    except Exception:                                        # noqa: BLE001
+        pass   # 同上:留在 STARTING 比谎称 READY 安全,快照里看得见
 
 
 @app.get("/v1/gpu/snapshot")
@@ -819,6 +834,169 @@ async def session_end(request: Request):
         )
     return {"status": "ok", "released_leases": released,
             "device": device, "reason": reason}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S9 · 组件挑选面板的服务端半边
+#
+#  ★★ 为什么必须有 /v1/gpu/components,而不是让客户端自己列:
+#     客户端**已经自己列过**一份(`Views/ModelCatalog.cs`:chat.8b / chat.8b.long /
+#     chat.30b / speech / vlm / image),那是【第三套词汇】——
+#     跟网关别名(chat.default…)对不上,跟显存组件 id(llm.assistant.8b@16k…)也对不上。
+#     它的注释自己写着「接入 GPU Broker(P4)后以中枢下发的清单为准替换这份占位」。
+#     ⇒ 现在就是那个"接入后"。清单只能有一份权威,就是准入白名单本身。
+# ══════════════════════════════════════════════════════════════════════
+
+@app.get("/v1/gpu/components")
+async def gpu_components(request: Request):
+    """组件目录 = **准入白名单本身**,不是它的一份摘抄。
+
+    ★★ 反向全表:目录**必须逐条列出** `cfg.components` 的全部成员,一个不漏。
+      漏掉一个的后果不是"界面少一项",是**用户看不见但闸仍然会算它** ——
+      于是"我明明没勾它"和"闸说装不下"同时成立,而用户无从对上账。
+      故这里不做任何过滤(不按 kind 筛、不按 peak 筛、不藏"装不下的")。
+    ★ `display` 缺失时**回落到 id 本身**,不是跳过、也不是空字符串:
+      一个没起名字的组件仍然占显存,它必须出现在面板上。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+    try:
+        snap = gpu_broker.BROKER.snapshot()
+        cfg = gpu_broker.BROKER.cfg
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "组件目录不可用(显存配置读不到)",
+                               "type": "broker_unavailable", "reason": type(e).__name__}},
+        )
+
+    intended = set(snap.intended)
+    committed = set(snap.committed)
+    permitted = set(snap.permitted_on_demand)
+    items = []
+    for cid in sorted(cfg.components):
+        meta = cfg.components[cid]
+        items.append({
+            "id": cid,
+            # ★ 回落到 id:没起名字的组件也必须出现在面板上,不能因缺字段被吞掉
+            "display": str(meta.get("display") or cid),
+            "kind": str(meta.get("kind") or ""),
+            "peak_gib": cfg.peak(cid),
+            # ★ 这条是**测量出处**,不是宣传语。界面照抄,不改写、不省略。
+            "note": str(meta.get("note") or ""),
+            "intended": cid in intended,
+            "committed": cid in committed,
+            "permitted_on_demand": cid in permitted,
+        })
+    # ★ 别名映射一并回带:让面板能说清"勾掉它,哪些功能会停"。
+    #   这层桥是 S2 建的;客户端**不得**自己再猜一遍 id 与功能的对应。
+    try:
+        aliases = {cid: sorted(aliases_for_component(cid)) for cid in cfg.components}
+    except Exception:                                        # noqa: BLE001
+        aliases = {}
+    return {
+        "generation": snap.generation,
+        "components": items,
+        "aliases_by_component": aliases,
+        "budget": {
+            "vram_budget": snap.vram_budget,
+            "total_gib": snap.total_gib,
+            "desktop_floor": snap.desktop_floor,
+            "free_gib": snap.free_gib,
+            # ★ 面板要能区分两种撞墙(§8.1:合并成「显存不足」是有害的):
+            #   撞 vram_budget ⇒ 改桌面预留**有用**;撞实时 free ⇒ 改预留**没用**,得关程序。
+            #   ★ 取自 cfg 而不是 getattr(snap, ..., None):快照上没有这个字段,
+            #     getattr 的默认值会让它**静默变成 null**,而面板拿 null 算不出第二种撞墙。
+            "safety_margin": cfg.budget.safety_margin,
+        },
+        "state": snap.state,
+        "stale": snap.stale,
+        "sampler_error": snap.sampler_error,
+    }
+
+
+@app.post("/v1/gpu/intended")
+async def gpu_intended(request: Request):
+    """「点确定」= 一次事务(S8 `apply_intended` 的对外落点)。
+
+    ★★ `if_generation` **必填**,与 lease 同款理由:省略它不等于"我不在乎",
+      那正是 fail-open。挑组件要花几十秒,期间桌面会变 ——
+      「预览过、确定时不过」是**必然**会发生的,而世代号是唯一能让两边对上账的东西。
+
+    ★★ 事务的每一种失败都有**自己的** code,不合并成一个"失败了":
+      · gate_*            预检不过 —— **一个组件都没卸**,回编辑态
+      · needs_user_choice 有任务在跑 —— 给了 5 秒排空窗口仍未空,交还用户裁定
+      · loader_absent     装载器尚未实现(P5)—— 事务失败关闭,**不是**"装好了"
+      · load_failed_rolled_back / rollback_failed
+      合并成一个失败码会让客户端只能弹一句"失败",而这四种的下一步动作**完全不同**。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+
+    if "if_generation" not in body:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "缺少必填的 if_generation ——"
+                                          "必须声明你是基于哪一版状态做的这次变更。",
+                               "type": "missing_if_generation",
+                               "hint": "先取 /v1/gpu/snapshot 或订阅 /v1/gpu/events"}},
+        )
+    try:
+        want_gen = int(body["if_generation"])
+    except Exception:                                        # noqa: BLE001
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": "if_generation 必须是整数",
+                                               "type": "bad_if_generation"}})
+    if not isinstance(body.get("components"), list):
+        # ★ 缺字段不当成"空集合" —— 那会把一次手滑变成"把所有模型都卸掉"。
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "缺少 components 数组。"
+                                          "★ 省略不等于空集合 —— 空集合意味着卸掉全部,"
+                                          "那必须是明确写出来的意图。",
+                               "type": "missing_components"}})
+    components = [str(c) for c in body["components"]][:32]
+    interrupt = bool(body.get("interrupt_running") or False)
+
+    try:
+        snap = gpu_broker.BROKER.snapshot()
+        if snap.generation != want_gen:
+            return JSONResponse(
+                status_code=409,
+                content={"error": {"message": f"世代号对不上:你基于 {want_gen},当前 {snap.generation}",
+                                   "type": "generation_conflict"},
+                         "snapshot": snap.to_json()},
+            )
+        res = await gpu_broker.BROKER.apply_intended(components, interrupt_running=interrupt)
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "变更驻留集合时 Broker 出错",
+                               "type": "broker_unavailable", "reason": type(e).__name__}},
+        )
+
+    after = gpu_broker.BROKER.snapshot()
+    payload = {"result": res.to_json(), "snapshot": after.to_json()}
+    if res.ok:
+        return payload
+    # ★ 事务没成 ⇒ **不得回 200**。回 200 再让客户端读 body 里的 ok 字段,
+    #   等于把"失败"藏进一个看起来成功的响应里 —— 失败必须长得和成功不一样。
+    #   409 = 状态冲突(有人在跑 / 忙),422 = 这次请求本身过不去(闸拒 / 装载器缺席)。
+    code = 409 if res.code in ("busy", "needs_user_choice") else 422
+    payload["error"] = {"message": res.message, "type": res.code}
+    return JSONResponse(status_code=code, content=payload)
 
 
 @app.get("/v1/models")
