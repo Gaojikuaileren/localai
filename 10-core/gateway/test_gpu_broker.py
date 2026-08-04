@@ -163,8 +163,38 @@ print("=== 8. ★ 硬约束:锁内不得跨 await 网络 I/O ===")
 #   本进程同时持有 300 秒的流式聊天连接;在锁内 await 网络 = 把聊天卡死。
 #   这条今天成立,但极易在 S4 加租约时被破坏 —— 所以用源码结构钉住。
 _lock_src = inspect.getsource(gpu_broker.Broker)
-for m in re.finditer(r"async with self\._lock:(.*?)(?=\n    (?:async )?def |\Z)", _lock_src, re.S):
-    seg = m.group(1)
+
+
+def _lock_bodies(src):
+    """精确取出每个 `async with self._lock:` 的【缩进块】。
+
+    ★ 原来这里是 `(.*?)(?=\n    def )` —— 一路捕到下一个方法定义。
+      S8 之前每个锁块恰好是方法的最后一段,所以看着对;S8 的 apply_intended 里
+      锁块后面还有【缩进已经退回去】的代码,那段被误算进锁内 —— 三条全红。
+      修法是**收紧**判据(只取缩进更深的行),不是把断言删掉。
+    """
+    lines, out = src.split("\n"), []
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(\s*)async with self\._lock:\s*$", ln)
+        if not m:
+            continue
+        ind, body = len(m.group(1)), []
+        for nxt in lines[i + 1:]:
+            if nxt.strip() == "" or len(nxt) - len(nxt.lstrip()) > ind:
+                body.append(nxt)
+            else:
+                break
+        out.append("\n".join(body))
+    return out
+
+
+_bodies = _lock_bodies(_lock_src)
+# ★★ 元断言:提取器一旦匹配不上,下面那个 for 就一次都不跑,三条检查【静默消失】——
+#   那正是本项目最恨的假断言。所以先钉住"提取到的块数 == 源码里 async with 的出现次数"。
+check("★★ 锁块提取器没有静默失灵(块数与源码中 async with self._lock 的次数相等)",
+      len(_bodies) == _lock_src.count("async with self._lock:") and len(_bodies) > 0,
+      f"提取 {len(_bodies)} / 源码 {_lock_src.count('async with self._lock:')}")
+for seg in _bodies:
     check("锁内没有 run_in_executor(那是 I/O)", "run_in_executor" not in seg, seg[:120])
     check("锁内没有 nvml 采样调用", "nvml_free_gib" not in seg and "_sample_once" not in seg, seg[:120])
     check("锁内没有 asyncio.sleep", "asyncio.sleep" not in seg, seg[:120])
@@ -558,6 +588,270 @@ check("★ 并写明两条结构性原因(无装载器 + WDDM)",
 check("★ 并写明不标 confidence 就是假检测器", "假检测器" in _asrc)
 check("快照里每条不变式都带 confidence",
       all("confidence" in i for i in _sj["invariants"]))
+
+print("\n=== 12. P4-S8 · 状态机白名单(反向全表)===")
+_AT = gpu_broker.ALLOWED_TRANSITIONS
+check("★ 反向全表:ALL_STATES 每个状态都在转换表里登记(加新状态不登记必红)",
+      sorted(_AT) == sorted(gpu_broker.ALL_STATES),
+      f"缺 {set(gpu_broker.ALL_STATES) - set(_AT)}")
+check("★ 转换表里没有指向未登记状态的孤儿边",
+      all(t in gpu_broker.ALL_STATES for tos in _AT.values() for t in tos))
+check("SERVING_STATES 是 ALL_STATES 的子集,没有「凭空多出来」的状态",
+      set(gpu_broker.SERVING_STATES) <= set(gpu_broker.ALL_STATES))
+check("★ DEGRADED_SAFE 是终态:唯一出口是 STARTING(不能自动回 READY)",
+      _AT[gpu_broker.STATE_DEGRADED_SAFE] == frozenset({gpu_broker.STATE_STARTING}))
+check("★ RECONCILING 仍然提供服务(一个 worker 掉线不该把还活着的也判死)",
+      gpu_broker.STATE_RECONCILING in gpu_broker.SERVING_STATES)
+check("★ DEGRADED_SAFE 不提供服务(等价 Off)",
+      gpu_broker.STATE_DEGRADED_SAFE not in gpu_broker.SERVING_STATES)
+check("预检的去处只有两个:通过进 APPLYING,不过回 STAGING 编辑态",
+      _AT[gpu_broker.STATE_PRECHECK] == frozenset({gpu_broker.STATE_APPLYING,
+                                                   gpu_broker.STATE_STAGING}))
+
+
+async def _trans_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    out = {}
+    async with b._lock:
+        await b._transition(gpu_broker.STATE_READY, "t")
+        out["ok_path"] = b._state
+        try:
+            await b._transition(gpu_broker.STATE_DEGRADED_SAFE, "跳级")
+            out["illegal"] = "未拒绝"
+        except gpu_broker.IllegalTransition:
+            out["illegal"] = "拒绝"
+        out["state_after_illegal"] = b._state
+        b._state = "MADE_UP_STATE"          # 未登记源状态 → 必须失败关闭
+        try:
+            await b._transition(gpu_broker.STATE_READY, "t")
+            out["unknown_src"] = "放行"
+        except gpu_broker.IllegalTransition:
+            out["unknown_src"] = "拒绝"
+        b._state = gpu_broker.STATE_DEGRADED_SAFE
+    await b.set_power(False)
+    out["degraded_after_off"] = b._state
+    await b.set_power(True)
+    out["degraded_exit"] = b._state
+    return out
+
+
+_t = asyncio.run(_trans_test())
+check("合法转换生效(STARTING → READY)", _t["ok_path"] == gpu_broker.STATE_READY)
+check("★ 非法转换【抛异常】,不是静默忽略(忽略=看着有约束实际没有)",
+      _t["illegal"] == "拒绝")
+check("非法转换后状态没被改坏", _t["state_after_illegal"] == gpu_broker.STATE_READY)
+check("★ 失败关闭:未登记的源状态一律拒绝,而不是默认放行",
+      _t["unknown_src"] == "拒绝")
+check("★ DEGRADED_SAFE 只能靠人重开电源轴离开(没有自动恢复,D10)",
+      _t["degraded_after_off"] == gpu_broker.STATE_DEGRADED_SAFE
+      and _t["degraded_exit"] == gpu_broker.STATE_STARTING,
+      f'{_t["degraded_after_off"]} → {_t["degraded_exit"]}')
+
+_src_nodoc = re.sub(r"#.*", "", re.sub(r'"""(?:.|\n)*?"""', "", inspect.getsource(gpu_broker)))
+_bare = re.findall(r"self\._state\s*=[^=]", _src_nodoc)
+check("★ _transition 是状态改写的唯一入口(裸赋值只允许两处)",
+      len(_bare) == 2,
+      f"裸赋值 {len(_bare)} 处,应为 2(_transition 一处 + set_power 的 DEGRADED_SAFE 出口一处)")
+
+print("\n=== 13. P4-S8 · 「确定 = 一次事务」===")
+
+
+class _FakeLoader:
+    """★ 只有测试里才有。生产里 `_loader is None` —— 见 Broker.__init__ 的说明。"""
+
+    def __init__(self, fail_load=(), fail_rollback=False):
+        self.fail_load = set(fail_load)
+        self.fail_rollback = fail_rollback
+        self.calls = []
+
+    async def unload(self, ids):
+        self.calls.append(("unload", list(ids)))
+
+    async def load(self, ids):
+        self.calls.append(("load", list(ids)))
+        if self.fail_rollback and len([c for c in self.calls if c[0] == "load"]) > 1:
+            raise RuntimeError("回滚也装不上")
+        if set(ids) & self.fail_load:
+            raise RuntimeError("装载失败")
+
+
+def _mkbroker(free, loader=None, state=None):
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    b._state = state or gpu_broker.STATE_READY
+    b._loader = loader
+    b._free = free
+    b._sampled_at = 0.0
+    b._sample_once = lambda: None          # 冻住采样,由 _free 直接给值
+    return b
+
+
+_small = min(gpu_broker.BROKER.cfg.components, key=lambda c: gpu_broker.BROKER.cfg.peak(c))
+
+
+async def _tx_tests():
+    o = {}
+    # ① 预检不过 → 回编辑态,committed 一字未动
+    b = _mkbroker(free=0.05)
+    b._committed = [_small]
+    r = await b.apply_intended([_small])
+    o["reject"] = (r.ok, r.code, r.state, list(b._committed))
+
+    # ② ★ 装载器缺席 → 失败关闭,绝不到 READY
+    b2 = _mkbroker(free=64.0, loader=None)
+    r2 = await b2.apply_intended([_small])
+    o["absent"] = (r2.ok, r2.code, r2.state, list(b2._committed))
+
+    # ③ 成功事务
+    b3 = _mkbroker(free=64.0, loader=_FakeLoader())
+    r3 = await b3.apply_intended([_small], permitted=[])
+    o["ok"] = (r3.ok, r3.state, list(b3._committed), list(b3._intended))
+
+    # ④ 装载失败 → 回滚 → RECONCILING,committed 回到 prev
+    b4 = _mkbroker(free=64.0, loader=_FakeLoader(fail_load={_small}))
+    b4._committed = []
+    r4 = await b4.apply_intended([_small])
+    o["rollback"] = (r4.ok, r4.code, r4.state, list(b4._committed))
+
+    # ⑤ 回滚也失败 → DEGRADED_SAFE
+    b5 = _mkbroker(free=64.0, loader=_FakeLoader(fail_load={_small}, fail_rollback=True))
+    r5 = await b5.apply_intended([_small])
+    o["degraded"] = (r5.ok, r5.code, r5.state)
+
+    # ⑥ 非 READY 状态拒新事务(单写者)
+    b6 = _mkbroker(free=64.0, loader=_FakeLoader(), state=gpu_broker.STATE_APPLYING)
+    r6 = await b6.apply_intended([_small])
+    o["busy"] = (r6.ok, r6.code)
+
+    # ⑦ ★ 重新求值:预览时够、确定时不够
+    b7 = _mkbroker(free=64.0, loader=_FakeLoader())
+    pre = gpu_broker.vram_gate.evaluate([_small], b7.cfg, free=64.0)   # 预览:过
+    b7._free = 0.05                                                    # 期间桌面吃满了
+    r7 = await b7.apply_intended([_small])
+    o["revalue"] = (pre.ok, r7.ok, r7.code)
+
+    # ⑧ blocking_set:有人在等 → 交还用户裁定,不动 committed
+    gpu_broker.DRAIN_WINDOW_S = 0.01
+    b8 = _mkbroker(free=64.0, loader=_FakeLoader())
+    b8._committed = [_small]
+    await b8.grant("client_session", "h1", [_small], ttl_s=30.0)
+    r8 = await b8.apply_intended([])
+    o["blocked"] = (r8.ok, r8.code, len(r8.blocking), list(b8._committed))
+    b8._state = gpu_broker.STATE_READY
+    r8b = await b8.apply_intended([_small], interrupt_running=True)
+    o["interrupt"] = (r8b.ok, r8b.state)
+    gpu_broker.DRAIN_WINDOW_S = 5.0
+
+    # ⑨ 回收超时 → vram_not_reclaimed
+    b9 = _mkbroker(free=1.0)
+    err = await b9._await_reclaim(expect_free=50.0, timeout=0.15, poll=0.02)
+    ok2 = await b9._await_reclaim(expect_free=1.1, timeout=0.15, poll=0.02)  # 在 ±0.2 内
+    o["reclaim"] = (err, ok2)
+    return o
+
+
+_x = asyncio.run(_tx_tests())
+check("预检不过 → 回 STAGING 编辑态", _x["reject"][2] == gpu_broker.STATE_STAGING, _x["reject"])
+check("★ 预检不过时【一个组件都没卸】—— committed 一字未动",
+      _x["reject"][3] == [_small], _x["reject"][3])
+check("预检不过的 code 指出是哪道闸", _x["reject"][1].startswith("gate_"), _x["reject"][1])
+check("★★★ 装载器缺席 → 失败关闭,code=loader_absent", _x["absent"][1] == "loader_absent",
+      _x["absent"])
+check("★★★ 装载器缺席时【绝不到达 READY】(否则报 READY 而显存里什么都没有)",
+      _x["absent"][2] != gpu_broker.STATE_READY and _x["absent"][0] is False, _x["absent"])
+check("装载器缺席时 committed 未被写入", _x["absent"][3] == [])
+check("事务成功 → READY 且 committed/intended 都落到申请集合",
+      _x["ok"][0] and _x["ok"][1] == gpu_broker.STATE_READY
+      and _x["ok"][2] == [_small] and _x["ok"][3] == [_small], _x["ok"])
+check("★ 装载失败 → 回滚到上一个成功集合,落 RECONCILING",
+      _x["rollback"][2] == gpu_broker.STATE_RECONCILING and _x["rollback"][3] == [],
+      _x["rollback"])
+check("★ 回滚也失败 → DEGRADED_SAFE(等价 Off + 托盘红 + 不可忽略通知)",
+      _x["degraded"][2] == gpu_broker.STATE_DEGRADED_SAFE
+      and _x["degraded"][1] == "rollback_failed", _x["degraded"])
+check("单写者:非 READY 状态拒新事务", _x["busy"][1] == "busy", _x["busy"])
+check("★★ 点确定时【重新求值】:预览过 → 确定时不过(挑组件几十秒,期间桌面会变)",
+      _x["revalue"][0] is True and _x["revalue"][1] is False
+      and _x["revalue"][2].startswith("gate_"), _x["revalue"])
+check("★ 有任务在跑 → needs_user_choice,并点名是哪几条租约",
+      _x["blocked"][1] == "needs_user_choice" and _x["blocked"][2] == 1, _x["blocked"])
+check("★ 交还用户裁定时 committed 一字未动", _x["blocked"][3] == [_small])
+check("用户选『优雅中断』后事务照常走完",
+      _x["interrupt"][0] and _x["interrupt"][1] == gpu_broker.STATE_READY, _x["interrupt"])
+check("★ 显存没回收到 ±0.2 GiB → vram_not_reclaimed(不是「大概回收了就算了」)",
+      _x["reclaim"][0] == "vram_not_reclaimed", _x["reclaim"])
+check("回收到容差内 → 通过", _x["reclaim"][1] is None)
+
+
+def _nodoc(fn):
+    return re.sub(r"#.*", "", re.sub(r'"""(?:.|\n)*?"""', "", inspect.getsource(fn)))
+
+
+_apply_nodoc = _nodoc(gpu_broker.Broker.apply_intended)
+check("★ 一律先卸后装:源码里 unload 出现在 load 之前",
+      _apply_nodoc.index(".unload(") < _apply_nodoc.index(".load("))
+check("★ loader_absent 的检查在进入 APPLYING 【之前】(否则就是先卸了再发现装不了)",
+      _apply_nodoc.index("loader_absent") < _apply_nodoc.index("STATE_APPLYING"))
+check("★★ 预检不过的落点上【没有任何一行写 _committed】(方案书第 2 条的字面落实)",
+      "_committed" not in _nodoc(gpu_broker.Broker._back_to_staging))
+check("DRAIN_WINDOW_S = 5 秒排空窗口(方案书 §8.1.6)", gpu_broker.DRAIN_WINDOW_S == 5.0)
+check("回收容差 / 超时与方案书行 1507 一致(±0.2 GiB / 10 s)",
+      gpu_broker.RECLAIM_TOLERANCE_GIB == 0.2 and gpu_broker.RECLAIM_TIMEOUT_S == 10.0)
+check("★ _await_reclaim 的 timeout 走 None 而非默认参数绑常量(否则测试改不动,断言只能抄数字)",
+      inspect.signature(gpu_broker.Broker._await_reclaim).parameters["timeout"].default is None)
+
+print("\n=== 14. P4-S8 · admission_guard(通用降幅,不看进程名)===")
+_ag_nodoc = _nodoc(gpu_broker.Broker.admission_guard)
+check("★★ admission_guard 全程不读进程名(原文「检测独占全屏游戏」特例已删除)",
+      not any(w in _ag_nodoc.lower() for w in ("process", "proc_name", "exe", "fullscreen", "game")),
+      _ag_nodoc)
+check("常量与方案书行 1623 一致:5 s 窗口 / 1.0 GiB 降幅",
+      gpu_broker.ADMISSION_GUARD_WINDOW_S == 5.0 and gpu_broker.ADMISSION_GUARD_DROP_GIB == 1.0)
+
+_bg = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_bg._free_history = [(100.0, 12.0), (101.0, 11.8), (102.0, 9.5)]
+_g1 = _bg.admission_guard()
+_bg._free_history = [(100.0, 12.0), (102.0, 11.4)]
+_g2 = _bg.admission_guard()
+_bg._free_history = [(80.0, 12.0), (100.0, 9.0), (101.0, 9.0)]   # 降幅在 5 s 窗口【之外】
+_g3 = _bg.admission_guard()
+_bg._free_history = [(100.0, None), (101.0, None)]
+_g4 = _bg.admission_guard()
+check("5 s 内降 2.5 GiB → 触发", _g1 is not None and _g1["drop_gib"] == 2.5, _g1)
+check("触发后的动作是拒新申请", _g1 and _g1["action"] == "refuse_new_admission")
+check("降 0.6 GiB(≤1.0)→ 不触发", _g2 is None, _g2)
+check("★ 窗口【之外】的降幅不算(否则开机以来的总降幅会永远触发)", _g3 is None, _g3)
+check("采样失败(None)不被当成降幅", _g4 is None, _g4)
+_so = _nodoc(gpu_broker.Broker._sample_once)
+check("★ 采样失败也要入历史(否则「采不到」会被当成「没变化」,故障反而更安静)",
+      "_free_history.append" in _so and "finally" in _so)
+check("历史有上界,不会无界增长", "FREE_HISTORY_MAX" in _so)
+
+print("\n=== 15. P4-S8 · 失败落点(D24 排查带出,原文完全没定义过)===")
+
+
+async def _fl_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    _, l1 = await b.grant("model_ref", "h", [_small], ttl_s=30.0)        # evictable
+    _, l2 = await b.grant("client_session", "h", [_small], ttl_s=30.0)   # 不可驱逐
+    return b.failure_landing(), l1.lease_id, l2.lease_id
+
+
+_fl, _lev, _lpin = asyncio.run(_fl_test())
+check("★★ 失败恒落在 AI 侧,不得由桌面承担分配失败",
+      _fl["then_lands_on"] == "ai" and _fl["never"] == "desktop", _fl)
+check("★★ 且明写这是【策略不是保证】(WDDM 不按优先级驱逐)", _fl["guarantee"] is False)
+check("可驱逐租约排在先驱逐名单里", _lev in _fl["evict_first"], _fl)
+check("不可驱逐租约不在驱逐名单、而在 pinned",
+      _lpin not in _fl["evict_first"] and _lpin in _fl["pinned_not_evicted"], _fl)
+check("AI 侧的动作就是拒新申请 / DEGRADED_SAFE",
+      _fl["ai_actions"] == ["refuse_new_admission", "degraded_safe"])
+_fls = inspect.getsource(gpu_broker.Broker.failure_landing)
+check("★ 文档写明 WDDM 不按优先级驱逐 —— 不得声称能保证桌面不被挤",
+      "WDDM" in _fls and "不按优先级驱逐" in _fls and "不等于" in _fls)
+check("blocking_set 恰好是方案书那三个",
+      gpu_broker.BLOCKING_SET == frozenset({gpu_broker.BLOCKING_USER,
+                                            gpu_broker.BLOCKING_ASYNC,
+                                            gpu_broker.BLOCKING_RESIDENT}))
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

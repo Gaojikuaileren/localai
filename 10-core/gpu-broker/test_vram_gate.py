@@ -216,12 +216,48 @@ print("=== 13. ★★ 跨进程:干净 cp936 控制台下,通过与拒绝【两�
 _env = {k: val for k, val in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
 
 
-def _run_cli(*args):
+def _run_cli(*args, env=None):
     r = subprocess.run([sys.executable, str(_HERE / "vram_gate.py"), *args],
+                       capture_output=True, env=env or _env, cwd=str(_HERE), timeout=60)
+    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+
+
+# ★★ 通过路径必须【确定性】。原来它直接打实机 NVML,判定随桌面占用漂移:
+#   2026-08-04 20:1x 桌面吃到 7.5 GiB,闸如实拒绝 → 这条断言无辜变红,挡下了一次无关的提交。
+#   一条随环境漂移的门禁断言不是"偶尔红一下"那么轻 —— 它训练人去用 --no-verify,
+#   而本项目已被这个模式咬过一次(D24:-Force 一路跳过三道闸)。
+#   本文件开头第 4 行自己就写着「动态闸统一注入固定的 free 值,不依赖真实 GPU 状态」——
+#   第 13 节违反的是它自己声明的纪律。
+#
+# ⇒ 修法:通过路径改走【跨进程引导】,在子进程里注入 free 再调 main()。
+#   ★ 不给 CLI 加 --free 之类的旁路开关 —— 那种开关迟早被用来绕闸。
+#   ★ 先试过"PATH 里放桩 nvidia-smi.cmd",不成立:Windows 的 CreateProcess **不执行 .cmd**,
+#     `nvidia-smi` 仍解析到 System32 的真 exe。这条弯路记在这里,省得下一个人再走。
+#   ★ 换来的代价说清楚:这条不再经过 `if __name__ == "__main__"` 那一行。
+#     编码修复本身在 main() 里(sys.stdout.reconfigure),仍被完整执行;
+#     而真正的 __main__ 入口由下面【拒绝路径】与【无参数列表模式】两条覆盖 ——
+#     那两条的判定与 free 无关,本来就是确定性的。
+_BOOT = (
+    "import sys; sys.path.insert(0, r'{here}');"
+    "import vram_gate;"
+    "vram_gate.nvml_free_gib = lambda: 14.65;"
+    "sys.exit(vram_gate.main(sys.argv[1:]))"
+).format(here=_HERE)
+
+
+def _run_cli_fixed_free(*args):
+    r = subprocess.run([sys.executable, "-c", _BOOT, *args],
                        capture_output=True, env=_env, cwd=str(_HERE), timeout=60)
     return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
 
-_rc, _out, _err = _run_cli("llm.assistant.8b@16k", "speech.lite")
+
+# ★ 元断言:注入要是没生效,这一节就悄悄退回打实机 —— 又变随机红/随机绿。
+#   所以先钉住输出里的 free 正好是注入值。
+_rc0, _out0, _err0 = _run_cli_fixed_free("llm.assistant.8b@16k")
+check("★★ free 注入确实生效(否则这一节退回打实机,又变 flaky)",
+      "14.65" in _out0, f"rc={_rc0} out={_out0[:200]} err={_err0[:160]}")
+
+_rc, _out, _err = _run_cli_fixed_free("llm.assistant.8b@16k", "speech.lite")
 check("通过路径:退出码 0", _rc == 0, f"实得 {_rc};stderr={_err[:120]}")
 check("通过路径:stdout 非空(修复前这里是空的)", len(_out.strip()) > 0)
 check("通过路径:三段预览齐全", all(s in _out for s in ("① 已选组件", "② 桌面预留", "③ 此刻可用")))

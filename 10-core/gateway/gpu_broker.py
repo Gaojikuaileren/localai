@@ -166,6 +166,56 @@ STATE_DEGRADED_SAFE = "DEGRADED_SAFE"
 ALL_STATES = (STATE_STARTING, STATE_READY, STATE_STAGING, STATE_PRECHECK,
               STATE_APPLYING, STATE_RECONCILING, STATE_DEGRADED_SAFE)
 
+# ── P4-S8:合法转换【白名单】────────────────────────────────────────
+# ★★ 这是白名单不是黑名单 —— 没列进来的转换一律拒绝(失败关闭)。
+#    加一个新状态,默认落在"谁也到不了它、它哪儿也去不了",而不是"畅通无阻"。
+#    反向全表断言盯着这张表:ALL_STATES 里每一个都必须在这里登记。
+ALLOWED_TRANSITIONS: Dict[str, frozenset] = {
+    STATE_STARTING:      frozenset({STATE_READY, STATE_RECONCILING}),
+    STATE_READY:         frozenset({STATE_STAGING, STATE_RECONCILING}),
+    STATE_STAGING:       frozenset({STATE_PRECHECK, STATE_READY}),     # 取消 → 回 READY
+    STATE_PRECHECK:      frozenset({STATE_APPLYING, STATE_STAGING}),   # 不过 → 回编辑态
+    STATE_APPLYING:      frozenset({STATE_READY, STATE_RECONCILING}),
+    STATE_RECONCILING:   frozenset({STATE_READY, STATE_DEGRADED_SAFE}),
+    # ★ DEGRADED_SAFE 是**终态**。唯一出口是 set_power 的显式电源循环(人的动作)——
+    #   自动恢复就是"自动触发",D10 存活下来的那一句明令禁止。
+    STATE_DEGRADED_SAFE: frozenset({STATE_STARTING}),
+}
+
+# 仍然对外提供服务的状态。★ RECONCILING 必须在内 —— 一个 worker 掉线不该把还活着的也判死。
+SERVING_STATES = frozenset({STATE_READY, STATE_STAGING, STATE_PRECHECK,
+                            STATE_APPLYING, STATE_RECONCILING})
+
+BLOCKING_SET = frozenset({BLOCKING_USER, BLOCKING_ASYNC, BLOCKING_RESIDENT})
+
+DRAIN_WINDOW_S          = 5.0    # 方案书 §8.1.6:先给 5 秒排空窗口
+RECLAIM_TIMEOUT_S       = 10.0   # 行 1507:超时 10 s 报 vram_not_reclaimed
+RECLAIM_TOLERANCE_GIB   = 0.2    # 行 1507:free 回升到预期 ±0.2 GiB
+ADMISSION_GUARD_WINDOW_S = 5.0   # 行 1623:5 s 内
+ADMISSION_GUARD_DROP_GIB = 1.0   # 行 1623:降幅 > 1.0 GiB
+FREE_HISTORY_MAX        = 32     # 1 Hz 采样,够覆盖 5 s 窗口且不无界增长
+
+
+class IllegalTransition(RuntimeError):
+    """非法状态转换。★ 抛异常而不是静默忽略 —— 忽略会让状态机看着有约束、实际没有。"""
+
+
+@dataclass
+class ApplyResult:
+    ok: bool
+    code: str            # "" | busy | needs_user_choice | gate_* | loader_absent |
+                         # vram_not_reclaimed | load_failed_rolled_back | rollback_failed
+    state: str
+    message: str = ""
+    blocking: List[str] = field(default_factory=list)
+
+    def to_json(self) -> Dict:
+        return {"ok": self.ok, "code": self.code, "state": self.state,
+                "message": self.message, "blocking": list(self.blocking)}
+
+ALL_STATES = (STATE_STARTING, STATE_READY, STATE_STAGING, STATE_PRECHECK,
+              STATE_APPLYING, STATE_RECONCILING, STATE_DEGRADED_SAFE)
+
 # I2 不等时,state 必须是这三个之一(方案书行 1566)
 I2_TOLERATED_STATES = (STATE_STARTING, STATE_RECONCILING, STATE_DEGRADED_SAFE)
 
@@ -278,6 +328,14 @@ class Broker:
         self._power_on: bool = True                # I4 的电源轴,与意图轴分离
         self._last_watch: Tuple[InvariantReport, ...] = ()
 
+        # ── P4-S8:事务 ──────────────────────────────────────────
+        # ★★★ 装载器【默认缺席】。这不是"待填的 TODO",是**判据本身**:
+        #     None ⇒ apply_intended 在预检阶段失败关闭,绝不到达 READY。
+        #     若给它一个空实现,每次事务都会"成功"而显存里什么都没有 ——
+        #     那是比"3 个装了 2 个仍报 READY"更坏的版本。
+        self._loader = None
+        self._free_history: List[Tuple[float, Optional[float]]] = []
+
     # ── 配置 ──────────────────────────────────────────────────────
     @property
     def cfg(self):
@@ -308,6 +366,12 @@ class Broker:
             self._free = None
             self._sampler_error = f"{type(e).__name__}: {e}"
             self._sampled_at = time.monotonic()
+        finally:
+            # P4-S8:admission_guard 要的降幅历史。★ 读失败也要入历史(记 None),
+            #   否则"采不到"会被降幅规则当成"没变化",故障反而更安静。
+            self._free_history.append((self._sampled_at, self._free))
+            if len(self._free_history) > FREE_HISTORY_MAX:
+                del self._free_history[:-FREE_HISTORY_MAX]
 
     async def _sampler_loop(self) -> None:
         while True:
@@ -580,6 +644,11 @@ class Broker:
             if not on:
                 self._committed = []          # 关电 ⇒ 实际驻留清空
                 # ★ self._intended 一个字都不动 —— 这就是 I4 的全部要点
+            else:
+                # ★ P4-S8:DEGRADED_SAFE 的**唯一**出口 —— 人手动重开电源轴。
+                #   放在 set_power 里而不是任何采样/巡检里,是为了钉死"没有自动恢复"。
+                if self._state == STATE_DEGRADED_SAFE:
+                    self._state = STATE_STARTING
             self._generation += 1
             self._notify_locked()
             return self._generation
@@ -599,6 +668,228 @@ class Broker:
                 if c not in self._committed and c not in out:
                     out.append(c)
         return out
+
+    # ══════════════════════════════════════════════════════════════
+    #  P4-S8 · 「确定 = 一次事务」(方案书 §8.1「确定 = 一次事务」+ §8.1.6)
+    #
+    #  ★★★ 本节最大的诚实边界:**装载器不存在**。
+    #      没有任何进程会真的把模型装进显存 —— 这是 P5 的活。
+    #      于是 S8 有一个极容易掉进去的坑:把 `load()` 写成空实现,
+    #      于是每次事务都"成功",状态机一路走到 READY,四个集合全部相等,
+    #      I2 永远绿 —— 而显存里【一个字节都没有】。
+    #      那正是方案书行 1594 点名的「3 个装了 2 个却仍报 READY」的更坏版本。
+    #  ⇒ 规定:`self._loader is None` 时,事务**在预检阶段就失败关闭**,
+    #      落 `loader_absent`,**绝不允许进入 APPLYING,更不允许到达 READY**。
+    #      失败必须长得和成功不一样 —— 这是本项目的第一戒律。
+    # ══════════════════════════════════════════════════════════════
+
+    async def _transition(self, to: str, why: str) -> None:
+        """★ 必须在锁内调用。所有状态改写的**唯一**入口。
+
+        转换合法性查 `ALLOWED_TRANSITIONS` 白名单 —— **没列进来的一律拒绝**。
+        加一个新状态,默认落在"谁也到不了它、它哪儿也去不了",而不是"畅通无阻"。
+        """
+        frm = self._state
+        if frm == to:
+            return
+        allowed = ALLOWED_TRANSITIONS.get(frm)
+        if allowed is None:
+            raise IllegalTransition(f"源状态 {frm} 未登记在 ALLOWED_TRANSITIONS —— 拒绝(失败关闭)")
+        if to not in allowed:
+            raise IllegalTransition(f"{frm} ─X→ {to} 不是合法转换({why})")
+        self._state = to
+        self._generation += 1
+        self._notify_locked()
+
+    def blocking_leases(self) -> List[Lease]:
+        """`blocking_set = {USER_BLOCKING, USER_ASYNC, RESIDENT_TASKED}`(方案书 §8.1.6)。
+
+        ★ 主语已由「降档」改为「变更驻留集合」(D25)—— 档位取消后原文这条会**字面失效**,
+          而它保护的正是"一键套用推荐组合"这条最容易静默杀掉运行中任务的路径。
+        """
+        now = time.monotonic()
+        return [l for l in self._leases.values()
+                if l.expires_at > now and LEASE_KINDS[l.kind].blocking in BLOCKING_SET]
+
+    def failure_landing(self) -> Dict[str, object]:
+        """失败落点(方案书行 1615-1621 · D24 排查带出,原文完全没定义过)。
+
+        规定:驱逐可驱逐租约(原文的 `WARM` / `MAINTENANCE` 类)后仍不足时,
+        **失败落在 AI 侧**(拒新申请 / DEGRADED_SAFE),**不得由桌面承担分配失败**。
+
+        ★★ 诚实边界:这是**策略**,不是保证。WDDM **不按优先级驱逐** ——
+           已经发生的驱逐落在谁头上,本项目控制不了。
+           本函数**永远不会**返回 "desktop",但那只说明我们没有主动把失败推给桌面,
+           **不等于**桌面不会被挤。任何 UI 文案不得据此声称"保证桌面不被挤"。
+        """
+        now = time.monotonic()
+        evictable, pinned = [], []
+        for l in self._leases.values():
+            if l.expires_at <= now:
+                continue
+            (evictable if LEASE_KINDS[l.kind].evictable else pinned).append(l.lease_id)
+        return {
+            "evict_first": sorted(evictable),   # 先驱逐这些(WARM / MAINTENANCE 类)
+            "then_lands_on": "ai",              # ★ 恒为 ai —— 见上面的诚实边界
+            "never": "desktop",
+            "ai_actions": ["refuse_new_admission", "degraded_safe"],
+            "pinned_not_evicted": sorted(pinned),
+            "guarantee": False,                 # ★ 策略非保证,WDDM 不按优先级驱逐
+        }
+
+    def admission_guard(self) -> Optional[Dict[str, object]]:
+        """通用降幅规则(方案书行 1623):`free_vram` 1 Hz 采样,**5 s 内降幅 > 1.0 GiB** → 触发。
+
+        ★★ 全程**不看进程名**。原文的「检测独占全屏游戏」特例已删除 ——
+           这台机器上比游戏更常见的显存大户是 UE5 与多标签 Chrome。
+           进程名**仅用于生成告知文案,不产生策略动作** ⇒ 本函数不接收也不读取任何进程名。
+        """
+        hist = [(t, f) for (t, f) in self._free_history if f is not None]
+        if len(hist) < 2:
+            return None
+        now_t, now_f = hist[-1]
+        window = [(t, f) for (t, f) in hist if now_t - t <= ADMISSION_GUARD_WINDOW_S]
+        if len(window) < 2:
+            return None
+        peak = max(f for _, f in window)
+        drop = round(peak - now_f, 4)
+        if drop <= ADMISSION_GUARD_DROP_GIB:
+            return None
+        return {"drop_gib": drop, "window_s": ADMISSION_GUARD_WINDOW_S,
+                "from_gib": peak, "to_gib": now_f,
+                "action": "refuse_new_admission"}
+
+    async def _await_reclaim(self, expect_free: float, *, timeout: Optional[float] = None,
+                             poll: float = 1.0) -> Optional[str]:
+        """卸载后轮询 NVML 直到 free 回升到预期 ±0.2 GiB(方案书行 1507)。
+
+        返回 None = 已回收;返回字符串 = 错误码 `vram_not_reclaimed`。
+        ★ 超时**不是**"大概回收了就算了" —— 显存没吐出来还硬装,撞的是物理墙。
+        ★ timeout 走 None 而不是默认参数直接引用常量:默认参数在 def 那一刻就绑死了,
+          测试改不动模块常量,断言就只能抄一份数字 —— 那份抄件跟真值分家的那天就是假断言。
+        """
+        timeout = RECLAIM_TIMEOUT_S if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        while True:
+            await asyncio.get_running_loop().run_in_executor(None, self._sample_once)
+            if self._free is not None and self._free >= expect_free - RECLAIM_TOLERANCE_GIB:
+                return None
+            if time.monotonic() >= deadline:
+                return "vram_not_reclaimed"
+            await asyncio.sleep(poll)
+
+    async def apply_intended(self, requested: List[str], *,
+                             permitted: Optional[List[str]] = None,
+                             interrupt_running: bool = False) -> "ApplyResult":
+        """「点确定」= 一次事务。READY → STAGING → PRECHECK → APPLYING → READY。
+
+        方案书「确定 = 一次事务」四条,逐条落在下面并各有断言:
+          1. **点确定时重新求值,不用预览时的快照** —— 挑组件要几十秒,期间桌面会变,
+             「预览过、确定时不过」是**必然**会发生的。故这里现采 NVML、现跑三道闸。
+          2. 预检不过 → 回编辑态(STAGING),**不卸载任何东西**。
+          3. 装载中途失败 → 回滚上一个成功集合;回滚也失败 → DEGRADED_SAFE。
+          4. 有任务在跑 → 先给 5 秒排空窗口,再让调用方选"优雅中断"或"等它跑完"。
+        """
+        # ── ① 进 STAGING(只能从 READY 进;别的状态说明有另一笔事务在跑)──
+        async with self._lock:
+            if self._state != STATE_READY:
+                return ApplyResult(False, "busy", self._state,
+                                   f"当前状态 {self._state} 不接受新事务(单写者)")
+            await self._transition(STATE_STAGING, "点确定")
+
+        # ── ② blocking_set:有人在等结果 → 5 秒排空窗口,再交给用户裁定 ──
+        blockers = self.blocking_leases()
+        if blockers and not interrupt_running:
+            await asyncio.sleep(DRAIN_WINDOW_S)          # ★ 先给排空窗口,再问
+            blockers = self.blocking_leases()
+            if blockers:
+                async with self._lock:
+                    await self._transition(STATE_READY, "有任务在跑,交还用户裁定")
+                return ApplyResult(False, "needs_user_choice", STATE_READY,
+                                   "有任务在跑:请选『优雅中断』或『等它跑完』",
+                                   blocking=[l.lease_id for l in blockers])
+
+        # ── ③ PRECHECK:现采、现判 —— 不用预览快照 ──
+        async with self._lock:
+            await self._transition(STATE_PRECHECK, "整组预检")
+        prev = list(self._committed)                      # 上一个成功集合(回滚锚点)
+        await asyncio.get_running_loop().run_in_executor(None, self._sample_once)
+        if self._free is None:
+            return await self._back_to_staging("precheck_no_sample",
+                                               f"取不到 NVML 读数:{self._sampler_error}")
+        v = vram_gate.evaluate(list(requested), self.cfg, free=self._free,
+                               resident=prev, reserved=self.reserved_components())
+        if not v.ok:
+            # ★★ 第 2 条:不过就回编辑态,**committed 一字未动** —— 断言直接比对 prev
+            return await self._back_to_staging(f"gate_{v.gate}", v.message)
+
+        # ★★★ 装载器缺席 → 在这里失败关闭。**不得**继续走到 APPLYING/READY。
+        if self._loader is None:
+            return await self._back_to_staging(
+                "loader_absent",
+                "装载器尚未实现(P5)。事务在此失败关闭 —— 若放行,状态机会报 READY "
+                "而显存里一个字节都没有,那正是 I2 存在的理由所要禁止的事")
+
+        # ── ④ APPLYING:一律先卸后装 ──
+        async with self._lock:
+            await self._transition(STATE_APPLYING, "预检通过")
+        try:
+            drop = [c for c in prev if c not in requested]
+            if drop:
+                expect = self._free + sum(self.cfg.peak(c) for c in drop if c in self.cfg.components)
+                await self._loader.unload(drop)
+                err = await self._await_reclaim(expect)
+                if err:
+                    return await self._to_reconciling(err, f"卸载 {drop} 后显存未回收")
+            add = [c for c in requested if c not in prev]
+            if add:
+                await self._loader.load(add)
+        except Exception as e:
+            # ── 回滚到上一个成功集合;回滚也失败 → DEGRADED_SAFE ──
+            try:
+                await self._loader.load(prev)
+            except Exception as e2:
+                async with self._lock:
+                    await self._transition(STATE_RECONCILING, "装载失败")
+                    await self._transition(STATE_DEGRADED_SAFE, "回滚失败")
+                    self._committed = []
+                    self._generation += 1
+                    self._notify_locked()
+                return ApplyResult(False, "rollback_failed", STATE_DEGRADED_SAFE,
+                                   f"装载失败({e})且回滚失败({e2})—— 等价 Off + 托盘红 + 不可忽略通知")
+            async with self._lock:
+                self._committed = prev
+                await self._transition(STATE_RECONCILING, "装载失败,已回滚")
+            return ApplyResult(False, "load_failed_rolled_back", STATE_RECONCILING, str(e))
+
+        async with self._lock:
+            self._committed = list(requested)
+            self._intended = list(requested)
+            if permitted is not None:
+                self._permitted_on_demand = list(permitted)
+            await self._transition(STATE_READY, "事务完成")
+        return ApplyResult(True, "", STATE_READY, "已应用")
+
+    async def _back_to_staging(self, code: str, msg: str) -> "ApplyResult":
+        """预检不过的**唯一**落点。★ 此路径上没有任何一行碰 `_committed` ——
+        方案书第 2 条「不卸载任何东西」的字面落实,断言按源码检查。"""
+        async with self._lock:
+            await self._transition(STATE_STAGING, "预检不过,回编辑态")
+        return ApplyResult(False, code, STATE_STAGING, msg)
+
+    async def _to_reconciling(self, code: str, msg: str) -> "ApplyResult":
+        """RECONCILING:**必须继续按 actual_resident 提供服务**(方案书行 1606-1608)。
+
+        ★ 否则一个语音 worker 掉线会连带把仍然可用的 LLM 也判成不可用 —— **比故障本身更糟**。
+          复用 §8.1.4 既有的 `contract_changed`(默认放行 + 回带真实契约 + X-LocalAI-Contract 头)。
+        """
+        async with self._lock:
+            await self._transition(STATE_RECONCILING, code)
+        return ApplyResult(False, code, STATE_RECONCILING, msg)
+
+    def serves_requests(self) -> bool:
+        """哪些状态仍然对外提供服务。★ RECONCILING **必须**是 True —— 见 `_to_reconciling`。"""
+        return self._state in SERVING_STATES
 
 
 # 进程内单例 —— 「单一权威」的字面落点。
