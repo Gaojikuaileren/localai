@@ -90,6 +90,33 @@ public static class Selftest
             Assert(sw.ElapsedMilliseconds < 3000, $"卡住的清理步骤会被预算掐断,不拖住关机(用时 {sw.ElapsedMilliseconds}ms)");
             Assert(!ran, "预算耗尽后跳过剩余步骤(而不是无限等下去)");
 
+            // ★★ 2026-08-04 用户实测:「关闭的时候会卡一段时间」。
+            //   根因不是总预算不够,而是**没有单步上限**:步骤顺序跑,② end-session+release-vram
+            //   要发一次真实网络请求(Transport.Send 每次现建 HttpClient 走完整 mTLS 握手,
+            //   **默认 100 秒超时**),中枢/网关没起时它就干等,把 5 秒总预算吃光 ——
+            //   于是 ③ 保存设置 · ④ 停显存监视 · ⑤ 收托盘图标 **一个都轮不到**。
+            //   用户看到的不只是卡,还有「设置没保存上、托盘图标还赖着」。
+            //   ⇒ 这条钉的是:**总预算充裕时,一个慢步骤只能拖垮它自己,后面的步骤照跑。**
+            var co2b = new ShutdownCoordinator
+            {
+                Budget = TimeSpan.FromSeconds(5),               // 总预算充裕
+                PerStepBudget = TimeSpan.FromMilliseconds(200), // 单步很短
+            };
+            var laterRan = false;
+            co2b.Register("slow-network", async ct => await Task.Delay(TimeSpan.FromSeconds(30), ct));
+            co2b.Register("save-settings", () => laterRan = true);
+            var sw2 = System.Diagnostics.Stopwatch.StartNew();
+            co2b.RunOnceAsync("per-step-budget").GetAwaiter().GetResult();
+            sw2.Stop();
+            Assert(laterRan,
+                   "★★ 慢步骤【不】饿死后面的步骤 —— 单步有自己的上限。"
+                   + "没有这一道:退出时一个网络调用卡住,保存设置与收托盘图标就再也跑不到"
+                   + "(用户实测「关闭卡一段时间」的根因)");
+            Assert(sw2.ElapsedMilliseconds < 2000,
+                   $"★ 单步上限到点就放弃那一步,不等它自己的 100 秒超时(用时 {sw2.ElapsedMilliseconds}ms)");
+            Assert(new ShutdownCoordinator().PerStepBudget < new ShutdownCoordinator().Budget,
+                   "★ 单步上限必须严格小于总预算,否则它形同虚设");
+
             var co3 = new ShutdownCoordinator();
             var reached = false;
             co3.Register("boom", () => throw new InvalidOperationException("x"));

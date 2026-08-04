@@ -170,6 +170,46 @@ public sealed class Store
         c.Status = "active"; c.Generation = IdentityGeneration;
     }
 
+    /// <summary>
+    /// 清掉【批准了、但对方从来没来领证】的半截 `provisioning` 记录。
+    ///
+    /// ★ 2026-08-04 加。为什么需要它:设备记录是在 **Approve** 那一刻建的(`AddProvisioning`),
+    ///   要等客户端 claim/complete 才转 `active`。中间任何一步失败,这条记录就**永远**停在
+    ///   `provisioning` —— 全仓没有任何代码让它过期。
+    ///   实测后果:证书名 bug 让 `/pair/status` 第一次握手就失败(见 `b136f01`),客户端每重试一次
+    ///   就在中枢多留一条,机主的设备列表里**同一台机器出现了 6 次**(store.json 实证:
+    ///   6 条 `HONGKONGPINGPON` 全是 `ApprovedAt: null`)。
+    ///   ★ 那个握手 bug 已修,但**积累机制**是独立的缺陷:今后任何一次没走完的配对都会再留一条。
+    ///
+    /// ★ 判据只用**记录自己的时间**,不用自报的名字 —— `UntrustedDisplayName` 是对方随便写的,
+    ///   拿它当去重键等于让局域网上任何人决定哪条记录该被清掉(与项目「自报值只作显示、永不作判据」同源)。
+    ///
+    /// ★ 落到 `revoked` 而不是新加一个状态:状态词表就 `provisioning|active|revoked` 三个,
+    ///   客户端按 `Status != "revoked"` 过滤;新造一个词会让这些死记录继续显示在「已配对电脑」里。
+    ///   也不 delete —— 项目纪律是留痕不删(`RevokedAt` 就是痕)。
+    /// </summary>
+    /// <param name="ttl">超过这个时长仍没领证就算死。★ 必须显著大于客户端的领证等待
+    /// (`ApprovalWaitMs` ≈ 5 分钟),否则会掐掉正在进行中的配对。</param>
+    /// <returns>本次清掉几条。</returns>
+    public int SweepStaleProvisioning(TimeSpan ttl)
+    {
+        var cutoff = DateTimeOffset.UtcNow - ttl;
+        var dead = Devices.Where(d => d.Status == "provisioning"
+                                      && DateTimeOffset.TryParse(d.CreatedAt, out var c) && c < cutoff)
+                          .ToList();
+        if (dead.Count == 0) return 0;
+
+        // 代数只加一次:这是一次清理,不是 N 次独立吊销。
+        IdentityGeneration++;
+        foreach (var d in dead)
+        {
+            d.Status = "revoked"; d.RevokedAt = Now();
+            foreach (var c in Certs.Where(x => x.DeviceId == d.DeviceId && x.Status == "candidate"))
+                c.Status = "revoked";
+        }
+        return dead.Count;
+    }
+
     // Revoke the whole device: device -> revoked, all its live certs -> revoked; generation++.
     public void RevokeDevice(string deviceId)
     {

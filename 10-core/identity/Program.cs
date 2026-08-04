@@ -476,6 +476,28 @@ static int Selftest3()
         Assert(afterApprove.IdentityGeneration == 0, "a candidate before complete does NOT bump the generation");
         var deviceId = afterApprove.Devices[0].DeviceId;
 
+        // ★★ 2026-08-04:批准了却从没领证的半截记录必须会过期。
+        //   设备记录在 Approve 那一刻就建好(上面这条断言),要等 claim/complete 才转 active;
+        //   在此之前任何一步失败,它就**永远**停在 provisioning —— 全仓原先没有代码让它过期。
+        //   实测后果:证书名 bug(b136f01)让 /pair/status 第一次握手就失败,客户端每重试一次
+        //   就多留一条,机主设备列表里同一台机器出现了 6 次(store.json 实证全是 ApprovedAt=null)。
+        //   握手 bug 已修,但**积累机制是独立缺陷**,所以单独钉这一条。
+        {
+            var s = Store.LoadOrEmpty(idDir);
+            Assert(s.SweepStaleProvisioning(TimeSpan.FromMinutes(15)) == 0,
+                   "★ 刚批的 provisioning 记录【不】被扫掉 —— 判据是时间,不能掐掉正在进行中的配对");
+            Assert(s.Devices is [{ Status: "provisioning" }], "未到期时记录原样保留");
+            // 把它推回 16 分钟前:超过 TTL 就该被判死
+            s.Devices[0].CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-16).ToString("O");
+            Assert(s.SweepStaleProvisioning(TimeSpan.FromMinutes(15)) == 1, "★★ 超时未领证的半截记录会被扫掉");
+            Assert(s.Devices is [{ Status: "revoked", RevokedAt: not null }],
+                   "★ 落到 revoked(而不是新造一个状态词)—— 客户端按 Status != revoked 过滤,"
+                   + "新词会让死记录继续显示在「已配对电脑」里;也不 delete,RevokedAt 就是痕");
+            Assert(s.Certs.All(c => c.DeviceId != deviceId || c.Status == "revoked"),
+                   "★ 连带把它那张 candidate 证书也吊销 —— 留着等于给一条死记录留一张能领的证");
+            Assert(s.SweepStaleProvisioning(TimeSpan.FromMinutes(15)) == 0, "★ 幂等:扫过的不再重复计数");
+        }
+
         // status: wrong secret rejected; right secret returns the challenge
         bool badSecret = false;
         try { pairing.Status(en.RequestId, R(32)); } catch (UnauthorizedAccessException) { badSecret = true; }

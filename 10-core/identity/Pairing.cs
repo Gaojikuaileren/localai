@@ -44,6 +44,12 @@ public sealed class Pairing
 {
     public const int MaxPending = 8;
 
+    /// <summary>
+    /// 「批准了却从没领证」的设备记录多久算死(见 <see cref="Store.SweepStaleProvisioning"/>)。
+    /// ★ 15 分钟远大于客户端领证等待(约 5 分钟),不会掐掉正在进行中的配对。
+    /// </summary>
+    public static readonly TimeSpan StaleProvisioningTtl = TimeSpan.FromMinutes(15);
+
     readonly string _idDir;
     readonly string _caKeyName;
     readonly X509Certificate2 _caCert;
@@ -197,6 +203,10 @@ public sealed class Pairing
 
         Store.Mutate(_idDir, store =>   // ★ 命名 Mutex 串行(见 Store.Mutate):别被并发的 revoke 写掉
         {
+            // ★ 建新记录之前先扫掉【批准了却从没领证】的旧半截,否则一次次没走完的配对
+            //   会把同一台机器在设备列表里堆成好几条(2026-08-04 实测堆到 6 条)。
+            //   放在这里是因为这就是**增长点**:每多一条 provisioning,必先经过这一行。
+            store.SweepStaleProvisioning(StaleProvisioningTtl);
             store.AddProvisioning(deviceId, p.DisplayName, null);
             store.AddCandidate(deviceId, cert.SerialNumber, p.CandidateSha256, Convert.ToHexString(p.CsrSpkiSha),
                                cert.NotBefore.ToString("O"), cert.NotAfter.ToString("O"));
