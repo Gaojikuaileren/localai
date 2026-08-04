@@ -54,6 +54,9 @@
 #     ② 一份人类可审的声明,改动必然出现在 diff 里。
 
 [aliases."assistant.fast"]
+components_any_of = ["llm.assistant.8b@8k", "llm.assistant.8b@16k", "llm.assistant.8b@32k"]
+                                         # ★ any_of 而非单值:D25 明确上下文由**实际装载的组件**决定,
+                                         #   别名不钉死它。三档任一在场即可服务本别名。
 egress      = false
 local_only  = false                      # 驾驶者可替换(改指云端时须同时把 egress 翻 true)
 agent_allow = ["assistant.main", "asset-director"]
@@ -63,6 +66,7 @@ contract    = "8b"                       # 上下文由后端实际装载决定(
 tier_min    = "low"
 
 [aliases."assistant.voice"]
+components_any_of = ["llm.assistant.8b@8k"]   # 语音场景钉 8K(contract 8b@8k)
 egress      = false
 local_only  = false
 agent_allow = ["assistant.main"]
@@ -72,6 +76,8 @@ contract    = "8b@8k"
 tier_min    = "low"
 
 [aliases."assistant.deep"]
+components_any_of = ["llm.assistant.30b-a3b@32k", "llm.assistant.8b@32k"]
+                                         # 第二项对应 fallback = "8b@32k"(§8.1.4 装不下时兜底)
 egress      = false
 local_only  = false
 agent_allow = ["assistant.main"]
@@ -82,6 +88,7 @@ tier_min    = "high"
 fallback    = "8b@32k"                   # 装不下时兜底(§8.1.4)
 
 [aliases."assistant.vision"]
+components_any_of = ["vlm.small"]
 egress      = false
 local_only  = false
 agent_allow = ["assistant.main", "asset-director"]
@@ -103,6 +110,8 @@ tier_min    = "mid"
 #     即:放开必然有 diff、有决议号、有测试变红,不可能悄悄发生。
 #     一个布尔开关迟早会在某次「先跑通」里被翻成 true;一条断言不会。
 [aliases."assistant.resident"]
+components_any_of = []
+no_gpu_reason = "§17:常驻助手跑 CPU,不占 GPU 驻留集合;走命名管道不经网关"
 egress      = false
 local_only  = true                       # ★ 与 egress=true 互斥,load_registry 强制
 agent_allow = ["vigil", "pet"]           # ★ 全表唯一含 "vigil" 的条目(反向断言钉死)
@@ -112,6 +121,8 @@ contract    = "resident.cpu"             # §17:常驻 · CPU · 不占 GPU 驻�
 tier_min    = "low"
 
 [aliases."embedding.default"]
+components_any_of = []
+no_gpu_reason = "bge-m3 跑 CPU(P1 实测 0 显存)"
 egress      = false
 local_only  = false
 agent_allow = ["assistant.main", "memory-service"]
@@ -120,6 +131,8 @@ backend     = "http://127.0.0.1:18084"   # CPU embedding(bge-m3)· P2 后续
 contract    = "bge-m3"
 
 [aliases."rerank.default"]
+components_any_of = []
+no_gpu_reason = "bge-reranker 跑 CPU,与 embedding 共进程"
 egress      = false
 local_only  = false
 agent_allow = ["assistant.main", "memory-service"]
@@ -130,6 +143,8 @@ contract    = "bge-reranker"
 # —— 以下不走本网关的 chat 路由,列此仅为别名清单完整 ——
 
 [aliases."escalate.cloud"]
+components_any_of = []
+no_gpu_reason = "云端后端,不占本机显存(egress=true)"
 egress      = true                       # ★ 云端 —— 记忆正文永不得进它的 prompt
 local_only  = false
 agent_allow = ["assistant.main"]         # ★ 不含 vigil/pet —— 反向断言的主要标的
@@ -139,6 +154,8 @@ egress_gate = true                       # (旧字段名,保留兼容;判据以 
 note        = "仅升级推理能力 · 粒度锁 L2(Q2)"
 
 [aliases."image.concept"]
+components_any_of = []
+no_gpu_reason = "nano-banana 在云端,不占本机显存"
 egress      = true                       # nano-banana 在云端
 local_only  = false
 agent_allow = ["asset-director"]
@@ -146,8 +163,34 @@ kind        = "job_cloud"
 note        = "nano-banana · JOB 平面 · 不经本网关 chat 路由"
 
 [aliases."image.texture"]
+components_any_of = ["comfyui.sdxl", "comfyui.sdxl.lowvram"]
+                                         # 低显存模式是同一别名的另一种兑现方式
 egress      = false                      # ComfyUI 在本机
 local_only  = false
 agent_allow = ["asset-director"]
 kind        = "job_local"
 note        = "ComfyUI · JOB 平面 · 不经本网关 chat 路由"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S2 · 词表桥:别名 ↔ 显存组件
+#
+#  ★★ 为什么必须是【声明】而不是从 contract 推导:
+#     contract 这一列今天混着四套后缀约定(8b / 8b@8k / 30b-a3b@32k /
+#     vlm.small(Qwen2.5-VL-3B) / resident.cpu)。实测按 "llm.assistant." + contract
+#     拼组件 id,5 个聊天别名里**只有 2 个**能拼对,其余得到根本不存在的 id。
+#     推导会静默给出错的答案;声明会在缺字段时拒绝启动。
+#
+#  ★★ 零显存的别名必须【显式】写 components_any_of = [] 加 no_gpu_reason ——
+#     省略即"默认不需要显存"是 fail-open,与 egress 那条论证逐字同源:
+#     将来新增一个吃显存的别名忘了写,它会被当成不占显存,而闸根本不知道要拦它。
+#
+#  ★ 反向映射(组件 → 哪些别名用它)由代码导出,**不在这里再声明一遍** ——
+#     一个方向声明、另一个方向导出,两者就不可能打架。
+# ══════════════════════════════════════════════════════════════════════
+
+# 没有任何别名驱动的组件。★ 必须逐个写明理由 —— 一个"谁都不用"的组件要么是欠账、
+#   要么是该删,不该无声地躺在预算表里参与算术。
+[unaliased]
+"speech.lite" = "P5 语音链路未接:同传界面骨架已在 P3c 完成,但采集/ASR/合成/虚拟麦全未接,还没有别名驱动它"
+"speech.full" = "同上。full 档在 P5 才会被 speech 别名选中"

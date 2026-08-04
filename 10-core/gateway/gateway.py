@@ -58,6 +58,8 @@ LAN_EDGE_ACCOUNT = None
 REGISTRY_PATH = Path(__file__).with_name("registry.toml")
 PATHS_TOML = Path(__file__).resolve().parents[2] / "config" / "paths.toml"
 CALLER_ACCOUNTS_PATH = Path(__file__).resolve().parents[2] / "config" / "caller-accounts.toml"
+# P4-S2:显存组件表 —— 词表桥要逐字校验别名引用的组件 id 真实存在。
+VRAM_BUDGET_PATH = Path(__file__).resolve().parents[2] / "config" / "vram-budget.toml"
 
 
 def _logs_dir() -> Path:
@@ -235,7 +237,98 @@ def load_registry() -> dict:
         raise RegistryError(f"egress 必须是布尔值,拒绝启动:{bad}")
 
     _check_local_only(aliases)
+    _check_component_bridge(aliases)
     return aliases
+
+
+def _check_component_bridge(aliases: dict) -> None:
+    """P4-S2 · 词表桥的启动期强制 —— 五条,全部 fail-closed。
+
+    ★★ 为什么要有这座桥:网关按**别名**路由(`assistant.fast`),显存闸按**组件 id**
+      记账(`llm.assistant.8b@16k`)。2026-08-04 实测两套词表**零交集** ——
+      网关源码里连 `component` 这个概念都没有。没有桥,Broker 就无法回答
+      「要服务这个别名,得让哪个组件驻留」,而那是 P4 的全部前提。
+
+    ★★ 必须是【声明】不是【推导】:`contract` 列今天混着四套后缀约定,
+      按 "llm.assistant." + contract 拼组件 id,5 个聊天别名里**只有 2 个**拼得对,
+      其余得到根本不存在的 id。推导会静默给出错的答案。
+
+    ★★ 零显存别名必须**显式**写 `components_any_of = []` + `no_gpu_reason` ——
+      省略即"默认不需要显存"是 fail-open,与 egress 那条论证逐字同源。
+    """
+    # ① 必填(缺字段拒绝启动并点名)
+    missing = sorted(n for n, a in aliases.items() if "components_any_of" not in a)
+    if missing:
+        raise RegistryError(
+            f"别名缺少必填的 components_any_of,拒绝启动:{missing}。\n"
+            "  每个别名都必须显式声明「服务它需要哪个组件驻留」(P4-S2)。\n"
+            "  不占显存的别名写 components_any_of = [] 并补 no_gpu_reason ——\n"
+            "  省略即『默认不需要显存』是 fail-open:将来新增一个吃显存的别名忘了写,\n"
+            "  它会被当成不占显存,而闸根本不知道要拦它。")
+
+    # ② 类型
+    bad = sorted(n for n, a in aliases.items() if not isinstance(a["components_any_of"], list))
+    if bad:
+        raise RegistryError(f"components_any_of 必须是数组,拒绝启动:{bad}")
+
+    # ③ 空表必须给理由 —— 「不占显存」是一个需要被说出口的判断,不是默认值
+    silent = sorted(n for n, a in aliases.items()
+                    if not a["components_any_of"] and not str(a.get("no_gpu_reason", "")).strip())
+    if silent:
+        raise RegistryError(
+            f"别名声明了不占显存却没写 no_gpu_reason,拒绝启动:{silent}。\n"
+            "  空表是一个**判断**(这个别名真的不需要 GPU),必须留下依据供人复核。")
+
+    # ④ 引用的组件必须真实存在于 config/vram-budget.toml —— 拼错一个字就是一条静默死路
+    try:
+        with open(VRAM_BUDGET_PATH, "rb") as f:
+            known = set(tomllib.load(f).get("components", {}))
+    except Exception as e:                                   # noqa: BLE001
+        raise RegistryError(
+            f"读不到显存组件表 {VRAM_BUDGET_PATH}({type(e).__name__}: {e}),拒绝启动。\n"
+            "  ★ 读不到 ≠ 没有组件:那会让所有别名的组件引用都'碰巧'通过检查。")
+    unknown = sorted({(n, c) for n, a in aliases.items()
+                      for c in a["components_any_of"] if c not in known})
+    if unknown:
+        raise RegistryError(
+            f"别名引用了不存在的组件 id,拒绝启动:{unknown}。\n"
+            f"  已登记组件:{sorted(known)}\n"
+            "  ★ 组件 id 必须逐字匹配 —— 拼错一个字,Broker 会以为这个别名不需要任何组件。")
+
+    # ⑤ ★★ 反向全表:每个组件要么被某个别名覆盖,要么显式登记在 [unaliased] 里并写明理由。
+    #   正向检查只管"别名引用的组件存不存在";而事故的形状是**新增的组件没人用却在参与算术**。
+    try:
+        with open(REGISTRY_PATH, "rb") as f:
+            unaliased = tomllib.load(f).get("unaliased", {})
+    except Exception:                                        # noqa: BLE001
+        unaliased = {}
+    covered = {c for a in aliases.values() for c in a["components_any_of"]}
+    orphan = sorted(known - covered - set(unaliased))
+    if orphan:
+        raise RegistryError(
+            f"这些组件没有任何别名驱动,也没登记进 [unaliased],拒绝启动:{orphan}。\n"
+            "  ★ 一个『谁都不用』的组件要么是欠账、要么是该删 ——\n"
+            "  不该无声地躺在预算表里参与算术。要保留就在 registry.toml 的\n"
+            "  [unaliased] 里写明理由(那句理由就是将来复核它的依据)。")
+    stale = sorted(set(unaliased) - known)
+    if stale:
+        raise RegistryError(
+            f"[unaliased] 里登记了不存在的组件,拒绝启动:{stale}。\n"
+            "  组件已从 vram-budget.toml 删掉,这条登记也该跟着删 —— 留着会掩盖下一次真的孤儿。")
+
+
+def components_for_alias(alias: str) -> list:
+    """别名 → 它可接受的组件集合(any_of)。★ 未知别名返回空表**并非**"不需要显存",
+    调用方必须先确认别名存在;这里不替它决定。"""
+    a = REGISTRY.get(alias)
+    return list(a["components_any_of"]) if a else []
+
+
+def aliases_for_component(component_id: str) -> list:
+    """组件 → 哪些别名会用到它。★ **由代码导出**,不在 registry.toml 里再声明一遍 ——
+    一个方向声明、另一个方向导出,两者就不可能打架。"""
+    return sorted(n for n, a in REGISTRY.items()
+                  if component_id in a.get("components_any_of", []))
 
 
 def _check_local_only(aliases: dict) -> None:

@@ -23,13 +23,26 @@ def ck(n, c, x=''):
 
 
 # ── 构造「除指定处外完全合法」的 registry ────────────────────────────
+# ★ 2026-08-04(P4-S2):别名新增必填 components_any_of;不占显存的要配 no_gpu_reason。
+#   本文件测的是 local_only / agent_allow,与显存无关,故夹具一律声明「不占显存」并写明理由。
+_BRIDGE = ('components_any_of = []\n'
+           'no_gpu_reason = "本文件的合成夹具,只测 local_only/agent_allow"\n')
+
 _VALID = {
-    "a.local":            'egress = false\nlocal_only = false\nagent_allow = ["assistant.main"]\nkind = "chat"\n',
-    "assistant.resident": 'egress = false\nlocal_only = true\nagent_allow = ["vigil", "pet"]\nkind = "chat"\n',
+    "a.local":            'egress = false\nlocal_only = false\nagent_allow = ["assistant.main"]\nkind = "chat"\n' + _BRIDGE,
+    "assistant.resident": 'egress = false\nlocal_only = true\nagent_allow = ["vigil", "pet"]\nkind = "chat"\n' + _BRIDGE,
 }
 
 def write_registry(path, entries):
     body = "".join(f'[aliases."{n}"]\n{b}\n' for n, b in entries.items())
+    # ★ 合成 registry 也必须满足 P4-S2 的反向全表:每个显存组件要么被别名覆盖、
+    #   要么显式登记在 [unaliased] 里。本文件的夹具一个组件都不覆盖,所以全部登记。
+    #   ——【不放松那条检查】,而是让夹具具备真实 registry 必须具备的东西。
+    #   那条检查本身由 test_component_bridge.py 负责钉死,不由这里。
+    import tomllib as _t
+    from pathlib import Path as _P
+    _comp = _t.load(open(_P(__file__).resolve().parents[2] / "config" / "vram-budget.toml", "rb"))["components"]
+    body += "\n[unaliased]\n" + "".join(f'"{c}" = "合成夹具:本测试不覆盖任何组件"\n' for c in _comp)
     io.open(path, 'w', encoding='utf-8').write(body)
 
 def expect_refuse(label, entries, must_name=None, reason=None):
