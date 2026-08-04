@@ -19,6 +19,7 @@ import inspect
 import re
 import sys
 
+import assert_helpers
 import gateway
 import gpu_broker
 
@@ -170,27 +171,9 @@ print("=== 8. ★ 硬约束:锁内不得跨 await 网络 I/O ===")
 _lock_src = inspect.getsource(gpu_broker.Broker)
 
 
-def _lock_bodies(src):
-    """精确取出每个 `async with self._lock:` 的【缩进块】。
-
-    ★ 原来这里是 `(.*?)(?=\n    def )` —— 一路捕到下一个方法定义。
-      S8 之前每个锁块恰好是方法的最后一段,所以看着对;S8 的 apply_intended 里
-      锁块后面还有【缩进已经退回去】的代码,那段被误算进锁内 —— 三条全红。
-      修法是**收紧**判据(只取缩进更深的行),不是把断言删掉。
-    """
-    lines, out = src.split("\n"), []
-    for i, ln in enumerate(lines):
-        m = re.match(r"^(\s*)async with self\._lock:\s*$", ln)
-        if not m:
-            continue
-        ind, body = len(m.group(1)), []
-        for nxt in lines[i + 1:]:
-            if nxt.strip() == "" or len(nxt) - len(nxt.lstrip()) > ind:
-                body.append(nxt)
-            else:
-                break
-        out.append("\n".join(body))
-    return out
+# ★ 实现见 assert_helpers.lock_bodies —— 判据按【缩进】取块,不是捕到下一个 def。
+#   见 00-docs/ASSERTION-PITFALLS.md 第 4 条。
+_lock_bodies = assert_helpers.lock_bodies
 
 
 _bodies = _lock_bodies(_lock_src)
@@ -1020,6 +1003,33 @@ check("★ 失败码不合并:四类失败在源码里各自成条",
                              "generation_conflict", "broker_unavailable")))
 check("★ 不成功时【绝不回 200】(源码里显式按 code 分 409/422)",
       "409 if res.code in" in _gi and "422" in _gi)
+
+print("\n=== 20. ★ 防复发:去注释器只许有一份 ===")
+# ★★ 用户裁定(2026-08-04):**同一个陷阱踩了三次以上就要记下,防止以后再踩。**
+#   「断言撞在解释性注释上」当天踩了 5 次(见 00-docs/ASSERTION-PITFALLS.md 第 1 条)。
+#   它反复回来的原因之一是:每个测试文件各写一份去注释的正则,
+#   于是每次都要在新文件里重新想起这件事。⇒ 收进 assert_helpers,并用反向全表钉住。
+import pathlib as _pl
+
+_HERE_T = _pl.Path(__file__).resolve().parent
+_own = []
+for _f in sorted(_HERE_T.glob("test_*.py")):
+    _t = _f.read_text(encoding="utf-8")
+    if "(?:.|" in _t and "assert_helpers" not in _t:
+        _own.append(_f.name)
+check("★★ 没有测试文件自己再写一份去注释器(要用 assert_helpers.code_only)",
+      _own == [], f"自带一份的:{_own} —— 收进 assert_helpers,别各写各的")
+check("assert_helpers 里三个工具都在",
+      all(hasattr(assert_helpers, n) for n in ("code_only", "lock_bodies", "assignments_to")))
+_DOC_P = _HERE_T.parents[1] / "00-docs" / "ASSERTION-PITFALLS.md"
+check("★ 文档在(记下来才算防复发,光改代码不算)", _DOC_P.exists())
+_doc = _DOC_P.read_text(encoding="utf-8") if _DOC_P.exists() else ""
+check("★ 文档记了【已踩几次】—— 次数是判断要不要装护栏的依据",
+      "已踩 5 次" in _doc and "已踩 2 次" in _doc)
+check("★ 文档给每条写了护栏(没有护栏的条目等于没记)",
+      _doc.count("护栏") >= 3, f"只有 {_doc.count('护栏')} 处")
+check("★ 文档写明了两种【不许的修法】(删断言 / 改注释迁就测试)",
+      "把断言删掉" in _doc and "迁就测试" in _doc)
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

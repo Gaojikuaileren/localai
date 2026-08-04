@@ -232,5 +232,42 @@ public static class Transport
         return ((int)r.StatusCode, await r.Content.ReadAsStringAsync(ct), hs);
     }
 
+    /// <summary>
+    /// P4-S9:订阅一条 SSE 长连接,每读到一行就回调。用于 GET /v1/gpu/events(D37 ② 推送非轮询)。
+    ///
+    /// ★★ 必须用 <c>HttpCompletionOption.ResponseHeadersRead</c>。默认的 ResponseContentRead 会
+    ///   **等整个响应体读完**才返回 —— 而 SSE 的响应体是【无限长】的,那等于永远挂住,
+    ///   而且在此期间内存里还在攒。这一条错了症状是"订阅了但一帧都收不到",很像"服务端没发",
+    ///   会把人引去查服务端。
+    /// ★ 超时:HttpClient 默认 100 秒会把长连接掐断。这里显式设 Timeout.InfiniteTimeSpan,
+    ///   由 <paramref name="ct"/> 控制生命周期 —— 让"谁负责结束"只有一个答案。
+    /// ★ 不吞异常:断线要让调用方知道。一条静默断掉的推送流在客户端看来
+    ///   与"一直没有变化"一模一样,那正是本项目最恨的形状。
+    /// </summary>
+    public static async Task OpenStream(ClientProfile p, IPEndPoint dial, string path,
+                                        Func<string, Task> onLine, CancellationToken ct)
+    {
+        var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
+        var candidate = Cert(Convert.FromBase64String(p.DeviceCertB64));
+        using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
+        using var clientCert = candidate.CopyWithPrivateKey(key);
+        using var cli = Trusted(dial, caPublic, clientCert);
+        cli.Timeout = Timeout.InfiniteTimeSpan;
+        using var req = new HttpRequestMessage(HttpMethod.Get, p.EdgeUrl + path);
+        req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
+        req.Headers.TryAddWithoutValidation("X-LocalAI-Protocol", "1");
+        using var r = await cli.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!r.IsSuccessStatusCode)
+            throw new HttpRequestException($"推送流被拒:{(int)r.StatusCode}");
+        using var stream = await r.Content.ReadAsStreamAsync(ct);
+        using var rd = new StreamReader(stream, Encoding.UTF8);
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await rd.ReadLineAsync(ct);
+            if (line is null) break;          // 服务端关流 —— 交给调用方决定要不要重连
+            await onLine(line);
+        }
+    }
+
     public static void DeleteKey(string keyName) { try { if (CngKey.Exists(keyName, SwProv)) CngKey.Open(keyName, SwProv).Delete(); } catch { } }
 }

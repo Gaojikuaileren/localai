@@ -342,11 +342,28 @@ public static class Selftest
             if (mdlView is not null)
             {
                 Assert(mdlView.Contains("ModelStorePath"), "模型页可设统一存放路径");
-                Assert(mdlView.Contains("IsModelEnabled") && mdlView.Contains("AutoStartPreset"), "模型页可选启用模型 + 自动启用规则");
+                Assert(mdlView.Contains("new ComponentPicker()") && mdlView.Contains("AutoStartPreset"),
+                       "模型页的启用清单来自 ComponentPicker(中枢下发)+ 自动启用规则");
                 Assert(mdlView.Contains("model.not_connected"), "模型页顶部诚实标注未接 Broker(不假装加载)");
+                // ★★ P4-S9 反向断言:那套【自造词汇】必须**不在了**。
+                //   原来这里遍历 ModelCatalog.All(chat.8b / speech / image),跟网关别名与
+                //   显存组件 id 一个都对不上 —— 勾了什么都不会发生,而界面看着像配好了。
+                var mdlCode = CodeOnly(mdlView);
+                Assert(!mdlCode.Contains("ModelCatalog.All") && !mdlCode.Contains("ModelToggle"),
+                       "★ 模型页不再有自造清单(ModelCatalog.All / ModelToggle 已删)");
+            }
+            var mcat = TryReadSource(Path.Combine("Views", "ModelCatalog.cs"));
+            if (mcat is not null)
+            {
+                // ★ 这里必须去注释再判:本文件的头部注释正是在**解释**那套词汇为什么被删,
+                //   照原样 Contains 会撞在那段说明上(当天第五次踩同一个坑,故装了 CodeOnly)。
+                var mcatCode = CodeOnly(mcat);
+                Assert(!mcatCode.Contains("Def[] All") && !mcatCode.Contains("record Def")
+                       && !mcatCode.Contains("chat.8b"),
+                       "★★ 第三套词汇(chat.8b/chat.30b/speech/vlm/image)已从清单里删干净,不是注释掉留着");
+                Assert(mcat.Contains("Presets"), "自动启用预设保留 —— 那四个 key 与 toml 的 [presets.*] 逐字对应");
             }
             var msSet = new AppSettings();
-            Assert(msSet.IsModelEnabled("chat.8b"), "模型默认启用");
 
             // ---- 聊天 + 项目 ----
             var pcx = new Services.ProjectCenter();
@@ -3037,8 +3054,20 @@ public static class Selftest
             var ctl2 = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
             if (ctl2 is not null)
                 Assert(ctl2.Contains("TargetType=\"Button\""), "按钮有统一圆角样式(发送等按钮不再方角)");
-            msSet.DisabledModels.Add("chat.8b");
-            Assert(!msSet.IsModelEnabled("chat.8b"), "停用列表里的模型不启用");
+            // ★★ P4-S9:IsModelEnabled / SetModelEnabled 已删。它们存的是自造 key,
+            //   而**没有任何代码再读它** —— 一个存得下却谁也不看的偏好就是"假开关":
+            //   用户拨了它以为生效了,实际什么都没发生。
+            //   「启用哪些组件」的权威现在在中枢(快照的 intended_resident)。
+            {
+                var apSrc = TryReadSource(Path.Combine("Services", "AppSettings.cs"));
+                Assert(apSrc is null || !apSrc.Contains("public bool IsModelEnabled"),
+                       "★ AppSettings 里那个没人读的模型启用开关已删(假开关)");
+                var pickerSrc = TryReadSource(Path.Combine("Views", "ComponentPicker.cs"));
+                Assert(pickerSrc is not null && pickerSrc.Contains("FetchCatalogAsync"),
+                       "★ 组件清单向中枢取,不在客户端维护第二份");
+                Assert(pickerSrc is null || !pickerSrc.Contains("IsModelEnabled"),
+                       "★ 面板不读本地那份停用列表(权威只有中枢一处)");
+            }
 
             // 扩展拖动把手:用透明命中块,不是拿描边 Path 当命中区
             var extGrip = TryReadSource(Path.Combine("Views", "ExtensionsView.cs"));
@@ -4001,7 +4030,7 @@ public static class Selftest
                 {
                     Assert(mv.Contains("StrategyPlaceholder()") && mv.Contains("model.strategy"),
                            "模型页多了一块「模型选择策略」");
-                    var ph = Slice(mv, "static FrameworkElement StrategyPlaceholder()", "static FrameworkElement ModelToggle");
+                    var ph = Slice(mv, "static FrameworkElement StrategyPlaceholder()", "return Ui.Card(Ui.Stack(");
                     Assert(ph is not null && !ph.Contains("ToggleSwitch") && !ph.Contains("new CheckBox") && !ph.Contains("new ComboBox"),
                            "★ 占位符里【没有任何能拨却不生效的控件】—— 空着只是“还没做”,假开关是骗人");
                     Assert(ph is not null && ph.Contains("StrokeDashArray"),
@@ -4108,6 +4137,94 @@ public static class Selftest
                 if (pu3 is not null)
                     Assert(pu3.Contains("AiNotConnected") && pu3.Contains("接入后:"),
                            "★ 项目 AI 权限标明“尚未接入、这是偏好”且解释用未来时");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  P4-S9:显存条的数据源 + 组件挑选面板
+            //
+            //  ★★★ 这一组守的是一条【实测发现的谎】:
+            //    此前左导航那条「显存」无条件直调本机 nvml 的 index 0。
+            //    主机上碰巧没错(本机就是中枢);副机上它显示的是**副机自己那张卡**,
+            //    标签却只写「显存」。两台机器的数字长得一模一样,
+            //    **没有任何地方能看出来看错了** —— 正是本项目最恨的形状。
+            // ══════════════════════════════════════════════════════════════
+            {
+                // ① 数据源必须能被区分,而且回退时标题必须改名
+                Assert(new VramSnapshot(16, 0, 4, true, null, VramSource.Hub).Title.Contains("中枢"),
+                       "★ 中枢来源的标题写明是中枢");
+                var localTitle = new VramSnapshot(16, 0, 4, true, null, VramSource.LocalFallback).Title;
+                Assert(localTitle.Contains("本机") && localTitle.Contains("不是中枢"),
+                       "★★ 回退到本机显卡时标题【必须写明不是中枢的】—— 换的是被测对象,不是精度");
+                Assert(new VramSnapshot(16, 0, 4, true, null, VramSource.Hub).Title
+                       != localTitle, "两种来源的标题不能一样(一样就等于静默换源)");
+
+                var vmSrc = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
+                if (vmSrc is not null)
+                {
+                    Assert(vmSrc.Contains("hub.HasFreshData"),
+                           "★ 只在中枢数据【新鲜】时才用它(过期的中枢数字也不能冒充现在)");
+                    Assert(vmSrc.IndexOf("hub.HasFreshData", StringComparison.Ordinal)
+                           < vmSrc.IndexOf("TryInitNvml()", StringComparison.Ordinal),
+                           "★ 中枢在前、本机在后 —— 本机只是回退,不是首选");
+                    Assert(vmSrc.Contains("VramSource.LocalFallback"),
+                           "★ 本机路径显式标 LocalFallback,不复用 Hub 的标签");
+                }
+
+                // ② 中枢连着但它自己没采到 ⇒ 不许退回本机冒充
+                var vmSrc2 = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
+                Assert(vmSrc2 is null || vmSrc2.Contains("不退回本机"),
+                       "★★ 中枢采样器坏了 ≠ 一切正常:此时不退回本机数字(两种情况必须长得不一样)");
+
+                // ③ 推送非轮询(D37 ②),且心跳是判据的一部分
+                var hg = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (hg is not null)
+                {
+                    Assert(hg.Contains("/v1/gpu/events"), "★ 走 SSE 推送流,不是定时轮询快照(D37 ②)");
+                    Assert(hg.Contains("LastFrameAt") && hg.Contains("StaleAfter"),
+                           "★★ 用心跳时间判活:没有它,一条【死掉】的长连接与「一直没变化」长得一样");
+                    Assert(hg.Contains("HubGpuLink.Reconnecting"),
+                           "★ 断线时显式转 Reconnecting —— 重连期间不假装还活着");
+                }
+                Assert(HubGpu.StaleAfter.TotalSeconds > 15,
+                       "判活阈值必须大于服务端心跳间隔(15 秒),否则正常心跳也会被判死");
+
+                // ④ 流式读取必须用 ResponseHeadersRead —— SSE 的响应体是无限长的
+                var ctSrc = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
+                Assert(ctSrc is null || ctSrc.Contains("HttpCompletionOption.ResponseHeadersRead"),
+                       "★★ SSE 用 ResponseHeadersRead:默认那个会等【无限长】的响应体读完 = 永远挂住");
+                Assert(ctSrc is null || ctSrc.Contains("Timeout.InfiniteTimeSpan"),
+                       "★ 长连接不能被 HttpClient 默认 100 秒超时掐断");
+
+                // ⑤ 每种失败给不同的下一步,不合并成"失败了"
+                string Adv(string code) => new ApplyOutcome(false, code, "m", "", Array.Empty<string>(), 0).Advice;
+                var codes = new[] { "loader_absent", "needs_user_choice", "busy", "generation_conflict",
+                                    "vram_not_reclaimed", "load_failed_rolled_back", "rollback_failed" };
+                Assert(codes.Select(Adv).Distinct().Count() == codes.Length,
+                       "★★ 七种失败七种说法 —— 合并成一句「失败了」会让用户无从判断下一步");
+                Assert(Adv("loader_absent").Contains("没有生效") || Adv("loader_absent").Contains("不会真的"),
+                       "★★★ loader_absent 必须说清【没有生效】—— 不能让用户以为模型装上了");
+                Assert(Adv("rollback_failed").Contains("主机"),
+                       "回滚失败要指出得去主机上处理(客户端自己解决不了)");
+
+                // ⑥ 面板:清单只从中枢来;取不到就什么都不列
+                var pk = TryReadSource(Path.Combine("Views", "ComponentPicker.cs"));
+                if (pk is not null)
+                {
+                    Assert(pk.Contains("FetchCatalogAsync") && !pk.Contains("ModelCatalog.All"),
+                           "★ 清单向中枢取,不用本地自造清单");
+                    Assert(pk.Contains("不显示】任何清单") || pk.Contains("什么都不列"),
+                           "★★ 取不到清单时【不列本地兜底】—— 那等于把自造清单当成中枢的真实清单");
+                    Assert(pk.Contains("改桌面预留") && pk.Contains("没有用"),
+                           "★★ 两种撞墙分开说:静态可调预留 / 动态调了没用(§8.1 合并是有害的)");
+                    Assert(pk.Contains("if_generation") || pk.Contains("Generation"),
+                           "★ 提交带世代号(挑选要几十秒,期间桌面会变)");
+                    Assert(pk.Contains("Snapshot?.Generation"),
+                           "★ 用推送流里【当前】那个世代号,不是面板加载时那个旧号");
+                    Assert(pk.Contains("interruptRunning: true"),
+                           "★ 有任务在跑时问过用户才中断,不自作主张");
+                    Assert(pk.Contains("本机与中枢的显存配置对不上"),
+                           "★ 本地算不出某个组件的峰值时说出来,不静默按 0 计(那是 fail-open)");
+                }
             }
 
             // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----
@@ -6223,6 +6340,58 @@ public static class Selftest
 
     static string Body(string src) =>
         string.Join(Environment.NewLine, src.Split('\n').Where(l => !l.TrimStart().StartsWith("//")));
+
+    /// <summary>
+    /// 去掉 C# 源码里的注释与字符串字面量,只留【真正会执行的代码】。
+    ///
+    /// ★★★ 2026-08-04 装这个东西,是因为同一个陷阱当天踩了**五次**:
+    ///   写「某某东西必须已经删掉」的断言时,它撞在了**解释"它已经被删了"的那句注释**上。
+    ///   (Python 侧同款四次:`_notify_locked` 的 "await"、`set_power` 注释里的 `_intended`、
+    ///    `Body()`、`e4_egress`;C# 侧这次是 `ModelCatalog.All` 与 `chat.8b`。)
+    ///   ⇒ 修法一律是**收紧判据**(把注释和字符串排除掉),不是把断言删掉,
+    ///     更不是把注释改写成绕开断言的样子 —— 那会让注释为了迁就测试而说不清话。
+    ///
+    /// ★ 顺带去掉字符串字面量:否则 `Assert(x.Contains("Foo"))` 这类代码本身
+    ///   会让"源码里不得出现 Foo"的断言恒假。
+    /// </summary>
+    static string CodeOnly(string src)
+    {
+        var sb = new System.Text.StringBuilder(src.Length);
+        for (int i = 0; i < src.Length; i++)
+        {
+            // 行注释
+            if (i + 1 < src.Length && src[i] == '/' && src[i + 1] == '/')
+            {
+                while (i < src.Length && src[i] != '\n') i++;
+                sb.Append('\n');
+                continue;
+            }
+            // 块注释
+            if (i + 1 < src.Length && src[i] == '/' && src[i + 1] == '*')
+            {
+                i += 2;
+                while (i + 1 < src.Length && !(src[i] == '*' && src[i + 1] == '/')) i++;
+                i++;
+                continue;
+            }
+            // 字符串字面量(含逐字字符串)
+            if (src[i] == '"')
+            {
+                bool verbatim = i > 0 && src[i - 1] == '@';
+                i++;
+                while (i < src.Length)
+                {
+                    if (verbatim) { if (src[i] == '"') { if (i + 1 < src.Length && src[i + 1] == '"') i++; else break; } }
+                    else { if (src[i] == '\\') { i++; } else if (src[i] == '"') break; }
+                    i++;
+                }
+                sb.Append("\"\"");
+                continue;
+            }
+            sb.Append(src[i]);
+        }
+        return sb.ToString();
+    }
 
     /// <summary>
     /// 读源码文件(开发/CI 环境)。发布环境没有源码 -> 返回 null,调用方跳过接线自检。

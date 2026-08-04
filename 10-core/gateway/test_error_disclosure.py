@@ -20,6 +20,8 @@ import ast
 import inspect
 import re
 
+import assert_helpers
+
 import gateway
 
 _pass = _fail = 0
@@ -51,16 +53,10 @@ check("log_upstream_problem 收 backend(后端地址往这儿去)", "backend" in
 SRC = inspect.getsource(gateway.chat_completions)
 
 
-def _code_only(src: str) -> str:
-    """只看会执行的代码:去掉 # 注释行与三引号文档串。
-
-    ★ 必须这么做 —— 注释里当然会提到 `backend` 与 `detail`(讲的正是"为什么不回给调用方"),
-      不摘掉的话这套断言会因为注释而假红/假绿。
-    """
-    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
-    return "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
-
-
+# ★ 去注释器已收进 assert_helpers(见 00-docs/ASSERTION-PITFALLS.md 第 1 条):
+#   「断言撞在解释性注释上」2026-08-04 一天踩了 5 次 —— 本文件的原实现自己的 docstring 里
+#   就写着「★ 必须这么做」,那已经是第 6 次。各写各的正是它反复回来的原因。
+_code_only = assert_helpers.code_only
 CODE = _code_only(SRC)
 
 check("404 不再枚举别名全表", "for k,v in REGISTRY.items()" not in CODE.replace(" ", "")

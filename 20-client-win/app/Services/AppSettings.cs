@@ -187,16 +187,13 @@ public sealed class AppSettings
     /// <summary>开机/连上中枢时自动启用哪一组预设(none/daily/long_context/deep/vision)。</summary>
     public string AutoStartPreset { get; set; } = "daily";
 
-    public bool IsModelEnabled(string key) => !DisabledModels.Contains(key);
-
-    public void SetModelEnabled(string key, bool enabled)
-    {
-        var changed = enabled ? DisabledModels.Remove(key)
-                              : (!DisabledModels.Contains(key) && AddDisabledModel(key));
-        if (changed) Save();
-    }
-
-    bool AddDisabledModel(string key) { DisabledModels.Add(key); return true; }
+    // ★★ 2026-08-04(P4-S9)删掉 IsModelEnabled / SetModelEnabled。
+    //   它们存的是 ModelCatalog 那套自造 key(chat.8b…),而【没有任何代码再读它】——
+    //   一个存得下、却谁也不看的偏好,就是本项目最恨的那种"假开关":
+    //   用户拨了它,以为配置生效了,实际什么都没发生。
+    //   ⇒ 「启用哪些组件」的权威现在在中枢(快照的 intended_resident),
+    //     由 Views/ComponentPicker.cs 经 POST /v1/gpu/intended 变更。
+    //   DisabledModels 字段本身留着只为**读回旧档案不报错**,不再有任何读取方。
 
     static readonly JsonSerializerOptions J = new() { WriteIndented = true };
 

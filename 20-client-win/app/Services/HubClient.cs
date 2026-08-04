@@ -144,6 +144,17 @@ public sealed class HubClient
         return new IPEndPoint(IPAddress.Parse(s[..i]), int.Parse(s[(i + 1)..]));
     }
 
+    /// <summary>
+    /// 拨号端点。★ 没有档案 / 档案里没地址 → 返回 null 而**不抛** ——
+    /// 订阅方(HubGpu 的推送流)要能安静地等着用户完成配对,那不是错误状态。
+    /// 业务调用仍然走会抛的 Dial():那些路径上"没配对"确实是调用方的错。
+    /// </summary>
+    public IPEndPoint? TryDial()
+    {
+        try { return string.IsNullOrWhiteSpace(Profile?.Dial) ? null : ParseDial(Profile!.Dial); }
+        catch { return null; }
+    }
+
     IPEndPoint Dial() => ParseDial(
         !string.IsNullOrWhiteSpace(Profile?.Dial) ? Profile!.Dial
         : throw new InvalidOperationException("配对档案里没有拨号地址(P3c 之前的旧档案),请重新配对"));

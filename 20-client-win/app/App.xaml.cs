@@ -29,6 +29,11 @@ public partial class App : Application
     public TaskCenter Tasks { get; } = new();
     /// <summary>显存实时监视(左导航的显存条)。2 秒轮询,窗口不可见时自动停表。</summary>
     public VramMonitor Vram { get; } = new();
+    /// <summary>
+    /// 中枢 GPU 状态副本(P4-S9)。★ 全进程**只有这一条**推送流 ——
+    /// 谁需要 GPU 状态都从这里读,不各自去订阅;两条流会让"哪份是权威"没有答案。
+    /// </summary>
+    public HubGpu Gpu { get; private set; } = null!;
     /// <summary>「正在进行的项目」——主页田字格的数据源;点方块深链到对应工作空间。</summary>
     public ProjectCenter Projects { get; } = new();
     /// <summary>「待办与家务」——主页待办板块的数据源(中枢自有数据,手动增删改当场生效)。</summary>
@@ -88,6 +93,13 @@ public partial class App : Application
 
         // 自启项若指向旧路径(exe 被移动/更新过)则重写,否则开机会启动到一个不存在的文件。
         if (Settings.Autostart && !Autostart.IsCurrent()) Autostart.Enable();
+
+        // ★ P4-S9:中枢 GPU 状态订阅。必须在建窗口【之前】接好并注入 VramMonitor ——
+        //   否则第一帧界面会走本机回退路径,显存条先闪一下「本机显卡」再跳成「中枢显存」。
+        Gpu = new HubGpu(Hub);
+        Vram.Hub = Gpu;
+        Gpu.Start();
+        Lifecycle.Register("stop-gpu-stream", () => Gpu.Stop());
 
         RegisterCleanupSteps();
 

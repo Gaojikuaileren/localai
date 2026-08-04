@@ -11,11 +11,27 @@
 //   · ★ 更关键的省电手段是**不可见就不轮询** —— 窗口最小化/缩到托盘时停表(见 Pause/Resume)。
 //     这比把间隔从 2 秒调到 5 秒有效得多。
 //
+// ══════════════════════════════════════════════════════════════════════
+//  ★★★ P4-S9 更正(2026-08-04):数据源默认是【中枢】,不是本机。
+//
+//  在这之前本文件无条件直调本机 nvml 的 index 0。在主机上碰巧没错(本机就是中枢);
+//  在**副机**上它显示的是副机自己那张卡,而标签只写「显存」——
+//  用户会以为看的是中枢那 8.52 GiB 预算,实际看的是另一台机器的显卡。
+//  两台机器的数字长得一模一样,**没有任何地方能看出来看错了**。这正是本项目最恨的形状。
+//
+//  ⇒ 新口径:
+//    · 有中枢数据(HubGpu 的 SSE 推送,新鲜)      → Source=Hub,标题「中枢显存」
+//    · 拿不到中枢数据但本机有 N 卡                 → Source=LocalFallback,
+//      标题明写「本机显卡(不是中枢的)」—— **绝不**用本机数字冒充中枢数字
+//    · 两边都没有                                   → Source=None,整条隐藏
+//  ★ 退回本机不是"降级到差一点的同类数据",而是【换了一个被测对象】。
+//    所以它不能只是精度差一点,必须在界面上改名字。
+// ══════════════════════════════════════════════════════════════════════
+//
 // 分段口径(用户裁定的三段)与本项目既有预算口径(config/vram-budget.toml)对齐:
-//   · 启用的模型 max 占用 = 已启用组件的 peak 之和(实测值,唯一数据源是那个 toml)。
-//     组件选择器要等 P4,所以现在恒为 0 —— 如实显示,不编造。
-//   · 当前桌面占用 = NVML 实测 used 减去模型实际占用。P4 之前没有 broker 归因,
-//     而此刻也确实没有经 broker 装载的模型,所以 used 即桌面/其它应用占用 —— 今天这是准确的。
+//   · 启用的模型 max 占用 = 中枢 committed 集合的 peak 之和(中枢下发,客户端不自己算)。
+//   · 当前桌面占用 = 实测 used 减去模型占用。★ 中枢来源下这是**推算**值
+//     (WDDM 不暴露逐进程显存,说不出占用者名字),界面须如实标注。
 //   · 未占用 = total - 上面两者。
 
 using System.Diagnostics;
@@ -23,13 +39,38 @@ using System.Runtime.InteropServices;
 
 namespace LocalAI.Client.Services;
 
+/// <summary>
+/// 这条显存数据【测的是哪台机器】。★ 它不是显示细节,是判读前提:
+/// 同一个 "8.3 GiB" 在两台机器上意思完全不同,而数字本身分辨不出来。
+/// </summary>
+public enum VramSource
+{
+    /// <summary>中枢的显卡 —— 这才是 AI 用的那块,预算口径也是它。</summary>
+    Hub,
+    /// <summary>★ 本机显卡。只在拿不到中枢数据时使用,且**必须**在界面上写明。</summary>
+    LocalFallback,
+    /// <summary>两边都没有。整条隐藏,不用 0 冒充"很空闲"。</summary>
+    None,
+}
+
 public sealed record VramSnapshot(
     double TotalGiB,
     double ModelReservedGiB,   // 启用的模型 max 占用(浅蓝)
     double DesktopUsedGiB,     // 当前桌面/其它占用(蓝)
     bool Available,            // 读不到 GPU 时为 false -> 界面隐藏该条,不显示 0 冒充
-    string? Note = null)
+    string? Note = null,
+    VramSource Source = VramSource.None,
+    bool DesktopIsInferred = false,
+    string? HubState = null)
 {
+    /// <summary>标题栏那一行。★ 本机回退时**必须**带上"不是中枢的",否则就是一次静默换源。</summary>
+    public string Title => Source switch
+    {
+        VramSource.Hub => "中枢显存",
+        VramSource.LocalFallback => "本机显卡(不是中枢的)",
+        _ => "显存",
+    };
+
     public double FreeGiB => Math.Max(0, TotalGiB - ModelReservedGiB - DesktopUsedGiB);
     /// <summary>实际占用比例(模型 + 桌面)。逼近 1 时界面转红。</summary>
     public double UsedRatio => TotalGiB <= 0 ? 0 : Math.Clamp((ModelReservedGiB + DesktopUsedGiB) / TotalGiB, 0, 1);
@@ -76,8 +117,35 @@ public sealed class VramMonitor : IDisposable
         catch { /* 采样失败不该影响界面;下一次再试 */ }
     }
 
+    /// <summary>
+    /// 中枢状态的来源。★ 由宿主在启动时注入 —— 不在这里 new 一个,
+    /// 否则会出现两条各自订阅的推送流,而"哪一条是权威"就没有答案了。
+    /// </summary>
+    public HubGpu? Hub { get; set; }
+
     VramSnapshot Read()
     {
+        // ── ① 首选:中枢。这才是 AI 真正用的那块显卡,预算口径也是它 ──
+        var hub = Hub;
+        if (hub is not null && hub.HasFreshData && hub.Snapshot is { } hs && hs.TotalGiB > 0)
+        {
+            // ★ 模型段来自中枢的 committed 集合,客户端不自己算 peak(数字只有一份权威)。
+            var modelHub = VramBudget.PeakSumGiB(hs.Committed);
+            // ★ 桌面段是**推算**的:total - free - 模型。WDDM 不暴露逐进程显存,
+            //   说不出占用者是谁 —— DesktopIsInferred=true 让界面必须如实标注。
+            var usedHub = hs.FreeGiB is { } f ? Math.Max(0, hs.TotalGiB - f) : (double?)null;
+            if (usedHub is { } u)
+                return new VramSnapshot(hs.TotalGiB, modelHub, Math.Max(0, u - modelHub), true,
+                                        hs.SamplerError, VramSource.Hub, true, hs.State);
+            // 中枢连着,但它自己这一轮没采到 NVML ⇒ 如实说"中枢读不到",
+            // ★ 不退回本机:那会把"中枢的采样器坏了"显示成"一切正常",两种情况必须长得不一样。
+            return new VramSnapshot(hs.TotalGiB, modelHub, 0, false,
+                                    hs.SamplerError ?? "中枢这一轮没读到显存",
+                                    VramSource.Hub, true, hs.State);
+        }
+
+        // ── ② 回退:本机显卡。★ 这是**换了被测对象**,不是精度差一点 ──
+        //   所以 Source=LocalFallback,标题会变成「本机显卡(不是中枢的)」。
         if (!_triedInit) { _triedInit = true; _nvmlOk = TryInitNvml(); }
 
         double usedGiB, totalGiB;
@@ -85,18 +153,17 @@ public sealed class VramMonitor : IDisposable
         else if (_smiDead || !TryReadSmi(out usedGiB, out totalGiB))
         {
             _smiDead = true;   // ★ 一次读不到就死心(无 N 卡机器不该每次 Tick 都去 Process.Start)
-            return new VramSnapshot(0, 0, 0, false, "读不到 GPU 显存(无 NVIDIA 驱动或不可用)");
+            return new VramSnapshot(0, 0, 0, false, "读不到 GPU 显存(无 NVIDIA 驱动或不可用)",
+                                    VramSource.None);
         }
 
         _totalGiB = totalGiB;
 
-        // 启用组件的 peak 之和。组件选择器是 P4;在那之前没有"已启用模型" -> 0(如实,不编造)。
-        var modelReserved = VramBudget.EnabledModelsPeakGiB();
-
-        // 归因:模型实际占用要等 broker(P4)。今天没有经 broker 装载的模型,故 used 即桌面/其它。
-        var desktop = Math.Max(0, usedGiB - modelReserved);
-
-        return new VramSnapshot(totalGiB, modelReserved, desktop, true);
+        // ★ 本机回退路径下模型段恒为 0,而且这是真话:经中枢装载的模型不在这台机器上,
+        //   本机这块卡上的占用全部来自本机的桌面程序。
+        return new VramSnapshot(totalGiB, 0, usedGiB, true,
+                                "拿不到中枢数据,这里显示的是本机这台机器的显卡",
+                                VramSource.LocalFallback);
     }
 
     // ---------------------------------------------------------------- NVML

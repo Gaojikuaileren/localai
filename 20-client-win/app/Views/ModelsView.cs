@@ -42,14 +42,11 @@ public sealed class ModelsView : UserControl
         path.LostFocus += (_, _) => Commit();
         Unloaded += (_, _) => Commit();
 
-        // ② 启用的模型
-        var modelList = new StackPanel();
-        foreach (var m in ModelCatalog.All)
-        {
-            var key = m.Key;
-            modelList.Children.Add(ModelToggle(m, s.IsModelEnabled(key),
-                on => s.SetModelEnabled(key, on)));
-        }
+        // ② 启用的模型 —— P4-S9:改由【中枢下发】的组件目录驱动,并走真事务。
+        //   ★ 原来这里遍历的是 ModelCatalog.All,那是客户端自造的一份占位清单
+        //     (chat.8b / speech / image),跟网关别名与显存组件 id **一个都对不上** ——
+        //     勾了不会发生任何事,而界面看着像配置好了。现在换成真的。
+        var modelList = new ComponentPicker();
 
         // ③ 自动启用规则
         var preset = new ComboBox { Margin = new Thickness(0, 4, 0, 6), Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
@@ -79,7 +76,8 @@ public sealed class ModelsView : UserControl
 
             Ui.Card(Ui.Stack(
                 Ui.Subtitle(Strings.Get("model.enabled")),
-                Ui.Caption(Strings.Get("model.enabled_hint")),
+                Ui.Caption("清单与峰值都由中枢下发(唯一权威是主机的 config/vram-budget.toml)。"
+                           + "点确定 = 向中枢提交一次驻留集合变更,中枢会在那一刻重新求值。"),
                 new Border { Height = 6 },
                 modelList
             )),
@@ -156,31 +154,4 @@ public sealed class ModelsView : UserControl
         ));
     }
 
-    static FrameworkElement ModelToggle(ModelCatalog.Def m, bool on, Action<bool> onChanged)
-    {
-        var ic = Icons.Make(IconName.Model, 17, "FgSecondary");
-        ic.VerticalAlignment = VerticalAlignment.Center;
-        ic.Margin = new Thickness(0, 0, 10, 0);
-
-        var name = new TextBlock { Text = m.Name, VerticalAlignment = VerticalAlignment.Center };
-        name.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-        var role = new TextBlock { Text = "  ·  " + m.Role, VerticalAlignment = VerticalAlignment.Center };
-        role.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-        role.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
-
-        var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        left.Children.Add(ic);
-        left.Children.Add(name);
-        left.Children.Add(role);
-
-        var check = new CheckBox { IsChecked = on, VerticalAlignment = VerticalAlignment.Center };
-        check.Checked += (_, _) => onChanged(true);
-        check.Unchecked += (_, _) => onChanged(false);
-
-        var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 5, 0, 5) };
-        DockPanel.SetDock(check, Dock.Right);
-        row.Children.Add(check);
-        row.Children.Add(left);
-        return row;
-    }
 }

@@ -27,14 +27,58 @@ public static class VramBudget
     }
 
     /// <summary>
-    /// 已启用组件的 peak 之和(GiB)。
-    /// P4 的组件选择器落地前没有"已启用"状态 -> 0。届时改为读 broker 的实际启用集合。
+    /// 一组组件 id 的 peak 之和(GiB)。★ 只认**中枢下发**的组件 id ——
+    /// 客户端不维护第二份组件清单(P4-S9 之前 Views/ModelCatalog.cs 里那份自造清单
+    /// chat.8b / speech / image 是**第三套词汇**,跟这里的 id 一个都对不上)。
+    ///
+    /// ★★ 认不出的 id **不当成 0**:那会让模型段偷偷少算,而少算的方向是
+    ///   "看起来还有余量" —— fail-open。认不出就整体返回 null 的语义交给调用方,
+    ///   这里返回已知部分并把未知项计入 <paramref name="unknown"/>,由界面如实说出来。
     /// </summary>
-    public static double EnabledModelsPeakGiB()
+    public static double PeakSumGiB(IEnumerable<string> ids, ICollection<string>? unknown = null)
     {
-        // 组件选择状态属于 P4(GPU Broker + 组件选择器)。现在没有任何组件被"启用",
-        // 所以模型段恒为 0 —— 这是真话:此刻显存里确实没有经 broker 装载的模型。
-        return 0;
+        var peaks = Peaks();
+        double sum = 0;
+        foreach (var id in ids)
+        {
+            if (peaks.TryGetValue(id, out var p)) sum += p;
+            else unknown?.Add(id);
+        }
+        return Math.Round(sum, 4);
+    }
+
+    static Dictionary<string, double>? _peaks;
+
+    /// <summary>组件 id → peak。读本地那份 toml(与中枢同一份文件);读不到返回空表。</summary>
+    public static Dictionary<string, double> Peaks()
+    {
+        if (_peaks is not null) return _peaks;
+        var map = new Dictionary<string, double>(StringComparer.Ordinal);
+        var path = FindToml();
+        if (path is null) return _peaks = map;
+        try
+        {
+            string? cur = null;
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.StartsWith("[components.\""))
+                {
+                    var a = line.IndexOf('"'); var b = line.LastIndexOf('"');
+                    cur = b > a ? line[(a + 1)..b] : null;
+                }
+                else if (line.StartsWith("[")) cur = null;      // 换段了
+                else if (cur is not null && line.StartsWith("peak"))
+                {
+                    var v = line.Split('=', 2)[1].Split('#')[0].Trim();
+                    if (double.TryParse(v, System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var d))
+                        map[cur] = d;
+                }
+            }
+        }
+        catch { }
+        return _peaks = map;
     }
 
     /// <summary>配置里的桌面保留下限(desktop_floor),仅用于界面上标一条参考线。读不到返回 null。</summary>
