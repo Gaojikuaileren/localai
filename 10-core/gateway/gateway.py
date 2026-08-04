@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import e1_detector as e1
 import e4_egress as e4
 import caller_identity
+import gpu_broker
 import membership
 
 # §6.8 隔离服务账户 —— 绝不允许经网关触达记忆(D30 混淆代理防护)
@@ -457,6 +458,8 @@ ROUTE_TIERS = {
     ("GET", "/health"): "public-minimal",
     ("GET", "/v1/models"): "authenticated",
     ("POST", "/v1/chat/completions"): "authenticated",
+    # P4-S3:GPU Broker 的**只读**快照。变更端点属于 S4,现在一条都没有。
+    ("GET", "/v1/gpu/snapshot"): "authenticated",
 }
 
 
@@ -512,6 +515,44 @@ def log_denied_access(account: str, session_id: str) -> None:
 @app.get("/health")
 async def health():
     return {"status": "ok"}   # ★ S3 收窄:不再泄露别名清单(别名走已认证的 /v1/models)
+
+
+@app.on_event("startup")
+async def _start_gpu_broker():
+    """P4-S3:起 1 Hz 采样器。★ 起不来【不静默】——失败会写进快照的 sampler_error,
+    而不是让端点看起来正常却永远返回同一个旧值。"""
+    try:
+        gpu_broker.BROKER.start()
+    except Exception:                                        # noqa: BLE001
+        pass   # 采样器起不来不该拖垮网关启动;快照会以 stale=True + sampler_error 如实呈现
+
+
+@app.get("/v1/gpu/snapshot")
+async def gpu_snapshot(request: Request):
+    """P4-S3 · GPU 状态的**只读副本**(D37「单一权威 + 副本」的副本那一半)。
+
+    ★ 本片没有任何变更端点 —— 预留 / 装载 / 租约都属于 S4。
+    ★ 快照带 generation:客户端将来提交变更时要回传它,对不上即 409 + 回带最新快照。
+    ★ 快照带 stale / sampler_error:采样器死了必须**看得见**,
+      而不是让调用方拿着一个永远不变的数字以为它是新的。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+    try:
+        snap = gpu_broker.BROKER.snapshot()
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 与显存闸 CLI 的三态同一条纪律:「读不出来」不能伪装成「一切正常」。
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "GPU 快照不可用(Broker 未就绪或显存配置读不到)",
+                               "type": "broker_unavailable",
+                               "reason": type(e).__name__}},
+        )
+    return snap.to_json()
 
 
 @app.get("/v1/models")
