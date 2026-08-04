@@ -553,6 +553,12 @@ ROUTE_TIERS = {
     ("POST", "/v1/chat/completions"): "authenticated",
     # P4-S3:GPU Broker 的**只读**快照。
     ("GET", "/v1/gpu/snapshot"): "authenticated",
+    # P4-S5:推送流(SSE)。D37 ②「推送非轮询」—— 客户端不再定时问,由中枢主动发。
+    ("GET", "/v1/gpu/events"): "authenticated",
+    # P4-S5:★ GPU 面的**第一个变更端点**。S3 曾断言"GPU 面只能有 GET",
+    #   那条断言现在被**有意地**改成一张显式方法表(见 test_gpu_broker.py 第 1 组)——
+    #   这是一次语义变更,应当在 diff 里看得见,而不是把断言删掉了事。
+    ("POST", "/v1/gpu/lease"): "authenticated",
     # P4-S4b:客户端退出时通知结束会话 —— ★ 这条路由**此前不存在**,
     #   而客户端 HubClient.cs:230 每次退出都在调它、失败还被吞掉:
     #   一次伪装成成功的静默失败。现在它真的存在了。
@@ -650,6 +656,128 @@ async def gpu_snapshot(request: Request):
                                "reason": type(e).__name__}},
         )
     return snap.to_json()
+
+
+@app.get("/v1/gpu/events")
+async def gpu_events(request: Request):
+    """P4-S5 · 推送流(SSE)。D37 ②:**推送非轮询**。
+
+    ★ 连上先给**全量**快照(重连即对齐,不必先问一次);之后每次世代号变化再发一帧。
+    ★ 每帧都盖 `generation` —— 客户端据此判断自己手上那份是不是最新的。
+    ★ 心跳:15 秒没变化就发一行注释帧。不发心跳的话,一条静默的长连接
+      与一条**死掉**的长连接在客户端看来一模一样 —— 又是"失败与成功长得一样"。
+
+    ★ 关于"增量":本快照只有几百字节,**每帧仍发全量**并如实标 `event: update`。
+      不做字段级 diff 是有意的:diff/apply 两侧不一致是一整类难查的 bug,
+      而这里省下的带宽可以忽略。不假装做了增量。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+
+    async def gen():
+        try:
+            snap = gpu_broker.BROKER.snapshot()
+            yield ("event: snapshot\ndata: "
+                   + json.dumps(snap.to_json(), ensure_ascii=False) + "\n\n")
+            last = snap.generation
+            while True:
+                if await request.is_disconnected():
+                    break
+                changed = await gpu_broker.BROKER.wait_for_change(last, timeout=15.0)
+                if await request.is_disconnected():
+                    break
+                if changed:
+                    snap = gpu_broker.BROKER.snapshot()
+                    last = snap.generation
+                    yield ("event: update\ndata: "
+                           + json.dumps(snap.to_json(), ensure_ascii=False) + "\n\n")
+                else:
+                    # ★ 心跳带上世代号:客户端可据此发现自己错过了一帧(不该发生,但能被发现)
+                    yield f": heartbeat gen={last}\n\n"
+        except Exception as e:                               # noqa: BLE001
+            # ★ 推送流崩了要**说出来**,不能静默断开 —— 客户端会把静默断开当成"没有变化"。
+            yield ("event: error\ndata: "
+                   + json.dumps({"type": type(e).__name__, "message": str(e)[:200]},
+                                ensure_ascii=False) + "\n\n")
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.post("/v1/gpu/lease")
+async def gpu_lease(request: Request):
+    """P4-S5 · 申请租约。D37 ③:**世代号对不上即拒,并回带最新状态**。
+
+    ★★ `if_generation` 是**必填**的。省略它不等于"我不在乎" ——
+      那正是 fail-open:一个没读过快照的客户端会盲目申请,而世代号存在的全部理由
+      就是让"你看到的"与"现在的"能被比对。缺字段 → 400,不是默认放行。
+
+    ★ 对不上时回 **409 + 最新快照**(不是裸 409):D37 明写「对不上即拒**并回最新状态**」。
+      只回 409 会让客户端必须再发一次请求才知道现在是什么样 —— 那就又变成轮询了。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+
+    if "if_generation" not in body:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "缺少必填的 if_generation ——"
+                                          "必须声明你是基于哪一版状态做的这次申请。",
+                               "type": "missing_if_generation",
+                               "hint": "先取 /v1/gpu/snapshot 或订阅 /v1/gpu/events"}},
+        )
+    try:
+        want_gen = int(body["if_generation"])
+    except Exception:                                        # noqa: BLE001
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": "if_generation 必须是整数",
+                                               "type": "bad_if_generation"}})
+
+    kind = str(body.get("kind") or "")
+    holder = _short_echo(body.get("holder"))
+    components = [str(c) for c in (body.get("components") or [])][:16]
+    ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
+
+    try:
+        snap = gpu_broker.BROKER.snapshot()
+        if snap.generation != want_gen:
+            # ★ 409 + 最新快照 —— 让客户端一次就拿到重试所需的一切
+            return JSONResponse(
+                status_code=409,
+                content={"error": {"message": f"世代号对不上:你基于 {want_gen},当前 {snap.generation}",
+                                   "type": "generation_conflict"},
+                         "snapshot": snap.to_json()},
+            )
+        status, lease = await gpu_broker.BROKER.grant(kind, holder, components, ttl)
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(status_code=503,
+                            content={"error": {"message": "Broker 不可用",
+                                               "type": "broker_unavailable",
+                                               "reason": type(e).__name__}})
+
+    if status != gpu_broker.LEASE_OK:
+        # ★ 被拒也回带最新快照:拒绝信息含【占用者】(P4-4)靠的就是它里面的 leases。
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"message": f"租约未发放:{status}", "type": status.lower()},
+                     "snapshot": gpu_broker.BROKER.snapshot().to_json()},
+        )
+    return {"status": "ok", "lease": lease.to_json(),
+            "fence_token": lease.fence_token,
+            "generation": gpu_broker.BROKER.snapshot().generation}
 
 
 @app.post("/v1/session/end")

@@ -39,11 +39,21 @@ check("没有未归类路由(新增路由必须进 ROUTE_TIERS)",
       gateway.unclassified_routes() == [], f"{gateway.unclassified_routes()}")
 check("/v1/gpu/snapshot 已登记且是 authenticated",
       gateway.ROUTE_TIERS.get(("GET", "/v1/gpu/snapshot")) == "authenticated")
-# ★ 反向全表:GPU 面此刻**只能有** GET。变更端点属于 S4 —— 提前长出来必须判红。
-_gpu_routes = [(m, p) for (m, p) in gateway.ROUTE_TIERS if p.startswith("/v1/gpu")]
-check(f"GPU 面当前只有只读路由(实测 {_gpu_routes})",
-      all(m == "GET" for m, _ in _gpu_routes) and len(_gpu_routes) == 1,
-      "S4 加变更端点时要连同这条断言一起改 —— 那是一次有意的语义变更,应当被看见")
+# ★★ 反向全表:GPU 面的路由必须**逐条登记**在这张表里。
+#   S3 时这条写的是"只能有 GET";S5 加了第一个变更端点(POST /v1/gpu/lease),
+#   于是它被**有意地**改成显式方法表 —— 那是一次语义变更,应当在 diff 里看得见,
+#   而不是把断言删掉了事。新增任何 GPU 路由若不改这里,必红。
+_EXPECTED_GPU_ROUTES = {
+    ("GET", "/v1/gpu/snapshot"),   # S3:只读快照
+    ("GET", "/v1/gpu/events"),     # S5:推送流(SSE)
+    ("POST", "/v1/gpu/lease"),     # S5:★ 第一个变更端点
+}
+_gpu_routes = {(m, p) for (m, p) in gateway.ROUTE_TIERS if p.startswith("/v1/gpu")}
+check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
+      _gpu_routes == _EXPECTED_GPU_ROUTES,
+      f"多出 {sorted(_gpu_routes - _EXPECTED_GPU_ROUTES)} 少了 {sorted(_EXPECTED_GPU_ROUTES - _gpu_routes)}")
+check("★ 变更端点只有一个(每多一个都该是一次有意的决定)",
+      len([1 for m, _ in _gpu_routes if m != "GET"]) == 1)
 
 print("=== 2. 快照形状:该有的字段一个不少 ===")
 snap = gpu_broker.BROKER.snapshot()
@@ -328,6 +338,91 @@ check("★ 回话里说清释放了几条(不是一律 200 空体让调用方无
       "released_leases" in _ss_src)
 check("★ 释放走的是条件写(带 fence_token),不是按 holder 无条件删",
       "fence_token" in _ss_src)
+
+##########################################################################
+#  P4-S5 · 推送非轮询 + 世代号冲突
+##########################################################################
+
+print("=== 19. ★★ 变更通知:订阅者【等事件】,不是轮询 ===")
+
+
+async def _notify_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    g = b.snapshot().generation
+    # ① 正常唤醒
+    t = asyncio.create_task(b.wait_for_change(g, timeout=5))
+    await asyncio.sleep(0.03)
+    await b.grant("client_session", "PC-A", ["speech.lite"])
+    woke = await t
+    # ② 无变更 → 超时(该发心跳了)
+    g2 = b.snapshot().generation
+    timed_out = not await b.wait_for_change(g2, timeout=0.15)
+    leaked = len(b._waiters)
+    # ③ ★ 丢失唤醒:变更发生在"读快照之后、开始等待之前"
+    g3 = b.snapshot().generation
+    await b.grant("model_ref", "PC-B", [])
+    immediate = await b.wait_for_change(g3, timeout=0.15)
+    return woke, timed_out, leaked, immediate
+
+
+_woke, _timedout, _leaked, _immediate = asyncio.run(_notify_test())
+check("状态变更会唤醒等待者", _woke)
+check("无变更时按时超时(调用方据此发心跳)", _timedout)
+check("★ 超时后把自己从等待队列摘掉(否则 _waiters 无界增长)", _leaked == 0, str(_leaked))
+check("★★ 不丢唤醒:变更发生在读快照与等待之间时立即返回",
+      _immediate, "先在锁内比一次世代号 —— 不比就会漏掉一整个世代")
+
+print("=== 20. ★ 通知必须与世代号 +1 在同一把锁里 ===")
+#   分开的话会出现「通知发出去了但世代号还没涨」,订阅者取到的快照与它以为的不符。
+for _m in ("_set_committed", "grant", "release"):
+    _s = inspect.getsource(getattr(gpu_broker.Broker, _m))
+    if "self._generation += 1" in _s:
+        _, _, _tail = _s.partition("async with self._lock:")
+        check(f"{_m}:世代号 +1 与 _notify_locked 都在锁内",
+              "self._generation += 1" in _tail and "_notify_locked()" in _tail, _m)
+_nsrc = inspect.getsource(gpu_broker.Broker._notify_locked)
+# ★ 必须先摘掉文档字符串再查:它的注释里正好在解释"为什么不违反锁内不得 await"——
+#   直接 in 判断会因为**注释里的那个词**而误红。第一版就栽在这儿(与本项目
+#   Body() 去注释、e4_egress 去 docstring 是同一条纪律:断言只看会执行的代码)。
+_ncode = re.sub(r'"""(?:.|\n)*?"""', "", _nsrc)
+_ncode = "\n".join(l for l in _ncode.splitlines() if not l.lstrip().startswith("#"))
+check("_notify_locked 只做 set(非阻塞),代码里不含 await", "await" not in _ncode, _ncode[:160])
+check("★ 通知后清空等待队列(一次性 Event,不复用)", "self._waiters = []" in _nsrc)
+
+print("=== 21. 推送流:先全量、后增量、每帧盖世代号、有心跳 ===")
+_ev = inspect.getsource(gateway.gpu_events)
+check("连上先发全量快照", "event: snapshot" in _ev)
+check("之后发变更帧", "event: update" in _ev)
+check("★ 有心跳(静默长连接与死掉的长连接必须长得不一样)", "heartbeat" in _ev)
+check("★ 心跳也带世代号(客户端可发现自己错过了一帧)", "gen=" in _ev)
+check("★ 推送流崩了要说出来,不静默断开", "event: error" in _ev)
+check("媒体类型是 text/event-stream", "text/event-stream" in _ev)
+check("★ 如实标注不做字段级 diff(不假装做了增量)", "不假装做了增量" in _ev or "仍发全量" in _ev)
+check("订阅走 wait_for_change,不是 sleep 轮询",
+      "wait_for_change" in _ev and "asyncio.sleep" not in _ev)
+
+print("=== 22. ★★ if_generation 必填 —— 省略不等于『我不在乎』 ===")
+_lz = inspect.getsource(gateway.gpu_lease)
+check("缺 if_generation → 400(不是默认放行)",
+      'if "if_generation" not in body' in _lz and "missing_if_generation" in _lz)
+check("★ 对不上 → 409", "generation_conflict" in _lz and "status_code=409" in _lz)
+check("★★ 409 回带最新快照(裸 409 会逼客户端再问一次 = 又变回轮询)",
+      _lz.count('"snapshot"') >= 2, "被拒时也要回带 —— 拒绝信息含占用者靠的就是它")
+check("租约未发放时也回 409 + 快照", "租约未发放" in _lz)
+
+print("=== 23. 世代号冲突的真实行为(端到端,不只是源码级)===")
+
+
+async def _conflict_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    g0 = b.snapshot().generation
+    await b.grant("client_session", "PC-A", [])      # 世代号涨了
+    g1 = b.snapshot().generation
+    return g0, g1
+
+
+_g0, _g1 = asyncio.run(_conflict_test())
+check("每次发租约世代号都变(客户端手上的旧号会失效)", _g1 != _g0, f"{_g0} -> {_g1}")
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

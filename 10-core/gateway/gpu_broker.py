@@ -202,6 +202,10 @@ class Broker:
         self._task: Optional[asyncio.Task] = None
         self._cfg = cfg
         self._leases: Dict[str, Lease] = {}
+        # P4-S5:变更通知。★ 订阅者【等事件】,不是轮询 —— D37 ② 明写「推送非轮询」。
+        #   每个订阅者持一个自己的 Event;状态变更时在锁内一次性全部 set。
+        #   set() 是非阻塞的,放在锁里安全(不违反"锁内不得跨 await I/O")。
+        self._waiters: List[asyncio.Event] = []
 
     # ── 配置 ──────────────────────────────────────────────────────
     @property
@@ -299,6 +303,7 @@ class Broker:
         async with self._lock:
             self._committed = list(ids)
             self._generation += 1
+            self._notify_locked()          # ★ 与 +1 在同一把锁里 —— 见 _notify_locked 的说明
             return self._generation
 
     # ══════════════════════════════════════════════════════════════
@@ -313,6 +318,35 @@ class Broker:
     #     "在 handler 顶部取一次 t 然后在循环里复用" —— 形状一模一样。
     #     故:每处需要时间的地方都在锁内现取 time.monotonic()。
     # ══════════════════════════════════════════════════════════════
+
+    # ── P4-S5 · 变更通知(推送,不是轮询)──────────────────────────
+    def _notify_locked(self) -> None:
+        """★ 必须在锁内调用,且必须与世代号 +1 在**同一把锁**里 ——
+        否则会出现「通知发出去了但世代号还没涨」,订阅者取到的快照与它以为的不符。
+        `Event.set()` 非阻塞,放锁内不违反「锁内不得跨 await I/O」。"""
+        for w in self._waiters:
+            w.set()
+        self._waiters = []
+
+    async def wait_for_change(self, since_generation: int, timeout: float = 15.0) -> bool:
+        """等到世代号离开 `since_generation`。返回 True=有变更,False=超时(该发心跳了)。
+
+        ★ 先在锁内比一次:变更可能在调用方读快照与开始等待之间就发生了 ——
+          不比这一次就会漏掉一整个世代(经典的丢失唤醒)。
+        """
+        ev = asyncio.Event()
+        async with self._lock:
+            if self._generation != since_generation:
+                return True                      # 已经变了,不必等
+            self._waiters.append(ev)
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            async with self._lock:
+                if ev in self._waiters:
+                    self._waiters.remove(ev)     # ★ 超时要摘掉自己,否则 _waiters 无界增长
+            return False
 
     def _sweep_expired_locked(self) -> None:
         """★ 必须在锁内调用。惰性过期:每次进锁顺手扫一遍。"""
@@ -347,6 +381,7 @@ class Broker:
             )
             self._leases[lease.lease_id] = lease
             self._generation += 1       # ★ 租约变化也是状态变化,同一把锁下涨号
+            self._notify_locked()
             return LEASE_OK, lease
 
     async def renew(self, lease_id: str, fence_token: str,
@@ -376,6 +411,7 @@ class Broker:
                 return LEASE_NOT_HOLDER
             del self._leases[lease_id]
             self._generation += 1
+            self._notify_locked()
             return LEASE_OK
 
     async def active_leases(self) -> List[Lease]:
