@@ -458,8 +458,12 @@ ROUTE_TIERS = {
     ("GET", "/health"): "public-minimal",
     ("GET", "/v1/models"): "authenticated",
     ("POST", "/v1/chat/completions"): "authenticated",
-    # P4-S3:GPU Broker 的**只读**快照。变更端点属于 S4,现在一条都没有。
+    # P4-S3:GPU Broker 的**只读**快照。
     ("GET", "/v1/gpu/snapshot"): "authenticated",
+    # P4-S4b:客户端退出时通知结束会话 —— ★ 这条路由**此前不存在**,
+    #   而客户端 HubClient.cs:230 每次退出都在调它、失败还被吞掉:
+    #   一次伪装成成功的静默失败。现在它真的存在了。
+    ("POST", "/v1/session/end"): "authenticated",
 }
 
 
@@ -553,6 +557,47 @@ async def gpu_snapshot(request: Request):
                                "reason": type(e).__name__}},
         )
     return snap.to_json()
+
+
+@app.post("/v1/session/end")
+async def session_end(request: Request):
+    """P4-S4b:客户端退出时结束会话,释放它持有的租约。
+
+    ★★ 这条路由**在 2026-08-04 之前根本不存在**,而客户端每次退出都在调它
+      (`HubClient.cs:230`,注释写着「结束会话通知失败(不影响退出)」并吞掉异常)。
+      于是每次关闭都在发一个永远不可能成功的请求 —— **一次伪装成成功的静默失败**,
+      正是本项目纪律明令禁止的形状。它同时也是当天「关闭卡一段时间」的一部分成因。
+
+    ★ 语义是**尽力而为但如实回话**:没有活跃租约不是错误(客户端可能从没申请过),
+      但要在响应里说清"释放了几条",而不是一律回 200 空体让调用方无从分辨。
+    """
+    if classify_caller(request) == "remote-unauthenticated":
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"message": "远程访问需认证;本机请走 loopback",
+                               "type": "unauthenticated"}},
+        )
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+    device = str(body.get("device") or "")[:64]
+    reason = str(body.get("reason") or "")[:64]
+
+    released = 0
+    try:
+        for l in await gpu_broker.BROKER.active_leases():
+            if l.holder == device:
+                if await gpu_broker.BROKER.release(l.lease_id, l.fence_token) == gpu_broker.LEASE_OK:
+                    released += 1
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "会话结束时释放租约失败", "type": "broker_unavailable",
+                               "reason": type(e).__name__}},
+        )
+    return {"status": "ok", "released_leases": released,
+            "device": device, "reason": reason}
 
 
 @app.get("/v1/models")

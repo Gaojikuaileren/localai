@@ -169,5 +169,165 @@ check("Broker 里没有自己重算 vram_budget 的算式",
       "total_vram -" not in _bsrc.replace("cfg.budget.total_vram - free", ""),
       "预算是导出值,只能来自 vram_gate.Config")
 
+##########################################################################
+#  P4-S4b · 租约账本
+##########################################################################
+
+print("=== 10. ★ kind 是两根正交的轴,不是一套枚举 ===")
+_k = gpu_broker.LEASE_KINDS
+check("kind 表非空且是闭集", len(_k) >= 5)
+for name, kd in _k.items():
+    check(f"{name} 同时声明了两根轴", isinstance(kd.evictable, bool) and isinstance(kd.blocking, str))
+check("生命周期轴与阻塞性轴确实不是同一根(存在同 evictable 不同 blocking 的组合)",
+      len({(kd.evictable, kd.blocking) for kd in _k.values()}) > len({kd.evictable for kd in _k.values()}),
+      "若两轴一一对应,就该合成一个枚举 —— 那时这条断言会红,提示重新裁定")
+check("五种用途齐备",
+      set(_k) >= {"client_session", "model_ref", "pet_presence", "agent_task", "recalibration"})
+check("★ 只有 model_ref 可驱逐(§8.1.7 显式开的口子),其余一律不可",
+      {n for n, kd in _k.items() if kd.evictable} == {"model_ref"},
+      f'{ {n for n, kd in _k.items() if kd.evictable} }')
+check("★ 重标定是独占的(B10⑥:期间测出来的数才作数)", _k["recalibration"].exclusive)
+check("独占只有重标定一种", {n for n, kd in _k.items() if kd.exclusive} == {"recalibration"})
+
+print("=== 11. ★★ 未登记 kind fail-closed ===")
+
+
+async def _kind_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    st_bad, l_bad = await b.grant("bogus_kind", "X", [])
+    st_ok, l_ok = await b.grant("client_session", "PC-A", ["llm.assistant.8b@16k"])
+    return st_bad, l_bad, st_ok, l_ok, b
+
+
+_stb, _lb, _sto, _lo, _b = asyncio.run(_kind_test())
+check("未登记 kind 被拒", _stb == gpu_broker.LEASE_UNKNOWN_KIND, _stb)
+check("未登记 kind 不发租约", _lb is None)
+check("已登记 kind 正常发放", _sto == gpu_broker.LEASE_OK and _lo is not None)
+
+print("=== 12. ★★ fence_token:全新 · 不复用 · 不由 holder 推导 ===")
+
+
+async def _token_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    toks, ids = set(), set()
+    for _ in range(20):
+        st, l = await b.grant("model_ref", "same-holder", ["speech.lite"])
+        toks.add(l.fence_token)
+        ids.add(l.lease_id)
+    return toks, ids
+
+
+_toks, _ids = asyncio.run(_token_test())
+check("20 次发放得到 20 个不同 token(不复用)", len(_toks) == 20, str(len(_toks)))
+check("lease_id 也各不相同", len(_ids) == 20)
+check("★ 同一个 holder 反复申请,token 也不相同(不可由 holder 推导)", len(_toks) == 20)
+check("token 长度足够(不是可枚举的小整数)", all(len(t) >= 16 for t in _toks))
+
+print("=== 13. ★★ 续租是条件写:对不上返回 NOT_HOLDER,与 EXPIRED 可区分 ===")
+
+
+async def _renew_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    _, l = await b.grant("client_session", "PC-A", [], ttl_s=60)
+    ok = await b.renew(l.lease_id, l.fence_token)
+    bad = await b.renew(l.lease_id, "0" * 32)
+    gone = await b.renew("nonexistent", "0" * 32)
+    # 过期路径:发一份 TTL 极短的
+    _, l2 = await b.grant("model_ref", "PC-B", [], ttl_s=0.001)
+    await asyncio.sleep(0.02)
+    exp = await b.renew(l2.lease_id, l2.fence_token)
+    return ok, bad, gone, exp
+
+
+_ok, _bad, _gone, _exp = asyncio.run(_renew_test())
+check("正确 token 续租成功", _ok == gpu_broker.LEASE_OK, _ok)
+check("★ 错误 token → NOT_HOLDER(不是 False,不是 EXPIRED)",
+      _bad == gpu_broker.LEASE_NOT_HOLDER, _bad)
+check("不存在的 lease → EXPIRED", _gone == gpu_broker.LEASE_EXPIRED, _gone)
+check("★ 真过期 → EXPIRED(与 NOT_HOLDER 分开)", _exp == gpu_broker.LEASE_EXPIRED, _exp)
+check("★ 两种失败【可区分】—— 混成一个 False,调用方只能猜,而猜错的方向是重试 = 双持有",
+      gpu_broker.LEASE_NOT_HOLDER != gpu_broker.LEASE_EXPIRED)
+
+print("=== 14. ★★ 惰性过期,且【不设收割线程】 ===")
+_src_all = inspect.getsource(gpu_broker)
+check("★ 没有收割线程/定时清理 task(收割线程 = 第二个写者 = 双持有从侧门回来)",
+      "reaper" not in _src_all and "_sweep_loop" not in _src_all and
+      _src_all.count("create_task") == 1,   # 只有采样器那一个
+      "create_task 出现次数 = " + str(_src_all.count("create_task")))
+check("清扫函数名明确要求在锁内调用", "_sweep_expired_locked" in _src_all)
+_sweep_src = inspect.getsource(gpu_broker.Broker._sweep_expired_locked)
+check("清扫在函数内现取时间(不接受外面传进来的时间)",
+      "time.monotonic()" in _sweep_src and "def _sweep_expired_locked(self)" in _sweep_src)
+
+
+async def _expiry_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    _, l = await b.grant("model_ref", "PC-A", ["speech.lite"], ttl_s=0.001)
+    before = b.reserved_components()
+    await asyncio.sleep(0.02)
+    after_reserved = b.reserved_components()
+    after_active = await b.active_leases()
+    return before, after_reserved, after_active
+
+
+_bef, _aft_r, _aft_a = asyncio.run(_expiry_test())
+check("未过期时组件计入 reserved", _bef == ["speech.lite"], str(_bef))
+check("★ 过期后立刻不再计入 reserved(只读路径也认过期)", _aft_r == [], str(_aft_r))
+check("过期条目在下次进锁时被真正删掉", _aft_a == [], str(_aft_a))
+
+print("=== 15. ★ 时间纪律:不得在拿到锁之前捕获时间(clock_timestamp 的进程内等价物)===")
+for _m in ("grant", "renew", "release"):
+    _s = inspect.getsource(getattr(gpu_broker.Broker, _m))
+    _head, _, _tail = _s.partition("async with self._lock:")
+    check(f"{_m}:锁【之前】没有取时间", "time.monotonic()" not in _head, _head[-120:])
+    if "time.monotonic()" in _s:
+        check(f"{_m}:时间在锁【之内】取", "time.monotonic()" in _tail)
+
+print("=== 16. ★ 独占租约:在场时拒发一切新租约(B10⑥)===")
+
+
+async def _excl_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    st1, l1 = await b.grant("client_session", "PC-A", [])
+    st2, _ = await b.grant("recalibration", "host", [])      # 已有租约 → 应拒
+    await b.release(l1.lease_id, l1.fence_token)
+    st3, l3 = await b.grant("recalibration", "host", [])      # 无租约 → 应成
+    st4, _ = await b.grant("client_session", "PC-B", [])      # 独占在场 → 应拒
+    return st1, st2, st3, st4
+
+
+_s1, _s2, _s3, _s4 = asyncio.run(_excl_test())
+check("普通租约正常发", _s1 == gpu_broker.LEASE_OK)
+check("★ 已有租约时发独占被拒", _s2 == gpu_broker.LEASE_EXCLUSIVE_HELD, _s2)
+check("清空后独占可发", _s3 == gpu_broker.LEASE_OK, _s3)
+check("★ 独占在场时一切新租约被拒", _s4 == gpu_broker.LEASE_EXCLUSIVE_HELD, _s4)
+
+print("=== 17. 快照带上租约与 reserved(拒绝信息要含【占用者】)===")
+
+
+async def _snap_test():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    await b.grant("client_session", "PC-A", ["llm.assistant.8b@16k"])
+    return b.snapshot().to_json()
+
+
+_sj = asyncio.run(_snap_test())
+check("快照含 leases", "leases" in _sj and len(_sj["leases"]) == 1)
+check("快照含 reserved", _sj.get("reserved") == ["llm.assistant.8b@16k"], str(_sj.get("reserved")))
+for _f in ("holder", "granted_at", "kind", "evictable", "blocking"):
+    check(f"租约条目含 {_f}(P4-4「拒绝信息含占用者」的原料)", _f in _sj["leases"][0])
+
+print("=== 18. ★★ /v1/session/end 终于存在了 ===")
+#   客户端 HubClient.cs:230 每次退出都调它,而网关里此前【没有这条路由】,失败还被吞掉 ——
+#   一次伪装成成功的静默失败。
+check("路由已登记", ("POST", "/v1/session/end") in gateway.ROUTE_TIERS)
+check("是 authenticated", gateway.ROUTE_TIERS[("POST", "/v1/session/end")] == "authenticated")
+check("仍无未归类路由", gateway.unclassified_routes() == [], f"{gateway.unclassified_routes()}")
+_ss_src = inspect.getsource(gateway.session_end)
+check("★ 回话里说清释放了几条(不是一律 200 空体让调用方无从分辨)",
+      "released_leases" in _ss_src)
+check("★ 释放走的是条件写(带 fence_token),不是按 holder 无条件删",
+      "fence_token" in _ss_src)
+
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)
