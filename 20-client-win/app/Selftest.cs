@@ -1121,11 +1121,11 @@ public static class Selftest
             if (cvShare is not null)
             {
                 Assert(cvShare.Contains("提升为共享") && cvShare.Contains("无法收回"), "★ 提升确认框写明【不可收回】");
-                Assert(cvShare.Contains("条消息)会一起共享"), "★ 确认框写明整段历史一起共享(用户裁定 A)");
-                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("中枢尚未接入") && cvShare.Contains("只影响这台"),
+                Assert(cvShare.Contains("条消息)会一起标为共享"), "★ 确认框写明整段历史一起共享(用户裁定 A)");
+                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("会话同步还没有做") && cvShare.Contains("只影响这台机器"),
                        "★ 删共享会话前【不得】断言对所有设备生效 —— 中枢未接入时共享只是本机标记,什么都没发生");
                 Assert(cvShare.Contains("· 共享"), "会话行标出共享状态");
-                Assert(cvShare.Contains("中枢尚未接入"), "★ 如实说明现在只是标记、接入后才上传");
+                Assert(cvShare.Contains("从来没上传过"), "★ 如实说明现在只是标记、接入后才上传");
             }
             var puShare = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
             if (puShare is not null)
@@ -3063,7 +3063,10 @@ public static class Selftest
                 Assert(apSrc is null || !apSrc.Contains("public bool IsModelEnabled"),
                        "★ AppSettings 里那个没人读的模型启用开关已删(假开关)");
                 var pickerSrc = TryReadSource(Path.Combine("Views", "ComponentPicker.cs"));
-                Assert(pickerSrc is not null && pickerSrc.Contains("FetchCatalogAsync"),
+                // ★ 本文件的惯例:**发布环境没有源码 → 跳过接线自检**(见 TryReadSource 的说明)。
+                //   我原来写成 `is not null && ...` = 【要求】源码存在,于是打包后必红 ——
+                //   出包门禁当场拦下(2026-08-05)。这正是今早修好的那道门禁在干真活。
+                Assert(pickerSrc is null || pickerSrc.Contains("FetchCatalogAsync"),
                        "★ 组件清单向中枢取,不在客户端维护第二份");
                 Assert(pickerSrc is null || !pickerSrc.Contains("IsModelEnabled"),
                        "★ 面板不读本地那份停用列表(权威只有中枢一处)");
@@ -4118,8 +4121,18 @@ public static class Selftest
                 {
                     Assert(cv3.Contains("AppPaths.StateDir, \"clips\"") && !cv3.Contains("GetTempPath(), \"localai-clip-"),
                            "★ 粘贴截图落到 client/clips 而不是 %TEMP% —— 否则“清理缓存”会删掉已发消息里截图的唯一副本");
-                    Assert(cv3.Contains("AI 模型尚未接入(P4)—— 消息会记在本机"),
-                           "★ AI 不回答的真因(P4 未接)无条件单说,不再归因到主机离线");
+                    // ★★★ 2026-08-05 更正:模型已接入(P4-S11),这句话**当场变成假话** ——
+                    //   用户刚跟模型聊完,输入框底下还印着「AI 模型尚未接入…现在还不会有回答」。
+                    //   原断言(要求这句话在)在那一刻是**在保护一句谎言**。
+                    //   ⇒ 反过来钉:那句话必须【不在了】,且提示按真实前提分层。
+                    Assert(!CodeOnly(cv3).Contains("AI 模型尚未接入"),
+                           "★★★ 模型接入后那句「尚未接入」必须删掉 —— 留着就是界面在说假话"
+                           + "(与 PDF 预览那次同款:接上了还留着『尚未接入』就是骗人)");
+                    Assert(cv3.Contains("还没有配对到中枢") && cv3.Contains("主机未开启"),
+                           "★★ 提示按【真实前提】分层:没配对 / 主机不在线 —— 每层只说自己那件事");
+                    Assert(cv3.Contains("if (!TheApp.Hub.IsPaired)"),
+                           "★ 一切正常时【什么都不说】—— 常驻提示会被当成背景噪声,真出事那天就没人看了");
+
                 }
                 if (su3 is not null)
                 {
@@ -4339,6 +4352,91 @@ public static class Selftest
                 var s11tr = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
                 Assert(s11tr is null || s11tr.Contains("onNonSuccess"),
                        "★★ 流式非 2xx 时先把正文读出来 —— 丢掉它等于把「后端没起」退化成「连不上」");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  P4-S12:★★★「未接入」类措辞必须【指名道姓】
+            //
+            //  2026-08-05 一晚之内同一类问题出现三次:
+            //    ① 输入框「AI 模型尚未接入(P4)」—— 模型接进来后**直接变假**;
+            //    ② 共享框「中枢尚未接入」—— 字面还真(会话同步确实没做),但用户刚跟
+            //       中枢聊完天,读起来就是假的,于是他相信共享已经生效
+            //       (实测反馈:「我把副机的会话提升到共享,主机这边看不见」);
+            //    ③ STATE 的「下一步」指路牌 —— 当天错了四次。
+            //
+            //  ★★ 共同根因:**系统是一件一件接入的**,而「未接入」是个笼统说法。
+            //    第一件接上的那一刻,所有笼统措辞同时失信 —— 用户没法判断哪句还算数。
+            //  ⇒ 规矩:凡是说「某某还没做/还没接入」,必须**点名是哪一件事**,
+            //    并且**不要用会随别处进展变化的笼统主语**(「中枢」「AI」「后端」)。
+            // ══════════════════════════════════════════════════════════════
+            {
+                var s12cv = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                if (s12cv is not null)
+                {
+                    // ★ 文案断言必须用 NoComments(保留字符串);用 CodeOnly 会把字符串剥光 ⇒ 恒真。
+                    //   2026-08-05 我这里先写错了一版,五条当场红 —— 而其中「不得出现」那条
+                    //   本来会**恒绿**,那才是真正危险的:它在文案改回去的那天也不会红。
+                    var code = NoComments(s12cv);
+                    Assert(!code.Contains("AI 模型尚未接入"),
+                           "★★★ 模型已接入(S11):那句「尚未接入」必须删掉 —— 留着就是界面在说假话");
+                    Assert(!code.Contains("中枢尚未接入"),
+                           "★★★ 不得再用笼统的「中枢尚未接入」—— 中枢已经能对话了,"
+                           + "这句话会让用户以为别的功能也好了(实测:共享提升后主机看不见)");
+                    Assert(code.Contains("会话同步还没有做"),
+                           "★★ 改成【指名道姓】:缺的是会话同步,不是笼统的「中枢」");
+                    Assert(code.Contains("中枢上没有存放共享会话的地方")
+                           || code.Contains("中枢上目前没有存放共享会话的地方"),
+                           "★ 并说清为什么缺(中枢上没有那个地方),而不只是说缺");
+                    Assert(code.Contains("别的设备还看不到"),
+                           "★★ 把「家里其他设备都能看到」降级为将来时 —— 它今天不成立,"
+                           + "写成确凿后果比不说更坏");
+                    Assert(code.Contains("还没有配对到中枢") && code.Contains("主机未开启"),
+                           "★★ 输入框提示按【真实前提】分层:没配对 / 主机不在线");
+                }
+                // ★★ 待办的「家庭」范围同一类问题(实测:「我这边添加的共享家庭待办也无法在对方应用显示」)。
+                //   D57 裁定待办是纯本机数据;而「家庭」这个词在**选范围的那一刻**读起来就是
+                //   "两台机器都看得见"。说明必须摆在期望形成的地方,不是摆在某个正确但没人看的角落。
+                var s12te = TryReadSource(Path.Combine("Views", "TodoEditor.cs"));
+                if (s12te is not null)
+                {
+                    var t = NoComments(s12te);
+                    Assert(t.Contains("不是同步范围"),
+                           "★★★ 选可见范围处必须说清「家庭」是归属、不是同步范围");
+                    Assert(t.Contains("只存在这台电脑上"),
+                           "★★ 并说清它只在这台机器上(D57)—— 原来这句只在归档页,用户很少去");
+                }
+                var s12todo = TryReadSource(Path.Combine("Services", "TodoCenter.cs"));
+                if (s12todo is not null)
+                {
+                    var s12tc = CodeOnly(s12todo);
+                    Assert(!s12tc.Contains("Transport.") && !s12tc.Contains("HubClient") && !s12tc.Contains("http"),
+                           "★★ 待办确实一个字节都不同步 —— 文案与行为一致(D57)");
+                }
+
+                // ★ 共享确实只是本机标记 —— 行为断言,不只是文案断言。
+                //   (文案改对了而行为悄悄变了,或者反过来,都是本项目最恨的形状。)
+                var s12cc = new Services.ChatCenter();
+                var s12sid = s12cc.NewSession(null).SessionId;
+                {
+                    s12cc.Send(s12sid, "x");
+                    var before = s12cc.Sessions.First(x => x.SessionId == s12sid);
+                    Assert(!before.Shared, "新会话默认不共享(D52:默认只在本机)");
+                    Assert(Services.ChatCenter.CanShare(before), "普通会话可提升");
+                    Assert(s12cc.ShareSession(s12sid), "提升成功");
+                    var after = s12cc.Sessions.First(x => x.SessionId == s12sid);
+                    Assert(after.Shared, "标记确实改了");
+                    Assert(!Services.ChatCenter.CanShare(after),
+                           "★ 单向不可收回:已共享的不能再提升(也没有降级入口)");
+                    var shareSrc = TryReadSource(Path.Combine("Services", "ChatCenter.cs"));
+                    if (shareSrc is not null)
+                    {
+                        var body = Slice(shareSrc, "public bool ShareSession", "幽灵会话:不保留记录");
+                        Assert(body is not null && !CodeOnly(body).Contains("Transport.")
+                               && !CodeOnly(body).Contains("HubClient"),
+                               "★★ ShareSession 确实【一个字节都没上传】—— 与文案一致。"
+                               + "文案说没上传而代码偷偷传了,或反过来,都是骗人");
+                    }
+                }
             }
 
             // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----
@@ -6468,6 +6566,54 @@ public static class Selftest
     /// ★ 顺带去掉字符串字面量:否则 `Assert(x.Contains("Foo"))` 这类代码本身
     ///   会让"源码里不得出现 Foo"的断言恒假。
     /// </summary>
+    /// <summary>
+    /// 只去【注释】,**保留字符串字面量**。用于「界面文案里必须/不得出现某句话」这类断言。
+    ///
+    /// ★★★ 与 <see cref="CodeOnly"/> 的分工必须分清,2026-08-05 混用过一次:
+    ///   · <c>CodeOnly</c> 去注释**也去字符串** —— 用于「代码里不得调用 X / 不得引用 Y」。
+    ///     拿它去判文案,会因为字符串被剥光而**恒真** —— 那是一条假断言,
+    ///     它会在文案改回去的那天**继续绿着**。
+    ///   · <c>NoComments</c> 只去注释 —— 用于判文案。仍然躲开了那个老坑
+    ///     (断言撞在解释它已经被删了的注释上,ASSERTION-PITFALLS 第 1 条)。
+    /// </summary>
+    static string NoComments(string src)
+    {
+        var sb = new System.Text.StringBuilder(src.Length);
+        for (int i = 0; i < src.Length; i++)
+        {
+            if (i + 1 < src.Length && src[i] == '/' && src[i + 1] == '/')
+            {
+                while (i < src.Length && src[i] != '\n') i++;
+                sb.Append('\n');
+                continue;
+            }
+            if (i + 1 < src.Length && src[i] == '/' && src[i + 1] == '*')
+            {
+                i += 2;
+                while (i + 1 < src.Length && !(src[i] == '*' && src[i + 1] == '/')) i++;
+                i++;
+                continue;
+            }
+            // ★ 字符串【原样保留】—— 这正是与 CodeOnly 的唯一区别
+            if (src[i] == '"')
+            {
+                bool verbatim = i > 0 && src[i - 1] == '@';
+                sb.Append(src[i]); i++;
+                while (i < src.Length)
+                {
+                    if (verbatim) { if (src[i] == '"') { if (i + 1 < src.Length && src[i + 1] == '"') { sb.Append(src[i]); i++; } else break; } }
+                    else { if (src[i] == '\\') { sb.Append(src[i]); i++; } else if (src[i] == '"') break; }
+                    if (i < src.Length) sb.Append(src[i]);
+                    i++;
+                }
+                if (i < src.Length) sb.Append(src[i]);
+                continue;
+            }
+            sb.Append(src[i]);
+        }
+        return sb.ToString();
+    }
+
     static string CodeOnly(string src)
     {
         var sb = new System.Text.StringBuilder(src.Length);

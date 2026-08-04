@@ -565,6 +565,10 @@ public sealed class ChatCenter
     //       要说清该做什么(见 ChatOutcome.Advice)。
     // ══════════════════════════════════════════════════════════════
 
+    /// <summary>每个会话上一次说过的预算提示 —— 用来避免每轮重复同一句(见 SendAndAskAsync)。
+    /// ★ 只在内存里:重启后重说一次是对的,那时用户也确实需要重新知道。</summary>
+    readonly Dictionary<string, string> _lastBudgetNotice = new();
+
     /// <summary>正在流式接收的那条回复的 MessageId(null = 没有在进行的请求)。</summary>
     public string? StreamingMessageId { get; private set; }
 
@@ -642,11 +646,27 @@ public sealed class ChatCenter
             _messages.Add(new ChatMessage(sessionId, ChatRole.System, res.Advice,
                                           DateTime.Now, null, NewMsgId()));
         }
-        // ★ 截断了就说出来 —— 静默丢历史 = 用户以为它记得,而它没有
-        if (plan.Truncated || plan.WindowIsGuess)
-            _messages.Add(new ChatMessage(sessionId, ChatRole.System,
-                                          plan.Caption + "。" + plan.Note,
+        // ★ 截断了就说出来 —— 静默丢历史 = 用户以为它记得,而它没有。
+        //
+        // ★★★ 但**只在它变了的时候说**(2026-08-05 实测改):第一版每一轮都印一遍,
+        //   而「窗口按最小的 8192 估」是**常态条件**、不是每轮新闻。
+        //   每轮刷一遍的后果不是"更透明",是**训练人忽略它** ——
+        //   跟一条会漂的断言训练人去用 --no-verify 是同一个失败模式(D85 第 5 条)。
+        //   ⇒ 判据:同一会话里,只有这句话**与上次不同**时才写。
+        //     ★ 方向仍然是宁可多说:第一次必说、内容一变就说,只是不重复同一句。
+        var notice = (plan.Truncated || plan.WindowIsGuess) ? plan.Caption + "。" + plan.Note : "";
+        if (notice.Length > 0 && (!_lastBudgetNotice.TryGetValue(sessionId, out var prev) || prev != notice))
+        {
+            _lastBudgetNotice[sessionId] = notice;
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System, notice,
                                           DateTime.Now, null, NewMsgId()));
+        }
+        else if (notice.Length == 0)
+        {
+            // ★ 条件恢复正常(不再截断、窗口也读到了)⇒ 忘掉上一句,
+            //   下次再出问题时会重新说 —— 不然"好了又坏了"这一轮会被吞掉。
+            _lastBudgetNotice.Remove(sessionId);
+        }
         Changed?.Invoke();
         return res;
     }

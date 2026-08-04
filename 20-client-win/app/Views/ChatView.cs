@@ -652,10 +652,15 @@ public sealed class ChatView : UserControl
                 Application.Current.Dispatcher.BeginInvoke(new Action(() =>
                 {
                     var ok = ConfirmDialog.Show("删除共享会话",
-                        // ★ 不能写"对家里所有设备生效"(审计 2026-07-31):中枢尚未接入,
-                        //   共享目前只是【本机的一个标记】,从来没上传过。把尚未发生的事写成确凿后果,
+                        // ★ 不能写"对家里所有设备生效"(审计 2026-07-31):共享目前只是
+                        //   【本机的一个标记】,从来没上传过。把尚未发生的事写成确凿后果,
                         //   比不说更坏 —— 用户会以为别的机器上也没了,而实际上什么都没发生。
-                        $"删除共享会话「{s.Title}」?\n\n这条标了共享。中枢尚未接入 —— 共享目前只是本机的一个标记,删除也只影响这台。接入之后才会同步到其它设备。\n\n" +
+                        // ★★ 2026-08-05 改措辞:原文写的是「中枢尚未接入」。模型接入当晚,
+                        //   用户刚跟中枢聊完天,再读到这句就会认为它是假的,于是相信共享已经生效
+                        //   (实测反馈:「我把副机的会话提升到共享,主机这边看不见」)。
+                        //   ⇒ 系统是**一件一件**接入的,笼统的「未接入」在第一件接上那刻全部失信。
+                        //     必须**指名道姓**说清缺的是哪一件。
+                        $"删除共享会话「{s.Title}」?\n\n这条标了共享,但★ 会话同步还没有做 —— 中枢上目前没有存放共享会话的地方,这个标记从来没上传过。所以删除【只影响这台机器】。\n\n" +
                         $"会先进「已删除」,{ChatCenter.TrashRetentionDays} 天内可恢复。",
                         confirmText: "删除", danger: true);
                     if (!ok) return;
@@ -685,9 +690,16 @@ public sealed class ChatView : UserControl
         {
             var ok = ConfirmDialog.Show("提升为共享",
                 $"把会话「{s.Title}」提升为共享?\n\n" +
-                $"· 整段对话({n} 条消息)会一起共享,家里其他设备都能看到\n" +
+                $"· 整段对话({n} 条消息)会一起标为共享\n" +
                 "· ★ 提升之后【无法收回】\n\n" +
-                "(中枢尚未接入,现在只做标记;接入后会上传到主机。)",
+                // ★★ 2026-08-05 改措辞(实测反馈:「副机提升到共享,主机这边看不见」)。
+                //   原文写「中枢尚未接入,现在只做标记」—— 而模型接入之后用户刚跟中枢聊过天,
+                //   这句话读起来就是假的,于是他合理地认为共享已经生效。
+                //   ★ 现在把缺的那件事**指名道姓**写出来,并且把「别的设备能看到」
+                //     从确凿后果降级为将来时 —— 它今天不成立。
+                "★ 但会话同步还没有做:中枢上没有存放共享会话的地方。\n" +
+                "现在它只是本机的一个标记,别的设备还看不到。\n" +
+                "等会话同步做出来之后,标了共享的会自动上传。",
                 confirmText: "提升为共享", danger: true);
             if (ok) TheApp.Chat.ShareSession(s.SessionId);
         }), System.Windows.Threading.DispatcherPriority.Background);
@@ -859,17 +871,27 @@ public sealed class ChatView : UserControl
             area.Children.Add(big);
         }
 
-        // ★★ AI 不回答的【真实原因】是模型尚未接入(P4),这与主机在不在线【无关】——
-        //   审计 2026-07-31:原来只在"已配对但离线"时提示,把"AI 不回答"归因到主机离线,
-        //   于是在线/未配对的用户看不到任何说明,还会误以为"开了主机就能用"。
-        //   现在把无条件的事实单说一句,主机离线只是【额外】一层。
-        var noAi = Ui.Caption("AI 模型尚未接入(P4)—— 消息会记在本机,现在还不会有回答。");
-        noAi.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-        noAi.Margin = new Thickness(2, 0, 2, 6);
-        area.Children.Add(noAi);
-        if (TheApp.Hub.IsPaired && TheApp.Hub.State != HubState.Online)
+        // ★★★ 2026-08-05:模型**已经接入**(P4-S11)。这里原来无条件印着
+        //   「AI 模型尚未接入(P4)—— 消息会记在本机,现在还不会有回答。」
+        //   接入当晚它就变成了**界面在说假话** —— 用户刚跟模型聊完,底下还写着它不会回答。
+        //   ★ 这正是本项目最恨的形状,而且方向最坏:一句**曾经为真**的话没跟着改。
+        //     (与 PDF 预览那次同款:接上了还留着那句『尚未接入』就是界面在骗人。)
+        //
+        //   ★ 新判据按【真实前提】分三层,每层只说自己那件事:
+        //     · 没配对 → 根本没有中枢可问(这条仍然为真);
+        //     · 配对了但主机不在线 → 中枢够不着;
+        //     · 都正常 → **什么都不说**。没有坏消息就不该占一行 ——
+        //       常驻的提示会被当成背景噪声,真出事那天也就没人看了。
+        if (!TheApp.Hub.IsPaired)
         {
-            var off = Ui.Caption("另外,主机未开启 —— AI 在主机上运行,接入之后还需要它在线。");
+            var noHub = Ui.Caption("还没有配对到中枢 —— 消息会记在本机,但没有 AI 可问。到「设备」里完成配对。");
+            noHub.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            noHub.Margin = new Thickness(2, 0, 2, 6);
+            area.Children.Add(noHub);
+        }
+        else if (TheApp.Hub.State != HubState.Online)
+        {
+            var off = Ui.Caption("主机未开启 —— AI 在主机上运行,它得在线才答得了。");
             off.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
             off.Margin = new Thickness(2, 0, 2, 6);
             area.Children.Add(off);

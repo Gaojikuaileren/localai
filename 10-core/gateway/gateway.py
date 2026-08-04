@@ -29,6 +29,7 @@ import e4_egress as e4
 import caller_identity
 import gpu_broker
 import gpu_policy
+import system_prompt
 import membership
 
 # §6.8 隔离服务账户 —— 绝不允许经网关触达记忆(D30 混淆代理防护)
@@ -1253,6 +1254,23 @@ async def chat_completions(request: Request):
     # ---- 转发到后端(llama-server,OpenAI 兼容)----
     # body 里的 model 换成后端认识的(llama-server 不校验具体名,传别名亦可)
     fwd = dict(body)
+    # ══════════════════════════════════════════════════════════════════
+    #  P4-S12:★★★ 注入**行为底线**提示词。
+    #
+    #  实机实测(2026-08-05,模型接入当晚第一轮):用户问「你记得我是谁吗」,
+    #  模型答「当然记得啦!我们之前聊过天气、日常趣事…」—— **那段"之前"根本不存在**,
+    #  会话就是从「你好」开始的。它在第二轮就凭空捏造了共同回忆,而且语气极笃定。
+    #
+    #  根因:全链路一句提示词都没有,模型落回自带聊天人设(那种人设的默认行为
+    #  就是营造熟稔感)。⇒ 这个项目从 P0 起的全部纪律是「绝不伪造」,
+    #  而产品面上第一个能开口的东西第二轮就在编。
+    #
+    #  ★ 放在中枢而不是客户端:客户端可以漏发、可以被改,将来还有桌宠/Agent/同传
+    #    好几个调用方。一条"靠每个调用方自觉带上"的底线**不是底线**。
+    #    与「权限按档位挂载而非运行时判断」同一条纪律:放在唯一权威那一侧。
+    # ══════════════════════════════════════════════════════════════════
+    if isinstance(fwd.get("messages"), list):
+        fwd["messages"] = system_prompt.ensure(fwd["messages"])
     upstream_url = backend.rstrip("/") + "/v1/chat/completions"
     stream = bool(body.get("stream", False))
 
