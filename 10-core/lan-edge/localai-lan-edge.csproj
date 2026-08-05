@@ -10,6 +10,9 @@
   <!-- reuse the S2 identity library sources (exclude its CLI entrypoint) -->
   <ItemGroup>
     <Compile Include="..\identity\Ca.cs" />
+    <Compile Include="..\identity\CertLifecycle.cs" />
+    <Compile Include="..\identity\Renewal.cs" />
+    <Compile Include="..\identity\ServerCertRotator.cs" />
     <Compile Include="..\identity\Store.cs" />
     <Compile Include="..\identity\Sas.cs" />
     <Compile Include="..\identity\Wordlist.cs" />

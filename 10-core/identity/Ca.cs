@@ -63,6 +63,22 @@ public static class Ca
     // CSR is copied. The CA key is opened from the TPM only to sign.
     public static X509Certificate2 IssueLeaf(string caKeyName, X509Certificate2 caCert, PublicKey subjectPublicKey,
         string subjectCn, string? dnsSan, string? uriSan, bool serverAuth, bool clientAuth, int days)
+        => IssueLeafWindow(caKeyName, caCert, subjectPublicKey, subjectCn, dnsSan, uriSan, serverAuth, clientAuth,
+                           DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(days));
+
+    /// <summary>
+    /// 同 <see cref="IssueLeaf"/>,但**有效期窗口由调用方给定**。
+    ///
+    /// ★ 为什么需要它(而不是只留 `days`):证书生命周期的断言必须能造出
+    ///   「昨天就过期了」「三天后到期」这种**样本**。按 ASSERTION-PITFALLS 第 5 条,
+    ///   这类外部量要【注入】而不是去等真实时间 —— 否则"到期前 N 天自动续"这条
+    ///   要等 80 天才能测一次,等于测不了。
+    /// ★ 它**不是**旁路开关:签发策略(服务端生成全部扩展、CSR 自带扩展一律忽略、
+    ///   PoP 已在 PublicKeyFromCsr 验过)一个字没松。CLI 上也没有任何命令能到达它。
+    /// </summary>
+    public static X509Certificate2 IssueLeafWindow(string caKeyName, X509Certificate2 caCert, PublicKey subjectPublicKey,
+        string subjectCn, string? dnsSan, string? uriSan, bool serverAuth, bool clientAuth,
+        DateTimeOffset notBefore, DateTimeOffset notAfter)
     {
         var req = new CertificateRequest(new X500DistinguishedName("CN=" + subjectCn),
                                          subjectPublicKey, HashAlgorithmName.SHA256);
@@ -84,8 +100,7 @@ public static class Ca
         RandomNumberGenerator.Fill(serial);
         using var caKey = new ECDsaCng(CngKey.Open(caKeyName, Prov));
         var gen = X509SignatureGenerator.CreateForECDsa(caKey);
-        return req.Create(caCert.SubjectName, gen,
-                          DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(days), serial);
+        return req.Create(caCert.SubjectName, gen, notBefore, notAfter, serial);
     }
 
     // Load a PKCS#10 CSR and VERIFY proof-of-possession (the signature over the CSR). Returns the
@@ -97,12 +112,20 @@ public static class Ca
         return csr.PublicKey;
     }
 
-    public static bool VerifyChainAndEku(X509Certificate2 leaf, X509Certificate2 caPublic, string requiredEku)
+    /// <param name="at">
+    /// 按哪个时刻校验有效期。★ 默认 null = **此刻**,生产路径的行为一个字没变
+    /// (ValidateClient 必须按当下判,否则过期证书就能进来)。
+    /// 只有测试会传值 —— 用来校验一张"60 天后才生效"的续签证书,
+    /// 否则它会因为 NotTimeValid 被判失败,而那是测试把时间点定错了、不是证书有问题。
+    /// </param>
+    public static bool VerifyChainAndEku(X509Certificate2 leaf, X509Certificate2 caPublic, string requiredEku,
+                                         DateTimeOffset? at = null)
     {
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         chain.ChainPolicy.CustomTrustStore.Add(caPublic);
+        if (at is not null) chain.ChainPolicy.VerificationTime = at.Value.UtcDateTime;
         if (!chain.Build(leaf)) return false;
         foreach (var ext in leaf.Extensions)
             if (ext is X509EnhancedKeyUsageExtension e)

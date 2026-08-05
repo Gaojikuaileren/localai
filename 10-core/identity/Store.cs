@@ -210,6 +210,80 @@ public sealed class Store
         return dead.Count;
     }
 
+    // ---------------------------------------------------------------- D? 设备证书续签(P3b.2 续期状态机)
+
+    /// <summary>
+    /// 完成一次设备证书续签:**新证书 → active,该设备其余在用的证书 → superseded**,generation++。
+    ///
+    /// ★ 「顺手把旧的置 superseded」是这条的**承重部分**,不是收尾工作。
+    ///   D49 在服务器证书那边记过同一个坑的另一面:「续签后删除 CurrentUser\My 里的旧证书,
+    ///   留着会继续用过期那张」。设备侧的等价物就是这一行 —— 不置 superseded 的话,
+    ///   旧证书会**一直 active 到它自己过期**,于是同一台设备在成员表里有两张同时有效的证书,
+    ///   而"吊销这台设备"之类的操作要面对"到底哪张才算数"。
+    ///
+    /// ★ 为什么 superseded 而不是 revoked:两者对 IsActive 的效果相同,但**含义相反** ——
+    ///   revoked = 机主把这台机器踢了(人的决定);superseded = 它自己换了张新证(例行维护)。
+    ///   混用会让设备列表把一次正常续签显示成一次解除。状态词表里本来就有 superseded(见文件头)。
+    ///
+    /// ★ 幂等:重复调用(complete 的成功响应丢了、客户端重试)不再递增 generation,
+    ///   也不改任何状态 —— 返回 false 表示"本次什么都没变"。
+    ///   不幂等的话每重试一次就 generation++,而世代号一动全家网关缓存都要失效。
+    /// </summary>
+    /// <returns>true = 这次真的完成了一次切换;false = 之前已经完成过(幂等重入)。</returns>
+    public bool CompleteRenewal(string deviceId, string newCertSha256)
+    {
+        var incoming = Certs.FirstOrDefault(x => x.DeviceId == deviceId && x.CertSha256 == newCertSha256)
+                       ?? throw new KeyNotFoundException("unknown renewal candidate for device " + deviceId);
+        if (incoming.Status == "active") return false;   // 已经切过了 —— 幂等重入,不动 generation
+        if (incoming.Status != "candidate")
+            throw new InvalidOperationException("only a candidate cert can be activated (status=" + incoming.Status + ")");
+
+        IdentityGeneration++;
+        foreach (var c in Certs.Where(x => x.DeviceId == deviceId && x.Status == "active"))
+            c.Status = "superseded";
+        incoming.Status = "active";
+        incoming.Generation = IdentityGeneration;
+
+        var d = Devices.FirstOrDefault(x => x.DeviceId == deviceId)
+                ?? throw new KeyNotFoundException("unknown device: " + deviceId);
+        // ★ 不动 d.Status:续签**不改变**这台设备是否被允许。若它已被 revoked,
+        //   续签不该把它复活 —— 那等于给一条被踢掉的设备开一道后门。
+        d.CurrentGeneration = IdentityGeneration;
+        return true;
+    }
+
+    /// <summary>
+    /// 清掉【续签签出了候选证书、却从来没完成切换】的半截 candidate 行。
+    ///
+    /// ★ 与 <see cref="SweepStaleProvisioning"/> 同源、同一个教训:设备记录在 approve 那刻就建,
+    ///   实测堆到过 6 条。续签的候选证书是**同一个形状的增长点** —— 每一次没走完的续签
+    ///   都会在 Certs 里永久留一行 candidate,而全仓没有任何东西让它过期。
+    ///   客户端只要连不上就会重试,一天能堆几十行。
+    ///
+    /// ★ 判据只用证书自己的 NotBefore,不用任何自报值(与 SweepStaleProvisioning 同一条纪律)。
+    /// ★ 落到 revoked 而不是 delete:留痕不删。且**必须**落地 —— 一条留着的 candidate
+    ///   配合泄漏的新私钥就是一张随时能被 complete 激活的证。
+    /// ★ 不动 IdentityGeneration:被清掉的 candidate 从来没 active 过,没有任何网关缓存需要失效。
+    /// </summary>
+    /// <returns>本次清掉几行。</returns>
+    public int SweepStaleRenewalCandidates(TimeSpan ttl, DateTimeOffset now)
+    {
+        var cutoff = now - ttl;
+        var dead = Certs.Where(c => c.Status == "candidate"
+                                    && DateTimeOffset.TryParse(c.NotBefore, out var nb) && nb < cutoff
+                                    // ★ 只扫【已经 active 过的设备】的候选证 —— 那才是"续签留下的半截"。
+                                    //   provisioning 设备的候选证归 SweepStaleProvisioning 管,
+                                    //   两个扫描器不许重叠,否则一次初次配对会被续签的扫描器掐掉。
+                                    && Devices.Any(d => d.DeviceId == c.DeviceId && d.Status == "active"))
+                          .ToList();
+        foreach (var c in dead) c.Status = "revoked";
+        return dead.Count;
+    }
+
+    /// <summary>按证书指纹找出它属于哪台设备(续签时用来把新证钉回**同一个** device_id)。</summary>
+    public string? DeviceIdOfCert(string certSha256) =>
+        Certs.FirstOrDefault(x => x.CertSha256 == certSha256)?.DeviceId;
+
     // Revoke the whole device: device -> revoked, all its live certs -> revoked; generation++.
     public void RevokeDevice(string deviceId)
     {

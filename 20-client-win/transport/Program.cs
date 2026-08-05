@@ -93,6 +93,167 @@ static async Task<int> Selftest()
         var (status, body) = await Transport.Call(profile, dial, "/v1/models");
         Assert(status == 200 && body == "ok", "business call over mTLS as active member -> 200 (" + status + ")");
 
+        // ══════════════════════════════════════════════════════════════════════
+        //  B16 · 词表版本必须能上线路 —— 否则换表当天每次配对都会被指控为中间人攻击
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            // 主机必须在 enroll 应答里报出自己的词表版本。★ 没有这个字段,客户端就**无法区分**
+            //   【两端词表版本不同】(索引一样、词不一样)与【真的有人在中间捣鬼】——
+            //   而 Transport.Pair 原先对两者只有一种说法:"possible MITM; aborting pairing"。
+            using var probe = new HttpClient(new SocketsHttpHandler
+            {
+                UseProxy = false,
+                SslOptions = { RemoteCertificateValidationCallback = (_, _, _, _) => true },
+            });
+            using var k3 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var body3 = JsonSerializer.Serialize(new
+            {
+                csr = Convert.ToBase64String(new CertificateRequest("CN=probe", k3, HashAlgorithmName.SHA256).CreateSigningRequest()),
+                clientNonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+                claimSecretHash = Convert.ToBase64String(SHA256.HashData(RandomNumberGenerator.GetBytes(32))),
+                protocolVersion = 1,
+                displayName = "wordlist-probe",
+            });
+            using var pr = await probe.PostAsync($"https://127.0.0.1:{PORT}/pair/enroll",
+                                                 new StringContent(body3, System.Text.Encoding.UTF8, "application/json"));
+            var pd = JsonDocument.Parse(await pr.Content.ReadAsStringAsync()).RootElement;
+            Assert(pd.TryGetProperty("sasWordlistVersion", out var wlv) && wlv.GetString() == Wordlist.Version,
+                   "★★ /pair/enroll 应答里带着主机的 SAS 词表版本(" + Wordlist.Version + ")—— 这是客户端区分"
+                   + "『版本不同』与『真的可疑』的唯一依据");
+
+            var note = Wordlist.VersionMismatchNote("localai-sas-wordlist-v0-" + "placeholder", Wordlist.Version);
+            // ★ 针拼出来写(ASSERTION-PITFALLS 第 1 条):否则这行断言自己的字面量会被扫描类守卫抓成"违例"。
+            foreach (var forbidden in new[] { "中间" + "人", "攻" + "击", "MI" + "TM" })
+                Assert(!note.Contains(forbidden),
+                       $"★★ 版本不一致的文案里**不出现**「{forbidden}」—— 版本落后与被攻击的处置完全相反,"
+                       + "把前者说成后者会让人不敢再配对,也永远想不到去更新客户端");
+            Assert(note.Contains("版本"), "★ 版本不一致的文案明确说出这是版本问题");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 丙 · TLS 失败四分类 —— 补上【本机设备证书过期】这一格(此前是空的)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var t0 = DateTimeOffset.UtcNow;
+
+            // ★★ 本机证书过期【不靠异常文本】判 —— 靠档案里那张证书自己的 NotAfter。
+            //   2026-08-05 实测:设备证书过期时客户端拿到的是
+            //   IOException -> Win32Exception「证书链是由不受信任的颁发机构颁发的」(本地化),
+            //   异常链里连 AuthenticationException 都没有 ⇒ 任何基于英文针的判据都扑空 ⇒ 归到 Offline
+            //   ⇒ 界面说「中枢没开机」,用户跑去重启一个没病的中枢。
+            var expiredProfile = new ClientProfile { CaCertB64 = profile.CaCertB64, KeyName = profile.KeyName, Dial = profile.Dial, EdgeUrl = profile.EdgeUrl, HubId = profile.HubId, DeviceCertB64 = profile.DeviceCertB64 };
+            // 造一张过期的设备证书塞进档案(同一个 CA 签,窗口显式给定)
+            var caFull = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(profile.CaCertB64));
+            var locJ = JsonDocument.Parse(File.ReadAllText(Path.Combine(secDir, "identity-locators.json"))).RootElement;
+            using (var k = new ECDsaCng(CngKey.Open(profile.KeyName, new CngProvider(Ca.TlsKeyProvider))))
+            {
+                var pub = PublicKey.CreateFromSubjectPublicKeyInfo(k.ExportSubjectPublicKeyInfo(), out _);
+                using var dead = Ca.IssueLeafWindow(locJ.GetProperty("ca_key_name").GetString()!, caFull, pub,
+                    "device-dead", null, "urn:localai:device:dead", false, true,
+                    t0.AddDays(-100), t0.AddDays(-1));
+                expiredProfile.DeviceCertB64 = Convert.ToBase64String(dead.RawData);
+            }
+
+            // 这就是实测到的那条异常链的形状(没有 AuthenticationException、消息是本地化的 Win32 文本)
+            var realShape = new HttpRequestException("An error occurred while sending the request.",
+                                new IOException("The decryption operation failed, see inner exception.",
+                                    new System.ComponentModel.Win32Exception(-2146893019, "证书链是由不受信任的颁发机构颁发的。")));
+
+            Assert(TlsFailure.Classify(realShape, expiredProfile, t0) == TlsFailureKind.LocalDeviceCertExpired,
+                   "★★★ 【本机设备证书过期】被判成 LocalDeviceCertExpired —— 这一格此前是空的,"
+                   + "旧判据会把它归成 Offline =「中枢没开机」,把人支去重启一个没病的中枢");
+
+            // ★ 同一条异常链,若本机证书**没有**过期,就不许再冒充这个结论
+            Assert(TlsFailure.Classify(realShape, profile, t0) != TlsFailureKind.LocalDeviceCertExpired,
+                   "★★ 反向:本机证书没过期时,同一条异常**不会**被判成本机证书过期(判据不是恒真的)");
+
+            // 主机服务器证书过期:这一句是 .NET 自己拼的,恒为英文、带 NotTimeValid
+            var srvExpired = new HttpRequestException("The SSL connection could not be established.",
+                                new System.Security.Authentication.AuthenticationException(
+                                    "The remote certificate is invalid because of errors in the certificate chain: NotTimeValid"));
+            Assert(TlsFailure.Classify(srvExpired, profile, t0) == TlsFailureKind.ServerCertExpired,
+                   "★ 【主机服务器证书过期】仍判 ServerCertExpired(D49 那条路径没被改坏)");
+
+            var untrusted = new HttpRequestException("x",
+                                new System.Security.Authentication.AuthenticationException(
+                                    "The remote certificate is invalid: UntrustedRoot"));
+            Assert(TlsFailure.Classify(untrusted, profile, t0) == TlsFailureKind.HubIdentityChanged,
+                   "★ 【链不到钉住的 CA】判 HubIdentityChanged(唯一该重新配对的一种)");
+
+            // ★★ 判不出来时**不猜**。裸的 AuthenticationException 不再兜底成 HubIdentityChanged ——
+            //   那个兜底给出的建议是"必须重新配对",而重新配对会删掉本机私钥。
+            Assert(TlsFailure.Classify(new System.Security.Authentication.AuthenticationException("Authentication failed."), profile, t0)
+                   == TlsFailureKind.Unknown,
+                   "★★ 认不出的 TLS 失败判 Unknown,**不再**兜底成『必须重新配对』(那条建议是破坏性的)");
+
+            // 四种处置文案必须各不相同,否则分开归因就白做了
+            var texts = new[] { TlsFailureKind.ServerCertExpired, TlsFailureKind.LocalDeviceCertExpired,
+                                TlsFailureKind.HubIdentityChanged, TlsFailureKind.Unknown }
+                        .Select(TlsFailure.Explain).ToArray();
+            Assert(texts.Distinct().Count() == 4, "★ 四种根因的处置文案互不相同");
+            Assert(TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired).Contains("不要点"),
+                   "★★ 本机证书过期的文案明确劝阻【重新配对】—— 那会删掉私钥,销毁一个只需续签的身份");
+
+            // ★ 过期【之前】就看得见(不必等握手失败)
+            Assert(TlsFailure.LocalCertPhase(profile, t0) == CertPhase.Healthy, "刚配对:本机证书 Healthy");
+            Assert(TlsFailure.LocalCertPhase(profile, t0.AddDays(85)) == CertPhase.Critical,
+                   "★★ 到期前 5 天:Critical —— **握手还好着的时候**就看得见,不是失败之后才归因");
+            Assert(TlsFailure.LocalCertPhase(profile, t0.AddDays(65)) == CertPhase.RenewDue,
+                   "★ 到期前 25 天:RenewDue(自动续签动手,但**不打扰用户**)");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 丁 · 设备证书续签:客户端驱动器(端到端)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var oldCert = profile.DeviceCertB64;
+
+            // 还没到窗口 -> 不动手
+            Assert(await Transport.RenewDeviceCertIfDue(profile, dial, stateDir, DateTimeOffset.UtcNow)
+                   == Transport.RenewOutcome.NotDue, "未进入续签窗口:客户端不动手");
+            Assert(profile.DeviceCertB64 == oldCert, "★ 不动手就是真的一个字节都没改");
+
+            // 进入窗口(注入"65 天后")-> 续一次
+            var due = DateTimeOffset.UtcNow.AddDays(65);
+            Assert(await Transport.RenewDeviceCertIfDue(profile, dial, stateDir, due) == Transport.RenewOutcome.Renewed,
+                   "★★ 进入续签窗口:客户端自动续签成功(全程**不经过配对流程**)");
+            Assert(profile.DeviceCertB64 != oldCert, "档案里的设备证书已换成新的");
+            Assert(profile.PendingDeviceCertB64.Length == 0 && profile.PendingRenewalId.Length == 0,
+                   "★ 完成之后 Pending 已清空(没有留半截状态)");
+
+            var reloaded = JsonSerializer.Deserialize<ClientProfile>(File.ReadAllText(Path.Combine(stateDir, "profile.json")))!;
+            Assert(reloaded.DeviceCertB64 == profile.DeviceCertB64, "★ 新证书已落盘(重启后仍然是它)");
+
+            // 新证书立刻可用
+            var (s2, b2) = await Transport.Call(profile, dial, "/v1/models");
+            Assert(s2 == 200 && b2 == "ok", "★★ 续签后用**新证书**做业务调用 -> 200 (" + s2 + ")");
+
+            // ★★ 崩溃重入:模拟"候选已签出、还没确认"就崩了
+            {
+                var crashed = JsonSerializer.Deserialize<ClientProfile>(File.ReadAllText(Path.Combine(stateDir, "profile.json")))!;
+                var csr2 = default(byte[]);
+                using (var k = new ECDsaCng(CngKey.Open(crashed.KeyName, new CngProvider(Ca.TlsKeyProvider))))
+                    csr2 = new CertificateRequest("CN=client", k, HashAlgorithmName.SHA256).CreateSigningRequest();
+                var (es, eb) = await Transport.Send(crashed, dial, HttpMethod.Post, "/identity/renew/enroll",
+                                                    new { csr = Convert.ToBase64String(csr2) });
+                Assert(es == 200, "重入用例:先签出一张候选证书 (" + es + ")");
+                var ed = JsonDocument.Parse(eb).RootElement;
+                crashed.PendingDeviceCertB64 = ed.GetProperty("candidateCert").GetString()!;
+                crashed.PendingRenewalId = ed.GetProperty("renewalId").GetString()!;
+                File.WriteAllText(Path.Combine(stateDir, "profile.json"), JsonSerializer.Serialize(crashed));
+                // ★ 此刻档案里两张都在:旧的还 active、新的挂在 Pending 上 —— 这正是崩溃现场的样子
+                Assert((await Transport.Call(crashed, dial, "/v1/models")).status == 200,
+                       "★★ 崩在'签出候选、未确认'之间:**旧证书仍然可用**(设备没有掉线)");
+
+                var outcome = await Transport.RenewDeviceCertIfDue(crashed, dial, stateDir, DateTimeOffset.UtcNow);
+                Assert(outcome == Transport.RenewOutcome.ResumedAndCompleted,
+                       "★★★ 重入:发现 Pending 就**把上一次做完**,而不是重新签一张(否则每崩一次多一行 candidate)");
+                Assert(crashed.PendingDeviceCertB64.Length == 0, "★ 重入完成后 Pending 清空");
+                Assert((await Transport.Call(crashed, dial, "/v1/models")).status == 200, "★ 重入完成后新证书可用");
+                profile = crashed;
+            }
+        }
+
         // sanity: a revoked device is refused
         var store = Store.LoadOrEmpty(idDir);
         store.RevokeDevice(store.Devices[0].DeviceId);
@@ -142,7 +303,7 @@ static WebApplication BuildTestEdge(string idDir, string secDir, Pairing pairing
     {
         var r = (await JsonDocument.ParseAsync(ctx.Request.Body)).RootElement;
         var en = pairing.Enroll(Convert.FromBase64String(r.GetProperty("csr").GetString()!), Convert.FromBase64String(r.GetProperty("clientNonce").GetString()!), Convert.FromBase64String(r.GetProperty("claimSecretHash").GetString()!), r.GetProperty("protocolVersion").GetInt32(), r.GetProperty("displayName").GetString() ?? "");
-        return Results.Json(new { requestId = en.RequestId, serverNonce = Convert.ToBase64String(en.ServerNonce), sas = en.Sas, caCert = Convert.ToBase64String(caPublic.RawData), hubId = pairing.HubId });
+        return Results.Json(new { requestId = en.RequestId, serverNonce = Convert.ToBase64String(en.ServerNonce), sas = en.Sas, caCert = Convert.ToBase64String(caPublic.RawData), hubId = pairing.HubId, sasWordlistVersion = Wordlist.Version });
     });
     app.MapPost("/pair/status", async (HttpContext ctx) =>
     {
@@ -163,6 +324,29 @@ static WebApplication BuildTestEdge(string idDir, string secDir, Pairing pairing
         pairing.Complete(ctx.Request.Query["requestId"].ToString(), Convert.ToHexString(SHA256.HashData(cert.RawData)));
         return Results.Text("active");
     });
+    // D? 设备证书续签两条路由(与 lan-edge 生产路由同形状,让客户端驱动器能被端到端测到)
+    var renewal = new Renewal(idDir, secDir);
+    app.MapPost("/identity/renew/enroll", async (HttpContext ctx) =>
+    {
+        var cert = ctx.Connection.ClientCertificate;
+        if (cert is null) return Results.StatusCode(401);
+        var r = (await JsonDocument.ParseAsync(ctx.Request.Body)).RootElement;
+        try
+        {
+            var res = renewal.Enroll(Convert.ToHexString(SHA256.HashData(cert.RawData)),
+                                     Convert.FromBase64String(r.GetProperty("csr").GetString()!), DateTimeOffset.UtcNow);
+            return Results.Json(new { renewalId = res.RenewalId, candidateCert = Convert.ToBase64String(res.CandidateDer), candidateSha256 = res.CandidateSha256, notAfter = res.NotAfter.ToString("O") });
+        }
+        catch (UnauthorizedAccessException) { return Results.Json(new { error = new { type = "lan_device_unknown" } }, statusCode: 401); }
+    });
+    app.MapPost("/identity/renew/complete", (HttpContext ctx) =>
+    {
+        var cert = ctx.Connection.ClientCertificate;
+        if (cert is null) return Results.StatusCode(401);
+        try { return Results.Json(new { ok = true, changed = renewal.Complete(ctx.Request.Query["renewalId"].ToString(), Convert.ToHexString(SHA256.HashData(cert.RawData))) }); }
+        catch (UnauthorizedAccessException) { return Results.StatusCode(401); }
+    });
+
     app.MapFallback((HttpContext ctx) =>
     {
         var cert = ctx.Connection.ClientCertificate;

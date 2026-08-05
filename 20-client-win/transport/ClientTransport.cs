@@ -28,6 +28,25 @@ public sealed class ClientProfile
     // Where to dial the hub ("ip:port"). Persisted so a paired client can reconnect on its own at
     // startup -- pairing happens once, never again (P3c). Empty on profiles written before P3c.
     public string Dial { get; set; } = "";
+
+    // ---------------------------------------------------------------- D? 设备证书续签(崩溃重入)
+    /// <summary>
+    /// 续签已签出、但**还没确认切换**的那张候选证书。空 = 没有进行中的续签。
+    ///
+    /// ★★ 为什么必须把它单独存下来,而不是直接覆盖 <see cref="DeviceCertB64"/>:
+    ///   续签有两步(签出候选 → 用候选握一次手来确认),而崩溃可能落在中间。
+    ///   · 若提前覆盖:崩在确认之前 ⇒ 档案里是新证书,而主机那边它还只是 candidate,
+    ///     IsActive 为假 ⇒ 客户端收到 401,界面会说「本设备已被主机解除」。
+    ///     一次成功的续签被显示成一次解除,而用户唯一想得到的动作是**重新配对**。
+    ///   · 若不存:崩在确认之前 ⇒ 那张候选证书彻底丢失,下次重新签一张,
+    ///     主机侧每崩一次就多留一行 candidate(与"同一台机器 6 条记录"同款的堆积)。
+    ///   ⇒ 两张都留着:旧的继续用(它还 active),新的挂在 Pending 上等确认。
+    ///     启动时只要看见 Pending 非空,就先去把那一次续签**幂等地做完**。
+    /// </summary>
+    public string PendingDeviceCertB64 { get; set; } = "";
+
+    /// <summary>与 <see cref="PendingDeviceCertB64"/> 配对的 renewalId(确认那一步要带上)。</summary>
+    public string PendingRenewalId { get; set; } = "";
 }
 
 public static class Transport
@@ -133,7 +152,25 @@ public static class Transport
         var t = new PairTranscript(1, hubId, SHA256.HashData(caDer), SHA256.HashData(caPublic.PublicKey.ExportSubjectPublicKeyInfo()),
                                    SHA256.HashData(serverLeaf), clientCsrSpkiSha, claimSecretHash, clientNonce, serverNonce, Convert.FromHexString(reqId));
         var sas = Sas.Derive(t).words;
-        if (!sas.SequenceEqual(hostSas)) throw new InvalidOperationException("SAS mismatch -- possible MITM; aborting pairing");
+        if (!sas.SequenceEqual(hostSas))
+        {
+            // ★★ 六个词对不上有**两种**完全不同的原因,处置正好相反:
+            //   · 两端 SAS 词表版本不同 ⇒ 索引一样、词不一样 ⇒ 去更新版本旧的那一端;
+            //   · 版本一样而词不一样   ⇒ transcript 被改过 ⇒ 真的可疑,立刻停手。
+            // 此前这里只有后一种说法(possible MITM),于是**一次纯粹的版本落后会被报成中间人攻击** ——
+            // 而"你正在被攻击"这个结论会让人不敢再配对,也不会去想到更新客户端。B16 换表当天就会踩到。
+            var hostWl = en.TryGetProperty("sasWordlistVersion", out var wv) ? wv.GetString() : null;
+            if (hostWl is not null && hostWl != Wordlist.Version)
+                throw new InvalidOperationException(Wordlist.VersionMismatchNote(hostWl, Wordlist.Version));
+            if (hostWl is null)
+                // 主机没报版本(P3b 时代的旧中枢)⇒ 我们**判不出**是哪一种,就别断言是攻击。
+                throw new InvalidOperationException(
+                    "六个词对不上,而这台主机没有报出它的 SAS 词表版本,因此无法区分"
+                    + "【两端词表版本不同】与【真的有人在中间捣鬼】。"
+                    + $"请先确认主机与本机的版本一致(本机 {Wordlist.Version});仍然对不上再当作可疑处理。");
+            throw new InvalidOperationException(
+                $"六个词对不上,而两端词表版本相同({Wordlist.Version})—— 这是可疑的,已中止配对。");
+        }
 
         await onSas(reqId, sas);   // human compares the six words; host approves out of band
 
@@ -281,4 +318,101 @@ public static class Transport
     }
 
     public static void DeleteKey(string keyName) { try { if (CngKey.Exists(keyName, SwProv)) CngKey.Open(keyName, SwProv).Delete(); } catch { } }
+
+    // ================================================================ D? 设备证书自动续签(客户端侧)
+    //
+    // 两步,与主机侧 Renewal 一一对应:
+    //   ① enroll  —— 用【当前 active 的旧证书】握手,提交一份新 CSR,拿回候选证书;
+    //   ② complete —— 用【候选证书】握手,主机确认它真的能用,才把旧证书退休。
+    //
+    // ★★ 顺序不能倒。② 存在的全部意义就是「在退休旧证书之前,先证明新证书真的握得上手」。
+    //   若先退休再验证,任何一个让新证书用不了的原因(SChannel 拿不到凭据句柄、
+    //   证书没落进存储、时钟偏差)都会让这台设备**在续签成功的那一刻掉线**,
+    //   而它原本还有几十天有效期 —— 自己把自己续死。
+    //
+    // ★ 复用同一把设备私钥(与 D49 服务器证书续签同口径),所以 CSR 用的是既有的 KeyName。
+    //   代价:私钥不轮换(见 Renewal.cs 顶部的记账)。收益:没有"新密钥已建、档案还指旧的"
+    //   这一类半截状态,也不会留孤儿 CNG 密钥。
+
+    /// <summary>一次续签尝试的结果。★ 失败必须**说得出是哪一步**,否则没法判断该重试还是该报警。</summary>
+    public enum RenewOutcome { NotDue, Renewed, ResumedAndCompleted, Failed }
+
+    /// <summary>
+    /// 若本机设备证书进入了续签窗口(或已过期),就续一次。**幂等、可重入、可重试**。
+    ///
+    /// ★ 崩溃重入:每次进来先看档案里有没有 <see cref="ClientProfile.PendingDeviceCertB64"/>。
+    ///   有 ⇒ 上一次崩在了"签出候选、还没确认"之间 ⇒ **先把那一次做完**,不重新签一张。
+    ///   主机侧 complete 是幂等的(已完成会返回"之前就完成过"),所以重复确认是安全的。
+    /// </summary>
+    /// <param name="now">注入的当前时间(测试要造"明天就过期"的档案)。</param>
+    public static async Task<RenewOutcome> RenewDeviceCertIfDue(
+        ClientProfile p, IPEndPoint dial, string stateDir, DateTimeOffset now, CancellationToken ct = default)
+    {
+        // ---- 先处理上一次没做完的续签(崩溃重入路径)----
+        if (!string.IsNullOrWhiteSpace(p.PendingDeviceCertB64) && !string.IsNullOrWhiteSpace(p.PendingRenewalId))
+        {
+            if (await TryCompleteRenewal(p, dial, stateDir, ct)) return RenewOutcome.ResumedAndCompleted;
+            return RenewOutcome.Failed;
+        }
+
+        var notAfter = TlsFailure.LocalCertNotAfter(p);
+        if (notAfter is null) return RenewOutcome.NotDue;   // 没档案/档案坏 —— 不是续签能解决的问题
+        var phase = CertLifecycle.Phase(notAfter.Value, now, CertLifecycle.DeviceCertDays);
+        if (!CertLifecycle.ShouldRenew(phase)) return RenewOutcome.NotDue;
+
+        // ---- ① enroll:用旧证书握手,交新 CSR ----
+        using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
+        var csr = new CertificateRequest("CN=client", key, HashAlgorithmName.SHA256).CreateSigningRequest();
+        var (st, body) = await Send(p, dial, HttpMethod.Post, "/identity/renew/enroll",
+                                    new { csr = Convert.ToBase64String(csr) }, ct);
+        if (st != 200) return RenewOutcome.Failed;
+
+        var r = JsonDocument.Parse(body).RootElement;
+        var candidateB64 = r.GetProperty("candidateCert").GetString()!;
+        var renewalId = r.GetProperty("renewalId").GetString()!;
+        using (var cand = Cert(Convert.FromBase64String(candidateB64)))
+        {
+            // ★ 拿到手先自己验一遍链:主机给的东西不因为"是主机给的"就免检。
+            using var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
+            if (!Ca.VerifyChainAndEku(cand, caPublic, Ca.OidClientAuth)) return RenewOutcome.Failed;
+        }
+
+        // ★★ 先落盘再确认。崩在这一行之后、确认之前 ⇒ 下次启动会走上面那条重入路径。
+        p.PendingDeviceCertB64 = candidateB64;
+        p.PendingRenewalId = renewalId;
+        SaveProfile(p, stateDir);
+
+        return await TryCompleteRenewal(p, dial, stateDir, ct) ? RenewOutcome.Renewed : RenewOutcome.Failed;
+    }
+
+    /// <summary>
+    /// ② complete:用**候选证书**握一次手。成功 ⇒ 把它提升为正式设备证书。
+    /// ★ 提升(改 DeviceCertB64 + 清 Pending)必须是**写档案这一个动作**里完成的,
+    ///   不能先清 Pending 再写 DeviceCertB64 —— 那中间崩一下,两张证书就都不在档案里了。
+    /// </summary>
+    static async Task<bool> TryCompleteRenewal(ClientProfile p, IPEndPoint dial, string stateDir, CancellationToken ct)
+    {
+        try
+        {
+            // 用候选证书(配同一把既有私钥)单独握一次手 —— 这就是"它真的能用"的证据。
+            var caPublic = Cert(Convert.FromBase64String(p.CaCertB64));
+            using var cand = Cert(Convert.FromBase64String(p.PendingDeviceCertB64));
+            using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
+            using var withKey = cand.CopyWithPrivateKey(key);
+            using var cli = Trusted(dial, caPublic, withKey);
+            using var resp = await cli.PostAsync(p.EdgeUrl + "/identity/renew/complete?renewalId=" + p.PendingRenewalId,
+                                                 new StringContent(""), ct);
+            if (!resp.IsSuccessStatusCode) return false;
+
+            p.DeviceCertB64 = p.PendingDeviceCertB64;
+            p.PendingDeviceCertB64 = "";
+            p.PendingRenewalId = "";
+            SaveProfile(p, stateDir);
+            return true;
+        }
+        catch { return false; }   // ★ 不吞进"成功":调用方据此重试并在连续失败时报警
+    }
+
+    static void SaveProfile(ClientProfile p, string stateDir)
+        => File.WriteAllText(Path.Combine(stateDir, "profile.json"), JsonSerializer.Serialize(p, J));
 }

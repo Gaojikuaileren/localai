@@ -1,4 +1,4 @@
-// P3b S2 -- localai-identity host-admin CLI.
+﻿// P3b S2 -- localai-identity host-admin CLI.
 //   selftest       S2.1: CA + issuance core against throwaway TPM keys
 //   selftest2      S2.2: init + membership-store lifecycle against a scratch dir (no production identity)
 //   init           mint the REAL hub identity into {state}/identity (one-time, consequential)
@@ -28,6 +28,18 @@ return (args.Length == 0 ? "" : args[0]) switch
     "set-device-member" => SetDeviceMember(args.Length > 1 ? args[1] : null, args.Length > 2 ? args[2] : null),
     _ => Usage(),
 };
+
+/// <summary>
+/// B16 换表前就已成立的六个 SAS **索引**(固定全零 transcript)。★ 冻结快照,用作回归钉:
+/// 索引由 HKDF 推出、与词表无关,所以换词表时它必须**一位都不变**。
+/// 它变红 = 动到的不只是显示层。
+/// </summary>
+/// <remarks>
+/// 取值方式(免得后人以为是"照着新代码抄的"):换表当天 <c>Sas.cs</c> 与 HEAD **逐字节相同**
+/// (<c>git diff --quiet HEAD -- 10-core/identity/Sas.cs</c> 已验),而索引在 <c>Wordlist</c> 被用到
+/// **之前**就算完了 ⇒ 这六个数就是换表前那份代码的输出。
+/// </remarks>
+static int[] FrozenSasIndices() => new[] { 274, 9, 590, 909, 1496, 1156 };
 
 static int Usage()
 {
@@ -272,6 +284,171 @@ static int Selftest5()
 
         var exp = Identity.ServerCertExpiry(idDir);
         Assert(Math.Abs((exp - notAfter).TotalSeconds) < 2, "ServerCertExpiry 读到的就是新到期时间(status 预警用它)");
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 一 · 生命周期判据(纯函数,注入时间 —— 不等 20 天)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var t0 = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+            int L = CertLifecycle.ServerCertDays;   // 30
+            Assert(CertLifecycle.RenewBeforeDays(L) == 10, "服务器证书:到期前 10 天进入自动续签窗口(寿命的 1/3)");
+            Assert(CertLifecycle.RenewBeforeDays(CertLifecycle.DeviceCertDays) == 30, "设备证书:到期前 30 天进入自动续签窗口");
+
+            // ★★ 承重的一条:告警线必须**显著晚于**续签线。
+            //   反过来的话,自动续签刚开始工作、还没跑第一次,用户就已经收到"快过期了"的告警 ——
+            //   一个正常运转也报警的系统,两周内就会被学会忽略,于是真出事那次也没人看。
+            Assert(CertLifecycle.AlarmBeforeDays(L) < CertLifecycle.RenewBeforeDays(L),
+                   "★★ 告警线严格晚于续签线 —— 系统正在自愈的那段时间【不打扰用户】");
+
+            Assert(CertLifecycle.Phase(t0.AddDays(20), t0, L) == CertPhase.Healthy, "剩 20 天:Healthy");
+            Assert(CertLifecycle.Phase(t0.AddDays(9), t0, L) == CertPhase.RenewDue, "剩 9 天:RenewDue(该动手了)");
+            Assert(CertLifecycle.Phase(t0.AddDays(2), t0, L) == CertPhase.Critical, "剩 2 天:Critical(该惊动人了)");
+            Assert(CertLifecycle.Phase(t0.AddDays(-1), t0, L) == CertPhase.Expired, "已过期:Expired");
+
+            Assert(!CertLifecycle.ShouldRenew(CertPhase.Healthy), "Healthy 不动手");
+            Assert(CertLifecycle.ShouldRenew(CertPhase.RenewDue), "RenewDue 动手");
+            // ★★ 这一条正是"最需要自愈时恰好停手"的反面。CA 十年有效、私钥还在,
+            //   过期之后 renew-server 照样签得出来 —— 把 Expired 排除掉才是真的没救。
+            Assert(CertLifecycle.ShouldRenew(CertPhase.Expired),
+                   "★★ **已过期也要续** —— 过期不是'来不及了';排除它等于在唯一真正影响用户的时刻停手");
+            Assert(!CertLifecycle.ShouldAlarm(CertPhase.RenewDue), "RenewDue **不**告警(系统正常自愈中)");
+            Assert(CertLifecycle.ShouldAlarm(CertPhase.Expired), "Expired 告警");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 二 · 自动轮换状态机(注入时钟 + 注入续签动作)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var t0 = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+            var cur = t0.AddDays(25);              // 还早
+            int renewCalls = 0;
+            var rot = new ServerCertRotator(() => cur, () => { renewCalls++; cur = cur.AddDays(30); });
+
+            Assert(rot.Tick(t0) == RotationOutcome.NotDue && renewCalls == 0, "还早:轮换器不动手");
+            cur = t0.AddDays(5);                   // 进入窗口
+            Assert(rot.Tick(t0) == RotationOutcome.Renewed && renewCalls == 1, "进入续签窗口:自动续了一次");
+            Assert(rot.Tick(t0) == RotationOutcome.NotDue && renewCalls == 1,
+                   "★ 续完立刻再跑一跳:不再动手 —— **重入的判据是证书自己的到期时间**,不是任何进度记录");
+
+            // ★★ 崩溃重入:轮换器没有自己的持久状态,所以"崩溃"等价于"换一个新实例继续跑"。
+            //   新实例只读证书 ⇒ 得出与旧实例完全相同的结论 ⇒ 不存在半套状态。
+            var rot2 = new ServerCertRotator(() => cur, () => { renewCalls++; cur = cur.AddDays(30); });
+            Assert(rot2.Tick(t0) == RotationOutcome.NotDue && renewCalls == 1,
+                   "★★ 崩溃后换新实例重入:结论一致、不重复续签(状态全在证书里,没有第二份可对不上)");
+
+            // fail-closed:续签抛错必须报 Failed,且**不**被吞成 NotDue
+            cur = t0.AddDays(3);
+            var boom = new ServerCertRotator(() => cur, () => throw new InvalidOperationException("TPM 忙"));
+            Assert(boom.Tick(t0) == RotationOutcome.Failed, "★ 续签抛错 -> Failed(不吞、不降级)");
+            Assert(boom.Status(t0).ConsecutiveFailures == 1 && boom.Status(t0).LastError!.Contains("TPM"),
+                   "★ 失败原因留在 Status 里(Edge 打横幅、/admin/ping 吐出去)");
+            Assert(boom.Tick(t0) == RotationOutcome.Failed && boom.Status(t0).ConsecutiveFailures == 2,
+                   "★ 失败后**继续重试**并累计次数 —— 停止重试等于静默退回手动");
+            Assert(boom.Status(t0).NeedsAttention, "★ 失败状态 NeedsAttention=true(这就是'必须响')");
+
+            // ★★ 最阴的一种失败:续签"成功"了但其实什么都没做。不复核的话它会被记成成功,
+            //   然后一路静默滑到证书真的过期 —— 而那时的症状是"客户端说中枢没开机"。
+            var stuck = new ServerCertRotator(() => cur, () => { /* 什么都不做 */ });
+            Assert(stuck.Tick(t0) == RotationOutcome.Failed,
+                   "★★ 续签没抛错但到期时间没前进 -> 判 **Failed**(否则假绿会一路滑到真过期)");
+            Assert(stuck.Status(t0).LastError!.Contains("没有前进"), "★ 并说得出是'没前进'这一种失败");
+
+            Assert(ServerCertRotator.Banner(boom.Status(t0)).StartsWith("ROTATE="),
+                   "★ 横幅以 ASCII 前缀开头(ASSERTION-PITFALLS 第 8 条:机器读的字符必须是 ASCII)");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 三 · 设备证书续签状态机(这一整格此前是空的)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var now = DateTimeOffset.UtcNow;
+            // ★ 续签发生在【配对之后 60 天】—— 那才是真的会进入续签窗口的时刻(90 天寿命,窗口 30 天)。
+            //   一开始我把 now 定在配对**之前**,于是"续"出来的证书比原证书还早过期,
+            //   断言当场判红。那不是产品的毛病,是测试把时间点定错了 —— 但它红得对:
+            //   「新证书有效期更长」本来就该是这条路径的硬要求。
+            var renewAt = now.AddDays(60);
+            var renewal = new Renewal(idDir, secDir);
+
+            // 先用配对流程造一台**真的 active** 的设备
+            var pairing = new Pairing(idDir, secDir);
+            pairing.OpenWindow(TimeSpan.FromMinutes(5));
+            var devKeyName = "localai-st5-dev-" + Guid.NewGuid().ToString("N")[..6];
+            using var devEc = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, devKeyName,
+                new CngKeyCreationParameters { Provider = new CngProvider(Ca.TlsKeyProvider), ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
+            try
+            {
+                var csr = new CertificateRequest("CN=client", devEc, HashAlgorithmName.SHA256).CreateSigningRequest();
+                var secret = RandomNumberGenerator.GetBytes(32);
+                var en = pairing.Enroll(csr, RandomNumberGenerator.GetBytes(32), SHA256.HashData(secret), 1, "renew-test");
+                pairing.Approve(en.RequestId);
+                var pst = pairing.Status(en.RequestId, secret);
+                var ch = Pairing.BuildChallenge(Convert.FromHexString(en.RequestId), pst.ClaimNonce!, Convert.FromHexString(pst.CandidateSha256!));
+                using var cand0 = pairing.Claim(en.RequestId, secret, devEc.SignData(ch, HashAlgorithmName.SHA256));
+                pairing.Complete(en.RequestId);
+                var oldFp = pst.CandidateSha256!;
+                var devId = Store.LoadOrEmpty(idDir).DeviceIdOfCert(oldFp)!;
+                Assert(Store.LoadOrEmpty(idDir).IsActive(oldFp), "续签前:设备证书 active");
+
+                // --- ① enroll:复用同一把私钥,只换有效期 ---
+                var newCsr = new CertificateRequest("CN=client", devEc, HashAlgorithmName.SHA256).CreateSigningRequest();
+                var rr = renewal.Enroll(oldFp, newCsr, renewAt);
+                using var newCert = X509CertificateLoader.LoadCertificate(rr.CandidateDer);
+                var caPub2 = X509CertificateLoader.LoadCertificate(File.ReadAllBytes(Path.Combine(idDir, "ca.cer")));
+
+                // ★ 按 renewAt 校验:这张证书 60 天后才生效,按"此刻"校验必然 NotTimeValid。
+                Assert(Ca.VerifyChainAndEku(newCert, caPub2, Ca.OidClientAuth, renewAt), "续签候选证书链得到同一个 CA + clientAuth");
+                Assert(Ca.HasUriSan(newCert, "urn:localai:device:" + devId),
+                       "★★ **device_id 一字未改** —— 续签不换身份,设备列表不会再长出一条");
+                Assert(newCert.GetPublicKeyString() == cand0.GetPublicKeyString(),
+                       "★ 公钥不变(复用同一把私钥,与 D49 服务器证书续签同口径)");
+                Assert(newCert.NotAfter > cand0.NotAfter, "新证书有效期更长");
+
+                // ★★ 关键顺序:enroll 之后、complete 之前,**旧证书仍然 active**。
+                //   若此刻就把旧的退休,任何让新证书用不上的原因都会让设备当场掉线 —— 自己把自己续死。
+                Assert(Store.LoadOrEmpty(idDir).IsActive(oldFp),
+                       "★★ 签出候选之后、确认之前:**旧证书仍然 active**(不确认就绝不退休旧的)");
+                Assert(!Store.LoadOrEmpty(idDir).IsActive(rr.CandidateSha256), "候选证书此时还**不是** active");
+
+                // 幂等:同一把 CSR 重来一次 ⇒ 同一张证书,不多签
+                var rr2 = renewal.Enroll(oldFp, newCsr, renewAt);
+                Assert(rr2.CandidateSha256 == rr.CandidateSha256,
+                       "★ enroll 幂等:同一 CSR 重试返回**同一张**候选证书(否则丢一次响应就多一行 candidate)");
+                Assert(Store.LoadOrEmpty(idDir).Certs.Count(c => c.Status == "candidate") == 1,
+                       "★ 成员表里始终只有一行 candidate —— 与'同一台机器 6 条记录'同款堆积不会再发生");
+
+                // --- ② complete:原子切换 ---
+                var genBefore = Store.LoadOrEmpty(idDir).IdentityGeneration;
+                Assert(renewal.Complete(rr.RenewalId, rr.CandidateSha256), "complete -> 完成一次切换");
+                var s2 = Store.LoadOrEmpty(idDir);
+                Assert(s2.IsActive(rr.CandidateSha256), "切换后:新证书 active");
+                Assert(!s2.IsActive(oldFp), "★★ 切换后:旧证书**立即失效**(superseded)—— D49「漏删旧的会继续用」的设备侧等价物");
+                Assert(s2.Certs.First(c => c.CertSha256 == oldFp).Status == "superseded",
+                       "★ 落到 superseded 而**不是** revoked —— revoked 是'机主把这台机器踢了',含义相反,会把一次正常续签显示成一次解除");
+                Assert(s2.IdentityGeneration == genBefore + 1, "切换让世代号 +1(网关缓存据此失效)");
+                Assert(s2.Devices.Count(d => d.DeviceId == devId) == 1, "★ 设备表里仍然只有这一台 —— 续签没有制造第二条记录");
+
+                // 幂等重入:complete 的成功响应丢了、客户端重试
+                Assert(!renewal.Complete(rr.RenewalId, rr.CandidateSha256), "★ complete 幂等:重试返回'之前就完成过'");
+                Assert(Store.LoadOrEmpty(idDir).IdentityGeneration == genBefore + 1,
+                       "★★ 幂等重试**不**再次递增世代号 —— 每重试一次就 +1 会让全家网关缓存反复失效");
+
+                // ★★ fail-closed:被吊销的设备**不能**靠续签把自己救回来
+                var s3 = Store.LoadOrEmpty(idDir); s3.RevokeDevice(devId); s3.Save(idDir);
+                bool refused = false;
+                try { renewal.Enroll(rr.CandidateSha256, newCsr, renewAt); }
+                catch (UnauthorizedAccessException) { refused = true; }
+                Assert(refused, "★★ 已被吊销的设备**不得**续签 —— 否则一张被踢掉的证书能自己换新的,「解除设备」整个被架空");
+
+                // 半截候选的清扫(与 SweepStaleProvisioning 同源的增长点)
+                var s4 = Store.LoadOrEmpty(idDir);
+                s4.Devices.First(d => d.DeviceId == devId).Status = "active";   // 复原以便测清扫
+                s4.AddCandidate(devId, "sn-stale", "FPSTALE", "spki", now.AddHours(-2).ToString("O"), now.AddDays(80).ToString("O"));
+                Assert(s4.SweepStaleRenewalCandidates(TimeSpan.FromMinutes(30), now) == 1, "★ 超时未确认的候选证书会被扫掉");
+                Assert(s4.Certs.First(c => c.CertSha256 == "FPSTALE").Status == "revoked", "★ 扫掉 = 落到 revoked(留痕不删)");
+                Assert(s4.SweepStaleRenewalCandidates(TimeSpan.FromMinutes(30), now) == 0, "★ 幂等:扫过的不再重复计数");
+            }
+            finally { Ca.DeleteKey(devKeyName); }
+        }
     }
     catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检抛异常: " + ex.Message); }
     finally
@@ -440,6 +617,50 @@ static int Selftest3()
         Assert(d1.words.SequenceEqual(Sas.Derive(t).words), "SAS is deterministic (same transcript -> same words)");
         Assert(!Sas.Derive(t with { ServerNonce = R(32) }).words.SequenceEqual(d1.words), "changing a transcript field changes the SAS");
         Assert(d1.indices.All(i => i is >= 0 and < 2048), "SAS indices in [0,2048)");
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  B16 · curated SAS 词表(v0 占位 -> v1)。用户要**念出口、逐字比对**的就是这六个词。
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            Assert(Wordlist.All.Count == 2048 && Wordlist.Size == 2048, "词表恰好 2048 个词(2^11,一词 11 位)");
+            Assert(Wordlist.All.Distinct().Count() == 2048, "★ 2048 个词互不相同(有重复就等于白扔熵)");
+            Assert(Wordlist.All.All(w => w.Length is >= 3 and <= 8 && w.All(ch => ch is >= 'a' and <= 'z')),
+                   "★ 全部是 3..8 个小写 ASCII 字母(跨终端、跨码页都不会变形 —— 见 ASSERTION-PITFALLS 第 8 条)");
+            // ★ 不足 4 字母的词取全词(与生成时的判据一致)。写成 w[..4] 会在 3 字母词上**抛异常**
+            //   而不是判红 —— 第一次跑就撞上了,这里记一笔免得下次再写错。
+            Assert(Wordlist.All.Select(w => w[..Math.Min(4, w.Length)]).Distinct().Count() == 2048,
+                   "★★ **前 4 个字母互不相同** —— 隔着房间比对时只念前四个字母就足以确定一个词");
+
+            // ★ 同音词是本表**最要命**的缺陷:念出口比对是它的主要用法,
+            //   而 right/write 听起来一模一样 ⇒ 一次真正的不一致会被听成"对上了"。
+            foreach (var (a, b) in new[] { ("right", "write"), ("pair", "pear"), ("peace", "piece"), ("wear", "where") })
+                Assert(!(Wordlist.All.Contains(a) && Wordlist.All.Contains(b)),
+                       $"★★ 同音词对 {a}/{b} 不同时在表内(念出口比对时它们无法区分)");
+
+            // ★★ 版本与内容【机械绑定】:改任何一个词都会让摘要对不上当前版本那一行,
+            //   于是想让断言重新变绿,只能新加一行版本 —— 版本字符串**无法**不跟着变。
+            var row = Wordlist.KnownVersions.Last();
+            Assert(row.Version == Wordlist.Version, "★ KnownVersions 最后一行必须是当前版本");
+            Assert(row.Sha256 == Wordlist.ContentSha256(),
+                   "★★ 词表内容摘要与当前版本对得上 —— **改词不改版本会当场判红**(这就是'版本必须跟着变'的机械保证)");
+            Assert(Wordlist.KnownVersions.Select(v => v.Version).Distinct().Count() == Wordlist.KnownVersions.Length,
+                   "★ 版本号互不重复(历史行只增不删)");
+            Assert(Wordlist.KnownVersions.Length >= 2 && Wordlist.KnownVersions[0].Sha256 is null,
+                   "★ v0 那一行留着当历史:它的词是算出来的、没有字面表,故摘要为 null");
+
+            // ★★★ 这一条是「换表只改显示的词,不改索引、不改安全性」的**唯一**硬证据。
+            //   索引由 HKDF 推出,与词表无关 ⇒ 换表时它**不该**动。
+            //   它一旦变红,说明动到的不只是显示层(改了 Sas 的推导或位切分),那时必须停下来重新审。
+            //   ★ 这是一条**回归钉**(冻结快照),不是规范推导 —— 值来自换表【之前】的同一段代码。
+            var frozen = new PairTranscript(1, "00000000-0000-0000-0000-000000000000",
+                new byte[32], new byte[32], new byte[32], new byte[32], new byte[32], new byte[32], new byte[32], new byte[16]);
+            var got = Sas.Derive(frozen).indices;
+            Assert(got.SequenceEqual(FrozenSasIndices()),
+                   "★★★ 固定 transcript 推出的六个**索引**与换表前逐位相同(" + string.Join(",", got) + ")"
+                   + " —— 换表没有碰索引,熵与 MITM 检测能力一位没变");
+            Assert(Wordlist.BitsPerWord == 11 && (1 << Wordlist.BitsPerWord) == Wordlist.Size,
+                   "★ 每词 11 位、2^11 == 表长(三个数是同一件事,不许各写各的)");
+        }
 
         // client key (TPM) + CSR + claim secret
         clientKeyName = "localai-selftest-pairclient-" + Convert.ToHexString(R(4)).ToLowerInvariant();

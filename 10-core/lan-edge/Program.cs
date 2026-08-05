@@ -544,8 +544,53 @@ static async Task<int> Run()
     if (!Identity.IsInitialized(idDir)) { Console.WriteLine("no hub identity (run: localai-identity init)"); return 1; }
     var app = Edge.Build(new EdgeConfig(idDir, secDir, "http://127.0.0.1:8080", 8443));
     Console.WriteLine("LAN Edge on https://127.0.0.1:8443 (loopback only; upstream 127.0.0.1:8080)");
-    await app.RunAsync();
+    using var rotCts = new CancellationTokenSource();
+    var rotLoop = RotationLoop(rotCts.Token);
+    try { await app.RunAsync(); }
+    finally { rotCts.Cancel(); try { await rotLoop; } catch (OperationCanceledException) { } }
     return 0;
+}
+
+// --------------------------------------------------------------------------- D? 服务器证书自动轮换循环
+//
+// ★★ 这个循环存在的理由,是 D49 只做了一半:它给了手动命令 + status 里 <10 天的提示,
+//   而那两样加起来的意思是「**要有人记得去看**」。实机证据:D49 于 07-29 裁定,
+//   到 08-05 勘察时 server.cer 的 LastWriteTime 仍是 07-29 —— 七天没人跑过一次 status。
+//
+// ★ fail-closed:每一跳的结果都打到控制台,失败**打红**并且**继续重试**。
+//   停止重试 = 静默退回手动 = 退回那个"要有人记得"的状态,而这正是本循环要消灭的东西。
+static async Task RotationLoop(CancellationToken ct)
+{
+    // ★ 一天一跳。续签窗口是 10 天(证书寿命的三分之一),所以在真正到期前
+    //   **至少有 10 次**独立的尝试机会 —— 一两次网络抖动或 TPM 忙不会把这件事拖没。
+    var period = TimeSpan.FromHours(24);
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var r = Edge.Rotator;
+            if (r is not null)
+            {
+                var outcome = r.Tick(now);
+                var status = r.Status(now);
+                Edge.LastRotation = status;
+                if (outcome == RotationOutcome.Renewed)
+                    Console.WriteLine($"[cert] 服务器证书已自动续签 -> {status.NotAfter:yyyy-MM-dd HH:mm}(已有连接未中断)");
+                else if (outcome == RotationOutcome.Failed)
+                {
+                    // ★ 必须**响**。用 stderr + ASCII 前缀,便于任何一层日志抓取
+                    //   (ASSERTION-PITFALLS 第 8 条:机器读的那几个字符必须是 ASCII)。
+                    Console.Error.WriteLine("[cert] !! " + ServerCertRotator.Banner(status));
+                    Console.Error.WriteLine("[cert] !! 自动续签失败,将继续重试。若一直失败,请在主机上手动执行:localai-identity renew-server");
+                }
+                else if (status.NeedsAttention)
+                    Console.Error.WriteLine("[cert] ! " + ServerCertRotator.Banner(status));
+            }
+        }
+        catch (Exception ex) { Console.Error.WriteLine("[cert] !! 轮换循环自身出错(不影响服务,将重试): " + ex.Message); }
+        try { await Task.Delay(period, ct); } catch (OperationCanceledException) { break; }
+    }
 }
 
 // --------------------------------------------------------------------------- selftest
@@ -562,6 +607,8 @@ static async Task<int> Selftest()
     var swProv = new CngProvider("Microsoft Software Key Storage Provider");   // SChannel-usable, still non-exportable
     string? caKey = null, srvKey = null, clientKeyName = null, swSrvKeyName = null;
     WebApplication? edge = null, upstream = null;
+    // 续签之后的**现役**设备证书(续签那一节填);null = 还没续过。
+    X509Certificate2? currentCert = null;
     try
     {
         var hub = Identity.Init(idDir, secDir);
@@ -657,11 +704,144 @@ static async Task<int> Selftest()
                    "/pair/enroll returns request id + six-word SAS");
         }
 
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 甲 · 【过期】与【被吊销】谁先命中 —— 2026-08-05 勘察结论,钉成常驻断言
+        // ══════════════════════════════════════════════════════════════════════
+        //  勘察问的是「成员表 active 校验会不会先于证书过期把请求挡掉」。实测**正好相反**:
+        //  证书有效期是在 **TLS 握手层**(ValidateClient -> X509Chain 判 NotTimeValid)判的,
+        //  连接当场断,MapFallback 里那句 Store.IsActive **一次都跑不到**。
+        //  ⇒ 过期先命中,而且它**连一个 HTTP 状态码都没有**;被吊销反而拿得到 401。
+        //  两者可归因性差一个量级,这正是设备证书过期难查的结构性原因。
+        {
+            // 用同一个 CA 签一张【昨天就过期】的设备证书(窗口显式给定,见 Ca.IssueLeafWindow)
+            var caCertFull = X509CertificateLoader.LoadCertificate(File.ReadAllBytes(Path.Combine(idDir, "ca.cer")));
+            var locJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(secDir, "identity-locators.json"))).RootElement;
+            var expKeyName = "localai-edge-expired-" + Convert.ToHexString(R(4)).ToLowerInvariant();
+            using var expEc = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, expKeyName,
+                new CngKeyCreationParameters { Provider = swProv, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
+            try
+            {
+                var expPub = PublicKey.CreateFromSubjectPublicKeyInfo(expEc.ExportSubjectPublicKeyInfo(), out _);
+                using var expiredLeaf = Ca.IssueLeafWindow(locJson.GetProperty("ca_key_name").GetString()!, caCertFull, expPub,
+                    "device-expired", null, "urn:localai:device:expired-test", false, true,
+                    DateTimeOffset.UtcNow.AddDays(-100), DateTimeOffset.UtcNow.AddDays(-1));
+
+                Assert(!Ca.VerifyChainAndEku(expiredLeaf, caPublic, Ca.OidClientAuth),
+                       "★ 过期设备证书在**链校验**这一层就被判死(ValidateClient 用的就是它)");
+
+                // 把它登记成 active 成员 —— 于是"成员表说它没问题",只有有效期是坏的。
+                // ★ 这样才能证明:挡住它的**不是**成员表,而是 TLS 层的有效期。
+                var expFp = Convert.ToHexString(SHA256.HashData(expiredLeaf.RawData));
+                Store.Mutate(idDir, s =>
+                {
+                    s.AddProvisioning("expired-test", "EXPIREDPC", null);
+                    s.AddCandidate("expired-test", expiredLeaf.SerialNumber, expFp, "spki",
+                                   expiredLeaf.NotBefore.ToString("O"), expiredLeaf.NotAfter.ToString("O"));
+                    s.Activate("expired-test", expFp);
+                });
+                Assert(Store.LoadOrEmpty(idDir).IsActive(expFp),
+                       "★ 前提摆正:这张过期证书在成员表里是 **active** —— 所以下面挡住它的只可能是有效期");
+
+                using var expiredWithKey = expiredLeaf.CopyWithPrivateKey(expEc);
+                int? httpStatus = null; string exShape = "";
+                try
+                {
+                    using var c = MkClient(expiredWithKey);
+                    using var r = await c.GetAsync(baseUrl + "/v1/models");
+                    httpStatus = (int)r.StatusCode;
+                }
+                catch (Exception ex)
+                {
+                    for (var e = ex; e is not null; e = e.InnerException) exShape += e.GetType().Name + "|";
+                }
+                // ★★ 承重:过期证书**根本没有 HTTP 状态码**。若哪天它变成 401,说明有效期校验
+                //   被挪到了应用层 —— 那是个好消息(可归因性变好),但届时客户端的归因逻辑必须跟着改,
+                //   所以这条断言要在那一刻**红给人看**,而不是默默通过。
+                Assert(httpStatus is null,
+                       $"★★ 【过期】设备证书:TLS 层就断了,**拿不到任何 HTTP 状态码**(异常链 {exShape})"
+                       + " —— 这就是它比'被吊销'难归因一个量级的根源");
+                Assert(!exShape.Contains("AuthenticationException"),
+                       "★★ 异常链里**没有** AuthenticationException —— 客户端旧判据靠它兜底,故对这一格完全失灵");
+
+                Store.Mutate(idDir, s => s.RevokeDevice("expired-test"));   // 收拾干净,别影响后面的断言
+            }
+            finally { Ca.DeleteKey(expKeyName); }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 乙 · 设备证书续签两条路由(端到端,真 HTTP + 真 mTLS)
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            // ① enroll:用【当前 active 的旧证书】握手,交一份新 CSR(复用同一把私钥)
+            var newCsr = new CertificateRequest("CN=client", clientEcdsa, HashAlgorithmName.SHA256).CreateSigningRequest();
+            string renewalId, candB64;
+            using (var c = MkClient(clientCert))
+            {
+                var body = JsonSerializer.Serialize(new { csr = Convert.ToBase64String(newCsr) });
+                using var r = await c.PostAsync(baseUrl + "/identity/renew/enroll", new StringContent(body, Encoding.UTF8, "application/json"));
+                Assert((int)r.StatusCode == 200, "续签 enroll(旧证书 mTLS)-> 200 (" + (int)r.StatusCode + ")");
+                var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+                renewalId = d.GetProperty("renewalId").GetString()!;
+                candB64 = d.GetProperty("candidateCert").GetString()!;
+            }
+            using var newCert = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(candB64));
+            Assert(Ca.HasUriSan(newCert, "urn:localai:device:" + deviceId),
+                   "★★ 续签出来的证书仍然钉着**同一个 device_id** —— 设备列表不会再长出一条");
+
+            // ★★ 确认之前:旧证书仍然能用。这条顺序是"续签不会把自己续死"的全部保障。
+            using (var c = MkClient(clientCert))
+            {
+                using var r = await c.GetAsync(baseUrl + "/v1/models");
+                Assert((int)r.StatusCode == 200, "★★ 签出候选之后、确认之前:**旧证书照常可用**(" + (int)r.StatusCode + ")");
+            }
+
+            // ② complete:用【候选证书】握手 —— 这就是"新证书真的能用"的证据
+            using var newWithKey = newCert.CopyWithPrivateKey(clientEcdsa);
+            using (var c = MkClient(newWithKey))
+            {
+                using var r = await c.PostAsync(baseUrl + "/identity/renew/complete?renewalId=" + renewalId, new StringContent(""));
+                Assert((int)r.StatusCode == 200, "续签 complete(候选证书 mTLS)-> 200 (" + (int)r.StatusCode + ")");
+                // 幂等:成功响应丢了、客户端重试
+                using var r2 = await c.PostAsync(baseUrl + "/identity/renew/complete?renewalId=" + renewalId, new StringContent(""));
+                Assert((int)r2.StatusCode == 200 &&
+                       JsonDocument.Parse(await r2.Content.ReadAsStringAsync()).RootElement.GetProperty("changed").GetBoolean() == false,
+                       "★ complete 幂等重试仍 200,且如实报 changed=false");
+            }
+
+            // 切换之后:新证书可用、旧证书立刻失效
+            using (var c = MkClient(newWithKey))
+            {
+                using var r = await c.GetAsync(baseUrl + "/v1/models");
+                Assert((int)r.StatusCode == 200, "切换后:**新证书**可以做业务调用 (" + (int)r.StatusCode + ")");
+            }
+            using (var c = MkClient(clientCert))
+            {
+                int code;
+                try { using var r = await c.GetAsync(baseUrl + "/v1/models"); code = (int)r.StatusCode; } catch { code = -1; }
+                Assert(code != 200, "★★ 切换后:**旧证书立刻失效**(" + code + ")—— D49「漏删旧的会继续用」的设备侧等价物");
+            }
+
+            // ★★ fail-closed:拿一张**已经不是 active** 的证书去发起续签,必须被拒
+            using (var c = MkClient(clientCert))
+            {
+                var body = JsonSerializer.Serialize(new { csr = Convert.ToBase64String(newCsr) });
+                using var r = await c.PostAsync(baseUrl + "/identity/renew/enroll", new StringContent(body, Encoding.UTF8, "application/json"));
+                Assert((int)r.StatusCode == 401,
+                       "★★ 用已 superseded 的旧证书发起续签 -> 401(" + (int)r.StatusCode + ")"
+                       + " —— 否则一张退休的证书能自己换新的,续签就成了绕过吊销的后门");
+            }
+
+            // 后面第 4 节要吊销 deviceId 并验证它连不上。★ 必须拿**现役**那张证书去试:
+            //   旧证书此刻已 superseded,拿它去测"吊销生效了没有"会恒过 —— 那是一条假断言,
+            //   它证明的是"退休证书不能用",而不是"吊销起作用了"。
+            currentCert = newCert.CopyWithPrivateKey(clientEcdsa);
+        }
+
         // 4. revoke the paired device -> its cert can no longer reach business
         var store = Store.LoadOrEmpty(idDir);
         store.RevokeDevice(deviceId);
         store.Save(idDir);
-        using (var c = MkClient(clientCert))
+        using (var c = MkClient(currentCert ?? clientCert))
         {
             HttpStatusCode code;
             try { using var r = await c.GetAsync(baseUrl + "/v1/models"); code = r.StatusCode; }
@@ -705,6 +885,22 @@ record EnrollNotice(string RequestId, string DisplayName, string[] Sas);
 
 static class Edge
 {
+    /// <summary>
+    /// 当前对外出示的服务器证书。★ 自动轮换续签之后**换这一个引用**,新握手立刻用上新证书,
+    /// 已建立的连接不受影响(见 ServerCertificateSelector 那段)。volatile:采样线程与请求线程都碰它。
+    /// </summary>
+    public static volatile X509Certificate2? CurrentServerCert;
+
+    /// <summary>
+    /// 服务器证书自动轮换器(fail-closed)。★ 它**没有自己的持久状态** —— 每一跳重读 server.cer
+    /// 的到期时间来决定要不要动手,所以崩在任何一步之后重入都不会留半套状态。
+    /// 详见 identity/ServerCertRotator.cs 顶部。
+    /// </summary>
+    public static ServerCertRotator? Rotator;
+
+    /// <summary>轮换器最近一次的可观测状态(/admin/ping 吐出去,主机界面据此报警)。</summary>
+    public static RotationStatus? LastRotation;
+
     public static WebApplication Build(EdgeConfig cfg, X509Certificate2? serverCertOverride = null, Pairing? pairingOverride = null)
     {
         var idDir = cfg.IdentityDir;
@@ -714,6 +910,21 @@ static class Edge
         // The self-test passes an SChannel-compatible (non-exportable software CNG) server cert so the
         // Edge's mTLS + membership + proxy + pairing LOGIC is fully exercised regardless of that gap.
         var serverCert = serverCertOverride ?? LoadServerCert(idDir, cfg.SecretsDir);
+        CurrentServerCert = serverCert;
+
+        // ★ 轮换器只在【生产路径】上装(没有 serverCertOverride 时)。自检传的是一张自己造的证书,
+        //   给它装轮换器等于让自检去续签**实机**的身份 —— 那是把测试的副作用打到生产上。
+        if (serverCertOverride is null)
+            Rotator = new ServerCertRotator(
+                readNotAfter: () => Identity.ServerCertExpiry(idDir),
+                renew: () =>
+                {
+                    Identity.RenewServerCert(idDir, cfg.SecretsDir);
+                    // ★ 续完立刻热换:重新物化一张带私钥的证书顶上去。不换的话续签等于没做 ——
+                    //   磁盘上是新的,对外出示的还是旧的那张,直到有人重启 Edge。
+                    CurrentServerCert = LoadServerCert(idDir, cfg.SecretsDir);
+                });
+
         var pairing = pairingOverride ?? new Pairing(idDir, cfg.SecretsDir);
         if (pairingOverride is null && cfg.OpenPairingWindowOnStart) pairing.OpenWindow(TimeSpan.FromMinutes(30));
         var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
@@ -730,7 +941,13 @@ static class Edge
             k.Limits.MaxRequestLineSize = 4 * 1024;
             k.Listen(cfg.Bind ?? IPAddress.Loopback, cfg.ListenPort, lo => lo.UseHttps(h =>
             {
-                h.ServerCertificate = serverCert;
+                // ★★ 用 Selector 而不是把证书钉死在 ServerCertificate 上 —— 这是「续签中不中断已有连接」
+                //   的**结构性**做法:Selector 在**每次新握手**时被调用,于是自动轮换换掉 CurrentServerCert
+                //   之后,新连接立刻拿到新证书,而**已建立的 TLS 连接一条都不受影响**(它们的会话密钥
+                //   早就协商好了,与证书对象无关)。
+                //   钉死 ServerCertificate 的话,换证书的唯一办法是重启 Edge —— 那会掐断正在进行的
+                //   聊天流(300 秒的流式连接),而 D49 当时给出的正是「请重启它以加载新证书」。
+                h.ServerCertificateSelector = (_, _) => Edge.CurrentServerCert ?? serverCert;
                 h.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
                 h.ClientCertificateValidation = (cert, _, __) => ValidateClient(cert, caPublic);
             }));
@@ -783,6 +1000,10 @@ static class Edge
                 sas = en.Sas,
                 caCert = Convert.ToBase64String(caPublic.RawData),
                 hubId = pairing.HubId,
+                // ★ B16:报出主机用的 SAS 词表版本。客户端拿它区分【版本不同】与【真的可疑】——
+                //   索引与词表无关,所以版本不一致时六个词必然对不上,而那**不是**中间人攻击。
+                //   不报的话,换表当天每一次配对都会被客户端指控为攻击(见 Transport.Pair)。
+                sasWordlistVersion = Wordlist.Version,
             });
         });
         app.MapPost("/pair/status", async (HttpContext ctx) =>
@@ -826,7 +1047,28 @@ static class Edge
              c.Connection.RemoteIpAddress?.Equals(IPAddress.IPv6Loopback) == true);
 
         app.MapGet("/admin/ping", (HttpContext c) =>
-            !IsAdmin(c) ? Results.NotFound() : Results.Json(new { ok = true, hubId = pairing.HubId, pairingWindowOpen = pairing.WindowOpen }));
+        {
+            if (!IsAdmin(c)) return Results.NotFound();
+            // ★ 轮换状态**必须**从这里吐出去。fail-closed 的意思不是"失败就停",是"失败必须被看见" ——
+            //   一个静默失败的轮换器会一路滑到证书过期,而那时的症状是实测过的那个:
+            //   客户端显示「中枢没开机」,用户跑去重启一个没病的中枢。
+            var rot = Rotator?.Status(DateTimeOffset.UtcNow) ?? LastRotation;
+            return Results.Json(new
+            {
+                ok = true,
+                hubId = pairing.HubId,
+                pairingWindowOpen = pairing.WindowOpen,
+                serverCert = rot is null ? null : new
+                {
+                    notAfter = rot.NotAfter.ToString("O"),
+                    daysLeft = Math.Round(rot.DaysLeft, 1),
+                    phase = rot.Phase.ToString(),
+                    consecutiveFailures = rot.ConsecutiveFailures,
+                    lastError = rot.LastError,
+                    needsAttention = rot.NeedsAttention,
+                },
+            });
+        });
 
         // 待批准的配对请求 + 六个词 + 剩余秒数(界面据此显示倒计时并到点让它消失)
         app.MapGet("/admin/pairing/pending", (HttpContext c) =>
@@ -902,6 +1144,54 @@ static class Edge
                 return Results.Json(new { ok = true, generation = gen });
             }
             catch (Exception ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 409); }
+        });
+
+        // ---------------------------------------------------------------- D? 设备证书续签(局域网口,两条)
+        //
+        // ★ 这两条**不是**业务路由,所以放在 MapFallback 之前显式声明:
+        //   业务面要求 IsActive,而续签的第二步(complete)恰恰是用一张**还没 active** 的候选证书打的
+        //   —— 落进业务面会被 401 挡死。这与 /pair/complete 的处境完全一样(见上面那段注释)。
+        //
+        // ★ 两条都不需要人工批准、不需要六词:身份没有变(同一个 device_id、同一个 CA、同一把私钥),
+        //   授权完全落在 mTLS 上。详见 identity/Renewal.cs 顶部。
+        var renewal = new Renewal(idDir, cfg.SecretsDir);
+
+        app.MapPost("/identity/renew/enroll", async (HttpContext ctx) =>
+        {
+            var cert = ctx.Connection.ClientCertificate;
+            if (cert is null) return Results.Json(new { error = new { type = "client_cert_required" } }, statusCode: 401);
+            var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
+            var r = (await JsonDocument.ParseAsync(ctx.Request.Body)).RootElement;
+            try
+            {
+                var res = renewal.Enroll(fp, Convert.FromBase64String(r.GetProperty("csr").GetString()!), DateTimeOffset.UtcNow);
+                return Results.Json(new
+                {
+                    renewalId = res.RenewalId,
+                    candidateCert = Convert.ToBase64String(res.CandidateDer),
+                    candidateSha256 = res.CandidateSha256,
+                    notAfter = res.NotAfter.ToString("O"),
+                });
+            }
+            // ★ 401 用的是**业务面同一个词**(lan_device_unknown):旧证书已不 active 的含义
+            //   与业务面那条一模一样,给两个词会让客户端多一条歧义分支。
+            catch (UnauthorizedAccessException) { return Results.Json(new { error = new { type = "lan_device_unknown" } }, statusCode: 401); }
+            catch (Exception ex) { return Results.Json(new { error = new { type = "renew_failed", detail = ex.Message } }, statusCode: 400); }
+        });
+
+        app.MapPost("/identity/renew/complete", (HttpContext ctx) =>
+        {
+            var cert = ctx.Connection.ClientCertificate;
+            if (cert is null) return Results.Json(new { error = new { type = "client_cert_required" } }, statusCode: 401);
+            var fp = Convert.ToHexString(SHA256.HashData(cert.RawData));
+            try
+            {
+                // changed=false 表示"之前就完成过"—— 幂等重试,同样回 200。
+                var changed = renewal.Complete(ctx.Request.Query["renewalId"].ToString(), fp);
+                return Results.Json(new { ok = true, changed });
+            }
+            catch (UnauthorizedAccessException) { return Results.Json(new { error = new { type = "lan_device_unknown" } }, statusCode: 401); }
+            catch (Exception ex) { return Results.Json(new { error = new { type = "renew_failed", detail = ex.Message } }, statusCode: 409); }
         });
 
         // everything else = business: requires an ACTIVE member cert, proxied to the gateway.
