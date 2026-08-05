@@ -155,7 +155,8 @@ print("\n=== 6. HTTP 面 ===")
 def _probe(tier, patch_lan=False):
     gateway.classify_caller = (lambda r: "lan-edge") if patch_lan else (lambda r, t=tier: t)
     if patch_lan:
-        gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device"}
+        # ★ 桩要长得像真的:真实现返回 device_id,而 device 归因与额度桶都靠它(审计 C1)。
+        gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device", "device_id": "DEV-" + fp[:6]}
     sync_policy.reset_quota()
     return {"x-localai-cert-sha256": "aa"} if patch_lan else {}
 
@@ -209,6 +210,34 @@ check("★★ 推送流崩了要【说出来】(静默断开会被客户端当�
       "event: error" in _ev)
 _nt = assert_helpers.code_only(gateway._sync_notify)
 check("★ 写完就叫,不攒批 —— 攒批就不实时了(D86 裁定②)", "set()" in _nt)
+
+print("\n=== ★★★ 在线状态(审计 C2:注册在生成器之外会永久留人 + 零断言)===")
+# ★★ 上一版把注册写在 sync_events 的**函数体**里、摘除写在 gen() 的 finally 里。
+#   客户端建连后立刻断开时,Starlette 会取消 stream_response ——
+#   **异步生成器从未启动,finally 就不会执行** ⇒ 那条记录永远留在名单里,
+#   而 key 是个 object(),再也够不着。后果恰好是这段代码自己说的最坏那个:
+#   **在线状态错了比没有更坏**(用户会以为东西已经同步过去了)。
+_se = assert_helpers.code_only(gateway.sync_events)
+_i_reg = _se.find("_sync_online[_me]")
+_i_gen = _se.find("async def gen()")
+check("★ 两处都找得到(位置判据的前提)", _i_reg >= 0 and _i_gen >= 0, f"reg={_i_reg} gen={_i_gen}")
+check("★★★ 注册必须在 gen() **里面** —— 写在外面时,连上就断的客户端会永久留在名单里",
+      _i_reg > _i_gen, f"reg={_i_reg} gen={_i_gen}")
+check("★★ 摘除在 finally(无论怎么走到那儿都要摘)", "finally" in _se and "_sync_online.pop" in _se)
+check("★★ 名单变了也要推 —— 「对方掉线了」没有任何数据变化伴随,不单独判就永远推不出去",
+      "now_online != seen_online" in _se)
+
+# ★★★ 审计 C1:device 一律由服务端解析,客户端自报不作数。
+#   它同时是「谁写的」的归因来源、和额度维令牌桶的 key ——
+#   自报的话每换一个名字就是一个新桶,pushes_per_min 形同虚设。
+_sd = assert_helpers.code_only(gateway._sync_device)
+check("★★★ 名字来自证书指纹反查的成员表,不是 body/query 的自报值",
+      "x-localai-cert-sha256" in _sd and "resolve_lan_principal" in _sd)
+check("★★ 解析不出身份 ⇒ 给 unknown(fail-closed),**不**退回自报值",
+      "unknown" in _sd)
+_push_src = assert_helpers.code_only(gateway.sync_push)
+check("★★★ 推送路径也不再采信 body 里的 device(它是额度桶的 key)",
+      "_sync_device(" in _push_src and 'body.get("device")' not in _push_src)
 
 print("\n=== ★★★ 删除 = 墓碑(2026-08-05 用户实测「删除时还是没法同步删除」)===")
 #  没有删除语义时,「连上就对齐」会把对方删掉的东西**推回去**:

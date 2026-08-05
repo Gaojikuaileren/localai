@@ -244,8 +244,21 @@ if ($Full) {
         }
     }
     if (-not (Test-Path $exe)) {
-        $broken += [pscustomobject]@{ File = 'client --selftest'; Why = "没有构建产物($exe)—— 先跑 90-ops\build-client.ps1" }
-        Write-Host "  X 客户端自检:没有构建产物,先出一次包" -ForegroundColor Red
+        # ★★ 两种"没有产物"要分开说,它们的下一步**完全相反**:
+        #   · 主树里没有 ⇒ 你还没出过包,去出一次;
+        #   · git worktree 里没有 ⇒ **本来就不会有**(bin/ 不进 git),
+        #     那不是缺陷,别去出包把这条红消掉 —— 照跑,把"没跑客户端"如实写进覆盖账。
+        #   判据用 .git 是文件(worktree 的 .git 是一个指向主库的文件,不是目录)。
+        $dotGit = Join-Path $repo '.git'
+        $inWorktree = (Test-Path $dotGit -PathType Leaf)
+        $why = if ($inWorktree) {
+            "没有构建产物 —— 这是一个 git worktree,bin/ 不进 git,**本来就不会有**。" +
+            "别为消这条红去出包;如实记成「本车道没跑客户端自检」即可"
+        } else {
+            "没有构建产物($exe)—— 先跑 90-ops\build-client.ps1"
+        }
+        $broken += [pscustomobject]@{ File = 'client --selftest'; Why = $why }
+        Write-Host ("  X 客户端自检:没有构建产物" + $(if ($inWorktree) { "(worktree 本来就没有,别出包)" } else { ",先出一次包" })) -ForegroundColor Red
     } elseif ($stale) {
         # 已在上面报过;这里**不跑** —— 跑出来的绿数字比不跑更有害
     } else {

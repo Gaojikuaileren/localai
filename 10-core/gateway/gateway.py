@@ -971,6 +971,38 @@ _sync_waiters: list = []
 _sync_online: dict = {}
 
 
+def _sync_device(request: Request, tier: str) -> str:
+    """这次请求算**哪台设备**。★ 只认服务端解析得出来的身份,客户端自报一律不信。
+
+    ══════════════════════════════════════════════════════════════════
+    ★★★ 2026-08-05 审计 C1:原来 device 完全由客户端 body/query 自报,三处后果 ——
+      ① **在线名单可任意命名**:副机报主机的名字,界面就显示主机在线两次;
+         或反过来让用户以为对方开着。而在线状态错了比没有更坏。
+      ② **冲突归因指错人**:「这条被另一台改过」就是拿它判的。
+      ③ **额度维可绕过**:sync_policy 的令牌桶 key 是 (tier, holder),
+         holder 就是这个自报值 —— 每换一个名字就是一个新桶,pushes_per_min 形同虚设。
+    ★ 而正确的值**就在手边**:lan-edge 注入验证过的证书指纹并剥掉客户端自带的
+      X-LocalAI-*,membership.active_device() 能由指纹反查出 device_id。
+      本文件自己写着的铁律就是「主体只来自成员表,客户端自报一律忽略」。
+    ⇒ 这不是新增机制,是**把已经存在的解析结果接上去**。
+    ══════════════════════════════════════════════════════════════════
+    """
+    fp = request.headers.get("x-localai-cert-sha256", "")
+    if fp:
+        p = resolve_lan_principal(fp)
+        if p is not None:
+            # ★ 成员表给不出 device_id 时,退到**指纹**本身 —— 它同样是服务端验过的,
+            #   只是可读性差一点。**绝不**因此退回客户端自报值:那正是这条要修的东西,
+            #   退回去等于绕了一圈把洞留在原地。
+            return str(p.get("device_id") or ("cert:" + fp[:12]))
+    # ★ 回环(trusted-local)没有证书 —— 它就是主机本身,给一个**固定**名字,
+    #   同样不看自报值:让本机进程随便自称,上面三条后果一条不少。
+    if tier == "trusted-local":
+        return "local"
+    # 解析不出身份 ⇒ 不给名字。fail-closed:宁可显示 unknown,不让它冒充别人。
+    return "unknown"
+
+
 def _sync_notify() -> None:
     """★ 非阻塞地叫醒所有订阅者。写完就叫,不攒批 ——
     D86 裁定②要求"内容更新也要实时",攒批就不实时了。"""
@@ -1036,7 +1068,12 @@ async def sync_push(request: Request):
         return JSONResponse(
             status_code=400,
             content={"error": {"message": "缺少 items 数组", "type": "missing_items"}})
-    device = _short_echo(body.get("device")) or "unknown"
+    # ★★ device 不再采信 body 里的自报值(审计 C1)——
+    #   它同时是「谁写的」的归因来源、和额度维令牌桶的 key。
+    #   自报的话:归因指错人,而且每换一个名字就是一个新桶,pushes_per_min 形同虚设。
+    #   ⇒ 先按回环档解一次(拿不到证书时用),再在 sync_guard 解出真档位后修正。
+    _pre_tier = gpu_principal(request)
+    device = _sync_device(request, _pre_tier)
     _tier, _deny = sync_guard(request, "sync_write", batch=len(items), holder=device)
     if _deny is not None:
         return _deny
@@ -1086,15 +1123,21 @@ async def sync_events(request: Request):
     #  ★ 订阅断开(关客户端、关机、拔网线)⇒ finally 里当场摘掉 ⇒ 另一台立刻看到它掉线。
     #    这同时就是用户说的「主机关闭要同步」。
     # ══════════════════════════════════════════════════════════════════
-    _who = _short_echo(request.query_params.get("device")) or "unknown"
+    # ★ 名字**只能由服务端解析**(见下面 _sync_device 的说明)—— 客户端自报一律不信。
+    _who = _sync_device(request, _tier)
     _me = object()                          # 这条连接自己的身份牌(同名多开也各算一条)
-    _sync_online[_me] = _who
-    _sync_notify()                          # ★ 上线也是一次变化,立刻推给别人
 
     def _roster():
         return sorted(set(_sync_online.values()))
 
     async def gen():
+        # ★★★ 注册必须在**生成器里面**(2026-08-05 审计 C2 抓出)。
+        #   写在函数体里的话:客户端建连后立刻断开时,Starlette 会把 stream_response
+        #   取消掉 —— **异步生成器从未启动,它的 finally 就不会执行**
+        #   ⇒ 这条记录永远留在名单里,而 key 是个 object(),再也够不着。
+        #   后果恰好是这段代码自己说的最坏那个:**在线状态错了比没有更坏**。
+        _sync_online[_me] = _who
+        _sync_notify()                      # ★ 上线也是一次变化,立刻推给别人
         try:
             snap = sync_store.store().snapshot()
             snap["online"] = _roster()
