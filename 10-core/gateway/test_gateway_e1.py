@@ -4,6 +4,15 @@
 无后端时 chat 转发会 ConnectError → 503,正好证明「E1 放行了」。
 """
 import sys
+
+# ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
+#   而 print 一抛异常会把整套脚本掀翻 —— 于是【一条断言变红】表现成【整套崩溃】,
+#   运行器只看到"没有汇总行",看不出是哪条没守住。
+#   S0 当年修的是 vram_gate 的生产路径,测试脚本这边一直没修 —— 2026-08-05 补上。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 from fastapi.testclient import TestClient
 import gateway
 

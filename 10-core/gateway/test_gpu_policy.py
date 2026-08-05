@@ -16,6 +16,15 @@
 import inspect
 import re
 import sys
+
+# ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
+#   而 print 一抛异常会把整套脚本掀翻 —— 于是【一条断言变红】表现成【整套崩溃】,
+#   运行器只看到"没有汇总行",看不出是哪条没守住。
+#   S0 当年修的是 vram_gate 的生产路径,测试脚本这边一直没修 —— 2026-08-05 补上。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -124,8 +133,15 @@ check("★ 拒绝时点名是【用户】维拦的 —— §6.8 是账户层面�
 print("\n=== 4. 逐档实跑 ===")
 _s, _c, _w, _l = _probe("trusted-local")
 check("trusted-local 读得到", _s.status_code == 200)
-check("trusted-local 变更能过权限层(落到业务层的 422 loader_absent)",
-      _c.status_code == 422 and _c.json()["error"]["type"] == "loader_absent", _c.status_code)
+# ★★★ 2026-08-05(S14):装载器接上了,这两条随之改守新事实。
+#   它们原本守「过了权限层 → 落到业务层的 loader_absent」;而 S14 之后
+#   speech.lite 走到的是另一条 fail-closed(它的 kind 启动方式尚未验证),
+#   lan-device 那条则可能撞上世代号(前一次请求已经把号推高了)。
+#   ★ 承重的性质没变:**权限层放行了**(不是 401/403),失败发生在【业务层】。
+#     ⇒ 判据改成盯这一点,而不是盯某个具体的业务错误码 ——
+#       盯具体错误码等于把"业务层今天怎么失败"焊进权限测试里。
+check("trusted-local 变更**过了权限层**(失败发生在业务层,不是 401/403)",
+      _c.status_code not in (401, 403), f"{_c.status_code}/{_dim(_c)}")
 check("★ trusted-local 是唯一能『卸掉全部』的档位(权限层放行)", _w.status_code in (409, 422))
 check("★ 但 ttl=10^9 仍被参数维拦住 —— 权限高不等于参数不封顶",
       _l.status_code == 403 and _dim(_l) == "param", f"{_l.status_code}/{_dim(_l)}")
@@ -133,7 +149,7 @@ check("★ 但 ttl=10^9 仍被参数维拦住 —— 权限高不等于参数不
 _s, _c, _w, _l = _probe(None, headers={"x-localai-cert-sha256": "aa"}, patch_lan=True)
 check("lan-device 读得到", _s.status_code == 200)
 check("lan-device 能改驻留集合(否则副机上的面板会变只读,是产品回退)",
-      _c.status_code == 422, _c.status_code)
+      _c.status_code not in (401, 403), f"{_c.status_code}/{_dim(_c)}")
 check("★★ lan-device 不能『卸掉全部』—— 拦在【工具】维",
       _w.status_code == 403 and _dim(_w) == "tool", f"{_w.status_code}/{_dim(_w)}")
 check("★ lan-device 不能拿独占租约(它会让整台中枢拒发一切新租约,而副机看不到主机屏幕)",

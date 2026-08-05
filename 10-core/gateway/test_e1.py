@@ -4,6 +4,15 @@
 非真实账户。反例用真实会出现的非凭证串(电话/订单号/日期/普通文本)控误报。
 """
 import sys
+
+# ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
+#   而 print 一抛异常会把整套脚本掀翻 —— 于是【一条断言变红】表现成【整套崩溃】,
+#   运行器只看到"没有汇总行",看不出是哪条没守住。
+#   S0 当年修的是 vram_gate 的生产路径,测试脚本这边一直没修 —— 2026-08-05 补上。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 from e1_detector import (
     scan, normalize, iban_valid, luhn_valid, steuer_id_valid,
     IBAN, TAX_ID_DE, CARD_PAN, ID_DOC, SECRET_PHRASE, HIGH_ENTROPY, E3_CATEGORIES,

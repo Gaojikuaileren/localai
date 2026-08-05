@@ -19,6 +19,15 @@ import inspect
 import re
 import sys
 
+# ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
+#   而 print 一抛异常会把整套脚本掀翻 —— 于是【一条断言变红】表现成【整套崩溃】,
+#   运行器只看到"没有汇总行",看不出是哪条没守住。
+#   S0 当年修的是 vram_gate 的生产路径,测试脚本这边一直没修 —— 2026-08-05 补上。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import assert_helpers
 import gateway
 import gpu_broker
@@ -892,13 +901,44 @@ check("★ 放行判据确实是 actual 与 committed 相等,不是「反正启�
 #   今天 actual_resident 就是 _committed(S7 已如实标注:无装载器 + WDDM 不暴露逐进程显存),
 #   所以 finish_startup 的判据等价于 committed == committed —— **它今天不是检测器,是形状**。
 #   这条断言的用处是:P5 让 actual 变成独立观测的那天,它会红,提醒回来把它当真检测器复核。
+# ★★★ 2026-08-05(S14)改写。这条原本是「记录恒真性」的绊线,写着
+#   「若这条红了 = actual 已变成独立观测」。装载器接上之后 actual **确实**变成独立观测了,
+#   而绊线**没有响** —— 因为它测的是一个【没接装载器】的 Broker,那条路径上恒真性仍然成立。
+#   ⇒ 绊线本身写窄了:它守的是"某个 Broker 实例",而该守的是**两条路径各自的性质**。
+#   ★ 这是「断言也会说假话」的又一种形态:不是说了假话,是**根本没在看那件事**。
+#     修法是把两条分支都显式钉住,而不是删掉。
 _probe = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
 _probe._committed = [_small]
-check("★★★ 记录事实:actual_resident 今天【就是】committed(判据恒真,等 P5 才成为真检测器)",
-      list(_probe.actual_resident) == list(_probe._committed),
-      "若这条红了 = actual 已变成独立观测 ⇒ 回去复核 finish_startup / I2 / I3 的 confidence 标注")
-check("★ 而 I2/I3 的 confidence 仍如实标着 self_reported(与上一条是同一个事实的两面)",
-      {r.invariant: r.confidence for r in _probe.check_invariants()}.get("I2") == "self_reported")
+check("★ 没有装载器时:actual 退回账本(恒真),confidence 如实标 self_reported",
+      list(_probe.actual_resident) == list(_probe._committed)
+      and {r.invariant: r.confidence for r in _probe.check_invariants()}.get("I2") == "self_reported")
+
+
+class _FakeLoaderObs:
+    """★ 独立事实源的替身:它报的东西**与账本无关** —— 这正是 S14 之后的真实形态。"""
+
+    def __init__(self, actual):
+        self._a = list(actual)
+
+    async def running(self):
+        return list(self._a)
+
+
+_probe2 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_probe2.attach_loader(_FakeLoaderObs([]))
+_probe2._committed = [_small]
+_probe2._actual_cache = []          # ★ 装载器说"一个都没装",而账本说装了一个
+check("★★★ 接上装载器后:actual **不再等于账本** —— 它是独立观测",
+      list(_probe2.actual_resident) != list(_probe2._committed),
+      f"actual={_probe2.actual_resident} committed={_probe2._committed}")
+check("★★ confidence 随之升为 observed(跟着事实源走,不是写死的)",
+      {r.invariant: r.confidence for r in _probe2.check_invariants()}.get("I2") == "observed")
+_probe2._state = gpu_broker.STATE_READY
+check("★★★ 而 I2 现在**真的抓得住谎**:账本说装了、实际没装 ⇒ 判违反。"
+      "这正是 S7 写它的目的 —— 它当了一天恒真式,今天才第一次有活干",
+      not {r.invariant: r.holds for r in _probe2.check_invariants()}["I2"])
+check("★ I3 的 confidence 与 I2 同源(同一个事实源,不该一个 observed 一个 self_reported)",
+      len({r.confidence for r in _probe2.check_invariants() if r.invariant in ("I2", "I3")}) == 1)
 
 print("\n=== 17. P4-S9 · 事务可【重试】—— S8 漏掉的那条路径 ===")
 # ★★ 这一组是补 S8 的洞:预检不过的落点是 STAGING,而 apply_intended 原来只收 READY
@@ -993,10 +1033,23 @@ with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
     check("★ 超预算 → 422 且 code 指出是哪道闸(不是笼统的「失败了」)",
           _r_over.status_code == 422 and _r_over.json()["error"]["type"].startswith("gate_"),
           _json.dumps(_r_over.json().get("error"), ensure_ascii=False)[:120])
-    check("★★★ 装载器缺席 → 422 loader_absent,**不是** 200 —— 失败必须长得和成功不一样",
-          _r_ok_path.status_code == 422
-          and _r_ok_path.json()["error"]["type"] == "loader_absent",
+    # ★★★ 2026-08-05(S14):装载器**接上了**,这条断言随之改守新事实。
+    #   它原本守「装载器缺席 → loader_absent」;而 S14 之后 speech.lite 走到的是
+    #   另一条 fail-closed:**它的 kind 启动方式尚未验证**(start-stack 只起过 llm 一个后端)。
+    #   ★ 两者都是 422、都不是 200 —— 承重的性质没变:**失败必须长得和成功不一样**。
+    #   ★ 但拒绝理由变了,断言必须跟着变 —— 守着旧理由就是守一句已经不成立的话
+    #     (这是「断言也会说假话」的第 6 次,见 ASSERTION-PITFALLS)。
+    _err_type = _r_ok_path.json().get("error", {}).get("type", "")
+    check("★★★ 装不了时 → 422,**不是** 200 —— 失败必须长得和成功不一样",
+          _r_ok_path.status_code == 422,
           f'{_r_ok_path.status_code} {_json.dumps(_r_ok_path.json().get("error"), ensure_ascii=False)[:120]}')
+    check("★★ 拒绝理由是【已登记的两种之一】,不是笼统失败",
+          _err_type in ("loader_absent", "gate_admission", "gate_static", "gate_dynamic")
+          or "尚未验证" in _json.dumps(_r_ok_path.json(), ensure_ascii=False),
+          _err_type)
+    check("★★★ 未验证过启动方式的 kind **fail-closed** —— "
+          "猜一套参数的后果不是「可能起不来」,是【看起来支持而第一次真用时才炸】",
+          "尚未验证" in _json.dumps(_r_ok_path.json(), ensure_ascii=False))
     check("★ 每种失败都回带变更后的快照(客户端一次就拿到重试所需的一切)",
           all("snapshot" in r.json() for r in (_r_over, _r_ok_path)))
     check("★ 事务没成时状态没被写坏:committed 仍为空",

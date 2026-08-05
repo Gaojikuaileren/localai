@@ -29,6 +29,7 @@ import e1_detector as e1
 import e4_egress as e4
 import caller_identity
 import gpu_broker
+import model_loader
 import gpu_policy
 import sync_policy
 import sync_store
@@ -699,6 +700,25 @@ async def _start_gpu_broker():
         gpu_broker.BROKER.start()
     except Exception:                                        # noqa: BLE001
         pass   # 采样器起不来不该拖垮网关启动;快照会以 stale=True + sampler_error 如实呈现
+    # ★★★ P4-S14:接上装载器 —— P4 清单最后一条。
+    #   在此之前所有事务的终点都是 loader_absent(那是**有意的**:
+    #   空实现会让每次事务都"成功"而显存里一个字节都没有)。
+    #   ★ 接上之后 actual_resident 变成**独立观测**,I2/I3 的 confidence 升为 observed,
+    #     而 S7 里那条钉住恒真性的断言会红 —— 那正是它被写下来的目的。
+    try:
+        gpu_broker.BROKER.attach_loader(model_loader.ModelLoader())
+    except Exception:                                        # noqa: BLE001
+        pass   # ★ 装载器接不上不该拖垮网关:退回 loader_absent 那条路径,如实拒绝事务
+    try:
+        # ★★ 先认领已经在跑的后端(中枢重启后的孤儿),**再**判 STARTING 的出口。
+        #   顺序反了的话:finish_startup 看到 actual(空) == committed(空) ⇒ 宣布 READY,
+        #   而端口上其实躺着上一批进程 —— 账本与现实从第一秒就分家。
+        adopted = await gpu_broker.BROKER.adopt_running()
+        if adopted:
+            log_upstream_problem("(loader)", "-", "adopted_orphans",
+                                 f"中枢重启后认领了已在跑的后端:{adopted}")
+    except Exception:                                        # noqa: BLE001
+        pass
     try:
         # P4-S9:结束 STARTING。★ 不加这一步的话 Broker **永远停在 STARTING**,
         #   而 apply_intended 只接受 READY ⇒ 整条事务路径从来走不到(实测 409 busy)。

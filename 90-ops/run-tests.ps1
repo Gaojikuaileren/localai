@@ -106,9 +106,18 @@ function Invoke-PySuite($file, $interp) {
     $out = & $interp $file.FullName 2>&1 | Out-String
     $code = $LASTEXITCODE
     $p = 0; $f = 0
-    if ($out -match '(\d+)\s*PASS') { $p = [int]$Matches[1] }
-    if ($out -match '(\d+)\s*FAIL') { $f = [int]$Matches[1] }
-    $sawSummary = $out -match 'PASS'
+    # ★★★ 2026-08-05 修:原判据是非锚定的 `(\d+)\s*FAIL`,它会匹配到**任何**
+    #   「数字 + FAIL」的片段 —— 包括某条 FAIL 行的 extra 里的状态码。
+    #   实测:一条断言打印 `FAIL  ... 422`(422 是 HTTP 状态码),
+    #   运行器报出 **FAIL=422**,而真实失败数是 **2**。
+    #   ★ 危害方向要看清:这一次是把 2 夸大成 422(吓人但不致命);
+    #     反方向同样可能 —— 输出里先出现一个「0 FAIL」的片段就会把真失败**盖掉**。
+    #   ⇒ 判据锚定到**汇总行本身**:必须是 "N PASS · M FAIL" 那一整行。
+    $summaryLine = ($out -split "`r?`n" | Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } | Select-Object -Last 1)
+    if ($summaryLine -and $summaryLine -match '(\d+)\s*PASS[^0-9]+(\d+)\s*FAIL') {
+        $p = [int]$Matches[1]; $f = [int]$Matches[2]
+    }
+    $sawSummary = [bool]$summaryLine
     return [pscustomobject]@{ Pass = $p; Fail = $f; Code = $code; Out = $out; SawSummary = $sawSummary }
 }
 

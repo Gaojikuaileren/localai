@@ -340,6 +340,10 @@ class Broker:
         #     若给它一个空实现,每次事务都会"成功"而显存里什么都没有 ——
         #     那是比"3 个装了 2 个仍报 READY"更坏的版本。
         self._loader = None
+        # ★ 装载器的观测结果缓存。actual_resident 是**同步**属性(快照、不变式都在读它),
+        #   而探活是 async I/O —— 不能在同步路径里跑。
+        #   ⇒ 由采样循环刷新;None = 还没探过,此时退回账本并保持 self_reported。
+        self._actual_cache: Optional[List[str]] = None
         self._free_history: List[Tuple[float, Optional[float]]] = []
 
     # ── 配置 ──────────────────────────────────────────────────────
@@ -385,6 +389,15 @@ class Broker:
                 # ★ 不在锁内做 I/O(见模块头硬约束)。nvml_free_gib 会起子进程,
                 #   在锁里跑会把整个网关(含 300s 流式聊天)卡住。
                 await asyncio.get_running_loop().run_in_executor(None, self._sample_once)
+                # ── P4-S14:刷新【独立观测】—— actual_resident 的事实源 ──
+                #   ★ 探活是 async I/O,而 actual_resident 是同步属性(快照与不变式都在读它),
+                #     所以在这里刷缓存。探活失败**不当成"什么都没装"** ——
+                #     那会让 I2 立刻判违反,而真相只是"这一轮没探到"。保留上一次的观测。
+                if self._loader is not None:
+                    try:
+                        self._actual_cache = await self._loader.running()
+                    except Exception as e:                   # noqa: BLE001
+                        self._sampler_error = f"loader_probe: {type(e).__name__}: {e}"
                 # ── RECONCILE_WATCH(P4-S7)★★ 只报告,不修复 ──
                 #   修复即"自动触发",而那正是 D10 存活下来的那半条明令禁止的。
                 #   这里只把结果记下来放进快照;要不要动手,是人的决定。
@@ -398,6 +411,31 @@ class Broker:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(self._sampler_loop())
+
+    def attach_loader(self, loader) -> None:
+        """接上装载器(P4-S14)。★ 只此一处 —— 装载器是唯一能动系统进程的东西。"""
+        self._loader = loader
+
+    async def adopt_running(self) -> List[str]:
+        """认领已经在跑的后端(中枢重启后的孤儿)。★ 以**现实**为准,不以账本为准。
+
+        ★★ 不认领的后果二选一,都很坏:以为没装 → 再起一个 → 端口冲突;
+          以为装了 → 账本与现实分家。
+        ★ 认领之后 committed 直接对齐现实 —— 这不是"信任账本",恰恰相反:
+          是**让账本去追现实**。
+        """
+        if self._loader is None:
+            return []
+        found = await self._loader.adopt()
+        if found:
+            async with self._lock:
+                for cid in found:
+                    if cid not in self._committed:
+                        self._committed.append(cid)
+                self._generation += 1
+                self._notify_locked()
+            self._actual_cache = await self._loader.running()
+        return found
 
     async def finish_startup(self) -> str:
         """P4-S9:`STARTING` 的出口。★ 此前**没有任何代码**能离开 STARTING ——
@@ -618,15 +656,30 @@ class Broker:
     def actual_resident(self) -> List[str]:
         """真实驻留集合。
 
-        ★★ **今天它不是独立观测**,而是 Broker 自己的账本(committed)。
-          原因有二,都是结构性的、不是没做完:
-            ① 装载器还不存在(装载/卸载端点属于后续片),没有"谁真的把模型装进去了"这个事实源;
-            ② WDDM 不暴露逐进程显存(本机实测 nvidia-smi --query-compute-apps 对全部进程
-               都是 [N/A]),所以也没法从 NVML 反推"现在装着哪几个"。
-          ⇒ 因此 I2 今天的置信度只能标 self_reported。**不标的话它就是个假检测器** ——
-            用自己的账本跟自己的账本比,永远相等。
+        ★★★ 2026-08-05(P4-S14):**这里终于变成独立观测了。**
+
+        S7 当时如实写着(原文保留,因为它记录了为什么曾经不能):
+          「今天它不是独立观测,而是 Broker 自己的账本(committed)。原因有二,
+            都是结构性的:① 装载器还不存在,没有"谁真的把模型装进去了"这个事实源;
+            ② WDDM 不暴露逐进程显存(本机实测 --query-compute-apps 全部是 [N/A])。
+            ⇒ I2 的置信度只能标 self_reported,**不标就是个假检测器** ——
+              用自己的账本跟自己的账本比,永远相等。」
+
+        原因①**已经消失**:装载器(model_loader.py)会起停真的后端进程,
+        「哪些组件真的装着」= **哪些后端进程活着且 /health 回 2xx** ——
+        那是一个与账本**完全无关**的事实源。
+        ⇒ I2/I3 的置信度随之从 self_reported 升为 observed;
+          S7 里那条**钉住恒真性**的断言会红,而那正是它被写下来的目的。
+
+        ★ 原因②仍然成立:我们知道「哪几个进程活着」,但**仍然不知道每个占了多少显存**。
+          所以非 AI 占用依旧只能算术反推、依旧标 inferred。**这一半没有解决,不得声称解决。**
+
+        ★ 装载器缺席时**退回账本**并保持 self_reported —— 不是"假装还是观测的"。
         """
-        return list(self._committed)
+        if self._loader is None:
+            return list(self._committed)
+        cached = self._actual_cache
+        return list(cached) if cached is not None else list(self._committed)
 
     def check_invariants(self) -> Tuple[InvariantReport, ...]:
         """求值 I2 / I3 / I4。★ 纯读,不改任何状态 —— 检测器不许有副作用。"""
@@ -649,7 +702,10 @@ class Broker:
         else:
             ok = True
             detail = f"state={self._state} 不是 READY ⇒ 前件为假,I2 自动成立(这是设计,不是放水)"
-        out.append(InvariantReport("I2", ok, detail, confidence="self_reported"))
+        # ★ 置信度跟着事实源走:有装载器 ⇒ actual 是**独立观测**(observed);
+        #   没有 ⇒ 退回账本,仍然是 self_reported。**不许固定写死其中一个。**
+        _conf = "observed" if self._loader is not None else "self_reported"
+        out.append(InvariantReport("I2", ok, detail, confidence=_conf))
 
         # ── I3 · 在的都该在(★ 无状态前件,任何状态下恒成立)──
         #  这条才是接住「某个 bug 装了不该装的」的那一条。
@@ -659,7 +715,10 @@ class Broker:
             "I3", not stray,
             ("没有不该在的组件" if not stray else
              f"★ 出现了既不在 committed 也不在 permitted_on_demand 的驻留:{stray} —— §9.3 告警"),
-            confidence="self_reported"))
+            # ★★ 与 I2 同一个 _conf:它们**读同一个 actual**,同一个事实源。
+            #   一个标 observed 一个标 self_reported 会让人以为它们的可信度不同 ——
+            #   2026-08-05 我改 I2 时漏了这一行,被新写的一条断言当场抓到。
+            confidence=_conf))
 
         # ── I4 · 电源轴与意图轴分离 ──────────────────────────
         #  power == off ⟹ actual == ∅ ∧ intended 不变。

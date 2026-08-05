@@ -61,6 +61,18 @@ display_note   = "P1-A7 测于当时的显示配置;分辨率/显示器数量未
 #        start-stack.ps1 里的端口是【写死的】(18081 / 8080),不来自这里;null 表示该组件不监听端口。
 #        同一份端口事实目前散在本文件、start-stack.ps1、各服务默认值三处,接 Broker 时收敛到一处。
 # =============================================================================
+# ══════════════════════════════════════════════════════════════════════
+#  ★ 2026-08-05(P4-S14)新增 model_rel / ctx / ngl —— 按需装载要用的启动参数。
+#
+#  ★★ 只给 kind = "llm" 的组件补了。其余(speech / vlm / comfyui)**故意留空**:
+#    `start-stack.ps1` 从来只起过 8B 一个后端,别的怎么起【没有人验证过】。
+#    编一套没跑过的启动参数写进这里,会让装载器看起来支持它们 ——
+#    而第一次真去起的时候才发现参数不对。⇒ 装载器对没有启动规格的组件**fail-closed**,
+#    如实报「这个组件的启动方式尚未验证」,不猜。
+#
+#  ★ model_rel 是**相对 paths.toml 的 models 根**的路径(§11.1:配置里不写绝对路径)。
+# ══════════════════════════════════════════════════════════════════════
+
 # ★ 2026-08-04(P4-S9)新增 display:组件的【人话名】。
 #   起因:客户端 Views/ModelCatalog.cs 自造了一份清单(chat.8b / speech / image),
 #   那是**第三套词汇** —— 跟网关别名对不上,跟这里的组件 id 也对不上,谁也映射不到谁。
@@ -73,6 +85,9 @@ peak = 5.92
 kind = "llm"
 port = 18081
 note = "日常主力。P1-A2 实测(q8_0 KV;F16 下是 6.97)"
+model_rel = "qwen3-8b\\Qwen3-8B-Q4_K_M.gguf"
+ctx = 16384
+ngl = 99
 
 [components."llm.assistant.8b@32k"]
 display = "长上下文 · 8B / 32K"
@@ -80,6 +95,9 @@ peak = 7.19
 kind = "llm"
 port = 18081
 note = "长上下文。q8_0 省 2.04,使 32K 从「日常用不了」变可用(B3b 零质量损失)"
+model_rel = "qwen3-8b\\Qwen3-8B-Q4_K_M.gguf"
+ctx = 32768
+ngl = 99
 
 [components."llm.assistant.8b@8k"]
 # ★ 2026-08-04 更正:原值 5.0 是转抄错误 —— 5.0 是 NUM-1 表里这一行的【权重】列,
@@ -93,6 +111,9 @@ peak = 5.31
 kind = "llm"
 port = 18081
 note = "语音场景(assistant.voice 契约)。P1 实测 5.31(F16 下 5.83)"
+model_rel = "qwen3-8b\\Qwen3-8B-Q4_K_M.gguf"
+ctx = 8192
+ngl = 99
 
 [components."llm.assistant.30b-a3b@32k"]
 display = "深度模式 · 30B-A3B"
@@ -100,6 +121,9 @@ peak = 11.9
 kind = "llm"
 port = 18082
 note = "深度模式。ngl30 · 38% offload · 57.5 tok/s(MoE 只 3B 活跃,offload 几乎免费)"
+model_rel = "qwen3-30b-a3b\\Qwen3-30B-A3B-Q4_K_M.gguf"
+ctx = 32768
+ngl = 30
 
 [components."speech.lite"]
 display = "语音 · 听写 + 朗读(轻)"
