@@ -377,6 +377,16 @@ public partial class App : Application
             {
                 try
                 {
+                    // ★★★ 墓碑先判(2026-08-05):删除是一条**会传播的记录**,
+                    //   不是"库里少了一行"。少了一行的话,另一台一对齐就又把它推回来了。
+                    if (x.TryGetProperty("deleted", out var dv)
+                        && dv.ValueKind == System.Text.Json.JsonValueKind.True)
+                    {
+                        var did = S(x, "id");
+                        if (kind == "todos") Todos.AbsorbRemoteDelete(did);
+                        else if (kind == "sessions") Chat.AbsorbRemoteDelete(did);
+                        continue;                       // messages 跟着会话走,不单独立碑
+                    }
                     if (kind == "todos")
                     {
                         var t = new TodoItem(

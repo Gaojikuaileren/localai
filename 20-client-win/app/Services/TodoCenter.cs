@@ -114,6 +114,22 @@ public sealed class TodoCenter
     /// <summary>当前**全部**该同步的待办。★ 连上中枢时用来对齐(见 SyncClient.ReconcileAsync)。</summary>
     public IEnumerable<SyncItem> SharedSnapshot() => _items.Where(ShouldSync).Select(ToSyncItem);
 
+    /// <summary>
+    /// 删除一条家庭待办的**上线形态**(墓碑)。★ 删除必须是一条会传播的记录 ——
+    /// 只是本地把它拿掉的话,另一台一对齐就又把它推回来了(用户实测:「删除时还是没法同步删除」)。
+    /// </summary>
+    public static SyncItem ToTombstone(string id) => new("todos", new { id, deleted = true });
+
+    /// <summary>收到远端的删除。★ 本地也删掉,并且**不再**把它算进 SharedSnapshot。</summary>
+    public bool AbsorbRemoteDelete(string id)
+    {
+        var i = _items.FindIndex(x => x.Id == id);
+        if (i < 0) return false;
+        _items.RemoveAt(i);
+        Changed?.Invoke();
+        return true;
+    }
+
     void PushIfShared(TodoItem t)
     {
         if (Sync is null || !ShouldSync(t)) return;
@@ -150,7 +166,14 @@ public sealed class TodoCenter
 
     public void Remove(string id)
     {
-        if (_items.RemoveAll(x => x.Id == id) > 0) Changed?.Invoke();
+        // ★★ 先看它是不是家庭待办 —— 拿掉之后就问不出来了。
+        //   只有共享过的才推墓碑:个人待办从来没上去过,推墓碑只会被服务端拒。
+        var wasShared = _items.FirstOrDefault(x => x.Id == id) is { } t && ShouldSync(t);
+        if (_items.RemoveAll(x => x.Id == id) > 0)
+        {
+            if (wasShared) Sync?.Enqueue(ToTombstone(id));   // 删除也要同步(用户实测)
+            Changed?.Invoke();
+        }
     }
 
     /// <summary>合并一条来自中枢的家庭待办。★ 返回是否真的变了(没变就不刷界面)。</summary>

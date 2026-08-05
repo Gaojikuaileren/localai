@@ -101,8 +101,25 @@ class SyncStore:
 
     # ── 范围判据(D86 裁定①)────────────────────────────────────────
     @staticmethod
-    def in_scope(kind: str, rec: dict, known_sessions: Optional[Dict[str, dict]] = None) -> Tuple[bool, str]:
+    def in_scope(kind: str, rec: dict, known_sessions: Optional[Dict[str, dict]] = None,
+                 existing: Optional[Dict[str, dict]] = None) -> Tuple[bool, str]:
         """这条该不该收。★ 返回 (收不收, 为什么) —— 拒收要说得出理由。"""
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ 删除 = 墓碑(2026-08-05 用户实测「删除时还是没法同步删除」)。
+        #
+        #  没有删除语义时,「连上就对齐」会把对方删掉的东西**推回去**:
+        #  A 删了 → B 开机不知情 → B 把本地那份又推上来 → A 那边复活。
+        #  所以删除必须是**一条会传播的记录**,不能是"把行去掉"。
+        #
+        #  ★ 判据:**只能删已经共享过的**。库里没有这个 id 就拒 ——
+        #    否则一条伪造的墓碑能凭空在别人机器上删东西,而且它不需要带 scope,
+        #    也就绕过了范围闸。fail-closed:认不出来源的删除一律不收。
+        # ══════════════════════════════════════════════════════════════
+        if rec.get("deleted"):
+            rid = str(rec.get("id") or "")
+            if rid and (existing or {}).get(rid) is not None:
+                return (True, "")
+            return (False, f"删除的记录 {rid[:12]}… 不在共享库里 —— 只能删已经共享过的")
         if kind == "todos":
             sc = str(rec.get("scope") or "")
             return (sc == "家庭", "" if sc == "家庭" else f"待办范围是「{sc or '未标'}」,不是家庭 —— 个人待办不同步(D52)")
@@ -113,6 +130,10 @@ class SyncStore:
             s = (known_sessions or {}).get(sid)
             if s is None:
                 return (False, f"消息所属会话 {sid[:8]}… 不在共享会话里 —— 不收")
+            # ★ 会话已被删(墓碑)⇒ 它的消息也不再收。否则删掉一个共享会话之后,
+            #   另一台的对齐还会把整段消息推回来,而会话本身已经没了 —— 变成孤儿消息。
+            if s.get("deleted"):
+                return (False, f"所属会话 {sid[:8]}… 已删除 —— 不收")
             return (bool(s.get("shared")), "" if s.get("shared") else "所属会话未共享 —— 不收")
         return (False, f"未登记的集合 {kind}")
 
@@ -137,7 +158,7 @@ class SyncStore:
         rid = str(rec.get("id") or "")
         if not rid:
             return {"ok": False, "code": "missing_id", "message": "记录缺 id"}
-        ok, why = self.in_scope(kind, rec, self._cache.get("sessions"))
+        ok, why = self.in_scope(kind, rec, self._cache.get("sessions"), self._cache.get(kind))
         if not ok:
             # ★ 拒收不是错误,是**按设计**。但必须说清为什么,否则客户端只会看到"没同步"。
             return {"ok": False, "code": "out_of_scope", "message": why}

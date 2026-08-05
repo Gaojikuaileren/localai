@@ -421,8 +421,32 @@ public sealed class ChatCenter
         var i = _sessions.FindIndex(x => x.SessionId == sessionId);
         if (i < 0) return;
         if (_sessions[i].Ghost) { _sessions.RemoveAt(i); _messages.RemoveAll(m => m.SessionId == sessionId); Changed?.Invoke(); return; }
+        var wasShared = _sessions[i].Shared;
         _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now, Pinned = false, ProjectId = null };
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ 2026-08-05 用户裁定:**删除共享也要同步**。
+        //
+        //  ★ 这**推翻了**此前那条「删共享会话只影响这台、中枢那份不删」。
+        //    原来那条的理由是:删了会让另一台上的会话凭空消失,而那台的用户没做过任何事。
+        //    这个后果**依然成立**,只是用户选择接受它 —— 共享的东西两边同进同退。
+        //  ★ 原文保留在此,因为它记录了当时为什么反过来 —— 哪天要改回去,理由在这儿。
+        // ══════════════════════════════════════════════════════════════
+        if (wasShared) Sync?.Enqueue(ToTombstone(sessionId));
         Changed?.Invoke();
+    }
+
+    /// <summary>删除一个共享会话的**上线形态**(墓碑)。</summary>
+    public static SyncItem ToTombstone(string sessionId) => new("sessions", new { id = sessionId, deleted = true });
+
+    /// <summary>收到远端的会话删除。★ 连它的消息一起清 —— 否则留下一堆孤儿消息。</summary>
+    public bool AbsorbRemoteDelete(string sessionId)
+    {
+        var i = _sessions.FindIndex(x => x.SessionId == sessionId);
+        if (i < 0) return false;
+        if (_sessions[i].DeletedAt is not null) return false;      // 已经删过了,别再刷
+        _sessions[i] = _sessions[i] with { DeletedAt = DateTime.Now, Pinned = false };
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>某工作空间"已删除"的【普通】会话(最近删的在前)。★ 排除跟随项目删除的(ProjectId!=null),

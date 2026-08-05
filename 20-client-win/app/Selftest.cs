@@ -1122,8 +1122,16 @@ public static class Selftest
             {
                 Assert(cvShare.Contains("提升为共享") && cvShare.Contains("无法收回"), "★ 提升确认框写明【不可收回】");
                 Assert(cvShare.Contains("条消息)会一起标为共享"), "★ 确认框写明整段历史一起共享(用户裁定 A)");
-                Assert(cvShare.Contains("删除共享会话") && cvShare.Contains("会话同步还没有做") && cvShare.Contains("只影响这台机器"),
-                       "★ 删共享会话前【不得】断言对所有设备生效 —— 中枢未接入时共享只是本机标记,什么都没发生");
+                // ★★★ 2026-08-05 两处一起更正:
+                //  ① 「会话同步还没有做」—— S13 做出来了,这句话早已过期;
+                //     而这条断言**一直是绿的**,因为它查的是原始源码,
+                //     而那句话如今只存在于一段【注释】里(拿注释当证据,今天第 N 次)。
+                //  ② 「只影响这台机器」—— 用户裁定删除共享要同步,这句话当场反过来。
+                //  ⇒ 改成钉**当前为真**的那句,并且用 NoComments(只留字符串,去掉注释)。
+                Assert(NoComments(cvShare).Contains("删除共享会话")
+                       && NoComments(cvShare).Contains("同步到其它设备"),
+                       "★★ 删共享会话的确认框必须如实说【会同步到其它设备】—— "
+                       + "删除现在会传播,还写「只影响这台机器」就是界面在说假话");
                 Assert(cvShare.Contains("· 共享"), "会话行标出共享状态");
                 Assert(cvShare.Contains("从来没上传过"), "★ 如实说明现在只是标记、接入后才上传");
             }
@@ -4522,9 +4530,13 @@ public static class Selftest
                            "★★ 同步做出来了:改成如实说「整段会立刻上传到中枢」");
                     Assert(code.Contains("未同步"),
                            "★★ 并说清主机不在线时会排队、界面会显示「未同步」");
-                    Assert(code.Contains("只影响这台机器"),
-                           "★ 删共享会话仍然只影响这台 —— 中枢那份不删"
-                           + "(删了会让另一台上的会话凭空消失,而那台的用户没做过任何事)");
+                    // ★★★ 2026-08-05 用户裁定推翻了原来那条(删除只影响本机)。
+                    //   原判的理由依然成立 —— 删了会让另一台上的会话凭空消失,
+                    //   而那台的用户没做过任何事 —— 只是用户选择接受这个后果:
+                    //   共享的东西两边同进同退。⇒ 界面必须**把这个后果说出来**。
+                    Assert(code.Contains("同步到其它设备") && code.Contains("不会收到任何提示"),
+                           "★★★ 删除会传播 ⇒ 确认框必须说清「另一台也会跟着删,而且对方没有提示」——"
+                           + "不说就是替用户做了一个他不知道的决定");
                     Assert(code.Contains("还没有配对到中枢") && code.Contains("主机未开启"),
                            "★★ 输入框提示按【真实前提】分层:没配对 / 主机不在线");
                 }
@@ -4612,6 +4624,56 @@ public static class Selftest
                             Assert(CodeOnly(hv).Contains("syncLine.Dispatcher.CheckAccess()"),
                                    "★★★ 主页那行同步状态必须先切回 UI 线程 —— "
                                    + "护栏能防它拖垮同步,但界面本身写错了还是刷不出来。两头都要修");
+                    }
+                    // ══════════════════════════════════════════════════════
+                    //  ★★★ 删除同步 + 先拉后推(2026-08-05 用户实测第 2、3 条)。
+                    //  这两条是**同一个洞的两面**:没有删除语义时,「连上就对齐」会把
+                    //  对方删掉的东西推回去 —— A 删了,B 开机不知情,把本地那份又推上来,
+                    //  A 那边复活。所以删除必须做成会传播的墓碑,而且顺序必须先拉后推。
+                    // ══════════════════════════════════════════════════════
+                    {
+                        // ① 墓碑的形状:带 id、带 deleted=true
+                        var tomb = Services.TodoCenter.ToTombstone("abc");
+                        var td = tomb.Record.GetType();
+                        Assert(tomb.Kind == "todos"
+                               && td.GetProperty("id")?.GetValue(tomb.Record)?.ToString() == "abc"
+                               && Equals(td.GetProperty("deleted")?.GetValue(tomb.Record), true),
+                               "★★ 待办墓碑必须带 id + deleted=true");
+                        var sessTomb = Services.ChatCenter.ToTombstone("s1");
+                        Assert(sessTomb.Kind == "sessions"
+                               && Equals(sessTomb.Record.GetType().GetProperty("deleted")?.GetValue(sessTomb.Record), true),
+                               "★★ 会话墓碑同款");
+
+                        // ② ★★★ 删掉之后**不许**再出现在对齐集合里 —— 否则一对齐就复活
+                        var tc = new Services.TodoCenter();
+                        var id = tc.Add(new Services.TodoItem("", "要删的", Services.TodoKind.Chore, Scope: "家庭"));
+                        Assert(tc.SharedSnapshot().Any(), "★ 元断言:加进去的确实在对齐集合里(否则下一条空转)");
+                        tc.Remove(id);
+                        Assert(!tc.SharedSnapshot().Any(),
+                               "★★★ 删掉的东西不得再进对齐集合 —— 进了的话另一台一开机就把它推回去,"
+                               + "删除永远删不掉");
+
+                        // ③ 收到远端墓碑要真的删掉
+                        var tc2 = new Services.TodoCenter();
+                        var id2 = tc2.Add(new Services.TodoItem("", "远端要删的", Services.TodoKind.Chore, Scope: "家庭"));
+                        Assert(tc2.AbsorbRemoteDelete(id2), "★★ 收到远端删除要真的删掉");
+                        Assert(!tc2.Items.Any(x => x.Id == id2), "★ 且确实不在了");
+
+                        // ④ 先拉后推:对齐必须挂在【第一帧 data 到手之后】
+                        var sc3 = TryReadSource(Path.Combine("Services", "SyncClient.cs"));
+                        if (sc3 is not null)
+                        {
+                            var c3 = CodeOnly(sc3);
+                            var iAbsorb = c3.IndexOf("Absorb(line[6..])", StringComparison.Ordinal);
+                            var iRec2 = c3.IndexOf("ReconcileAsync())", StringComparison.Ordinal);
+                            Assert(iAbsorb >= 0 && iRec2 >= 0, "★ 两处都在(位置判据的前提)");
+                            Assert(iAbsorb < iRec2,
+                                   "★★★ 必须**先吃完中枢那帧全量再推** —— 反过来的话,"
+                                   + "关机期间对方删掉的东西会被本机推回去,在对方那边复活");
+                            Assert(c3.Contains("_pullFirst"),
+                                   "★ 对齐由「第一帧到手」触发,不是「连上」触发 —— "
+                                   + "连上但还没收到全量就推,和先推没有区别");
+                        }
                     }
                     Assert(Services.SyncClient.MaxPerPush == 200,
                            $"★★ 单批上限必须与服务端 sync_policy 的 max_batch 一致(现 {Services.SyncClient.MaxPerPush})");

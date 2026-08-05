@@ -210,6 +210,35 @@ check("★★ 推送流崩了要【说出来】(静默断开会被客户端当�
 _nt = assert_helpers.code_only(gateway._sync_notify)
 check("★ 写完就叫,不攒批 —— 攒批就不实时了(D86 裁定②)", "set()" in _nt)
 
+print("\n=== ★★★ 删除 = 墓碑(2026-08-05 用户实测「删除时还是没法同步删除」)===")
+#  没有删除语义时,「连上就对齐」会把对方删掉的东西**推回去**:
+#  A 删了 → B 开机不知情 → B 把本地那份又推上来 → A 那边复活。
+_ts = sync_store.SyncStore(root=tempfile.mkdtemp(prefix="tomb_"))
+_r = _ts.put("todos", {"id": "t1", "scope": "家庭", "title": "买菜"}, "PC-A")
+check("先有一条共享待办", _r["ok"])
+_d = _ts.put("todos", {"id": "t1", "deleted": True}, "PC-A")
+check("★★ 删除被收下(墓碑,不是把行去掉)", _d["ok"], _d)
+_snap = _ts.snapshot()
+_rec = {r["id"]: r for r in _snap["data"]["todos"]}
+check("★★★ 墓碑仍然在快照里 —— 它必须传得出去,否则另一台永远不知道这条被删了",
+      "t1" in _rec and _rec["t1"].get("deleted") is True, _rec.get("t1"))
+check("★ 且 rev 涨了(增量拉取也能拿到它)", int(_rec["t1"]["rev"]) > int(_r["rev"]))
+
+# ★ 只能删已经共享过的 —— 否则一条伪造的墓碑能凭空在别人机器上删东西,
+#   而且墓碑不带 scope,等于绕过范围闸。
+_bad = _ts.put("todos", {"id": "从来没有过的", "deleted": True}, "PC-B")
+check("★★★ 删一条库里没有的 ⇒ 拒(fail-closed:认不出来源的删除不收)",
+      not _bad["ok"] and _bad.get("code") == "out_of_scope", _bad)
+
+# ★ 会话删了之后,它的消息也不再收 —— 否则另一台的对齐会把整段消息推回来,成孤儿
+_ts.put("sessions", {"id": "s1", "shared": True, "title": "家庭计划"}, "PC-A")
+_m1 = _ts.put("messages", {"id": "m1", "session_id": "s1", "text": "在"}, "PC-A")
+check("会话活着时消息能收", _m1["ok"])
+_ts.put("sessions", {"id": "s1", "deleted": True}, "PC-A")
+_m2 = _ts.put("messages", {"id": "m2", "session_id": "s1", "text": "还在?"}, "PC-B")
+check("★★ 会话已删 ⇒ 它的消息不再收(否则留下孤儿消息)",
+      not _m2["ok"], _m2)
+
 print("\n=== ★★ 跨端对拍:客户端的单批上限必须与这边的 max_batch 一致 ===")
 #  2026-08-05 实机修复带出来的:客户端原来把整个待推队列**一次**推上来,
 #  而这边 max_batch=200,超了**整批**拒(denied_param)。被拒的那批一条都不出队

@@ -325,17 +325,38 @@ public sealed class SyncClient : IDisposable
         {
             Link = SyncLink.Live;
             LastError = null;
-            // ★★★ 一连上就**对齐**(不只是补推队列)——
-            //   队列是纯内存的,关一次 App 就没了;而"该同步的东西"一直躺在本地存档里。
-            //   只补队列的话,那些数据永远等不到下一次"变更",也就永远不会上去。
-            //   这正是用户实测「仍然无法双边共享」的根因,见 ReconcileAsync 上方的说明。
-            _ = Task.Run(() => ReconcileAsync());
+            // ★★★ 一连上就**对齐**,但必须**先拉后推**(见下面 _pullFirst 的说明)。
+            _pullFirst = true;
         }
         if (line.StartsWith("data: ", StringComparison.Ordinal))
+        {
             Absorb(line[6..]);
+            // ══════════════════════════════════════════════════════════
+            //  ★★★ 先拉后推(2026-08-05 用户实测带出来的第三条)。
+            //
+            //  用户原话:「客户端启动时也要校验一遍同步,不然一台机器关机,
+            //            另外一台更新了很多就无法同步了。」
+            //
+            //  ★ 而顺序**不能反**:连上就先推的话,会出现这一幕 ——
+            //    A 删掉一条共享待办 → B 一直关着机,不知道这件事 →
+            //    B 开机,先把本地那份推上去 → **删掉的东西在 A 那边复活了**。
+            //  ⇒ 必须先吃完中枢那一帧全量(里面带着 A 的墓碑),把删除落到本地,
+            //    然后再推 —— 那时它已经不在 SharedSnapshot 里了,自然不会复活。
+            //  ★ 判据挂在【第一帧 data 到手之后】,不是"连上之后":
+            //    连上但还没收到全量的那一瞬间推,和先推没有区别。
+            // ══════════════════════════════════════════════════════════
+            if (_pullFirst)
+            {
+                _pullFirst = false;
+                _ = Task.Run(() => ReconcileAsync());
+            }
+        }
         Notify();
         return Task.CompletedTask;
     }
+
+    /// <summary>连上之后还欠一次对齐 —— 但要等**第一帧全量吃完**才做。见 OnLine。</summary>
+    volatile bool _pullFirst;
 
     void Absorb(string json)
     {

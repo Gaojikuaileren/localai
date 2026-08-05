@@ -245,15 +245,9 @@ public sealed class HomeView : UserControl
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         }.PassThrough();
 
-        // 底部一条:右下角「已完成 (N) ›」入口,点开右侧抽屉看已归档的
+        // 底部一条:右下角「已完成 (N) ›」入口,点开右侧抽屉看已归档的;左下角放同步提示。
         var footer = new Border { BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(0, 6, 0, 0), Margin = new Thickness(0, 6, 0, 0) };
         footer.SetResourceReference(Border.BorderBrushProperty, "Border");
-        footer.Child = ArchiveButton();
-
-        var todoBody = new DockPanel { LastChildFill = true };
-        DockPanel.SetDock(footer, Dock.Bottom);
-        todoBody.Children.Add(footer);
-        todoBody.Children.Add(todoScroll);
 
         // ══════════════════════════════════════════════════════════════
         //  ★★★ P4-S13(D86):同步状态必须【看得见】。
@@ -266,9 +260,19 @@ public sealed class HomeView : UserControl
         //  ★ 一切正常时 StatusLine() 返回**空串**,这一行整个不出现 ——
         //    常驻的"已同步"绿字会被当成背景噪声,真出事那天也就没人看了。
         // ══════════════════════════════════════════════════════════════
+        //  ★★ 2026-08-05 用户实测:「待办板块的界面被挤的只剩不到一半了」。
+        //    根因是 DockPanel:todoBody 的 LastChildFill=true,而这一行**最后**加进去,
+        //    于是**它**占了填充区,待办列表退化成默认的 Dock.Left 只拿自己那点宽度 ——
+        //    提示越长,待办越窄。
+        //    ⇒ 用户裁定:条目占满全横板,提示挪到板块**左下角**(「已完成」左边)。
+        //    ⇒ 这一行进 footer 的左侧;填充区留给待办列表(它必须是最后一个子元素)。
         var syncLine = Ui.Caption("");
-        syncLine.Margin = new Thickness(2, 0, 2, 4);
-        syncLine.TextWrapping = TextWrapping.Wrap;
+        syncLine.Margin = new Thickness(2, 0, 8, 0);
+        syncLine.VerticalAlignment = VerticalAlignment.Center;
+        // ★ 不换行:换行会把 footer 撑高,又变成"提示挤掉内容"的另一种形态。
+        //   放不下就截断,全文放 ToolTip —— 信息不丢,版面不动。
+        syncLine.TextWrapping = TextWrapping.NoWrap;
+        syncLine.TextTrimming = TextTrimming.CharacterEllipsis;
         void RefreshSyncLine()
         {
             // ★★★ 2026-08-05:SyncClient.Changed 是在**后台线程**上抬起的
@@ -285,6 +289,7 @@ public sealed class HomeView : UserControl
             }
             var t = TheApp.Sync?.StatusLine() ?? "";
             syncLine.Text = t;
+            syncLine.ToolTip = t.Length == 0 ? null : t;   // 截断了也看得到全文
             syncLine.Visibility = t.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
             syncLine.SetResourceReference(TextBlock.ForegroundProperty,
                                           t.StartsWith("★") ? "RiskWarning" : "FgMuted");
@@ -295,7 +300,21 @@ public sealed class HomeView : UserControl
             TheApp.Sync.Changed += RefreshSyncLine;
             Unloaded += (_, _) => TheApp.Sync.Changed -= RefreshSyncLine;
         }
-        todoBody.Children.Add(syncLine);
+
+        // ── 底栏:左边同步提示,右边「已完成 (N) ›」──
+        var footerRow = new DockPanel { LastChildFill = true };
+        var archive = ArchiveButton();
+        DockPanel.SetDock(archive, Dock.Right);
+        footerRow.Children.Add(archive);
+        footerRow.Children.Add(syncLine);      // 最后一个 = 占满剩下的宽度(会被截断,不换行)
+        footer.Child = footerRow;
+
+        // ★★ 顺序要紧:待办列表**必须是最后一个**子元素,它才是那个占满剩余空间的。
+        //   放错顺序就是用户看到的那个样子 —— 提示占了填充区,待办被挤成半栏。
+        var todoBody = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(footer, Dock.Bottom);
+        todoBody.Children.Add(footer);
+        todoBody.Children.Add(todoScroll);
 
         _todoPanel = Ui.Panel("待办事项", todoBody,
             IconName.Member, new Thickness(0, 0, 0, 12),
