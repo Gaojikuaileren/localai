@@ -415,7 +415,12 @@ public partial class App : Application
                             null, S(x, "id")));
                     }
                 }
-                catch { /* ★ 单条解析不了就跳过这一条,不整批丢 —— 别的条是好的 */ }
+                // ★★★ 2026-08-05:这里原来是光秃秃的 `catch { }`,而它**吞掉了一个真缺陷** ——
+                //   远端记录因为 JsonDocument 已释放而条条抛 ObjectDisposedException,
+                //   于是"收到了帧、一条都没落地"这件事在任何地方都看不出来。
+                //   ⇒ 单条失败仍然跳过(别的条是好的),但**必须留下痕迹**。
+                //   失败必须长得和成功不一样 —— 哪怕只是 crash.log 里的一行。
+                catch (Exception ex) { LogCrash("absorb-remote:" + kind, ex); }
             }
         }));
     }

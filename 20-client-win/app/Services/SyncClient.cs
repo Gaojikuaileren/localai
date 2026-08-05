@@ -100,6 +100,36 @@ public sealed class SyncClient : IDisposable
 
     public SyncClient(HubClient hub) => _hub = hub;
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ 2026-08-05 实机抓到的**真正**根因(比"没有对齐"更致命)。
+    //
+    //  症状:网关重启后 25 秒内收到 2 次 GET /v1/gpu/events,
+    //  而 GET /v1/sync/events **一次都没有** —— 订阅循环根本没在跑。
+    //
+    //  crash.log 里躺着答案:
+    //    InvalidOperationException: 调用线程无法访问此对象,因为另一个线程拥有该对象。
+    //      at TextBlock.set_Text
+    //      at HomeView.RefreshSyncLine()
+    //      at SyncClient.FlushAsync()
+    //
+    //  `Changed` 是在**后台线程**上抬起的,而订阅者(主页那行同步状态)直接写了
+    //  WPF 的 TextBlock.Text ⇒ 抛。而 RunAsync 里那句 `Changed?.Invoke()`
+    //  **在 try/catch 之外** ⇒ 异常掀翻整个 while 循环,`_loop` 就此结束,
+    //  **没有任何东西会重启它**。于是同步流永久死掉,而推送(各自 Task.Run)还偶尔能成。
+    //
+    //  ★ 对照 HubGpu:它一直有 `void Notify() { try { Changed?.Invoke(); } catch { } }`。
+    //    **GPU 有这道护栏、同步没有** —— 这就是"GPU 流活着、同步流死了"的全部原因。
+    //
+    //  ⇒ 两头都修:这里加同款护栏(一个订阅者抛异常,不该让整条同步流永久死掉);
+    //    HomeView 那边改成切回 UI 线程再写(那才是真正写错的地方)。
+    //  ★ 只修一头都不够:光修界面,下一个订阅者还会踩;光加护栏,界面照样刷不出来。
+    // ══════════════════════════════════════════════════════════════════
+    void Notify()
+    {
+        try { Changed?.Invoke(); }
+        catch { /* 订阅者自己的问题不该拖垮同步 —— 与 HubGpu.Notify 同款 */ }
+    }
+
     public void Start()
     {
         if (_loop is not null && !_loop.IsCompleted) return;
@@ -126,7 +156,7 @@ public sealed class SyncClient : IDisposable
             _pending.RemoveAll(x => x.Kind == item.Kind && IdOf(x.Record) == IdOf(item.Record));
             _pending.Add(item);
         }
-        Changed?.Invoke();
+        Notify();
         _ = Task.Run(() => FlushAsync());
     }
 
@@ -200,7 +230,7 @@ public sealed class SyncClient : IDisposable
             if (status != 200)
             {
                 LastError = $"推送被拒({status})";
-                Changed?.Invoke();
+                Notify();
                 return new SyncPushResult(0, batch.Count, Array.Empty<(string, string, bool, string)>(),
                                           false, LastError);
             }
@@ -214,14 +244,14 @@ public sealed class SyncClient : IDisposable
                     _pending.RemoveAll(x => x.Kind == k && IdOf(x.Record) == id);
             }
             LastError = null;
-            Changed?.Invoke();
+            Notify();
             return res;
         }
         catch (Exception ex)
         {
             // ★ 推不上去**不出队** —— 连上之后补推。期间界面显示「未同步」。
             LastError = ex.Message;
-            Changed?.Invoke();
+            Notify();
             return null;
         }
     }
@@ -266,7 +296,7 @@ public sealed class SyncClient : IDisposable
                 if (_hub.Profile is null || ep is null)
                 {
                     Link = SyncLink.NotPaired;
-                    Changed?.Invoke();
+                    Notify();
                     await Task.Delay(TimeSpan.FromSeconds(5), ct);
                     continue;
                 }
@@ -280,7 +310,7 @@ public sealed class SyncClient : IDisposable
                 Link = ex.Message.Contains("被拒") ? SyncLink.Refused : SyncLink.Reconnecting;
                 LastError = ex.Message;
             }
-            Changed?.Invoke();
+            Notify();
             if (ct.IsCancellationRequested) return;
             try { await Task.Delay(backoff, ct); } catch { return; }
             backoff = TimeSpan.FromSeconds(Math.Min(30, backoff.TotalSeconds * 2));
@@ -303,7 +333,7 @@ public sealed class SyncClient : IDisposable
         }
         if (line.StartsWith("data: ", StringComparison.Ordinal))
             Absorb(line[6..]);
-        Changed?.Invoke();
+        Notify();
         return Task.CompletedTask;
     }
 
@@ -319,7 +349,20 @@ public sealed class SyncClient : IDisposable
             foreach (var kind in new[] { "sessions", "todos", "messages" })
             {
                 if (!data.TryGetProperty(kind, out var arr) || arr.ValueKind != JsonValueKind.Array) continue;
-                var list = arr.EnumerateArray().ToList();
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ 2026-08-05 实机抓到:必须 Clone()。
+                //
+                //  JsonElement 只在**它所属的 JsonDocument 活着时**有效,而上面那句
+                //  `using var d = JsonDocument.Parse(json)` 在本方法返回时就把它释放了。
+                //  接手方 AbsorbRemote 用的是 `Dispatcher.BeginInvoke` —— **异步**,
+                //  等它真正在 UI 线程跑起来时,文档早没了 ⇒ 每一条都抛
+                //  ObjectDisposedException,而那边逐条 `catch { }` 把它们**静默吞光**。
+                //
+                //  表现:订阅流建起来了、帧也收到了、generation 一路在涨,
+                //  而本地一条记录都不会多。实测:推了两条诊断待办,盯 30 秒纹丝不动。
+                //  ⇒ Clone() 出来的元素脱离文档,之后怎么用都安全。
+                // ══════════════════════════════════════════════════════════
+                var list = arr.EnumerateArray().Select(e => e.Clone()).ToList();
                 if (list.Count == 0) continue;
                 // ★ 记下哪些是别的机器写的 —— 界面据此提示「这条被另一台改过」
                 foreach (var x in list)
@@ -346,7 +389,7 @@ public sealed class SyncClient : IDisposable
     public void ClearConflicts()
     {
         lock (_gate) _conflicts.Clear();
-        Changed?.Invoke();
+        Notify();
     }
 
     /// <summary>界面上那一行状态。★ 没有坏消息时返回空 —— 一切正常就不该占一行。</summary>

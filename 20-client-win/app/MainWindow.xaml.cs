@@ -174,7 +174,11 @@ public partial class MainWindow : Window
 
         // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
         VramHost.Content = _vram;
-        TheApp.Vram.Updated += s => Dispatcher.Invoke(() => _vram.Update(s));
+        // ★ 用 BeginInvoke(非阻塞)而不是 Invoke:2026-08-05 起 VramMonitor 还会被
+        //   HubGpu 的**推送线程**直接叫醒(主机显存要实时,不能等下一个 2 秒的表)。
+        //   同步的 Invoke 会让 UI 一忙就把 SSE 读取线程一起堵住 —— 心跳读不到,
+        //   连接就会被判"死了",而实际只是界面卡了一下。与聊天流式那边同一条理由。
+        TheApp.Vram.Updated += s => Dispatcher.BeginInvoke(new Action(() => _vram.Update(s)));
         _vram.Update(TheApp.Vram.Last);
         IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) TheApp.Vram.Resume(); else TheApp.Vram.Pause(); RefreshTaskBar(); };
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) TheApp.Vram.Pause(); else TheApp.Vram.Resume(); RefreshTaskBar(); };

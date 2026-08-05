@@ -271,6 +271,18 @@ public sealed class HomeView : UserControl
         syncLine.TextWrapping = TextWrapping.Wrap;
         void RefreshSyncLine()
         {
+            // ★★★ 2026-08-05:SyncClient.Changed 是在**后台线程**上抬起的
+            //   (推送、订阅循环都在 Task 里),而这里直接写 WPF 的 TextBlock ⇒
+            //   InvalidOperationException「调用线程无法访问此对象」。
+            //   实机后果远超"这一行没刷新":异常从 RunAsync 里那句 Changed?.Invoke()
+            //   逃出去,**掀翻整个订阅循环**,同步流就此永久死掉 ——
+            //   网关侧的表现是 /v1/sync/events 一次请求都收不到。
+            //   ⇒ 碰 UI 之前先切回 UI 线程。见 crash.log 2026-08-05 21:15:04。
+            if (!syncLine.Dispatcher.CheckAccess())
+            {
+                syncLine.Dispatcher.BeginInvoke(new Action(RefreshSyncLine));
+                return;
+            }
             var t = TheApp.Sync?.StatusLine() ?? "";
             syncLine.Text = t;
             syncLine.Visibility = t.Length == 0 ? Visibility.Collapsed : Visibility.Visible;

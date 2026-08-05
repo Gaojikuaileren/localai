@@ -4570,6 +4570,49 @@ public static class Selftest
                                "★★★ 推送必须切批:服务端 max_batch=200,超了**整批**拒,"
                                + "而被拒的一条都不出队 ⇒ 永远重推、永远失败(对齐大会话正好撞上)");
                     }
+                    // ══════════════════════════════════════════════════════
+                    //  ★★★ 2026-08-05 实机抓到的真根因,行为断言(不是查源码)。
+                    //
+                    //  一个订阅者在 Changed 里抛异常(实测:主页那行同步状态在
+                    //  **后台线程**上写 WPF 的 TextBlock),异常从 RunAsync 里那句
+                    //  裸 Changed?.Invoke() 逃出去,**掀翻整个订阅循环** ——
+                    //  _loop 结束后没有任何东西会重启它,同步流永久死掉。
+                    //  网关侧的表现:GET /v1/sync/events **一次请求都收不到**,
+                    //  而 /v1/gpu/events 好好的(HubGpu 一直有 try/catch 护栏)。
+                    // ══════════════════════════════════════════════════════
+                    {
+                        var probe = new Services.SyncClient(new Services.HubClient());
+                        var blew = false;
+                        probe.Changed += () => { blew = true; throw new InvalidOperationException("订阅者炸了"); };
+                        var survived = true;
+                        try { probe.Enqueue(new Services.SyncItem("todos", new { id = "__t", scope = "家庭" })); }
+                        catch { survived = false; }
+                        Assert(blew, "★ 元断言:那个会抛的订阅者确实被调到了(没调到的话下一条是空转)");
+                        Assert(survived,
+                               "★★★ 订阅者抛异常**不得**冒泡出来 —— 它会掀翻订阅循环,"
+                               + "而循环一死就再没有东西重启它,同步流永久失联(实机实测过)");
+                        probe.Dispose();
+                    }
+                    {
+                        var sc2 = TryReadSource(Path.Combine("Services", "SyncClient.cs"));
+                        if (sc2 is not null)
+                        {
+                            // ★ 判据是「只许出现一次」而不是「一次都不许」——
+                            //   那唯一一次正是 Notify() 自己的实现。第一版写成"不许出现",
+                            //   于是断言禁止了护栏本身,当场红了一条假红(判据比想判的东西宽)。
+                            var raw = CodeOnly(sc2).Split("Changed?.Invoke()").Length - 1;
+                            Assert(raw == 1,
+                                   $"★★ 裸调用只许有 1 处(Notify 自己),实得 {raw} —— "
+                                   + "其余必须全部走带 try/catch 的 Notify()");
+                            Assert(CodeOnly(sc2).Contains("void Notify()"),
+                                   "★ 护栏方法必须在(元断言:上一条数的是它)");
+                        }
+                        var hv = TryReadSource(Path.Combine("Views", "HomeView.cs"));
+                        if (hv is not null)
+                            Assert(CodeOnly(hv).Contains("syncLine.Dispatcher.CheckAccess()"),
+                                   "★★★ 主页那行同步状态必须先切回 UI 线程 —— "
+                                   + "护栏能防它拖垮同步,但界面本身写错了还是刷不出来。两头都要修");
+                    }
                     Assert(Services.SyncClient.MaxPerPush == 200,
                            $"★★ 单批上限必须与服务端 sync_policy 的 max_batch 一致(现 {Services.SyncClient.MaxPerPush})");
 
