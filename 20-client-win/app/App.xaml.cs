@@ -159,6 +159,11 @@ public partial class App : Application
 
         // Apple 日历的自动拉取(默认关;认证失败会自动熔断,见 AppleAutoSync)
         AppleAutoSync.Install(() => Settings, () => MemberContext.Current);
+        // ★★ 启动时先拉一次日历(用户要求 2026-08-05)。
+        //   Install 里的 Apply() 只是【装表】,第一次触发要等满一个间隔(≥15 分钟)——
+        //   于是开机打开 APP 看到的日历最多能陈旧 15 分钟,而那正是人最想看它的时刻。
+        //   ★ PullOnStartup 复用 TickAsync,五道闸(关着/熔断/软暂停/忙/没网)原封不动生效。
+        AppleAutoSync.PullOnStartup();
 
         _instance.ListenForWake(() => Dispatcher.Invoke(ShowMainWindow));
 

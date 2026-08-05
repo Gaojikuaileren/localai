@@ -4599,6 +4599,53 @@ public static class Selftest
                            "★★ 待办面板上有同步状态行(未同步必须看得见)");
             }
 
+            // ══════════════════════════════════════════════════════════════
+            //  P4-S15:Apple 日历【启动时拉一次】(用户要求 2026-08-05)
+            //
+            //  ★★★ 这一组守的核心不是"有没有拉",是**没有另开一条绕过闸的路**。
+            //    AppleAutoSync 的文件头把「什么时候不要跑」写得极硬:
+            //    认证失败会把用户**真实的 Apple ID 锁掉**(得去 iforgot.apple.com 重置),
+            //    而"自动"正是最危险的形态 —— 手动失败用户会停下来看,自动失败没人看着,
+            //    它能安安静静撞一整夜。
+            //    ⇒ 启动拉取必须**复用 TickAsync**,一道闸都不另写。
+            //      写第二遍就意味着有一天两边会不一致 —— 这是本项目反复吃过的亏
+            //      (chat 与 GPU 面各写各的档位判断,结果 §6.8「绝不放行」在 GPU 面完全失效)。
+            // ══════════════════════════════════════════════════════════════
+            {
+                var asSrc = TryReadSource(Path.Combine("Services", "AppleAutoSync.cs"));
+                if (asSrc is not null)
+                {
+                    var code = CodeOnly(asSrc);
+                    Assert(code.Contains("PullOnStartup"), "★ 有启动拉取入口");
+                    var body = Slice(code, "public static void PullOnStartup", "public static readonly TimeSpan StartupDelay");
+                    Assert(body is not null, "取得 PullOnStartup 的源码(提取器没静默失灵)");
+                    Assert(body is null || body.Contains("TickAsync"),
+                           "★★★ 启动拉取【复用 TickAsync】—— 五道闸(关着/熔断/软暂停/忙/没网)"
+                           + "原封不动生效。另写一遍就意味着有一天两边会不一致");
+                    Assert(body is null
+                           || (!body.Contains("PullAsync") && !body.Contains("NetworkUp")
+                               && !body.Contains("TrippedReason")),
+                           "★★★ 启动拉取里【不得】自己判网络/熔断/直接调 PullAsync —— "
+                           + "那就是把五道闸重写了一遍");
+                    Assert(Services.AppleAutoSync.StartupDelay.TotalSeconds > 0,
+                           "★★ 不在启动瞬间拉:那时网络栈可能还没就绪,会得到一次假的「连不上」,"
+                           + "而连续三次就触发软暂停 —— 白白停掉自动拉取");
+                    Assert(Services.AppleAutoSync.StartupDelay.TotalSeconds <= 30,
+                           "★ 但也别拖太久 —— 用户打开 APP 就是想看今天的日程");
+                }
+                var s15app = TryReadSource("App.xaml.cs");
+                if (s15app is not null)
+                {
+                    var code = CodeOnly(s15app);
+                    Assert(code.Contains("AppleAutoSync.PullOnStartup"),
+                           "★ 启动路径上真的调了它(函数还在、调用点没了 是编译与行为都抓不到的缺陷)");
+                    Assert(code.IndexOf("AppleAutoSync.Install", StringComparison.Ordinal)
+                           < code.IndexOf("AppleAutoSync.PullOnStartup", StringComparison.Ordinal),
+                           "★★ 必须在 Install 之后调 —— Install 才注入 settings/owner,"
+                           + "顺序反了 PullOnStartup 会因为 _settings is null 直接静默返回");
+                }
+            }
+
             // ---- 审计 2026-07-31 批次二:UI/皮肤/性能 ----
             {
                 var hv = TryReadSource(Path.Combine("Views", "HomeView.cs"));

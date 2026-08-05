@@ -65,6 +65,38 @@ public static class AppleAutoSync
         Apply();
     }
 
+    /// <summary>
+    /// ★★★ 启动时先拉一次(用户要求 2026-08-05)。
+    ///
+    /// 起因:`Apply()` 里 `Timer.Start()` 之后要**等满一个间隔(≥15 分钟)**才第一次触发 ——
+    /// 于是开机打开 APP 看到的日历,最多可以陈旧 15 分钟,而那正是人最想看它的时刻。
+    ///
+    /// ★★ **复用 TickAsync,一道闸都不另写。** 这个文件头把「什么时候不要跑」写得很硬:
+    ///   认证失败会把用户**真实的 Apple ID 锁掉**(得去 iforgot.apple.com 重置)。
+    ///   另开一条"启动专用"的拉取路径 = 那五道闸(关着/熔断/软暂停/忙/没网)要再写一遍,
+    ///   而**写第二遍就意味着有一天两边会不一致** —— 这是本项目反复吃过的亏
+    ///   (chat 与 GPU 面各写各的档位判断,结果 §6.8「绝不放行」在 GPU 面完全失效)。
+    ///
+    /// ★ 延迟一小会儿再拉:启动瞬间网络栈可能还没就绪(尤其开机自启那条路径),
+    ///   立刻拉会得到一次假的"连不上",而连续三次就会触发软暂停 —— 白白停掉自动拉取。
+    /// ★ 不阻塞启动:拉取是网络 I/O,同步等它会让窗口迟迟不出来。
+    /// </summary>
+    public static void PullOnStartup()
+    {
+        if (_settings is null) return;
+        var t = new DispatcherTimer { Interval = StartupDelay };
+        t.Tick += async (_, _) =>
+        {
+            t.Stop();
+            // ★ 走 TickAsync —— 五道闸原封不动地生效,包括"关着就不跑"。
+            try { await TickAsync(); } catch { /* 失败已由 TickAsync 记进 LastMessage */ }
+        };
+        t.Start();
+    }
+
+    /// <summary>启动后等这么久再拉第一次。★ 见 PullOnStartup 里为什么不能立刻拉。</summary>
+    public static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(8);
+
     /// <summary>按当前设置重新装表(开/关、改间隔、解除暂停后调用)。</summary>
     public static void Apply()
     {
