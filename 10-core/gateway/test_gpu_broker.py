@@ -987,6 +987,44 @@ from starlette.testclient import TestClient as _TC   # noqa: E402
 #   ⇒ 变更端点 403。让测试显式说明"我以哪个档位在测",比依赖环境凑巧更结实。
 _cc_saved = gateway.classify_caller
 gateway.classify_caller = lambda r: "trusted-local"
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-06:这一段端点测试原来用的是**全局 BROKER 单例**,
+#  而 TestClient 会触发 @app.on_event("startup") —— 于是它
+#  ① 接上一个**真装载器**,② `adopt_running()` **认领正在跑的 llama-server**。
+#
+#  后果实测:栈起着的时候,committed 变成真模型 ⇒ 一次 apply 会先去**卸它** ⇒
+#  卸不掉(认领来的进程按设计不杀)⇒ 回 vram_not_reclaimed,
+#  于是三条断言集体变红,而它们自称在测的是"装载器拒收未验证的 kind"。
+#  ★ 这正是 ASSERTION-PITFALLS 第 5 条:**一条断言若会因为「功能终于能用了」而变红,
+#    它测的就不是它自称在测的东西**。而且这一次更糟 —— 它还会**动到真实系统的状态**。
+#
+#  ⇒ 换成注入:自己的 Broker(空 committed、固定 free、冻住采样)+
+#    一个**不认领任何东西**的装载器(load 的判据仍走真实现,所以"尚未验证"仍是真的)。
+# ══════════════════════════════════════════════════════════════════════
+import model_loader as _ml                                    # noqa: E402
+
+
+class _NoAdoptLoader(_ml.ModelLoader):
+    """真装载器,但**不认领**任何已在跑的后端。★ load/unload 的判据一字未改 ——
+    改了的话这段测试就不再是在测真实现了。"""
+
+    async def adopt(self):
+        return []
+
+    async def running(self):
+        return []
+
+
+_BROKER_saved, _ML_saved = gpu_broker.BROKER, _ml.ModelLoader
+_iso = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_iso._state = gpu_broker.STATE_READY
+_iso._free = 64.0
+_iso._sampled_at = 0.0
+_iso._sample_once = lambda: None          # 冻住采样:判据不随桌面占用漂移
+gpu_broker.BROKER = _iso
+_ml.ModelLoader = _NoAdoptLoader
+
 with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
     _cat = _c.get("/v1/gpu/components")
     _catj = _cat.json()
@@ -1057,6 +1095,12 @@ with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
           _r_ok_path.json()["snapshot"]["committed"])
 
 gateway.classify_caller = _cc_saved
+# ★ 还回去 —— 这段用的是模块级单例,不还的话后面的断言(以及同进程里的任何东西)
+#   会继续对着一个测试用的 Broker 说话。
+gpu_broker.BROKER, _ml.ModelLoader = _BROKER_saved, _ML_saved
+check("★★ 全局 BROKER 已还回去 —— 不还的话后面每一条断言都在对着一个测试用的 Broker 说话",
+      gpu_broker.BROKER is _BROKER_saved)
+check("★ 装载器类也还回去了", _ml.ModelLoader is _ML_saved)
 
 _gi = _nodoc(gateway.gpu_intended)
 check("★ 失败码不合并:四类失败在源码里各自成条",

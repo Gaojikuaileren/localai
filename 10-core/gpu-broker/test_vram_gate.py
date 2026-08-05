@@ -206,7 +206,28 @@ print("=== 12. ★ 退出码三态:通过 0 / 被拒 1 / 闸自己坏了 2 ===")
 #   原来只有 0/1,于是「闸崩了」与「闸判定为拒」不可分辨,而后者可以被 -Force 覆盖、前者不能。
 check("EXIT_OK/REFUSED/BROKEN 三个常量存在且互不相等",
       len({vram_gate.EXIT_OK, vram_gate.EXIT_REFUSED, vram_gate.EXIT_BROKEN}) == 3)
-check("main() 通过 → 0", vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_OK)
+# ★★★ 2026-08-06:这一条原来直接跑 main(),也就是**拿真实机显存当判据** ——
+#   于是它只在"此刻显存够"的时候是绿的。栈一起来(llama-server 占掉 6 GiB,
+#   实测 free 从 11.4 掉到 6.06),闸正确地判拒,而这条断言变红,
+#   报出来的却是"退出码不对" —— 判据和它自称在测的东西不是一回事。
+#   ★ 这就是本仓第 5 条坑:**会随环境漂移的断言**。第 11 组早就用注入解决过同款问题,
+#     这一条漏了。⇒ 注入固定的 free,三态各钉一次。
+_saved_main = vram_gate.nvml_free_gib
+try:
+    vram_gate.nvml_free_gib = lambda: 64.0          # 够装
+    check("main() 通过 → 0", vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_OK)
+    vram_gate.nvml_free_gib = lambda: 1.0           # 装不下(动态闸)
+    check("★ main() 被拒 → 1(可以被 -Force 覆盖的那一种)",
+          vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_REFUSED)
+    vram_gate.nvml_free_gib = lambda: None          # 读不到 NVML
+    # ★ 这里第一版我写成了 EXIT_BROKEN,**错的**:BROKEN 的定义是「闸没能跑起来」
+    #   (配置坏了 / 解析失败 / 自身异常,见 vram_gate.py:424)。
+    #   而"读不到 NVML"是闸**跑起来了并决定拒绝** —— fail-closed 的拒绝,归 1。
+    #   两者的区别正是这三态存在的理由:REFUSED 能被 -Force 覆盖,BROKEN 不能。
+    check("★★ 读不到 NVML → 1(这是**拒绝**,不是闸坏了 —— 闸跑起来了,它选择不放行)",
+          vram_gate.main(["llm.assistant.8b@16k"]) == vram_gate.EXIT_REFUSED)
+finally:
+    vram_gate.nvml_free_gib = _saved_main
 check("main() 超预算 → 1",
       vram_gate.main(["llm.assistant.30b-a3b@32k", "comfyui.sdxl"]) == vram_gate.EXIT_REFUSED)
 _saved_load = vram_gate.load_config

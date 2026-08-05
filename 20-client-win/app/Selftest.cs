@@ -4304,7 +4304,7 @@ public static class Selftest
                        "★ 长连接不能被 HttpClient 默认 100 秒超时掐断");
 
                 // ⑤ 每种失败给不同的下一步,不合并成"失败了"
-                string Adv(string code) => new ApplyOutcome(false, code, "m", "", Array.Empty<string>(), 0).Advice;
+                string Adv(string code) => new ApplyOutcome(false, code, "m", "", Array.Empty<BlockingLease>(), 0).Advice;
                 var codes = new[] { "loader_absent", "needs_user_choice", "busy", "generation_conflict",
                                     "vram_not_reclaimed", "load_failed_rolled_back", "rollback_failed" };
                 Assert(codes.Select(Adv).Distinct().Count() == codes.Length,

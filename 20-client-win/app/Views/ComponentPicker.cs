@@ -238,7 +238,12 @@ public sealed class ComponentPicker : UserControl
             {
                 var ok = ConfirmDialog.Show("有任务正在跑",
                     "现在变更驻留组件会打断它。\n\n" +
-                    (res.Blocking.Count > 0 ? "正在跑:" + string.Join("、", res.Blocking) + "\n\n" : "") +
+                    // ★ 审计 C4:原来拼的是 lease_id(secrets.token_hex(8)),
+                    //   用户看到「正在跑:a3f9c1d2e8b74501」—— 说不出是谁在占,也就无从决定。
+                    //   现在说清:什么在占 · 谁的 · 已多久 · 能不能被自动让开。
+                    (res.Blocking.Count > 0
+                        ? "正在跑:" + string.Join("、", res.Blocking.Select(b => b.Describe())) + "\n\n"
+                        : "") +
                     "选『优雅中断』会给它一次收尾的机会;选『等它跑完』就先不改。",
                     confirmText: "优雅中断", cancelText: "等它跑完");
                 if (ok)

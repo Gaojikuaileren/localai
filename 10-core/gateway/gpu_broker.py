@@ -136,6 +136,10 @@ class Lease:
             "components": list(self.components),
             "granted_at": self.granted_at,
             "expires_at": self.expires_at,
+            # ★★ 已持有多久,由**中枢**算好再给(2026-08-05 审计 C4)。
+            #   granted_at 是中枢进程内的**单调时钟**,客户端拿自己的表去减毫无意义
+            #   —— 两个时钟没有可比性,减出来是个随机数。谁有时钟谁算,别让对方猜。
+            "held_s": max(0.0, time.monotonic() - self.granted_at),
             "evictable": k.evictable,
             "blocking": k.blocking,
             "exclusive": k.exclusive,
@@ -213,7 +217,13 @@ class ApplyResult:
                          # vram_not_reclaimed | load_failed_rolled_back | rollback_failed
     state: str
     message: str = ""
-    blocking: List[str] = field(default_factory=list)
+    # ★★★ 2026-08-05 审计 C4:这里原来是 List[str],只装 lease_id ——
+    #   而 lease_id 是 secrets.token_hex(8)。客户端把它直接拼进对话框,
+    #   用户看到的是「正在跑:a3f9c1d2e8b74501」,**说不出是谁在占**。
+    #   本文件自己在租约那一节写着:「拒绝信息要含【占用者】—— 谁持有、何时拿的、是否可驱逐」。
+    #   而 Lease.to_json() 里 holder / kind / granted_at / evictable 全都有,
+    #   只是拒绝的时候没带上。⇒ 改成结构体数组,该有的一个不少。
+    blocking: List[Dict] = field(default_factory=list)
 
     def to_json(self) -> Dict:
         return {"ok": self.ok, "code": self.code, "state": self.state,
@@ -1005,9 +1015,18 @@ class Broker:
             if blockers:
                 async with self._lock:
                     await self._transition(STATE_READY, "有任务在跑,交还用户裁定")
+                # ★ 消息本身也点名 —— 对话框可能只显示 message,不去展开 blocking。
+                #   「有任务在跑」和「桌宠(pet_presence)占着,已 12 秒」是两种不同的处境:
+                #   前者你不知道该等谁,后者你知道该关什么。
+                _t = time.monotonic()      # ★ 与 granted_at 同一个时钟(单调,不是墙钟)
+                _who = "、".join(
+                    f"{l.kind}({l.holder or '未署名'},已 {max(0, int(_t - l.granted_at))} 秒"
+                    + ("・可驱逐" if LEASE_KINDS[l.kind].evictable else "・不可驱逐") + ")"
+                    for l in blockers[:3])
+                _more = f" 等 {len(blockers)} 个" if len(blockers) > 3 else ""
                 return ApplyResult(False, "needs_user_choice", STATE_READY,
-                                   "有任务在跑:请选『优雅中断』或『等它跑完』",
-                                   blocking=[l.lease_id for l in blockers])
+                                   f"有任务在跑:{_who}{_more}。请选『优雅中断』或『等它跑完』",
+                                   blocking=[l.to_json() for l in blockers])
 
         # ── ③ PRECHECK:现采、现判 —— 不用预览快照 ──
         async with self._lock:

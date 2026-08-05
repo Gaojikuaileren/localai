@@ -50,8 +50,30 @@ public sealed record GpuCatalog(
     double VramBudget, double TotalGiB, double DesktopFloor, double? FreeGiB, double SafetyMargin);
 
 /// <summary>一次「点确定」的结果。★ 每种失败保留自己的 code —— 下一步动作完全不同。</summary>
+/// <summary>
+/// 挡住这次变更的一条租约。★★ 2026-08-05 审计 C4:这里原来只有一个 lease_id
+/// (secrets.token_hex(8)),界面直接拼成「正在跑:a3f9c1d2e8b74501」——
+/// **说不出是谁在占**。而中枢那边 holder/kind/granted_at/evictable 全都有,
+/// 只是拒绝的时候没带上。中枢自己的注释写着:「拒绝信息要含【占用者】——
+/// 谁持有、何时拿的、是否可驱逐」。
+/// </summary>
+public sealed record BlockingLease(string LeaseId, string Kind, string Holder,
+                                   double HeldSeconds, bool Evictable)
+{
+    /// <summary>给人看的一行。★ 说清三件事:什么在占 · 谁的 · 能不能被自动让开。</summary>
+    public string Describe()
+    {
+        var who = string.IsNullOrWhiteSpace(Holder) ? "未署名" : Holder;
+        // ★ 中枢没给时长(HeldSeconds < 0)就**不说** —— 编一个"已 0 秒"比不说更坏。
+        var held = HeldSeconds < 0 ? ""
+                   : HeldSeconds >= 60 ? $",已 {HeldSeconds / 60:0.#} 分钟"
+                   : $",已 {HeldSeconds:0} 秒";
+        return $"{Kind}({who}{held}{(Evictable ? "・可驱逐" : "・不可驱逐")})";
+    }
+}
+
 public sealed record ApplyOutcome(bool Ok, string Code, string Message, string State,
-                                  IReadOnlyList<string> Blocking, long Generation)
+                                  IReadOnlyList<BlockingLease> Blocking, long Generation)
 {
     /// <summary>给用户看的一句话。★ 逐种失败给**不同**的下一步,不合并成"失败了"。</summary>
     public string Advice => Code switch
@@ -331,7 +353,7 @@ public sealed class HubGpu : IDisposable
     {
         var ep = _hub.TryDial();
         if (_hub.Profile is null || ep is null)
-            return new ApplyOutcome(false, "not_paired", "尚未配对", "", Array.Empty<string>(), 0);
+            return new ApplyOutcome(false, "not_paired", "尚未配对", "", Array.Empty<BlockingLease>(), 0);
         var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post, "/v1/gpu/intended",
             new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning }, ct);
         return ParseOutcome(status, body);
@@ -346,14 +368,31 @@ public sealed class HubGpu : IDisposable
             // 成功路径:{"result": {...}, "snapshot": {...}}
             if (status == 200 && r.TryGetProperty("result", out var res))
                 return new ApplyOutcome(true, "", Str(res, "message") ?? "已应用",
-                                        Str(res, "state") ?? "", Array.Empty<string>(),
+                                        Str(res, "state") ?? "", Array.Empty<BlockingLease>(),
                                         Gen(r));
             var code = r.TryGetProperty("error", out var er) ? (Str(er, "type") ?? "") : "";
             var msg = r.TryGetProperty("error", out var er2) ? (Str(er2, "message") ?? "") : body;
-            var blocking = new List<string>();
+            // ★★ blocking 现在是**结构体数组**(审计 C4)。原来按字符串读,
+            //   中枢改成对象之后 GetString() 会返回 null ⇒ **整个读空**,
+            //   界面上那行"正在跑:…"会一声不响地消失 —— 又是"失败与成功长得一样"。
+            var blocking = new List<BlockingLease>();
             if (r.TryGetProperty("result", out var res2) && res2.TryGetProperty("blocking", out var bl)
                 && bl.ValueKind == JsonValueKind.Array)
-                foreach (var x in bl.EnumerateArray()) if (x.GetString() is { } s) blocking.Add(s);
+                foreach (var x in bl.EnumerateArray())
+                {
+                    if (x.ValueKind != JsonValueKind.Object) continue;
+                    // ★ 已持有多久由**中枢算好再给**(held_s):granted_at 是中枢进程内的
+                    //   单调时钟,客户端拿自己的表去减是两个不可比的时钟,减出来是随机数。
+                    //   ★ 中枢没给就是 -1,界面据此**不显示时长**而不是编一个 0。
+                    var held = x.TryGetProperty("held_s", out var hs) && hs.ValueKind == JsonValueKind.Number
+                               ? hs.GetDouble() : -1;
+                    blocking.Add(new BlockingLease(
+                        Str(x, "lease_id") ?? "",
+                        Str(x, "kind") ?? "未知",
+                        Str(x, "holder") ?? "",
+                        held,
+                        x.TryGetProperty("evictable", out var ev) && ev.ValueKind == JsonValueKind.True));
+                }
             var state = r.TryGetProperty("result", out var res3) ? (Str(res3, "state") ?? "") : "";
             return new ApplyOutcome(false, code, msg, state, blocking, Gen(r));
         }
@@ -361,7 +400,7 @@ public sealed class HubGpu : IDisposable
         {
             // ★ 解析不出来**不能**当成成功。HTTP 状态是唯一还可信的东西。
             return new ApplyOutcome(status == 200, status == 200 ? "" : "unreadable_response",
-                                    $"中枢回了 {status},但响应读不懂", "", Array.Empty<string>(), 0);
+                                    $"中枢回了 {status},但响应读不懂", "", Array.Empty<BlockingLease>(), 0);
         }
     }
 
