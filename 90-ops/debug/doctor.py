@@ -56,17 +56,23 @@ def _paths(key: str) -> Optional[Path]:
     return Path(m.group(1)) if m else None
 
 
-def _listening(port: int) -> bool:
+def _listening(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket() as s:
-        s.settimeout(0.4)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+        s.settimeout(0.6)
+        return s.connect_ex((host, port)) == 0
 
 
 def _http(url: str, timeout: float = 2.0) -> Tuple[Optional[int], str]:
+    # ★★ 2026-08-05 修:原来是 `r.read(400)` —— 只读 400 字节。
+    #   响应一长就被**从中间截断**,调用方 json.loads 抛 JSONDecodeError,
+    #   于是体检报「探测器自己出错」。实测触发条件:GPU 快照加了两个字段、
+    #   同步快照里有了记录,双双越过 400 字节。
+    #   ⇒ 读全(留个上限防着有人往这儿塞流)。**截断的 JSON 与坏掉的服务长得一样**,
+    #     而这两件事该做的下一步完全不同。
     try:
         import urllib.request
         with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.status, r.read(400).decode("utf-8", "replace")
+            return r.status, r.read(1_000_000).decode("utf-8", "replace")
     except Exception as e:                                   # noqa: BLE001
         return None, f"{type(e).__name__}: {e}"
 
@@ -152,11 +158,38 @@ def link_gpu_face():
         "★ 不变式违反 = 账本与现实分家,去看 upstream_problem.jsonl" if bad else ""
 
 
+def _pair_profile():
+    """本机的配对档案。★ 只此一处读它 —— 两处各写一份 key 名迟早会漂。"""
+    prof = Path(os.environ.get("LOCALAPPDATA", "")) / "LocalAI" / "client" / "profile.json"
+    if not prof.exists():
+        return None
+    try:
+        return json.loads(prof.read_text(encoding="utf-8"))
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def link_lan_edge():
-    up = _listening(8443)
-    return (up if up else None), \
-        f"lan-edge 8443 {'在听' if up else '**没在听**'}", \
-        "" if up else "副机连不上就是它 —— 起 dist/host/localai-lan-edge.exe"
+    # ★★★ 2026-08-05 修:原来只探 127.0.0.1:8443,于是**永远**报「没在听」——
+    #   lan-edge 只把 8443 绑在**网卡 IP** 上,回环没有监听者(这正是主机自配对
+    #   被封存的原因,见 decision-packets/selfpair-review)。
+    #   ⇒ 这条误报最坏的地方是它的建议:「副机连不上就是它」——
+    #     指着一个**好好的**东西说它坏了,人会去重启一个不需要重启的服务,
+    #     而真正的原因(比如网关没起)就在它旁边那一行。
+    #   ⇒ 探地址取自**配对档里的 dial**(副机真正要连的就是那个),回环只作兜底。
+    hosts = []
+    dial = str((_pair_profile() or {}).get("Dial") or "")
+    if ":" in dial:
+        hosts.append(dial.rsplit(":", 1)[0])
+    hosts.append("127.0.0.1")
+
+    for h in hosts:
+        if _listening(8443, h):
+            where = "回环" if h == "127.0.0.1" else h
+            return True, f"lan-edge 8443 在听({where})", ""
+    return None, f"lan-edge 8443 **没在听**(试过 {hosts})", \
+        "副机连不上多半是它 —— 起 dist/host/localai-lan-edge.exe。" \
+        "★ 但先看上一行:网关没起的话,lan-edge 起着也没用(它的上游就是 8080)"
 
 
 def link_client_pkg():
@@ -177,15 +210,13 @@ def link_client_pkg():
 
 
 def link_pairing():
-    d = Path(os.environ.get("LOCALAPPDATA", "")) / "LocalAI" / "client"
-    prof = d / "profile.json"
+    prof = Path(os.environ.get("LOCALAPPDATA", "")) / "LocalAI" / "client" / "profile.json"
     if not prof.exists():
         return None, "本机没有配对档案(这台不是客户端,或还没配对)", ""
-    try:
-        j = json.loads(prof.read_text(encoding="utf-8"))
-        return True, f"已配对 · dial={j.get('Dial')} hub={str(j.get('HubId'))[:12]}…", ""
-    except Exception as e:                                   # noqa: BLE001
-        return False, f"配对档案**读不动**:{type(e).__name__}", "档案损坏 —— 需要重新配对"
+    j = _pair_profile()
+    if j is None:
+        return False, "配对档案**读不动**(在,但解析不了)", "档案损坏 —— 需要重新配对"
+    return True, f"已配对 · dial={j.get('Dial')} hub={str(j.get('HubId'))[:12]}…", ""
 
 
 def link_vram():
