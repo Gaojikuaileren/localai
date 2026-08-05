@@ -115,6 +115,8 @@ internal static class Probe
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
+                var oem = Native.OemEncodingOrNull();
+                if (oem != null) { psi.StandardOutputEncoding = oem; psi.StandardErrorEncoding = oem; }
                 using var p = Process.Start(psi);
                 r["stdout"] = p.StandardOutput.ReadToEnd().Trim();
                 r["stderr"] = p.StandardError.ReadToEnd().Trim();

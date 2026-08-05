@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text;
 
 namespace AcSpike;
 
@@ -201,6 +202,28 @@ internal static class Native
 
     [DllImport("advapi32.dll", SetLastError = true)]
     internal static extern bool OpenThreadToken(IntPtr ThreadHandle, uint DesiredAccess, bool OpenAsSelf, out IntPtr TokenHandle);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetOEMCP();
+
+    /// <summary>
+    /// 被我们 spawn 的系统工具(CheckNetIsolation / reg)按**本地化 OEM 代码页**往管道里写字节。
+    /// 用 UTF-8 去读会得到乱码(实测:「完成。」读成「��ɡ�」)。
+    /// 拿不到该编码时返回 null —— 调用方就别设,至少不会更糟。
+    /// </summary>
+    internal static Encoding OemEncodingOrNull()
+    {
+        try { return Encoding.GetEncoding((int)GetOEMCP()); }
+        catch
+        {
+            try
+            {
+                Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                return Encoding.GetEncoding((int)GetOEMCP());
+            }
+            catch { return null; }
+        }
+    }
 
     [DllImport("kernel32.dll")]
     internal static extern IntPtr GetCurrentProcess();

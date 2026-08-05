@@ -706,10 +706,31 @@ internal static class Program
         Console.WriteLine($"  身份        : {me.UserName}");
         Console.WriteLine($"  完整性等级  : {me.IntegrityLabel}   ({me.IntegritySid})");
         Console.WriteLine($"  Administrators: {me.AdministratorsState}");
+
+        // ★ 必须把 UAC 的状态一起读出来,否则「High」这个事实会被误读成「你用错了跑法」。
+        //   EnableLUA=0 时,管理员账户的**一切**进程都是 High —— 本机不存在更低权限的上下文,
+        //   换成双击也不会变。那时这一格不是「测法不对」,而是「本机的最终答案」。
+        int? enableLua = null;
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+            if (k?.GetValue("EnableLUA") is int v) enableLua = v;
+        }
+        catch { }
+        Console.WriteLine($"  UAC(EnableLUA): {(enableLua.HasValue ? enableLua.Value.ToString() : "读不到")}" +
+                          (enableLua == 0 ? "   ← UAC 关闭:本账户的一切进程都是 High" : ""));
         Console.WriteLine();
-        if (me.IntegrityLabel == "High")
-            Console.WriteLine("  ⚠⚠ 这是【提权】上下文 —— 本次结果**不能**用来回答「普通用户能不能」。\n" +
-                              "      请在资源管理器里双击本 .cmd(不要用「以管理员身份运行」),再跑一次。\n");
+
+        bool lowerContextExists = me.IntegrityLabel == "High" && enableLua != 0;
+        if (lowerContextExists)
+            Console.WriteLine("  ⚠⚠ 这是【提权】上下文,而本机 UAC 并未关闭 ⇒ 存在更低权限的上下文,\n" +
+                              "      本次结果**不能**用来回答「普通用户能不能」。\n" +
+                              "      请在资源管理器里双击本 .cmd(不要「以管理员身份运行」),再跑一次。\n");
+        else if (me.IntegrityLabel == "High")
+            Console.WriteLine("  ★ 本机 UAC 关闭(EnableLUA=0)⇒ 机主账户**不存在**更低权限的上下文,\n" +
+                              "    双击也一样是 High。⇒ 下面的结论就是本机的最终答案,不是「测法不对」。\n" +
+                              "    (残留的另一问:在 UAC 开启的机器上 Medium 进程能不能开 —— 那是产品化的问题,本机测不到。)\n");
 
         var sid = CreateProfile(Ac1Name, Array.Empty<string>());
         Console.WriteLine($"  建 AppContainer profile(本身不需要管理员)= {sid ?? "失败"}");
@@ -732,10 +753,21 @@ internal static class Program
 
             Console.WriteLine();
             Console.WriteLine("  ── 结论(看效果,不看退出码)──");
+            // ★ 措辞必须跟着上下文变。在 High 上跑出来的结果说成「普通用户可以」是**假陈述**;
+            //   而在 UAC 关闭的机器上,「普通用户」这个上下文根本不存在,更不能那么写。
+            var who = me.IntegrityLabel == "High"
+                      ? (enableLua == 0 ? "机主账户(本机 UAC 关闭,一切进程皆 High)" : "【提权】上下文")
+                      : $"{me.IntegrityLabel} 上下文(Administrators={me.AdministratorsState})";
             if (afterHasOurs && !beforeHasOurs)
-                Console.WriteLine("  ★★ 普通用户【可以】自己打开回环豁免 —— 这道隔离对机主是纸的。");
+            {
+                Console.WriteLine($"  ★★ {who}【可以】自己打开回环豁免。");
+                if (enableLua == 0)
+                    Console.WriteLine("     ⇒ 本机没有更低权限的上下文可退 ⇒ **这道隔离对机主是无摩擦可拆的**。");
+                else if (me.IntegrityLabel == "High")
+                    Console.WriteLine("     ⇒ 但这只说明「管理员能开」,**没有**回答「普通用户能不能」。");
+            }
             else if (!afterHasOurs)
-                Console.WriteLine("  ★★ 普通用户【不能】打开回环豁免 —— 这道隔离需要一次提权才能拆掉。");
+                Console.WriteLine($"  ★★ {who}【不能】打开回环豁免 —— 这道隔离要一次提权才拆得掉。");
             else
                 Console.WriteLine("  ?? 加之前列表里就已经有这一条了,这一轮判不出来。先清掉它再重跑。");
 
@@ -922,6 +954,8 @@ internal static class Program
         {
             var psi = new ProcessStartInfo(exe, args)
             { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+            var oem = Native.OemEncodingOrNull();
+            if (oem != null) { psi.StandardOutputEncoding = oem; psi.StandardErrorEncoding = oem; }
             using var p = Process.Start(psi);
             o["stdout"] = p.StandardOutput.ReadToEnd().Trim();
             o["stderr"] = p.StandardError.ReadToEnd().Trim();
