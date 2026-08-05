@@ -1198,5 +1198,71 @@ check(f"★★ 代码里不再有那句过期文案(它 S14 起就是假话)", _
 check("★ 针没拼错(拿一段确定含它的文本验一次)",
       _needle in f"旧文案:{_needle}(S14 前的说法)")
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  审计 A1(2026-08-05)· 「推送非轮询」原来只做了一半
+#
+#  7 处 `_generation += 1` **没有一处在采样路径上** ⇒ 别的程序吃掉 4 GiB 显存时
+#  状态没变、世代号不涨 ⇒ 推送流一帧都不发;而客户端的心跳照样把"数据新鲜"喂成真。
+#  数字纹丝不动,**且看不出来它是旧的** —— 这正是本项目的签名失败模式。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== 审计 A1:显存变化必须推,而且不许动世代号 ===")
+
+_a1 = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+_g0, _r0 = _a1.snapshot().generation, _a1.stream_rev
+_a1._free = 10.0
+_a1._note_free_for_push()
+check("★ 第一次拿到读数就推一帧", _a1.stream_rev > _r0)
+
+_r1 = _a1.stream_rev
+_a1._free = 10.0 + _a1.VRAM_PUSH_DELTA_GIB / 5     # 噪声量级
+_a1._note_free_for_push()
+check("★★ 噪声级波动**不推** —— 每秒一帧的话推送就退化成轮询了",
+      _a1.stream_rev == _r1, f"rev 从 {_r1} 涨到 {_a1.stream_rev}")
+
+_a1._free = 10.0 + _a1.VRAM_PUSH_DELTA_GIB * 1.2   # 真事件
+_a1._note_free_for_push()
+check("★★★ 越过阈值必须推(开一局游戏吃掉几 GiB 就是这一条)", _a1.stream_rev > _r1)
+
+# ★★ 累计判据:缓慢爬升也要抓得到。用"相邻差"的话,每次涨一点点会一帧都不发。
+_r2 = _a1.stream_rev
+_base = _a1._free
+for _k in range(1, 4):
+    _a1._free = _base + _a1.VRAM_PUSH_DELTA_GIB * 0.4 * _k
+    _a1._note_free_for_push()
+check("★★★ 缓慢爬升(每次 0.4 阈值)累计够了也要推 —— 判据比的是"
+      "「客户端手上那个数偏了多少」,不是「这一秒动了多少」",
+      _a1.stream_rev > _r2, f"rev {_r2} -> {_a1.stream_rev}")
+
+# ★★★ 最要紧的一条:显存推送**不许动世代号**。
+#   世代号是事务的乐观锁(if_generation);被显存波动带着涨的话,
+#   用户"点确定"会一直撞 409 —— 修好一个 bug 造出另一个。
+check("★★★ 显存推送期间世代号一动不动(它是事务的乐观锁,不是帧计数器)",
+      _a1.snapshot().generation == _g0,
+      f"世代号从 {_g0} 变成了 {_a1.snapshot().generation}")
+
+# ★ 反过来:状态变更当然也要发帧
+_r3 = _a1.stream_rev
+asyncio.run(_a1._set_committed([_small]))
+check("★ 状态变更也要发帧(两个计数器一起涨)", _a1.stream_rev > _r3)
+check("★ 且这一次世代号**确实**涨了(它管的就是状态变更)",
+      _a1.snapshot().generation > _g0)
+
+# ── 阈值必须是实测出来的,不是拍的 ──
+_thr = gpu_broker.Broker.VRAM_PUSH_DELTA_GIB
+check("★★ 阈值高于本机实测的桌面漂移(30 秒实测 0.154 GiB,相邻差最大 0.130)",
+      _thr > 0.154, f"阈值 {_thr} 压不住实测噪声 —— 会退化成每秒一帧")
+check("★★ 也要远低于任何有意义的事件(最小的组件 speech.lite 是 2.07 GiB)",
+      _thr < 2.0, f"阈值 {_thr} 太大,真事件会被压住")
+_src_b = assert_helpers.code_only(gpu_broker.Broker._note_free_for_push)
+check("★ 用的是【累计差】(与上次推出去的比),不是相邻差", "_pushed_free" in _src_b)
+
+# ── 网关那一头:等的必须是推送修订号,心跳必须带数据 ──
+_ge = assert_helpers.code_only(gateway.gpu_events)
+check("★★★ SSE 等的是 stream_rev,不是 generation —— "
+      "只看 generation 的话显存变化永远等不来一帧", "stream_rev" in _ge)
+check("★★★ 心跳**带数据**(keepalive + 完整快照)—— 裸心跳会去喂客户端的『数据新鲜』判断,"
+      "而它一个数字都没带", "keepalive" in _ge and "heartbeat" not in _ge)
+
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

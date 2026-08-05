@@ -102,10 +102,16 @@ public sealed class HubGpu : IDisposable
     public string? LastError { get; private set; }
     public DateTime LastFrameAt { get; private set; } = DateTime.MinValue;
 
-    /// <summary>★ 有没有一份【可信且新鲜】的中枢数据。界面只在这条为真时才敢说"中枢显存"。</summary>
+    /// <summary>
+    /// ★ 有没有一份【可信且新鲜】的中枢数据。界面只在这条为真时才敢显示主机显存的数字。
+    /// ★★ 2026-08-05(审计 A1):判据从 LastFrameAt 换成 **LastDataAt** ——
+    ///   前者**被心跳刷新**,于是"数据新鲜"这个判断一直被一个不带任何数字的东西喂着。
+    ///   中枢现在心跳自带数据,所以正常情况下两者同步;换成 LastDataAt 是为了
+    ///   **接上一个只发裸心跳的中枢时能看出来**,而不是继续显示一个冻住的数字。
+    /// </summary>
     public bool HasFreshData =>
         Snapshot is not null && Link == HubGpuLink.Live
-        && (DateTime.UtcNow - LastFrameAt) < StaleAfter;
+        && (DateTime.UtcNow - LastDataAt) < StaleAfter;
 
     public event Action? Changed;
 
@@ -185,12 +191,44 @@ public sealed class HubGpu : IDisposable
                 return Task.CompletedTask;
             }
             Snapshot = parsed;
+            LastDataAt = DateTime.UtcNow;    // ★ 只有**带数据**的帧刷新它 —— 裸心跳不算
         }
         LastFrameAt = DateTime.UtcNow;
         if (Link != HubGpuLink.Live) { Link = HubGpuLink.Live; LastError = null; }
         Notify();
         return Task.CompletedTask;
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ 2026-08-05 审计 A1:拆开「连接活着」与「数字新鲜」。
+    //
+    //  原来只有 LastFrameAt 一个时间戳,**心跳也刷新它**,而 HasFreshData
+    //  = Live && LastFrameAt 在 40 秒内 ⇒ **心跳在喂"数据新鲜"这个判断**。
+    //  于是:别的程序吃掉 4 GiB 显存(状态没变、世代号不涨)⇒ 一帧不发 ⇒
+    //  快照冻结 ⇒ 而心跳让客户端一直认为自己那份是新鲜的。数字纹丝不动,且看不出来。
+    //
+    //  ⇒ 中枢那边已经改成**心跳自带数据**(event: keepalive + 完整快照),
+    //    所以正常情况下这两个时间戳会一起走。这里仍然分开记,是为了
+    //    **接上一个只发裸心跳的中枢时能看出来** —— 那正是这条 bug 的形状,
+    //    而"看不出来"是它当初能活这么久的唯一原因。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>最后一次收到**带数据**的帧。★ 裸心跳不刷新它。</summary>
+    public DateTime LastDataAt { get; private set; } = DateTime.MinValue;
+
+    /// <summary>连接还活着吗(心跳也算)。★ 这只说明线通着,**不说明数字是新的**。</summary>
+    public bool LinkAlive =>
+        Link == HubGpuLink.Live && (DateTime.UtcNow - LastFrameAt) < StaleAfter;
+
+    /// <summary>
+    /// 手上这份数字有多旧(秒)—— 从**收到那一帧**算起。
+    /// ★ 帧发出时它自己最多旧 1 秒(中枢 1 Hz 采样);中枢的采样器真死了会由
+    ///   快照的 Stale / SamplerError 标出来,不靠这个数猜。
+    /// </summary>
+    public double DataAgeSeconds =>
+        LastDataAt == DateTime.MinValue
+            ? double.PositiveInfinity
+            : (DateTime.UtcNow - LastDataAt).TotalSeconds;
 
     void Notify() { try { Changed?.Invoke(); } catch { } }
 

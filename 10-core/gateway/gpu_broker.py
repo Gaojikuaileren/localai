@@ -363,6 +363,10 @@ class Broker:
         #   ⇒ 由采样循环刷新;None = 还没探过,此时退回账本并保持 self_reported。
         self._actual_cache: Optional[List[str]] = None
         self._free_history: List[Tuple[float, Optional[float]]] = []
+        # ★ 推送修订号 + 上次推出去的那个 free —— 见 wait_for_change 上方 A1 那一段。
+        #   与世代号**分开**:世代号是事务的乐观锁,不能被显存波动带着涨。
+        self._stream_rev = 0
+        self._pushed_free: Optional[float] = None
 
     # ── 配置 ──────────────────────────────────────────────────────
     @property
@@ -420,6 +424,10 @@ class Broker:
                 #   修复即"自动触发",而那正是 D10 存活下来的那半条明令禁止的。
                 #   这里只把结果记下来放进快照;要不要动手,是人的决定。
                 self._last_watch = self.check_invariants()
+                # ★★ A1:显存偏离上次推出去的值够多了就叫醒订阅者(不动世代号)。
+                #   不做这一步的话,开一局游戏吃掉 4 GiB 推送流**一帧都不发**,
+                #   而心跳照样把客户端的"数据新鲜"喂成真 —— 数字纹丝不动且看不出来是旧的。
+                self._note_free_for_push()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -579,20 +587,69 @@ class Broker:
     def _notify_locked(self) -> None:
         """★ 必须在锁内调用,且必须与世代号 +1 在**同一把锁**里 ——
         否则会出现「通知发出去了但世代号还没涨」,订阅者取到的快照与它以为的不符。
-        `Event.set()` 非阻塞,放锁内不违反「锁内不得跨 await I/O」。"""
+        `Event.set()` 非阻塞,放锁内不违反「锁内不得跨 await I/O」。
+        ★ 2026-08-05(A1):状态变更当然也要发帧,所以推送修订号跟着一起涨。"""
+        self._stream_rev += 1
         for w in self._waiters:
             w.set()
         self._waiters = []
 
-    async def wait_for_change(self, since_generation: int, timeout: float = 15.0) -> bool:
-        """等到世代号离开 `since_generation`。返回 True=有变更,False=超时(该发心跳了)。
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 推送修订号(2026-08-05 审计 A1)—— 与世代号**分开**的第二个计数器。
+    #
+    #  审计原文:「推送非轮询只做了一半:非 AI 显存变化不会推,而客户端会显示一个
+    #  自称新鲜的旧数字。」证据:7 处 `_generation += 1` **没有一处在采样路径上**,
+    #  于是开一局游戏吃掉 4 GiB,推送流一帧都不发,而心跳照样把客户端的
+    #  `HasFreshData` 喂成真 —— 数字纹丝不动,且看不出来它是旧的。
+    #
+    #  ★★ 为什么不直接让采样去涨世代号:**世代号是事务的乐观锁**
+    #    (`if_generation`,S5 定的)。显存每波动一下就涨一次,用户"点确定"会一直撞 409。
+    #    ⇒ 必须是两个计数器:世代号管**状态变更**,推送修订号管**该不该发一帧**。
+    #      状态变了当然也要发,所以 _notify_locked 里两个一起涨。
+    #
+    #  ★ 阈值 0.25 GiB 是**实测**出来的,不是拍的(审计明确要求实测):
+    #    本机桌面空闲时连续采样 40 次(约 30 秒)——
+    #    相邻差 中位 0.006 / p90 0.029 / **最大 0.130**,全程漂移 0.154 GiB。
+    #    ⇒ 审计建议的 0.1 会被噪声直接打穿。取 0.25:高于实测漂移,
+    #      远低于任何有意义的事件(装模型 2–8 GiB、开游戏 4 GiB)。
+    #  ★ 比的是**累计差**(现在 vs 上次推出去的那个数),不是相邻差 ——
+    #    判据要回答的是"客户端手上那个数已经偏了多少",而不是"这一秒动了多少"。
+    #    用相邻差的话,缓慢爬升 2 GiB 会一帧都不发。
+    # ══════════════════════════════════════════════════════════════════
+    VRAM_PUSH_DELTA_GIB = 0.25
+
+    @property
+    def stream_rev(self) -> int:
+        """该发第几帧了。★ 与 generation 不同:它还包含"显存变了"这件事。"""
+        return self._stream_rev
+
+    def _note_free_for_push(self) -> None:
+        """采样后调:显存偏离上次推出去的值够多了就叫醒订阅者(**不动世代号**)。"""
+        f = self._free
+        if f is None:
+            return
+        base = self._pushed_free
+        if base is not None and abs(f - base) < self.VRAM_PUSH_DELTA_GIB:
+            return
+        self._pushed_free = f
+        self._stream_rev += 1
+        # ★ 这里不加锁:采样跑在 executor 回来的协程里,而 _waiters 的操作是同步的、
+        #   不跨 await。与 _notify_locked 同款理由(Event.set() 非阻塞)。
+        for w in self._waiters:
+            w.set()
+        self._waiters = []
+
+    async def wait_for_change(self, since_rev: int, timeout: float = 15.0) -> bool:
+        """等到**推送修订号**离开 `since_rev`。返回 True=该发帧了,False=超时(发心跳)。
 
         ★ 先在锁内比一次:变更可能在调用方读快照与开始等待之间就发生了 ——
-          不比这一次就会漏掉一整个世代(经典的丢失唤醒)。
+          不比这一次就会漏掉一整帧(经典的丢失唤醒)。
+        ★ 2026-08-05:判据从 generation 改成 stream_rev —— 见上方 A1 那一段。
+          只看 generation 的话,显存变化永远等不来一帧。
         """
         ev = asyncio.Event()
         async with self._lock:
-            if self._generation != since_generation:
+            if self._stream_rev != since_rev:
                 return True                      # 已经变了,不必等
             self._waiters.append(ev)
         try:

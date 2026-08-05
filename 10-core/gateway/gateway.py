@@ -793,21 +793,40 @@ async def gpu_events(request: Request):
             snap = gpu_broker.BROKER.snapshot()
             yield ("event: snapshot\ndata: "
                    + json.dumps(snap.to_json(), ensure_ascii=False) + "\n\n")
-            last = snap.generation
+            # ★★ 等的是**推送修订号**不是世代号(2026-08-05 审计 A1)——
+            #   世代号只在状态变更时涨,而显存被别的程序吃掉时状态没变,
+            #   于是推送流一帧都不发,客户端却因为心跳而认为自己那份是新鲜的。
+            #   ★ 世代号仍然照常盖在每一帧里(客户端的乐观锁靠它),只是不再用它决定"何时发"。
+            last_rev = gpu_broker.BROKER.stream_rev
             while True:
                 if await request.is_disconnected():
                     break
-                changed = await gpu_broker.BROKER.wait_for_change(last, timeout=15.0)
+                changed = await gpu_broker.BROKER.wait_for_change(last_rev, timeout=15.0)
                 if await request.is_disconnected():
                     break
                 if changed:
                     snap = gpu_broker.BROKER.snapshot()
-                    last = snap.generation
+                    last_rev = gpu_broker.BROKER.stream_rev
                     yield ("event: update\ndata: "
                            + json.dumps(snap.to_json(), ensure_ascii=False) + "\n\n")
                 else:
-                    # ★ 心跳带上世代号:客户端可据此发现自己错过了一帧(不该发生,但能被发现)
-                    yield f": heartbeat gen={last}\n\n"
+                    # ══════════════════════════════════════════════════
+                    #  ★★★ 心跳**带上数据**(2026-08-05 审计 A1 的另一半)。
+                    #
+                    #  原来是一行注释 `: heartbeat gen=N`。客户端拿它刷新
+                    #  LastFrameAt,而 HasFreshData = Live && LastFrameAt 在 40 秒内
+                    #  ⇒ **心跳在喂"数据新鲜"这个判断,而它一个数字都没带**。
+                    #  这就是 A1 说的最坏稳态:快照冻结 + 心跳续命 + 看不出来。
+                    #
+                    #  ⇒ 与其在客户端拆两个时间戳去猜,不如让心跳**本身就是数据**:
+                    #    "连接活着"和"数字新鲜"从此是同一件事,整类 bug 消失。
+                    #  ★ 代价:每 15 秒几百字节。相对它消掉的那一整类问题,可忽略。
+                    #  ★ 仍标 keepalive 而不是 update —— 如实说"这是定时发的,不是变化",
+                    #    客户端要区分"刚变了"与"只是还活着"时用得上。
+                    # ══════════════════════════════════════════════════
+                    snap = gpu_broker.BROKER.snapshot()
+                    yield ("event: keepalive\ndata: "
+                           + json.dumps(snap.to_json(), ensure_ascii=False) + "\n\n")
         except Exception as e:                               # noqa: BLE001
             # ★ 推送流崩了要**说出来**,不能静默断开 —— 客户端会把静默断开当成"没有变化"。
             yield ("event: error\ndata: "
