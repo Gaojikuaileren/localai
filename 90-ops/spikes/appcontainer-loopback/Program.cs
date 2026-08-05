@@ -149,10 +149,21 @@ internal static class Program
         StartPipeServer(pipeGranted, BuildSddl(me.UserSid, acSids), pipeLog, spawned);
 
         // ---- AF_UNIX ----
-        // ★ 每轮换一个新文件名。实测:AF_UNIX 的 socket 文件在进程退出后作为 ReparsePoint
-        //   留在盘上且删不掉(File.Delete 抛 IOException),复用同一路径 bind 会 WSAEINVAL(10022)。
-        //   ——「上一轮的残留让这一轮静默失败」正是本项目最恨的形状,这里躲开它。
-        var sockPath = Path.Combine(outDir, $"spike-{Environment.ProcessId}.sock");
+        // ★ AF_UNIX 的落点很讲究(实测,见 unix-check):
+        //   在 {state} / {cache}\tmp / {code} / Windows 自己的 Temp 下 bind+connect 全通,
+        //   而在**机主的 %TEMP%** 下 connect 报 WSAEINVAL(10022),且失败会留下一个删不掉的
+        //   socket 文件,把该路径后续的 bind 也一起弄坏。
+        //   outDir 就在机主 %TEMP% 里 ⇒ socket 默认放这儿测出来的「容器连不上」是**我的路径问题**,
+        //   不是容器的性质。所以允许用 LOCALAI_SOCK_DIR 指到一个已实测可用的目录。
+        var sockDir = Environment.GetEnvironmentVariable("LOCALAI_SOCK_DIR");
+        if (!string.IsNullOrEmpty(sockDir))
+        {
+            Directory.CreateDirectory(sockDir);
+            GrantDir(sockDir, acSids, FileSystemRights.Modify);   // 容器要够得着才谈得上「能不能连」
+        }
+        else sockDir = outDir;
+        var sockPath = Path.Combine(sockDir, $"spike-{Environment.ProcessId}.sock");
+        report["unixSocketDir"] = sockDir;
         StartUnixServer(sockPath);
 
         // ---- 子进程配置 ----
@@ -765,35 +776,87 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>AF_UNIX 到底是本机不支持,还是我这个测法有问题 —— 换三条路径各试一次。</summary>
+    /// <summary>
+    /// AF_UNIX 到底是本机不支持,还是我这个测法有问题。
+    /// ★ bind 单独测过是成功的 —— 所以这里必须把 **connect** 也测掉:
+    ///   同进程内 bind + listen + accept + connect 全走一遍。
+    ///   分不清「bind 成功但 connect 失败」时,不能说 AF_UNIX「未测」。
+    /// </summary>
     private static int UnixCheck()
     {
-        foreach (var p in new[]
-                 {
-                     Path.Combine(Path.GetTempPath(), "localai-acspike", "spike.sock"),
-                     Path.Combine(Path.GetTempPath(), "s.sock"),
-                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp", "s.sock"),
-                 })
+        // ★ 矩阵:把「路径长度」与「路径里有空格」两个变量分开测。
+        //   前一轮 3 条路径同时变了这两样,分不出是哪一个 —— 那样的数据不能当判据。
+        var winTemp = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp");
+        var spaceDir = Path.Combine(winTemp, "a b");
+        Directory.CreateDirectory(spaceDir);
+        var candidates = new List<string>
         {
+            Path.Combine(winTemp, "u_short.sock"),                                  // 短 · 无空格
+            Path.Combine(winTemp, new string('x', 40) + ".sock"),                   // 长 · 无空格
+            Path.Combine(spaceDir, "u.sock"),                                       // 短 · 有空格
+            Path.Combine(spaceDir, new string('y', 40) + ".sock"),                  // 长 · 有空格
+            Path.Combine(Path.GetTempPath(), "u_usertemp.sock"),                    // 机主 Temp
+        };
+        // 额外目录由调用方给(如 {state} / {cache}\tmp —— B′ 真正会放 socket 的地方),
+        // 分号分隔的**目录**列表;代码里不写死盘符(§11.1)。
+        var extraDirs = Environment.GetEnvironmentVariable("LOCALAI_UNIX_DIRS");
+        if (!string.IsNullOrEmpty(extraDirs))
+            foreach (var d in extraDirs.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                candidates.Add(Path.Combine(d.Trim(), "u_probe.sock"));
+        foreach (var p in candidates)
+        {
+            Console.WriteLine($"— 长度 {p.Length,3} · 含空格 {(p.Contains(' ') ? "是" : "否")} · {p}");
             try { Directory.CreateDirectory(Path.GetDirectoryName(p)); File.Delete(p); } catch { }
+            Socket srv = null;
             try
             {
-                using var s = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                s.Bind(new UnixDomainSocketEndPoint(p));
-                s.Listen(4);
-                Console.WriteLine($"BIND ok   len={p.Length,3}  {p}");
-            }
-            catch (SocketException se)
-            {
-                Console.WriteLine($"BIND FAIL {se.SocketErrorCode}({se.NativeErrorCode}) len={p.Length,3}  {p}");
+                srv = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                srv.Bind(new UnixDomainSocketEndPoint(p));
+                srv.Listen(4);
+                Console.WriteLine($"  BIND ok    len={p.Length,3}  {p}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"BIND FAIL {ex.GetType().Name} len={p.Length,3}  {p} :: {ex.Message}");
+                Console.WriteLine($"  BIND FAIL  {Describe(ex)} len={p.Length,3}  {p}");
+                srv?.Dispose();
+                continue;
             }
-            finally { try { File.Delete(p); } catch { } }
+
+            var accepted = new ManualResetEventSlim(false);
+            string acceptErr = null;
+            new Thread(() =>
+            {
+                try { using var c = srv.Accept(); c.Send(Encoding.UTF8.GetBytes("U-HELLO")); }
+                catch (Exception ex) { acceptErr = Describe(ex); }
+                finally { accepted.Set(); }
+            }) { IsBackground = true }.Start();
+
+            try
+            {
+                using var cli = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                cli.Connect(new UnixDomainSocketEndPoint(p));
+                var buf = new byte[64];
+                cli.ReceiveTimeout = 3000;
+                int n = cli.Receive(buf);
+                Console.WriteLine($"  CONNECT ok  收到 \"{Encoding.UTF8.GetString(buf, 0, n)}\"");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  CONNECT FAIL {Describe(ex)}");
+            }
+            accepted.Wait(2000);
+            if (acceptErr != null) Console.WriteLine($"  ACCEPT 侧报错 {acceptErr}");
+
+            srv.Dispose();
+            try { File.Delete(p); Console.WriteLine("  socket 文件已删掉"); }
+            catch (Exception ex) { Console.WriteLine($"  ★ socket 文件删不掉:{ex.GetType().Name}(退出后会成为残留)"); }
+            Console.WriteLine();
         }
         return 0;
+
+        static string Describe(Exception ex) => ex is SocketException se
+            ? $"{se.SocketErrorCode}({se.NativeErrorCode})"
+            : $"{ex.GetType().Name}: {ex.Message}";
     }
 
     private static void Banner(string s)

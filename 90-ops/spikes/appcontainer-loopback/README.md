@@ -74,6 +74,8 @@ AcSpike probe <cfg> <out>              内部用:被投进容器里的那一半
 |---|---|
 | `LOCALAI_PROBE` | 文件侧探测目标,形如 `名字=路径;名字=路径` |
 | `LOCALAI_TARGET_PORT` | 打一个**已经有人在听**的端口(如真在跑的 `llama-server:18081`)。设了就不自己绑监听 —— 用来去掉「我是用替身监听测的」这条保留意见 |
+| `LOCALAI_SOCK_DIR` | AF_UNIX socket 的落点目录(会显式授权给容器 SID)。**不设就落 out 目录,而那是个坏落点**(见下方缺陷 2) |
+| `LOCALAI_UNIX_DIRS` | 只给 `unix-check` 用:额外要试的目录,分号分隔 |
 
 **代码里不写死任何盘符**(§11.1 路径契约),真实路径由调用方从 `config/paths.toml` 取。
 
@@ -99,9 +101,15 @@ AcSpike probe <cfg> <out>              内部用:被投进容器里的那一半
    与 `CREATE_NEW_CONSOLE` 也一样。⇒ 「Medium + Administrators 只用于拒绝」这一格
    **没测到**,只能靠用户双击 `1-` 补。别信这个模式的沉默。
 
-2. **AF_UNIX 的 socket 文件在进程退出后作为 ReparsePoint 留在盘上且删不掉**
-   (`File.Delete` 抛 `IOException`),复用同一路径 bind 会 `WSAEINVAL(10022)`。
-   本程序因此每轮换一个新文件名。—— 这一条本身是实测值,见决议包。
+2. **AF_UNIX 的落点很讲究,而且默认落点是坏的那个。**
+   实测:在 `{state}` / `{cache}\tmp` / `{code}` / `C:\Windows\Temp` 下
+   bind + connect + 收发 + 干净删除**全通**(路径长度与空格都不是变量);
+   **唯独机主 `%TEMP%` 下 connect 报 `WSAEINVAL(10022)`**,且失败会留下
+   **永久删不掉**的孤立 ReparsePoint(`fsutil reparsepoint query` 报 `Error 1920`),
+   把该路径后续的 bind 也一起弄坏。
+   ⇒ `run` 的 socket 默认放在 out 目录(就在机主 `%TEMP%` 里)**是坏落点**,
+   要测 AF_UNIX 必须用 `LOCALAI_SOCK_DIR` 指到一个实测可用的目录。
+   ★ 我初版据此写过一句「AF_UNIX 不适合做长期常驻通道」——**那是过度推广,已作废**。
 
 3. 容器内 `TCP connect` 被静默丢包时表现为**挂住**,不是立刻报错。
    探测器给了 4 秒与 30 秒两档,就是为了把「被丢包」和「只是慢」分开。
