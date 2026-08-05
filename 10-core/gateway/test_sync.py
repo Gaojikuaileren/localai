@@ -10,6 +10,7 @@
 """
 import inspect
 import pathlib
+import re
 import sys
 
 # ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
@@ -208,6 +209,28 @@ check("★★ 推送流崩了要【说出来】(静默断开会被客户端当�
       "event: error" in _ev)
 _nt = assert_helpers.code_only(gateway._sync_notify)
 check("★ 写完就叫,不攒批 —— 攒批就不实时了(D86 裁定②)", "set()" in _nt)
+
+print("\n=== ★★ 跨端对拍:客户端的单批上限必须与这边的 max_batch 一致 ===")
+#  2026-08-05 实机修复带出来的:客户端原来把整个待推队列**一次**推上来,
+#  而这边 max_batch=200,超了**整批**拒(denied_param)。被拒的那批一条都不出队
+#  ⇒ 客户端永远重推、永远失败,表现为"同步一直在转但什么都没发生"。
+#  ★ 两边各写一个数字,迟早会漂 —— 所以在这里对拍,让它漂的那天有人红。
+_client = (pathlib.Path(__file__).resolve().parents[2]
+           / "20-client-win" / "app" / "Services" / "SyncClient.cs")
+if _client.exists():
+    _cs = _client.read_text(encoding="utf-8")
+    _m = re.search(r"MaxPerPush\s*=\s*(\d+)", _cs)
+    check("★ 客户端确实声明了单批上限(找不到就是判据空转)", _m is not None)
+    if _m:
+        _srv = {t: c.max_batch for t, c in sync_policy.TIER_CAPS.items()
+                if "sync_write" in c.actions}
+        check(f"★★★ 客户端 MaxPerPush={_m.group(1)} 必须等于服务端能写的档位的 max_batch {sorted(set(_srv.values()))}",
+              all(int(_m.group(1)) == v for v in _srv.values()) and len(_srv) > 0,
+              f"服务端逐档:{_srv}")
+    check("★ 客户端确实**切了批**(不切的话上限形同虚设)", "Take(MaxPerPush)" in _cs)
+    check("★★ 客户端连上要【对齐】而不只是补队列 —— "
+          "队列是纯内存的,关一次 App 那些数据就永远上不去(实机实测:中枢存档里两台真机 0 条记录)",
+          "ReconcileAsync" in _cs and "FullSet" in _cs)
 
 print(f"\n=== 内网同步:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

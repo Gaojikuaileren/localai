@@ -36,10 +36,16 @@ public sealed class VramBar : UserControl
     readonly TextBlock _caption = new();
     readonly TextBlock _title = new();
     readonly StackPanel _root = new();
+    Border _clip = null!;
 
     public VramBar()
     {
-        _title.Text = "显存";
+        // ★★★ 这里原来写死 `_title.Text = "显存"`,而 Update() 从头到尾没碰过 s.Title ——
+        //   于是 P4-S9「拿不到中枢数据就把标题改成『本机显卡(不是中枢的)』」那个修复
+        //   **从来没有在界面上生效过**:副机上显示的一直是「显存」+ 副机自己那张卡。
+        //   钉着 Title 的几条断言测的是一个孤立的纯函数,所以它们一直是绿的。
+        //   ⇒ 标题一律由 Update() 从快照里取(见下)。这里只放一个建构期占位。
+        _title.Text = "主机显存";
         _title.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _title.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
 
@@ -60,7 +66,9 @@ public sealed class VramBar : UserControl
         _bar.Children.Add(_segModel); _bar.Children.Add(_segDesktop); _bar.Children.Add(_segFree);
 
         // 整条圆角:两端裁圆,中间平接(靠 Clip 实现,避免每段各自圆角显得断续)
-        var clip = new Border { Child = _bar, CornerRadius = new CornerRadius(3), ClipToBounds = true };
+        // ★ 提成字段:拿不到主机数据时要单独把这三段条收掉,而说明那一行要留着
+        _clip = new Border { Child = _bar, CornerRadius = new CornerRadius(3), ClipToBounds = true };
+        var clip = _clip;
 
         _caption.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
         _caption.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -148,12 +156,19 @@ public sealed class VramBar : UserControl
     public void Update(VramSnapshot s)
     {
         _last = s;
-        if (!s.Available || s.TotalGiB <= 0)
+        Visibility = Visibility.Visible;
+        // ★★★ 标题一律来自快照 —— 这一行就是 P4-S9 那个修复缺的那一环。
+        _title.Text = s.Title;
+
+        if (!s.HasNumbers)
         {
-            Visibility = Visibility.Collapsed;   // 读不到就藏起来,不显示 0 冒充空闲
+            // ★★ 用户裁定(2026-08-05):「拿不到就显示主机未连接」——**不是隐藏**。
+            //   隐藏是不可读的:用户分不清"出错了"和"这个版本没这个功能"。
+            //   ★ 必须在 UpdateRing 之前 return:环上写的是 UsedRatio,
+            //     拿不到时它是 0 ⇒ 收起态会显示 **0% = 显存全空**,那是最坏的一种谎。
+            ShowUnavailable(s);
             return;
         }
-        Visibility = Visibility.Visible;
 
         // 星号宽度按 GiB 分配 -> 三段比例即真实占比
         _colModel.Width = new GridLength(Math.Max(0.0001, s.ModelReservedGiB), GridUnitType.Star);
@@ -177,6 +192,27 @@ public sealed class VramBar : UserControl
         ToolTip = $"启用的模型 max:{s.ModelReservedGiB:0.00} GiB\n当前桌面占用:{s.DesktopUsedGiB:0.00} GiB\n未占用:{s.FreeGiB:0.00} GiB\n总计:{s.TotalGiB:0.00} GiB"
                   + (danger ? "\n\n⚠ 已逼近显存上限" : "");
 
+        _clip.Visibility = Visibility.Visible;
         UpdateRing(s);   // 收起态的环形与展开态的横条读同一份数据
+    }
+
+    /// <summary>
+    /// 拿不到主机显存时的样子。★ 一个数字都不给 —— 不给 0、不给旧值、不给本机那张卡。
+    /// ★★ 三态各有各的说法(标题 + 说明),因为它们的下一步完全不同:
+    ///   未连接 → 去开主机 / 起 lan-edge;主机读不到 → 去查主机的驱动。
+    ///   合并成一句"读不到"会把人支去错的地方。
+    /// </summary>
+    void ShowUnavailable(VramSnapshot s)
+    {
+        _clip.Visibility = Visibility.Collapsed;     // 条子整条收掉:没有数据就不画进度
+        _pct.Text = "—";                             // ★ 不写 0% —— 那会读成"显存全空"
+        _pct.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        _caption.Text = s.Note ?? "";
+        ToolTip = $"{s.Title}\n{s.Note}"
+                  + (s.HubState is { Length: > 0 } st ? $"\n主机状态:{st}" : "");
+        // 收起态的环:同样不画弧、不写百分比
+        _ringArc.Data = null;
+        _ringText.Text = "—";
+        _ring.ToolTip = ToolTip;
     }
 }

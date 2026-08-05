@@ -19,13 +19,28 @@
 //  用户会以为看的是中枢那 8.52 GiB 预算,实际看的是另一台机器的显卡。
 //  两台机器的数字长得一模一样,**没有任何地方能看出来看错了**。这正是本项目最恨的形状。
 //
-//  ⇒ 新口径:
-//    · 有中枢数据(HubGpu 的 SSE 推送,新鲜)      → Source=Hub,标题「中枢显存」
-//    · 拿不到中枢数据但本机有 N 卡                 → Source=LocalFallback,
-//      标题明写「本机显卡(不是中枢的)」—— **绝不**用本机数字冒充中枢数字
-//    · 两边都没有                                   → Source=None,整条隐藏
-//  ★ 退回本机不是"降级到差一点的同类数据",而是【换了一个被测对象】。
-//    所以它不能只是精度差一点,必须在界面上改名字。
+//  ⇒ S9 当时的做法:退回本机,但把标题改成「本机显卡(不是中枢的)」。
+//
+// ══════════════════════════════════════════════════════════════════════
+//  ★★★ 2026-08-05 用户裁定 + 实测:**本机回退整个拆掉**。
+//
+//  用户原话:「显存的显示,要显示的是主机的显存,副机要主机显存,主机要主机显存。」
+//           「拿不到就显示主机未连接。」
+//
+//  ★★ 而实测发现 S9 那个"改标题"的修复**从来没接到界面上** ——
+//    `VramSnapshot.Title` 全仓只有 Selftest 在读;`VramBar` 的标题是构造函数里
+//    写死的 `_title.Text = "显存"`,`Update()` 一次都没碰过 `s.Title`。
+//    ⇒ 副机上显示的一直是「显存」+ 副机自己那张卡的数字,**和 S9 之前一模一样**。
+//    钉着 Title 的那几条断言测的是一个孤立的纯函数,所以它们一直是绿的。
+//    (改在模型里、断言钉住了、文档写着已修,就是没接到视图上。)
+//
+//  ⇒ 现在的口径**只有三种,没有一种会显示别的机器的数字**:
+//    · 主机数据新鲜                → Source=Hub,标题「主机显存」
+//    · 连不上主机 / 没配对         → Source=HostUnreachable,标题「主机未连接」
+//    · 连上了但主机自己没采到      → Source=HostNoReading,标题「主机显存读不到」
+//  ★ 第三种**不能**说成"未连接" —— 它连着,坏的是主机上的采样器。
+//    说成未连接会把人支去查网络,而问题在显卡那头。两者的下一步完全不同。
+//  ★ 本机那张卡**一个字都不显示**了:它不是"差一点的同类数据",它是另一台机器。
 // ══════════════════════════════════════════════════════════════════════
 //
 // 分段口径(用户裁定的三段)与本项目既有预算口径(config/vram-budget.toml)对齐:
@@ -45,31 +60,40 @@ namespace LocalAI.Client.Services;
 /// </summary>
 public enum VramSource
 {
-    /// <summary>中枢的显卡 —— 这才是 AI 用的那块,预算口径也是它。</summary>
+    /// <summary>主机(中枢)的显卡 —— 这才是 AI 用的那块,预算口径也是它。**唯一会显示数字的来源**。</summary>
     Hub,
-    /// <summary>★ 本机显卡。只在拿不到中枢数据时使用,且**必须**在界面上写明。</summary>
-    LocalFallback,
-    /// <summary>两边都没有。整条隐藏,不用 0 冒充"很空闲"。</summary>
-    None,
+    /// <summary>连不上主机(没配对 / 主机没开 / lan-edge 没起)。显示「主机未连接」,不显示任何数字。</summary>
+    HostUnreachable,
+    /// <summary>★ 连着主机,但主机自己这一轮没读到显存。**不是**未连接 —— 下一步该查主机的显卡,不是查网络。</summary>
+    HostNoReading,
 }
 
 public sealed record VramSnapshot(
     double TotalGiB,
     double ModelReservedGiB,   // 启用的模型 max 占用(浅蓝)
     double DesktopUsedGiB,     // 当前桌面/其它占用(蓝)
-    bool Available,            // 读不到 GPU 时为 false -> 界面隐藏该条,不显示 0 冒充
+    bool Available,            // 拿到主机数字了没有。★ 与 Source 是同一件事,见 HasNumbers
     string? Note = null,
-    VramSource Source = VramSource.None,
+    // ★ 默认值取 HostUnreachable(**不是** Hub):加一个新构造点、忘了传来源时,
+    //   它落在"没有主机数据"这边 —— 落错边的代价是拿一份来路不明的数字当主机的。
+    VramSource Source = VramSource.HostUnreachable,
     bool DesktopIsInferred = false,
     string? HubState = null)
 {
-    /// <summary>标题栏那一行。★ 本机回退时**必须**带上"不是中枢的",否则就是一次静默换源。</summary>
+    /// <summary>
+    /// 标题栏那一行。★★ 这个属性**必须被界面读**(VramBar.Update 里)——
+    /// 它曾经存在但没人渲染,于是"改标题"这个修复整整没有生效过。
+    /// </summary>
     public string Title => Source switch
     {
-        VramSource.Hub => "中枢显存",
-        VramSource.LocalFallback => "本机显卡(不是中枢的)",
-        _ => "显存",
+        VramSource.Hub => "主机显存",
+        VramSource.HostUnreachable => "主机未连接",
+        VramSource.HostNoReading => "主机显存读不到",
+        _ => "主机显存",
     };
+
+    /// <summary>有没有可显示的数字。★ 只有主机数据新鲜时才有 —— 别的一律没有。</summary>
+    public bool HasNumbers => Source == VramSource.Hub && Available && TotalGiB > 0;
 
     public double FreeGiB => Math.Max(0, TotalGiB - ModelReservedGiB - DesktopUsedGiB);
     /// <summary>实际占用比例(模型 + 桌面)。逼近 1 时界面转红。</summary>
@@ -89,16 +113,22 @@ public sealed class VramMonitor : IDisposable
 
     readonly System.Threading.Timer _timer;
     bool _paused;
-    double _totalGiB;
-    bool _nvmlOk;
-    bool _triedInit;
-    bool _smiDead;   // ★ nvidia-smi 也读不到 -> 不再重试(与 _triedInit 对称;否则无 N 卡机器每 2 秒起一次进程)
+    // ★ _totalGiB / _nvmlOk / _triedInit / _smiDead 已随本机读取路径一并删除(2026-08-05)。
+    //   留着它们就是四个"从不使用的字段" —— 编译器会警告,而本项目把死代码当缺陷。
+    //   ★ 其中 _totalGiB **在删之前就已经是死的**:只写不读,没有任何人用它。
 
-    public VramSnapshot Last { get; private set; } = new(0, 0, 0, false, "尚未读取");
+    public VramSnapshot Last { get; private set; } =
+        new(0, 0, 0, false, "还没有接上主机", VramSource.HostUnreachable);
 
     public VramMonitor()
     {
-        _timer = new System.Threading.Timer(_ => Tick(), null, TimeSpan.Zero, Interval);
+        // ★★ 起初**不采样**:VramMonitor 是 App 的字段初始化器,构造发生在 OnStartup 之前,
+        //   而 Hub 要到 OnStartup 里才接上。dueTime 若是 Zero,第一帧必然在 Hub 还是 null 时跑,
+        //   于是开机瞬间会闪一下「主机未连接」—— 那是一句**转瞬即逝的假话**,
+        //   而转瞬即逝的假话最难查(用户看见了,你复现不了)。
+        //   ⇒ 由 Hub 的 setter 启动这张表,见下面 Hub 属性。
+        _timer = new System.Threading.Timer(_ => Tick(), null,
+                                            System.Threading.Timeout.InfiniteTimeSpan, Interval);
     }
 
     /// <summary>窗口不可见时暂停 —— 省电的关键远大于调长间隔。</summary>
@@ -118,108 +148,93 @@ public sealed class VramMonitor : IDisposable
     }
 
     /// <summary>
-    /// 中枢状态的来源。★ 由宿主在启动时注入 —— 不在这里 new 一个,
+    /// 主机(中枢)状态的来源。★ 由宿主在启动时注入 —— 不在这里 new 一个,
     /// 否则会出现两条各自订阅的推送流,而"哪一条是权威"就没有答案了。
+    /// ★★ 接上的那一刻才开始采样(见构造函数):在此之前采样只会得到"没有主机",
+    ///   而那不是事实,只是还没接线。
     /// </summary>
-    public HubGpu? Hub { get; set; }
+    public HubGpu? Hub
+    {
+        get => _hub;
+        set
+        {
+            _hub = value;
+            if (value is null) return;
+            // 主机那边一有变化就立刻重画(不必等下一个 2 秒),同时把周期表也起起来 ——
+            // ★ 周期表不能省:「40 秒一帧都没来」是**没有事件**的那一种失败,
+            //   纯事件驱动的话它永远不会被画出来。
+            value.Changed += Tick;
+            _timer.Change(TimeSpan.Zero, Interval);
+        }
+    }
+    HubGpu? _hub;
 
     VramSnapshot Read()
     {
-        // ── ① 首选:中枢。这才是 AI 真正用的那块显卡,预算口径也是它 ──
+        // ── 只有一个来源:主机。拿不到就说拿不到,**绝不换一台机器的数字顶上** ──
         var hub = Hub;
-        if (hub is not null && hub.HasFreshData && hub.Snapshot is { } hs && hs.TotalGiB > 0)
+        if (hub is null || !hub.HasFreshData || hub.Snapshot is not { } hs)
         {
-            // ★ 模型段来自中枢的 committed 集合,客户端不自己算 peak(数字只有一份权威)。
-            var modelHub = VramBudget.PeakSumGiB(hs.Committed);
+            // ★ 标题统一是「主机未连接」(用户要的就是这一句),但**说明里分清是哪一种** ——
+            //   没配对 / 主机没开 / 被拒,这三种的下一步完全不同。
+            var why = hub?.Link switch
+            {
+                null => "还没有接上主机",
+                HubGpuLink.NeverConnected => "还没有连上主机 —— 主机没开机?或主机上的 lan-edge 没起?",
+                HubGpuLink.Reconnecting => "正在重连主机…",
+                HubGpuLink.Refused => "主机拒绝了这台设备(证书被吊销了?)",
+                _ => hub?.LastError ?? "连不上主机",
+            };
+            return new VramSnapshot(0, 0, 0, false, why, VramSource.HostUnreachable);
+        }
+        {
+            // ★ 主机连着,但它报的总显存是 0 ⇒ 主机那台机器上读不到显卡。
+            //   这**不是**"未连接" —— 网络是通的,该去查的是主机的驱动。
+            if (hs.TotalGiB <= 0)
+                return new VramSnapshot(0, 0, 0, false,
+                                        hs.SamplerError ?? "主机上读不到显卡(驱动没装?)",
+                                        VramSource.HostNoReading, true, hs.State);
+
+            // ★ 模型段来自主机的 committed 集合,客户端不自己算 peak(数字只有一份权威)。
+            // ★★ 必须收 unknown:认不出的组件 id 会被跳过,而跳过等于**把它当成 0 GiB** ——
+            //   客户端装在仓库外时读不到 vram-budget.toml,整张 peak 表是空的,
+            //   于是模型段静默算成 0,而条子照常显示"一切正常"。
+            //   (ComponentPicker 早就在收这个了,只有显存条这一处漏了。)
+            var unknown = new List<string>();
+            var modelHub = VramBudget.PeakSumGiB(hs.Committed, unknown);
+            _unknownComponents = unknown;
             // ★ 桌面段是**推算**的:total - free - 模型。WDDM 不暴露逐进程显存,
             //   说不出占用者是谁 —— DesktopIsInferred=true 让界面必须如实标注。
             var usedHub = hs.FreeGiB is { } f ? Math.Max(0, hs.TotalGiB - f) : (double?)null;
             if (usedHub is { } u)
                 return new VramSnapshot(hs.TotalGiB, modelHub, Math.Max(0, u - modelHub), true,
-                                        hs.SamplerError, VramSource.Hub, true, hs.State);
-            // 中枢连着,但它自己这一轮没采到 NVML ⇒ 如实说"中枢读不到",
-            // ★ 不退回本机:那会把"中枢的采样器坏了"显示成"一切正常",两种情况必须长得不一样。
+                                        // ★ 认不出组件时**说出来**:模型段这时是偏低的,
+                                        //   不说的话界面会显示"还很空",而实际可能已经满了。
+                                        unknown.Count > 0
+                                            ? $"有 {unknown.Count} 个组件认不出({string.Join("、", unknown.Take(3))}),模型段可能偏低"
+                                            : hs.SamplerError,
+                                        VramSource.Hub, true, hs.State);
+            // 主机连着,但它自己这一轮没采到 NVML ⇒ 如实说是**主机读不到**。
+            // ★ 这一种**不能**说成"未连接":它连着,坏的是主机上的采样器。
+            //   说成未连接会把人支去查网络,而问题在显卡那头 —— 下一步完全不同。
             return new VramSnapshot(hs.TotalGiB, modelHub, 0, false,
-                                    hs.SamplerError ?? "中枢这一轮没读到显存",
-                                    VramSource.Hub, true, hs.State);
+                                    hs.SamplerError ?? "主机这一轮没读到显存",
+                                    VramSource.HostNoReading, true, hs.State);
         }
-
-        // ── ② 回退:本机显卡。★ 这是**换了被测对象**,不是精度差一点 ──
-        //   所以 Source=LocalFallback,标题会变成「本机显卡(不是中枢的)」。
-        if (!_triedInit) { _triedInit = true; _nvmlOk = TryInitNvml(); }
-
-        double usedGiB, totalGiB;
-        if (_nvmlOk && TryReadNvml(out usedGiB, out totalGiB)) { /* ok */ }
-        else if (_smiDead || !TryReadSmi(out usedGiB, out totalGiB))
-        {
-            _smiDead = true;   // ★ 一次读不到就死心(无 N 卡机器不该每次 Tick 都去 Process.Start)
-            return new VramSnapshot(0, 0, 0, false, "读不到 GPU 显存(无 NVIDIA 驱动或不可用)",
-                                    VramSource.None);
-        }
-
-        _totalGiB = totalGiB;
-
-        // ★ 本机回退路径下模型段恒为 0,而且这是真话:经中枢装载的模型不在这台机器上,
-        //   本机这块卡上的占用全部来自本机的桌面程序。
-        return new VramSnapshot(totalGiB, 0, usedGiB, true,
-                                "拿不到中枢数据,这里显示的是本机这台机器的显卡",
-                                VramSource.LocalFallback);
     }
 
-    // ---------------------------------------------------------------- NVML
-    const string Nvml = "nvml.dll";
-    [DllImport(Nvml, EntryPoint = "nvmlInit_v2")] static extern int NvmlInit();
-    [DllImport(Nvml, EntryPoint = "nvmlShutdown")] static extern int NvmlShutdown();
-    [DllImport(Nvml, EntryPoint = "nvmlDeviceGetHandleByIndex_v2")] static extern int NvmlGetHandle(uint index, out IntPtr device);
-    [DllImport(Nvml, EntryPoint = "nvmlDeviceGetMemoryInfo")] static extern int NvmlGetMemory(IntPtr device, out NvmlMemory mem);
+    // ★★ 本机 NVML / nvidia-smi 的读取路径**已整条删除**(2026-08-05)。
+    //   它唯一的用途是"拿不到主机数据时退回显示本机这张卡",而用户裁定:
+    //   显存永远显示主机的,拿不到就说主机未连接。
+    //   ⇒ 留着那段代码就是留着一条随时会被接回去的错误路径,而它没有任何调用点 ——
+    //     本项目把"定义了却没有调用点"当缺陷。删干净比留着注释掉更诚实。
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct NvmlMemory { public ulong Total; public ulong Free; public ulong Used; }
-
-    static bool TryInitNvml() { try { return NvmlInit() == 0; } catch { return false; } }
-
-    static bool TryReadNvml(out double usedGiB, out double totalGiB)
-    {
-        usedGiB = totalGiB = 0;
-        try
-        {
-            if (NvmlGetHandle(0, out var dev) != 0) return false;
-            if (NvmlGetMemory(dev, out var m) != 0) return false;
-            const double G = 1024.0 * 1024 * 1024;
-            usedGiB = m.Used / G;
-            totalGiB = m.Total / G;
-            return totalGiB > 0;
-        }
-        catch { return false; }
-    }
-
-    // ---------------------------------------------------------------- 降级:nvidia-smi
-    // 只在 NVML 不可用时才走,且同样 2 秒一次 —— 开进程较贵,但总比没有强。
-    static bool TryReadSmi(out double usedGiB, out double totalGiB)
-    {
-        usedGiB = totalGiB = 0;
-        try
-        {
-            var psi = new ProcessStartInfo("nvidia-smi",
-                "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits")
-            { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
-            using var p = Process.Start(psi);
-            if (p is null) return false;
-            var line = p.StandardOutput.ReadLine();
-            p.WaitForExit(2000);
-            if (line is null) return false;
-            var parts = line.Split(',', StringSplitOptions.TrimEntries);
-            if (parts.Length < 2) return false;
-            usedGiB = double.Parse(parts[0]) / 1024.0;    // MiB -> GiB
-            totalGiB = double.Parse(parts[1]) / 1024.0;
-            return totalGiB > 0;
-        }
-        catch { return false; }
-    }
+    /// <summary>上一轮认不出的组件 id。★ 只用于诊断,界面已在 Note 里说过了。</summary>
+    List<string> _unknownComponents = new();
 
     public void Dispose()
     {
+        if (_hub is not null) _hub.Changed -= Tick;   // ★ 订了就要退,否则 Dispose 之后还在被回调
         _timer.Dispose();
-        try { if (_nvmlOk) NvmlShutdown(); } catch { }
     }
 }

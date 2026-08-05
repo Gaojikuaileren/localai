@@ -66,6 +66,38 @@ public sealed class SyncClient : IDisposable
     public event Action<string, IReadOnlyList<JsonElement>>? Remote;
     public event Action? Changed;
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ 2026-08-05 实机修复:此前只有「追增量」,没有「对齐」。
+    //
+    //  用户报「共享会话和家庭待办仍然无法双边共享」。查中枢的同步存档:
+    //  **两台真机一条记录都没有**(只有测试夹具 PC-B 的),而本机存档里
+    //  确实躺着 1 条 scope=家庭 的待办和 1 个 Shared=true 的会话。
+    //
+    //  根因:推送**只在变更那一刻**触发(Add/Update -> PushIfShared),
+    //  而待推队列是**纯内存**的。于是:
+    //    · 建它的时候中枢连不上 -> 进队列 -> 关掉 App -> **队列没了**
+    //    · 或者它建于 S13(同步落地)之前 -> 从来没有"变更"过 -> 永远不会被推
+    //  此后**再也没有任何东西会重推它** —— 因为系统里根本没有"对齐"这个动作。
+    //
+    //  ⇒ 连上的那一刻,把**当前全部合格数据**重新推一遍(不只是队列)。
+    //    重推是安全的:服务端对同内容重推明确回 superseded=false(不算冲突),
+    //    这一点 S13 就验过。★ 代价是幂等的一次全量,换来的是**系统能自愈**。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 当前**全部**该同步的记录(家庭待办 + 共享会话及其消息)。由宿主注入。
+    /// ★ 不在这里去翻各 Center —— SyncClient 不该知道待办和会话长什么样。
+    /// </summary>
+    public Func<IEnumerable<SyncItem>>? FullSet { get; set; }
+
+    /// <summary>
+    /// 单次最多推多少条。★ **必须与服务端 sync_policy 的 max_batch 一致**。
+    /// 超了服务端整批拒(denied_param),而被拒的那批**一条都不会出队** ——
+    /// 于是它会永远重推、永远失败,表现为"同步一直转圈但什么都没发生"。
+    /// 对齐一个消息多的共享会话正好会撞上这条。
+    /// </summary>
+    public const int MaxPerPush = 200;
+
     public SyncClient(HubClient hub) => _hub = hub;
 
     public void Start()
@@ -108,14 +140,49 @@ public sealed class SyncClient : IDisposable
         catch { return ""; }
     }
 
-    /// <summary>把待推队列推上去。★ 成功才出队 —— 失败留着下次,不静默丢。</summary>
+    /// <summary>
+    /// 把**当前全部合格数据**重新排队并推上去。★ 连上的那一刻调 —— 见上面那段说明。
+    /// 幂等:服务端对同内容重推回 superseded=false,不算冲突。
+    /// </summary>
+    public async Task ReconcileAsync(CancellationToken ct = default)
+    {
+        var all = FullSet?.Invoke();
+        if (all is not null)
+        {
+            lock (_gate)
+                foreach (var it in all)
+                {
+                    // 与 Enqueue 同款去重:同一条记录只留最后一版
+                    _pending.RemoveAll(x => x.Kind == it.Kind && IdOf(x.Record) == IdOf(it.Record));
+                    _pending.Add(it);
+                }
+        }
+        // ★ 循环推到推不动为止:一次只走 MaxPerPush 条,而对齐很可能不止一批。
+        //   出队的条件仍然是"服务端明确处理过",所以推不上去的不会被误清。
+        for (int round = 0; round < 64; round++)
+        {
+            int before;
+            lock (_gate) before = _pending.Count;
+            if (before == 0) return;
+            var r = await FlushAsync(ct);
+            int after;
+            lock (_gate) after = _pending.Count;
+            // ★ 一轮下来一条都没少 ⇒ 推不动了(网络断 / 被拒)。
+            //   继续转只会空烧 —— 退出去等下一次连上再来。
+            if (r is null || after >= before) return;
+        }
+    }
+
+    /// <summary>把待推队列推上去(单批,最多 MaxPerPush 条)。★ 成功才出队 —— 失败留着下次,不静默丢。</summary>
     public async Task<SyncPushResult?> FlushAsync(CancellationToken ct = default)
     {
         List<SyncItem> batch;
         lock (_gate)
         {
             if (_pending.Count == 0) return null;
-            batch = _pending.ToList();
+            // ★★ 必须切批:服务端 max_batch=200,超了**整批**拒(denied_param),
+            //   而被拒的那批一条都不出队 ⇒ 永远重推、永远失败。见 MaxPerPush 的说明。
+            batch = _pending.Take(MaxPerPush).ToList();
         }
         if (_hub.Profile is null) return null;
         var ep = _hub.TryDial();
@@ -228,8 +295,11 @@ public sealed class SyncClient : IDisposable
         {
             Link = SyncLink.Live;
             LastError = null;
-            // ★ 一连上就把攒着的补推上去 —— 否则离线期间的改动要等下一次改动才走
-            _ = Task.Run(() => FlushAsync());
+            // ★★★ 一连上就**对齐**(不只是补推队列)——
+            //   队列是纯内存的,关一次 App 就没了;而"该同步的东西"一直躺在本地存档里。
+            //   只补队列的话,那些数据永远等不到下一次"变更",也就永远不会上去。
+            //   这正是用户实测「仍然无法双边共享」的根因,见 ReconcileAsync 上方的说明。
+            _ = Task.Run(() => ReconcileAsync());
         }
         if (line.StartsWith("data: ", StringComparison.Ordinal))
             Absorb(line[6..]);

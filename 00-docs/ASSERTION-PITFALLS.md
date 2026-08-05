@@ -126,10 +126,20 @@ cp /tmp/target.bak target.py     # 用备份还原
 ★ 第 3 次正是被这条判据抓到的:数字**没有**按预期变,而不是变红了。
 **反过来同样成立:你增删了断言而总数没动 ⇒ 你跑的不是刚改的那个东西。**
 
+- **★★ 第 4 次(2026-08-05 傍晚):`dotnet build -c Release` 不带 `-r win-x64`,
+  根本不更新被测的那个产物。**
+  改了 `Selftest.cs`、`dotnet build -c Release --no-incremental` 报「0 个错误 / 1.78 秒」,
+  而 `bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-client.dll` 的时间戳**纹丝不动** ——
+  它编的是另一个 TFM(`net9.0-windows`),而门禁和手跑自检用的都是 win-x64 那个。
+  ⇒ 我对着一条**上一版**的断言消息查了三轮,以为是判据写错了;真相是那份修改根本没编进去。
+  ★ 判据同上:**断言总数没按预期变** —— 加了一条断言而 `PASS+FAIL` 的总数不变,就是它。
+
 **正确写法**
 - 要和 CI 对齐,就用 CI 那条命令:`powershell -ExecutionPolicy Bypass -File 90-ops\run-tests.ps1 -Full`;
 - 单独跑客户端自检,用 **Release/win-x64** 那个 exe,不用 Debug 的;
-- 手工构建一律带 `--no-incremental`。
+- 手工构建一律带 `--no-incremental` **和 `-r win-x64`** —— 少了 RID 就是在编另一个产物;
+- ★ 改完立刻**比时间戳**:`(Get-Item ...\win-x64\localai-client.dll).LastWriteTime`
+  必须晚于你刚改的那个 `.cs`。这一步比读构建输出可靠 —— 构建输出会说"成功"。
 
 **护栏(2026-08-05 落地)**
 `run-tests.ps1` 在跑客户端自检前**比时间戳**:任何 `*.cs`/`*.xaml` 比 exe 新,

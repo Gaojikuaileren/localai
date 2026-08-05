@@ -4170,31 +4170,110 @@ public static class Selftest
             //    **没有任何地方能看出来看错了** —— 正是本项目最恨的形状。
             // ══════════════════════════════════════════════════════════════
             {
-                // ① 数据源必须能被区分,而且回退时标题必须改名
-                Assert(new VramSnapshot(16, 0, 4, true, null, VramSource.Hub).Title.Contains("中枢"),
-                       "★ 中枢来源的标题写明是中枢");
-                var localTitle = new VramSnapshot(16, 0, 4, true, null, VramSource.LocalFallback).Title;
-                Assert(localTitle.Contains("本机") && localTitle.Contains("不是中枢"),
-                       "★★ 回退到本机显卡时标题【必须写明不是中枢的】—— 换的是被测对象,不是精度");
-                Assert(new VramSnapshot(16, 0, 4, true, null, VramSource.Hub).Title
-                       != localTitle, "两种来源的标题不能一样(一样就等于静默换源)");
+                // ══════════════════════════════════════════════════════
+                //  ★★★ 2026-08-05 重写。用户裁定:显存**永远显示主机的**,
+                //  副机要主机显存、主机也要主机显存;拿不到就显示「主机未连接」。
+                //
+                //  ★★ 重写的另一半理由更要紧:这一组**原来大半是假的** ——
+                //    · `Hub.Title != localTitle` 是两个**字符串常量**互比,永真;
+                //    · 「不退回本机」那条判据是 VramMonitor.cs 里的**一句注释**
+                //      (全仓唯一出处)⇒ 删注释就红、留注释就绿,**从来没验过行为**;
+                //    · `IndexOf(A) < IndexOf(B)` 的顺序断言,在 B 被删之后会以
+                //      **一个假理由**失败(报"顺序错了",真相是"根本没有本机路径")。
+                //  而它们全都绿着,同时产品里那条谎**原封不动活着**:
+                //  `VramBar` 的标题是构造函数写死的「显存」,`Update()` 一次都没读过 `s.Title`。
+                //  ⇒ 新的这一组一律钉**行为**与**接线**,不钉注释。
+                // ══════════════════════════════════════════════════════
+
+                // ① 逐态标题互不相同 —— 合并任意两态就等于把两种下一步说成同一件事
+                var vsTitles = Enum.GetValues<VramSource>()
+                                   .Select(v => new VramSnapshot(16, 0, 4, false, null, v).Title)
+                                   .ToList();
+                Assert(vsTitles.Count >= 3, $"★ 元断言:确实枚举到了各态(只有 {vsTitles.Count} 个)");
+                Assert(vsTitles.Distinct().Count() == vsTitles.Count,
+                       $"★★ 每一态必须有自己的说法,不许合并:{string.Join(" / ", vsTitles)}");
+                Assert(new VramSnapshot(16, 0, 4, false, null, VramSource.HostUnreachable).Title
+                           .Contains("主机未连接"),
+                       "★★ 拿不到主机数据时,标题就是「主机未连接」(用户裁定 2026-08-05)");
+                Assert(!new VramSnapshot(16, 0, 4, false, null, VramSource.HostNoReading).Title
+                            .Contains("未连接"),
+                       "★★★ 主机连着但它自己没读到 ≠ 未连接 —— 说成未连接会把人支去查网络,"
+                       + "而该查的是主机的显卡。两者的下一步完全相反");
+
+                // ② ★★★ 「回退回不来」的钉子:只有 Hub 那一态允许有数字。
+                //    哪天有人加回一个本机来源并让它显示数字,这条当场红。
+                foreach (var v in Enum.GetValues<VramSource>())
+                {
+                    var snap = new VramSnapshot(16, 2, 4, true, null, v);
+                    Assert(snap.HasNumbers == (v == VramSource.Hub),
+                           $"★★★ 只有主机来源可以显示数字;{v} 却 HasNumbers={snap.HasNumbers}");
+                }
 
                 var vmSrc = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
                 if (vmSrc is not null)
                 {
-                    Assert(vmSrc.Contains("hub.HasFreshData"),
-                           "★ 只在中枢数据【新鲜】时才用它(过期的中枢数字也不能冒充现在)");
-                    Assert(vmSrc.IndexOf("hub.HasFreshData", StringComparison.Ordinal)
-                           < vmSrc.IndexOf("TryInitNvml()", StringComparison.Ordinal),
-                           "★ 中枢在前、本机在后 —— 本机只是回退,不是首选");
-                    Assert(vmSrc.Contains("VramSource.LocalFallback"),
-                           "★ 本机路径显式标 LocalFallback,不复用 Hub 的标签");
+                    var vmCode = CodeOnly(vmSrc);
+                    Assert(vmCode.Contains("hub.HasFreshData"),
+                           "★ 只在主机数据【新鲜】时才用它(过期的主机数字也不能冒充现在)");
+                    // ★★ 反向:本机读取路径必须**整条不在了**。判据查代码不查注释 ——
+                    //   注释里正解释着"为什么删掉了",拿它当判据会永远红。
+                    foreach (var gone in new[] { "nvml.dll", "TryInitNvml", "TryReadNvml",
+                                                 "TryReadSmi", "nvidia-smi", "_smiDead" })
+                        Assert(!vmCode.Contains(gone),
+                               $"★★★ 本机显卡读取路径必须删干净,`{gone}` 还在 —— "
+                               + "留着就是留着一条随时会被接回去的错误路径,而它没有任何调用点");
                 }
 
-                // ② 中枢连着但它自己没采到 ⇒ 不许退回本机冒充
-                var vmSrc2 = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
-                Assert(vmSrc2 is null || vmSrc2.Contains("不退回本机"),
-                       "★★ 中枢采样器坏了 ≠ 一切正常:此时不退回本机数字(两种情况必须长得不一样)");
+                // ══════════════════════════════════════════════════════
+                //  ★★★ 接线断言 —— 这一条要是早写了,上面那半年的谎当天就会红。
+                //
+                //  P4-S9 把「拿不到中枢数据就改标题」做在了 VramSnapshot.Title 里,
+                //  断言也钉住了它,而 **VramBar 从来没读过这个属性** ——
+                //  标题是构造函数里写死的「显存」。于是:模型改了、断言绿了、
+                //  文档写了"已修",**而屏幕上一个字都没变**。
+                //  ⇒ 凡是"界面必须如实标注 X"这类判据,光钉住 X 算出来是对的**没有意义**,
+                //    必须同时钉住**有人把它画出来**。
+                // ══════════════════════════════════════════════════════
+                var vbSrc = TryReadSource(Path.Combine("Views", "VramBar.cs"));
+                if (vbSrc is not null)
+                {
+                    var vb = CodeOnly(vbSrc);
+                    Assert(vb.Contains("_title.Text = s.Title"),
+                           "★★★ 标题必须来自快照 —— 写死的标题让「说清是哪台机器」永远不生效");
+                    Assert(vb.Contains("s.HasNumbers") || vb.Contains("HasNumbers"),
+                           "★★ 画不画数字由 HasNumbers 一处决定,不各自判 Available/Total");
+                    // ★ 顺序判据:先各自 Contains 再比位置 —— 否则某一天其中一个被删,
+                    //   IndexOf 返回 -1,断言会以**一个假理由**失败(上面那组就栽过)。
+                    // ★★ 而且必须**只在 Update() 体内**比:第一版拿整个文件比,
+                    //   于是比到的是 UpdateRing 的**方法定义**(它写在 Update 前面),
+                    //   报"顺序错了"而代码是对的 —— 判据比想判的东西宽,当场红了一条假红。
+                    var iUpd = vb.IndexOf("public void Update(VramSnapshot s)", StringComparison.Ordinal);
+                    var body = iUpd >= 0 ? vb[iUpd..] : "";
+                    var iShow = body.IndexOf("ShowUnavailable(s)", StringComparison.Ordinal);
+                    var iRing = body.IndexOf("UpdateRing(s)", StringComparison.Ordinal);
+                    Assert(iUpd >= 0 && iShow >= 0 && iRing >= 0,
+                           $"★ 三处都要找得到(位置判据的前提):Update={iUpd} Show={iShow} Ring={iRing}");
+                    Assert(iShow < iRing,
+                           $"★★★ 拿不到数据必须在 UpdateRing 之前就 return(Show={iShow} Ring={iRing})"
+                           + " —— 环上写的是 UsedRatio,拿不到时它是 0,收起态会显示 0% = 显存全空");
+                    Assert(!vb.Contains("Visibility.Collapsed;   // 读不到就藏起来"),
+                           "★ 拿不到不再整条隐藏(用户裁定:要显示「主机未连接」)—— "
+                           + "隐藏分不清『出错了』和『这版没这个功能』");
+                }
+
+                // ★★ 主机发来读不懂的帧时,不许把旧快照伪装成新鲜的
+                var hgFresh = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (hgFresh is not null)
+                {
+                    var hgc = CodeOnly(hgFresh);
+                    var iParse = hgc.IndexOf("TryParseSnapshot(line[6..])", StringComparison.Ordinal);
+                    var iStamp = hgc.IndexOf("LastFrameAt = DateTime.UtcNow", StringComparison.Ordinal);
+                    Assert(iParse >= 0 && iStamp >= 0, "★ 两处都在(位置判据的前提)");
+                    Assert(iParse < iStamp,
+                           "★★★ 时间戳必须在**解析成功之后**才刷 —— 反过来的话,中枢发来读不懂的帧时"
+                           + "会进入最坏的稳态:Link=Live、时间戳一直新、快照冻在最后一帧好数据,"
+                           + "于是界面一直显示几小时前的数字而看不出来,「主机未连接」永远不触发");
+                }
 
                 // ③ 推送非轮询(D37 ②),且心跳是判据的一部分
                 var hg = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
@@ -4462,6 +4541,57 @@ public static class Selftest
                     Assert(t.Contains("只在这台电脑上") || t.Contains("不同步"),
                            "★★ 并逐档说清个人的不同步 —— 笼统的说法失信最快");
                 }
+
+                // ══════════════════════════════════════════════════════
+                //  ★★★ 2026-08-05 实机修复:同步此前只有「追增量」,没有「对齐」。
+                //
+                //  用户报「共享会话和家庭待办仍然无法双边共享」。查中枢的同步存档:
+                //  **两台真机一条记录都没有**(只有测试夹具的),而本机存档里确实躺着
+                //  合格的家庭待办与共享会话。根因:推送只在**变更那一刻**触发,
+                //  而待推队列是**纯内存**的 —— 关一次 App 就没了,那些数据此后
+                //  永远等不到下一次"变更",也就永远不会上去。
+                // ══════════════════════════════════════════════════════
+                {
+                    var scSrc = TryReadSource(Path.Combine("Services", "SyncClient.cs"));
+                    if (scSrc is not null)
+                    {
+                        var sc = CodeOnly(scSrc);
+                        Assert(sc.Contains("ReconcileAsync"),
+                               "★★★ 必须有【对齐】动作 —— 只补内存队列的话,关一次 App 那些数据就永远上不去");
+                        Assert(sc.Contains("FullSet"),
+                               "★★ 对齐的数据源由宿主注入(SyncClient 不该知道待办和会话长什么样)");
+                        // ★ 连上那一刻走的必须是对齐,不是只 Flush 队列
+                        var iLive = sc.IndexOf("Link = SyncLink.Live", StringComparison.Ordinal);
+                        var iRec = sc.IndexOf("ReconcileAsync()", StringComparison.Ordinal);
+                        Assert(iLive >= 0 && iRec >= 0, "★ 两处都在(位置判据的前提)");
+                        Assert(iRec > iLive && iRec - iLive < 800,
+                               "★★★ 一连上就要对齐 —— 这正是用户实测『仍然无法双边共享』的根因");
+                        Assert(sc.Contains("Take(MaxPerPush)"),
+                               "★★★ 推送必须切批:服务端 max_batch=200,超了**整批**拒,"
+                               + "而被拒的一条都不出队 ⇒ 永远重推、永远失败(对齐大会话正好撞上)");
+                    }
+                    Assert(Services.SyncClient.MaxPerPush == 200,
+                           $"★★ 单批上限必须与服务端 sync_policy 的 max_batch 一致(现 {Services.SyncClient.MaxPerPush})");
+
+                    // ★★ Scope 存的是【界面文案】,判据不能只认中文那一个
+                    Assert(Services.TodoCenter.IsFamily("家庭")
+                           && Services.TodoCenter.IsFamily("Family")
+                           && Services.TodoCenter.IsFamily("家族"),
+                           "★★★ 三语界面下建的家庭待办都要认 —— 只认中文的话,"
+                           + "英文/日文界面下建的家庭待办会**静默地永远不同步**");
+                    Assert(!Services.TodoCenter.IsFamily("个人")
+                           && !Services.TodoCenter.IsFamily("Personal")
+                           && !Services.TodoCenter.IsFamily(null)
+                           && !Services.TodoCenter.IsFamily(""),
+                           "★★★ 反过来:个人档一个都不许认 —— 把私人东西推到另一台是不可撤销的错误");
+                    // ★ 上线的一律是规范值:服务端的范围闸也是拿「家庭」比的,
+                    //   送 "Family" 上去会被判 out_of_scope。
+                    var enTodo = new Services.TodoItem("t1", "x", Services.TodoKind.Chore, Scope: "Family");
+                    var wire = Services.TodoCenter.ToSyncItem(enTodo);
+                    var wireScope = wire.Record.GetType().GetProperty("scope")?.GetValue(wire.Record)?.ToString();
+                    Assert(wireScope == Services.TodoCenter.WireFamily,
+                           $"★★★ 上线必须写规范值而不是界面文案(实得「{wireScope}」)");
+                }
                 var s12todo = TryReadSource(Path.Combine("Services", "TodoCenter.cs"));
                 if (s12todo is not null)
                 {
@@ -4715,9 +4845,10 @@ public static class Selftest
                 if (mw2 is not null)
                     Assert(mw2.Contains("who.IsGuess ? \"FgSecondary\" : \"FgOnSelected\""),
                            "★ 头像首字前景跟着底色走(墨白皮肤下白字压近白底看不见)");
-                if (vm2 is not null)
-                    Assert(vm2.Contains("_smiDead"),
-                           "★ nvidia-smi 读不到就死心(无 N 卡机器不再每 2 秒起一次进程)");
+                // ★ 原来这里钉的是 `_smiDead`(nvidia-smi 读不到就死心)。本机读取路径
+                //   2026-08-05 整条删掉了 —— 显存永远显示主机的,没有本机可退。
+                //   ⇒ 这条断言连同它守的东西一起消失,**不留一个恒真的壳**。
+                //   反向判据在上面那一组(本机读取路径必须删干净)。
                 if (cc4 is not null)
                     Assert(cc4.Contains("Dictionary<string, int> _archiveCount") && cc4.Contains("_archiveCount.Remove"),
                            "★ 归档条数缓存 —— 不再每次会话区重建都整档读盘");

@@ -112,6 +112,12 @@ public partial class App : Application
         Sync = new SyncClient(Hub);
         Todos.Sync = Sync;
         Chat.Sync = Sync;
+        // ★★★ 连上中枢时用来**对齐**的数据源(2026-08-05 实机修复)。
+        //   在这之前系统只有"追增量":推送只在变更那一刻发生,而待推队列是纯内存的 ——
+        //   关一次 App 就没了,那些数据此后永远等不到下一次"变更"。
+        //   实测后果:中枢的同步存档里两台真机**一条记录都没有**,
+        //   而本机存档里确实躺着合格的家庭待办与共享会话。见 SyncClient.ReconcileAsync。
+        Sync.FullSet = () => Todos.SharedSnapshot().Concat(Chat.SharedSnapshot());
         Sync.Remote += AbsorbRemote;
         Lifecycle.Register("stop-sync-stream", () => Sync.Stop());
 

@@ -161,14 +161,33 @@ public sealed class HubGpu : IDisposable
 
     Task OnLine(string line)
     {
-        // ★ 心跳也刷新 LastFrameAt —— 它正是用来区分"没变化"和"连接死了"的那一手。
-        LastFrameAt = DateTime.UtcNow;
-        if (Link != HubGpuLink.Live) { Link = HubGpuLink.Live; LastError = null; }
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ 2026-08-05 修:LastFrameAt 原来在**解析之前**无条件刷新,
+        //  而 Snapshot 只在解析成功时更新。于是中枢发来读不懂的帧时(双方版本对不上、
+        //  字段改了名),客户端会进入一个**最坏的稳态**:
+        //      Link=Live · LastFrameAt 一直是新的 · Snapshot 冻结在最后一帧好数据
+        //  ⇒ HasFreshData 恒为真,界面**一直显示几小时前的数字,而且看不出来**。
+        //  ★ 这条恰好会让「拿不到主机数据就说主机未连接」那个判据**永远不触发** ——
+        //    一条坏在"永远说一切正常"上的新鲜度闸,比没有闸更糟。
+        //  ⇒ 心跳照常刷新(它本来就是用来区分"没变化"和"连接死了"的);
+        //    但 data: 帧**只有解析成功才算收到了数据**。
+        // ══════════════════════════════════════════════════════════════
         if (line.StartsWith("data: ", StringComparison.Ordinal))
         {
             var parsed = TryParseSnapshot(line[6..]);
-            if (parsed is not null) Snapshot = parsed;
+            if (parsed is null)
+            {
+                // ★ 不刷新时间戳、不置 Live —— 让它按正常路径过期,和"连接死了"同样对待。
+                //   读不懂对方说什么,和听不见对方说话,对使用者是同一件事。
+                Link = HubGpuLink.Reconnecting;
+                LastError = "中枢发来的帧读不懂(客户端与中枢版本可能对不上)";
+                Notify();
+                return Task.CompletedTask;
+            }
+            Snapshot = parsed;
         }
+        LastFrameAt = DateTime.UtcNow;
+        if (Link != HubGpuLink.Live) { Link = HubGpuLink.Live; LastError = null; }
         Notify();
         return Task.CompletedTask;
     }

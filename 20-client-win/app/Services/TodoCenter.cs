@@ -71,20 +71,53 @@ public sealed class TodoCenter
     /// <summary>同步器。★ 由宿主注入 —— 不在这里 new,否则会出现两条各自订阅的流。</summary>
     public SyncClient? Sync { get; set; }
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★ 2026-08-05 审计发现:Scope 存的是【界面文案】,不是数据键。
+    //
+    //  TodoEditor 填进去的是 `Strings.Get("visibility.family")`,而词表里:
+    //      zh-CN "家庭"  ·  en-US "Family"  ·  ja-JP "家族"
+    //  判据原来写死 `t.Scope == "家庭"` ⇒ **英文/日文界面下建的家庭待办
+    //  静默地永远不同步**;而且换一次语言,已存的待办就永远卡在旧语言的字符串上。
+    //
+    //  ⇒ ① 判据认全部三种写法;② **上线时一律写规范值**,不把界面文案送上网 ——
+    //    服务端的范围闸也是拿 "家庭" 比的,送 "Family" 上去会被判 out_of_scope。
+    //  ★ 诚实边界:这只修好了【同步】。彻底的做法是 Scope 存语言无关的键、
+    //    显示时再翻译 —— 那要迁移已有存档,记在 STATE 的待办里,**没有假装已解决**。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>「家庭」这一档在三语界面下的全部写法。★ 新增语言必须同步加进来。</summary>
+    static readonly string[] FamilyAliases = { "家庭", "Family", "家族" };
+
+    /// <summary>上线的规范值。★ 与服务端 sync_store.in_scope 的判据一致。</summary>
+    public const string WireFamily = "家庭";
+
+    /// <summary>这个 Scope 是不是「家庭」档 —— 不管界面是什么语言。</summary>
+    public static bool IsFamily(string? scope) =>
+        scope is not null && FamilyAliases.Contains(scope, StringComparer.Ordinal);
+
     /// <summary>该不该同步这一条。★ 判据只看 Scope,不看别的(别的字段一变就漏推)。</summary>
-    public static bool ShouldSync(TodoItem t) => t.Scope == "家庭";
+    public static bool ShouldSync(TodoItem t) => IsFamily(t.Scope);
+
+    /// <summary>
+    /// 一条待办的**上线形态**。★ 只此一处 —— 增量推与全量对齐必须共用它,
+    /// 两处各写一份迟早会漂(本项目已经栽过好几次)。
+    /// </summary>
+    public static SyncItem ToSyncItem(TodoItem t) => new("todos", new
+    {
+        id = t.Id, title = t.Title, kind = t.Kind.ToString(), done = t.Done,
+        due = t.Due?.ToString("o"), due_has_time = t.DueHasTime, flagged = t.Flagged,
+        priority = t.Priority.ToString(), notes = t.Notes,
+        owner = t.Owner, scope = WireFamily,      // ★ 规范值,不送界面文案
+        completed_at = t.CompletedAt?.ToString("o"), created_by_ai = t.CreatedByAi,
+    });
+
+    /// <summary>当前**全部**该同步的待办。★ 连上中枢时用来对齐(见 SyncClient.ReconcileAsync)。</summary>
+    public IEnumerable<SyncItem> SharedSnapshot() => _items.Where(ShouldSync).Select(ToSyncItem);
 
     void PushIfShared(TodoItem t)
     {
         if (Sync is null || !ShouldSync(t)) return;
-        Sync.Enqueue(new SyncItem("todos", new
-        {
-            id = t.Id, title = t.Title, kind = t.Kind.ToString(), done = t.Done,
-            due = t.Due?.ToString("o"), due_has_time = t.DueHasTime, flagged = t.Flagged,
-            priority = t.Priority.ToString(), notes = t.Notes,
-            owner = t.Owner, scope = t.Scope,
-            completed_at = t.CompletedAt?.ToString("o"), created_by_ai = t.CreatedByAi,
-        }));
+        Sync.Enqueue(ToSyncItem(t));
     }
 
     /// <summary>新增。Id 为空则自动生成;返回最终 Id。</summary>

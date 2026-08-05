@@ -161,15 +161,45 @@ public sealed class ChatCenter
     /// <summary>同步器。★ 由宿主注入 —— 全进程只有一条流。</summary>
     public SyncClient? Sync { get; set; }
 
+    /// <summary>
+    /// 一个共享会话的**上线形态**。★ 只此一处 —— 增量推与全量对齐共用,
+    /// 两处各写一份迟早会漂(本项目已经栽过好几次)。
+    /// </summary>
+    public static SyncItem ToSyncItem(ChatSession s) => new("sessions", new
+    {
+        id = s.SessionId, title = s.Title, shared = true,
+        workspace = s.WorkspaceKey, owner = s.OwnerMemberId,
+        last_active = s.LastActive.ToString("o"),
+    });
+
+    /// <summary>一条消息的上线形态。★ 同上,只此一处。</summary>
+    public static SyncItem ToSyncItem(ChatMessage m) => new("messages", new
+    {
+        id = m.MessageId ?? (m.SessionId + "-" + m.At.Ticks),
+        session_id = m.SessionId, role = m.Role.ToString(),
+        text = m.Text, at = m.At.ToString("o"),
+    });
+
+    /// <summary>
+    /// 当前**全部**该同步的会话与消息。★ 连上中枢时用来对齐(见 SyncClient.ReconcileAsync)。
+    /// ★★ 顺序:会话在前、消息在后 —— 服务端判消息范围时要查它所属会话在不在共享表里,
+    ///   顺序反了同一批里"新共享的会话 + 它的消息"会因为会话还没进表而被拒。
+    ///   (服务端也按 kind 重排过一次,这里保持同序是为了**两边不依赖对方的好意**。)
+    /// ★ System 消息不推:那是客户端自己的界面文案,推过去等于让另一台机器读我们的 UI 提示。
+    /// </summary>
+    public IEnumerable<SyncItem> SharedSnapshot()
+    {
+        var shared = _sessions.Where(s => s.Shared && s.DeletedAt is null && !s.Ghost).ToList();
+        foreach (var s in shared) yield return ToSyncItem(s);
+        var ids = shared.Select(s => s.SessionId).ToHashSet(StringComparer.Ordinal);
+        foreach (var m in _messages.Where(m => ids.Contains(m.SessionId) && m.Role != ChatRole.System))
+            yield return ToSyncItem(m);
+    }
+
     void PushSession(ChatSession s)
     {
         if (Sync is null || !s.Shared) return;
-        Sync.Enqueue(new SyncItem("sessions", new
-        {
-            id = s.SessionId, title = s.Title, shared = true,
-            workspace = s.WorkspaceKey, owner = s.OwnerMemberId,
-            last_active = s.LastActive.ToString("o"),
-        }));
+        Sync.Enqueue(ToSyncItem(s));
     }
 
     void PushMessage(ChatMessage m)
@@ -177,12 +207,7 @@ public sealed class ChatCenter
         if (Sync is null) return;
         var s = _sessions.FirstOrDefault(x => x.SessionId == m.SessionId);
         if (s is null || !s.Shared) return;      // ★ 只推共享会话里的消息
-        Sync.Enqueue(new SyncItem("messages", new
-        {
-            id = m.MessageId ?? (m.SessionId + "-" + m.At.Ticks),
-            session_id = m.SessionId, role = m.Role.ToString(),
-            text = m.Text, at = m.At.ToString("o"),
-        }));
+        Sync.Enqueue(ToSyncItem(m));
     }
 
     /// <summary>把一条共享会话的**全部消息**推上去。★ 提升那一刻用(D52 规则 A:整段一起上)。</summary>
