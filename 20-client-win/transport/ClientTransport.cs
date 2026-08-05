@@ -59,6 +59,29 @@ public static class Transport
 
     static X509Certificate2 Cert(byte[] der) => X509CertificateLoader.LoadCertificate(der);
 
+    /// <summary>
+    /// 这次请求实际要用的 URL —— **由钉住的 hub_id 与当前拨号端口现算**,不信任档案里存的 EdgeUrl。
+    ///
+    /// ★★ 为什么不能直接用 <see cref="ClientProfile.EdgeUrl"/>(2026-08-06 查出):
+    ///   URL 里的**主机名**决定 TLS 主机名校验,而服务器证书的 SAN 是 `localai-&lt;hubShort&gt;.local`。
+    ///   `SetDial` 只改 `Profile.Dial`,**从不改 `EdgeUrl`**;而 2026-08-04 之前写下的档案里
+    ///   `EdgeUrl` 是 `https://&lt;ip&gt;:&lt;port&gt;` 形式(见 Pair 里那段注释的来历)。
+    ///   ⇒ 这类档案对**完全正确的**主机也会永久 `RemoteCertificateNameMismatch`。
+    ///   而归因修好之后,名字不匹配会被判成 HubIdentityChanged =「必须重新配对」——
+    ///   **结论是错的,主机一点毛病没有**,而按那条建议做会删掉本机私钥。
+    ///   ★ 老代码是**碰巧**躲过的:重新配对会顺手重写 EdgeUrl,于是没人发现存的那个会过期。
+    ///
+    /// ★ 顺带一层加固:期望的服务器名从**钉住的 hub_id** 推出,而不是取一个可被改写的字符串。
+    ///   于是改 profile.json 里的 EdgeUrl 也没法把主机名校验指到别处去。
+    ///
+    /// ★ 认不出 hub_id 形状(极旧档案)时退回存的 EdgeUrl —— 不猜、也不抛,
+    ///   让那种档案维持原有行为,而不是当场变成连不上。
+    /// </summary>
+    public static string EdgeUrlFor(ClientProfile p, IPEndPoint dial)
+        => Guid.TryParse(p.HubId, out var g)
+            ? $"https://localai-{LocalAI.Identity.HubId.Short(g)}.local:{dial.Port}"
+            : p.EdgeUrl;
+
     static HttpClient Boot(IPEndPoint dial, Action<byte[]> captureLeaf)
     {
         var h = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false };
@@ -238,7 +261,7 @@ public static class Transport
         using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
         using var clientCert = candidate.CopyWithPrivateKey(key);
         using var cli = Trusted(dial, caPublic, clientCert);
-        using var req = new HttpRequestMessage(method, p.EdgeUrl + path);
+        using var req = new HttpRequestMessage(method, EdgeUrlFor(p, dial) + path);
         if (body is not null)
             req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         using var r = await cli.SendAsync(req, ct);
@@ -258,7 +281,7 @@ public static class Transport
         using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
         using var clientCert = candidate.CopyWithPrivateKey(key);
         using var cli = Trusted(dial, caPublic, clientCert);
-        using var req = new HttpRequestMessage(method, p.EdgeUrl + path);
+        using var req = new HttpRequestMessage(method, EdgeUrlFor(p, dial) + path);
         // 本机也报自己的版本:中枢将来想按版本分流时不必再猜
         req.Headers.TryAddWithoutValidation("X-LocalAI-Protocol", "1");
         if (body is not null)
@@ -292,7 +315,7 @@ public static class Transport
         using var clientCert = candidate.CopyWithPrivateKey(key);
         using var cli = Trusted(dial, caPublic, clientCert);
         cli.Timeout = Timeout.InfiniteTimeSpan;
-        using var req = new HttpRequestMessage(method ?? HttpMethod.Get, p.EdgeUrl + path);
+        using var req = new HttpRequestMessage(method ?? HttpMethod.Get, EdgeUrlFor(p, dial) + path);
         if (body is not null)
             req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
@@ -400,7 +423,7 @@ public static class Transport
             using var key = new ECDsaCng(CngKey.Open(p.KeyName, SwProv));
             using var withKey = cand.CopyWithPrivateKey(key);
             using var cli = Trusted(dial, caPublic, withKey);
-            using var resp = await cli.PostAsync(p.EdgeUrl + "/identity/renew/complete?renewalId=" + p.PendingRenewalId,
+            using var resp = await cli.PostAsync(EdgeUrlFor(p, dial) + "/identity/renew/complete?renewalId=" + p.PendingRenewalId,
                                                  new StringContent(""), ct);
             if (!resp.IsSuccessStatusCode) return false;
 

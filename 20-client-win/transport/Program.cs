@@ -94,6 +94,48 @@ static async Task<int> Selftest()
         Assert(status == 200 && body == "ok", "business call over mTLS as active member -> 200 (" + status + ")");
 
         // ══════════════════════════════════════════════════════════════════════
+        //  D? 戊 · 陈旧的 EdgeUrl 不得再让一台好主机看起来像"换了中枢"
+        // ══════════════════════════════════════════════════════════════════════
+        //  SetDial 只改 Profile.Dial,从不改 Profile.EdgeUrl;而 2026-08-04 之前写下的档案里
+        //  EdgeUrl 是 https://<ip>:<port> 形式。URL 的主机名决定 TLS 主机名校验,而服务器证书
+        //  的 SAN 是 localai-<hubShort>.local ⇒ 这类档案对**完全正确的**主机也会永久名字不匹配。
+        //  ★ 归因修好之后这会变成一条**自信的错误结论**:「必须重新配对」—— 而重新配对删私钥。
+        //  ⇒ 不再信任存的 EdgeUrl,改由钉住的 hub_id + 当前拨号端口现算(Transport.EdgeUrlFor)。
+        {
+            // ★★ 这就是那种坏档案的真实形状:EdgeUrl 是 ip 形式,其余一切正确。
+            var stale = JsonSerializer.Deserialize<ClientProfile>(JsonSerializer.Serialize(profile))!;
+            stale.EdgeUrl = $"https://127.0.0.1:{PORT}";
+            // ★ 必须 try 起来:坏掉时 Transport.Call 是**抛**而不是返回状态码。
+            //   不接住的话这一节会把整个套件**崩掉**,连汇总行都没有 —— 那比一条干净的红更难查。
+            //   (第一次红测就是这样崩的,所以补上这层。)
+            int ss; string sb;
+            try { (ss, sb) = await Transport.Call(stale, dial, "/v1/models"); }
+            catch (Exception ex) { ss = -1; sb = ex.GetBaseException().Message; }
+            Assert(ss == 200 && sb == "ok",
+                   "★★★ 档案里 EdgeUrl 还是 ip 形式(SetDial 改不到的那半边)时,业务调用**照常 200**("
+                   + ss + " " + sb + ")—— 这一行红 = 一台好主机会被判成「必须重新配对」,而那会删掉本机私钥");
+
+            // 端口跟着 Dial 走,不跟着存的那个字符串走
+            Assert(Transport.EdgeUrlFor(stale, dial) == $"https://{hub.ServerName}:{PORT}",
+                   "★ URL 由**钉住的 hub_id** 与当前拨号端口现算(" + Transport.EdgeUrlFor(stale, dial) + ")");
+            Assert(Transport.EdgeUrlFor(stale, new IPEndPoint(IPAddress.Loopback, 9999)).EndsWith(":9999"),
+                   "★ 换了拨号端口,URL 端口跟着变 —— 存的 EdgeUrl 再陈旧也不影响");
+
+            // ★ 加固:改写档案里的 EdgeUrl 指向别处,也改不动主机名校验的目标
+            var tampered = JsonSerializer.Deserialize<ClientProfile>(JsonSerializer.Serialize(profile))!;
+            tampered.EdgeUrl = "https://evil.example.com:8443";
+            Assert(Transport.EdgeUrlFor(tampered, dial) == $"https://{hub.ServerName}:{PORT}",
+                   "★★ 篡改档案里的 EdgeUrl **改不动**期望的服务器名(它由钉住的 hub_id 推出)");
+
+            // ★ 认不出 hub_id 形状的极旧档案 -> 退回存的那个,不抛、不猜
+            var ancient = JsonSerializer.Deserialize<ClientProfile>(JsonSerializer.Serialize(profile))!;
+            ancient.HubId = "not-a-guid";
+            ancient.EdgeUrl = "https://legacy.local:1234";
+            Assert(Transport.EdgeUrlFor(ancient, dial) == "https://legacy.local:1234",
+                   "★ hub_id 认不出来时退回存的 EdgeUrl(维持原行为,不当场变成连不上)");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
         //  B16 · 词表版本必须能上线路 —— 否则换表当天每次配对都会被指控为中间人攻击
         // ══════════════════════════════════════════════════════════════════════
         {

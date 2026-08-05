@@ -201,6 +201,30 @@ D49 当时给的是「请重启 Edge 以加载新证书」,而重启会掐断 30
 > 且索引在 `Wordlist` 被用到**之前**就算完了 ⇒ 这六个数确是换表前那份代码的输出,不是"照着新代码抄的"。
 > ★ 上面那次红测里,这条断言**保持绿色** —— 是"换表没碰索引"的现场证据,不是推断。
 
+### 1.5 (08-06)拨号 URL **现算**,不再信任档案里存的 `EdgeUrl`
+
+**病灶**:`HubClient.SetDial` 只改 `Profile.Dial`,**从不改 `Profile.EdgeUrl`**;
+而 2026-08-04 之前写下的档案里 `EdgeUrl` 是 `https://<ip>:<port>` 形式。
+URL 的**主机名**决定 TLS 主机名校验,而服务器证书的 SAN 是 `localai-<hubShort>.local`
+⇒ 这类档案对**完全正确的**主机也会永久 `RemoteCertificateNameMismatch`。
+
+**为什么它现在才致命**:归因修好之前,名字不匹配落进 `Offline`(「中枢没开机」)—— 错,但无害。
+修好之后它会落进 `HubIdentityChanged` =「**必须重新配对**」—— 一个**自信的错误结论**,
+而按它做会删掉本机私钥。★ 修好归因反而把这条潜伏的坑变成了破坏性的。
+
+**裁定**:`Transport.EdgeUrlFor(profile, dial)` —— 由**钉住的 `hub_id`** 与**当前拨号端口**现算,
+`ClientTransport` 里四个用到 URL 的地方全部改走它。存的 `EdgeUrl` 退化为**显示用 + 极旧档案的兜底**。
+
+- 老档案**自愈**,不需要迁移脚本,也不需要 client 车道配合;
+- 端口跟着 `Dial` 走,`SetDial` 改端口不再产生漂移;
+- ★ 顺带加固:期望的服务器名从**钉住的 hub_id** 推出,改写 `profile.json` 里的
+  `EdgeUrl` 也没法把主机名校验指到别处;
+- ★ `hub_id` 认不出形状(极旧档案)时退回存的 `EdgeUrl` —— 不猜、不抛,维持原行为。
+
+> ★ 为什么**不**去改 `SetDial` 本身:那在 client 车道,而且只治一个入口。
+> 四个消费点全在 `ClientTransport.cs`(本车道),把"不信任那个字段"做成结构性的,
+> 比在每个写入点记得同步更可靠 —— 后者正是这个 bug 的成因。
+
 ---
 
 ## §2 ★★ 要 client 车道改的:逐行清单
@@ -303,7 +327,17 @@ public string? CertWarning => TlsFailure.LocalCertPhase(Profile, DateTimeOffset.
 ★ `RenewDue` 段**不得**告警 —— 那段系统正在正常自愈;一个正常运转也报警的系统,
 两周内就会被学会忽略,于是真出事那次也没人看。
 
-### 2.7 建议(非必须):设备页显示主机侧轮换状态
+### 2.7 (08-06,**纯显示**)`Views/DevicesView.cs:618` 显示的是**存的** `EdgeUrl`
+
+```csharp
+Ui.Body($"中枢:{p.EdgeUrl}"),
+```
+`EdgeUrl` 现已退化为显示用字段(见 §1.5),`SetDial` 改端口后它会**显示陈旧的值**。
+连接本身已经不受影响,所以这是**纯外观**问题。要修就换成
+`Transport.EdgeUrlFor(p, ep)`(需要那一处能拿到 `IPEndPoint`)。
+★ 优先级低,**不修也不会有功能后果** —— 列在这里只是免得下次有人看到不一致以为是 bug。
+
+### 2.8 建议(非必须):设备页显示主机侧轮换状态
 
 `/admin/ping` 现在多回一个 `serverCert { daysLeft, phase, consecutiveFailures, lastError, needsAttention }`。
 `needsAttention == true` 时应当在主机端界面显著提示 —— 这是自动轮换 fail-closed 的**最后一段路**:
@@ -334,17 +368,25 @@ public string? CertWarning => TlsFailure.LocalCertPhase(Profile, DateTimeOffset.
 |---|---|---|
 | identity selftest / 2 / 3 / 4 / 5 | 11 / 15 / **28** / 14 / **13** | 11 / 15 / **42** / 14 / **57** |
 | lan-edge selftest | 8 | **20** |
-| transport selftest | 5 | **37** |
+| transport selftest | 5 | **42** |
 | Python 18 套件 | 978 | 978(未触碰) |
-| **合计** | — | **PASS=1174 FAIL=0** |
+| **合计** | — | **PASS=1179 FAIL=0** |
 
-净增 **+102** 条断言(其中 08-06 修回归时 +5)。
+净增 **+107** 条断言(08-05 +97 · 08-06 修归因回归 +5 · 08-06 修 EdgeUrl +5)。
 
 **红测(证明断言不是恒绿的)**
 1. 词表改一个词(`zebra→zebroo`)⇒ 摘要断言**红**,冻结索引断言**保持绿**(= 换表没碰索引的现场证据);
 2. 摘掉 `TlsFailure.Classify` 里"先查本机证书"那两行 ⇒ `LocalDeviceCertExpired` 断言**红**;
-3. (08-06)摘掉名字不匹配那一根针 ⇒ **恰好** S1/S3 两条身份断言**红**,其余全绿。
-三次都已还原并逐字节核对。
+3. (08-06)摘掉名字不匹配那一根针 ⇒ **恰好** S1/S3 两条身份断言**红**,其余全绿;
+4. (08-06)把 `EdgeUrlFor` 退回"直接用存的 `EdgeUrl`" ⇒ 陈旧档案那 4 条**红**,
+   且红的消息里直接打出了病因原文 `RemoteCertificateNameMismatch`。
+四次都已还原并逐字节核对。
+
+**★ 第 4 次红测顺带修好了一条自己写坏的断言**:它原来**不接异常**,
+而坏掉时 `Transport.Call` 是**抛**不是返回状态码 ⇒ 整个套件当场崩掉、连汇总行都没有。
+按 `run-tests.ps1` 的纪律那算「没跑起来」(不会被当成通过),但**比一条干净的红难查得多**。
+已加 `try/catch` 让它报成 FAIL 并把异常原文带进消息。
+⇒ **判据涉及"会抛的调用"时,断言必须自己接住异常** —— 否则它的失败形态是崩,不是红。
 
 **★ 一条方法论教训(值得进 ASSERTION-PITFALLS,但那份文件本车道只读)**
 原来那条 `HubIdentityChanged` 断言用的针是我**凭印象手写**的
@@ -380,12 +422,7 @@ public string? CertWarning => TlsFailure.LocalCertPhase(Profile, DateTimeOffset.
    ★ 这是**第五种**归因(「本机配对状态不可用」),不在本次四分类里。
    未做的原因:它需要再加一个 `HubState`,会扩大 client 车道的改动面;
    且它与本次任务(证书生命周期)是相邻但不同的问题。**建议单开一条。**
-8. **(08-06 新查出,未修)`SetDial` 只改 `Profile.Dial`,从不改 `Profile.EdgeUrl`** ——
-   若某份档案的 `EdgeUrl` 仍是 `https://<ip>:<port>` 形式(2026-08-04 之前的形状,
-   见 `ClientTransport.cs` 里那段注释),它对**正确的**主机也会永久名字不匹配。
-   修好归因之后,这种档案会稳定显示「必须重新配对」——**结论是错的,主机没问题**。
-   ★ 老代码是**碰巧**躲过的(重新配对会顺手重写 `EdgeUrl`)。属 transport 车道(本车道),
-   但已超出本次任务范围,**未做**,单独记账。
+8. ~~`SetDial` 只改 `Dial` 不改 `EdgeUrl`~~ —— **08-06 已修**,见 §1.5。
 
 ---
 
