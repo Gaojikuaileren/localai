@@ -4311,6 +4311,23 @@ public static class Selftest
                        "★★ 七种失败七种说法 —— 合并成一句「失败了」会让用户无从判断下一步");
                 Assert(Adv("loader_absent").Contains("没有生效") || Adv("loader_absent").Contains("不会真的"),
                        "★★★ loader_absent 必须说清【没有生效】—— 不能让用户以为模型装上了");
+                // ★★★ 2026-08-06 审计 B2:上面那条**只钉了诚实的那半句**,
+                //   于是「中枢还没有装载器(那是 P5)」这半句假话在它眼皮底下绿了一整天。
+                //   装载器 S14 就落地了,P5 是语音 v1 —— 两处都是假话。
+                //   ⇒ 补**反向**断言。★ 这是本项目的老规矩:
+                //     「必须说 X」和「不许说 Y」是两条,只写前一条挡不住后一条。
+                Assert(!Adv("loader_absent").Contains("P5"),
+                       "★★★ 不得再把装载器安给 P5 —— 装载器 S14 就实现了,P5 是语音 v1。"
+                       + "给错原因的提示比不给提示更坏");
+                Assert(!Adv("loader_absent").Contains("还没有装载器"),
+                       "★★ 也不得说『中枢还没有装载器』—— 它有。该说的是【这一次为什么没接上】");
+                // ★ 服务端的归因必须能透出来:它已经分清「接线失败:{原因}」与「有意没接」,
+                //   客户端再套一句写死的等于把那份归因丢掉。
+                Assert(new ApplyOutcome(false, "loader_absent", "接线失败:配置里少了 model_rel",
+                                        "", Array.Empty<BlockingLease>(), 0)
+                       .Advice.Contains("model_rel"),
+                       "★★★ 服务端说出来的原因必须原样透给用户 —— "
+                       + "客户端自己编一句罐头话,等于把中枢查出来的归因丢在半路");
                 Assert(Adv("rollback_failed").Contains("主机"),
                        "回滚失败要指出得去主机上处理(客户端自己解决不了)");
 

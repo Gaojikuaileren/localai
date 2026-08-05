@@ -48,8 +48,25 @@ public sealed class ModelsView : UserControl
         //     勾了不会发生任何事,而界面看着像配置好了。现在换成真的。
         var modelList = new ComponentPicker();
 
-        // ③ 自动启用规则
-        var preset = new ComboBox { Margin = new Thickness(0, 4, 0, 6), Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
+        // ══════════════════════════════════════════════════════════════
+        //  ③ 自动启用规则 —— ★★★ 2026-08-06 审计 B1:这两个控件**能拨却不生效**。
+        //
+        //  `AutoStartPreset` / `AutoUnloadIdle` 全仓只有"写"和"声明",**没有任何读取方**:
+        //  不发给中枢、中枢也没有接收它们的端点。用户勾了"空闲自动卸载",显存不会被卸。
+        //  ★ 而它们就长在下面 StrategyPlaceholder() 那段注释的正上方,那段写着:
+        //    「摆一个**能拨却不生效**的开关,用户会以为自己已经配好了策略 ——
+        //     而实际上什么都没发生。这比空着糟得多:空着只是"还没做",**假开关是"骗人"**。」
+        //  ★★ S14 之后更坏:Broker 已经接上了,副标题那句"接入后由它执行"读起来变成
+        //    "已经生效了"。**它比 S14 之前更容易骗人,不是更少。**
+        //
+        //  ⇒ 置灰 + 文案明说没生效、在等哪一步。
+        //  ★ 为什么不按审计建议直接撤掉:那段注释点名的罪是「**能拨**却不生效」——
+        //    灰掉之后拨不动,就不是那个罪;而保留它能告诉用户"这件事有人管、在等 D87",
+        //    撤掉则什么都不告诉。★ 两种都不说谎,这一种信息量更大。
+        //    ★★ 若协调层/用户认为该撤,撤掉也对 —— 这一条我按"信息量更大"选的,不是唯一解。
+        //  ★ 字段**留着**:S16-b(D87 触发策略)就是下一件事,它会来读这两个值。
+        // ══════════════════════════════════════════════════════════════
+        var preset = new ComboBox { Margin = new Thickness(0, 4, 0, 6), Width = 260, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = false };
         foreach (var (_, label) in ModelCatalog.Presets) preset.Items.Add(label);
         var pIdx = Array.FindIndex(ModelCatalog.Presets, p => p.Key == s.AutoStartPreset);
         preset.SelectedIndex = pIdx < 0 ? 0 : pIdx;
@@ -58,7 +75,7 @@ public sealed class ModelsView : UserControl
             if (preset.SelectedIndex >= 0) { s.AutoStartPreset = ModelCatalog.Presets[preset.SelectedIndex].Key; s.Save(); }
         };
 
-        var idle = new CheckBox { Content = Strings.Get("model.idle_unload"), IsChecked = s.AutoUnloadIdle, Margin = new Thickness(0, 6, 0, 0) };
+        var idle = new CheckBox { Content = Strings.Get("model.idle_unload"), IsChecked = s.AutoUnloadIdle, Margin = new Thickness(0, 6, 0, 0), IsEnabled = false };
         idle.Checked += (_, _) => { s.AutoUnloadIdle = true; s.Save(); };
         idle.Unchecked += (_, _) => { s.AutoUnloadIdle = false; s.Save(); };
 
