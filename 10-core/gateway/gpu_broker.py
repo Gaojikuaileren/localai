@@ -93,7 +93,18 @@ LEASE_KINDS: Dict[str, LeaseKind] = {
         note="客户端会话。人在用,驱逐它等于把人的界面打空"),
     "model_ref":      LeaseKind(
         "model_ref", evictable=True, blocking=BLOCKING_ASYNC,
-        note="模型引用计数。§8.1.7 允许空闲时自动卸载 —— 这是显式开的口子"),
+        # ★★★ 2026-08-06 留痕更正:这条 note 原来写的是
+        #   「§8.1.7 **允许空闲时自动卸载** —— 这是显式开的口子」。
+        #   **源头查不到这句话。** §8.1.7(方案书 :1541)允许列的原文是
+        #   「自动驱逐 `WARM` / `MAINTENANCE` 类**租约**」,而禁止列明写「**自动卸载/换装**」。
+        #   ⇒ **驱逐一份租约 ≠ 卸载一个进程**。而且 LEASE_KINDS 里根本没有
+        #     WARM/MAINTENANCE 这两类 —— 本文件 :62 把它们重新诠释成了 evictable 这条轴,
+        #     那是一次**诠释**,不是方案书给的授权。
+        #   ★ 这句注释一直被当作"按需卸载已获授权"的依据在引用(包括我自己引过一次)——
+        #     一行注释替方案书说了它没说过的话,而它看起来像是在转述裁定。
+        #   ⇒ 按 D25 的做法:**写出来,不静默修**。是否真的开这个口子,由 D? 决议包裁。
+        note="模型引用计数。evictable=True 表示**本实现**允许它被驱逐;"
+             "★ 这不等于方案书授权了『空闲自动卸载进程』—— 那一条待裁(见 decision-packets)"),
     "pet_presence":   LeaseKind(
         "pet_presence", evictable=False, blocking=BLOCKING_RESIDENT,
         note="桌宠在场。peak=0.0 但语义是独占的一份在场证明(D40 唯一实体)"),
