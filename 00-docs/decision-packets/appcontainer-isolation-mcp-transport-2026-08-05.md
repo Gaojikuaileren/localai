@@ -204,11 +204,19 @@ live 的管道服务端日志与修好后的重跑互相印证。)
    一开始让我误判成「PowerShell 起不来」;
 2. `explorer.exe <cmd>` 交接 → 本机**没有**交接给非提权 shell,起出来仍是 High + Administrators enabled;
 3. `schtasks /rl LIMITED /it` → 同样是 High + Administrators enabled;
-4. 自己写的 `CreateRestrictedToken` + 降完整性到 Medium → **降成功了**,
-   但起出来的进程一律 `0xC0000142`(STATUS_DLL_INIT_FAILED),
-   补了 `lpDesktop=winsta0\default` 与 `CREATE_NEW_CONSOLE` 也一样。
+4. 自己写的 `CreateRestrictedToken` + `DuplicateTokenEx` + 降完整性到 Medium →
+   **token 造成功了**(降 Medium 确认成功),但 `CreateProcessWithTokenW` 起出来的进程
+   一律 `0xC0000142`(STATUS_DLL_INIT_FAILED);补 `lpDesktop=winsta0\default`、
+   换 `CREATE_NEW_CONSOLE`、去掉 `DISABLE_MAX_PRIVILEGE`(它会连
+   `SeChangeNotifyPrivilege` 一起剥掉,那本身就足以让 DLL 加载失败)都一样;
+5. 换 `CreateProcessAsUserW`(文档:token 是调用方主令牌的受限版本时**不需要**
+   `SeAssignPrimaryTokenPrivilege`)→ **进程创建成功了**,但**仍然** `0xC0000142`。
+   ⇒ 说明卡点不在 API,而在**窗口站/桌面的 DACL 没有授权给这个受限 token**。
+   MSDN 的解法是把 logon SID 加进 `winsta0` 与 `default` 的 DACL —— 那是**改会话级
+   系统对象的 ACL**,为了一次测量去动它不合适,**故止步**。
 
-⇒ **这一格只能由用户在自己上下文里双击补**(§8)。**不要**用我第一格或第二格的结果替代它。
+⇒ 五种手段全试过,**这一格只能由用户在自己上下文里双击补**(§8)。
+**不要**用我第一格或第二格的结果替代它,也**不要**再去试上面这五条。
 
 ★ **一条要撤回的证据链**:我一开始把
 `HKLM\...\FirewallPolicy\RestrictedServices\AppIso\FirewallRules` 的 ACL

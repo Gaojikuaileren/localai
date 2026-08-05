@@ -95,11 +95,16 @@ AcSpike probe <cfg> <out>              内部用:被投进容器里的那一半
 
 ## 已知缺陷(交回时如实记账,不要当成能用)
 
-1. **`medium-probe` 造不出 Medium 完整性的可用进程。**
-   `CreateRestrictedToken` + 降完整性都成功了,但起出来的进程一律
-   `0xC0000142`(STATUS_DLL_INIT_FAILED),给了 `lpDesktop=winsta0\default`
-   与 `CREATE_NEW_CONSOLE` 也一样。⇒ 「Medium + Administrators 只用于拒绝」这一格
-   **没测到**,只能靠用户双击 `1-` 补。别信这个模式的沉默。
+1. **`medium-probe` 造不出 Medium 完整性的可用进程 —— 别再往这条路上投时间。**
+   token 造得出来(`CreateRestrictedToken` + `DuplicateTokenEx`,降 Medium 确认成功),
+   但起出来的进程**一律** `0xC0000142`(STATUS_DLL_INIT_FAILED)。已试过并全部失败:
+   `CreateProcessWithTokenW` / `CreateProcessAsUserW`(后者进程创建返回成功,子进程仍然
+   `0xC0000142`)· `lpDesktop=winsta0\default` · `CREATE_NEW_CONSOLE` ·
+   去掉 `DISABLE_MAX_PRIVILEGE`。
+   ⇒ 卡点在**窗口站/桌面的 DACL 没授权给这个受限 token**;MSDN 的解法要改
+   `winsta0`/`default` 的 ACL,**为一次测量去动会话级系统对象不合适,故止步**。
+   ⇒ 「Medium + Administrators 只用于拒绝」这一格**只能靠用户双击 `1-` 补**。
+   **别信这个模式的沉默**,也别再重试上面那几条。
 
 2. **AF_UNIX 的落点很讲究,而且默认落点是坏的那个。**
    实测:在 `{state}` / `{cache}\tmp` / `{code}` / `C:\Windows\Temp` 下

@@ -243,6 +243,18 @@ internal static class Native
         uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
         ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
 
+    /// <summary>
+    /// ★ 文档:当 token 是【调用方自己主令牌的受限版本】时,**不需要** SeAssignPrimaryTokenPrivilege。
+    /// CreateRestrictedToken 造出来的正是这种,所以提权管理员身份可以直接用这个 API。
+    /// 用它是因为 CreateProcessWithTokenW 在本机一律 0xC0000142(STATUS_DLL_INIT_FAILED)。
+    /// </summary>
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    internal static extern bool CreateProcessAsUserW(
+        IntPtr hToken, string lpApplicationName, string lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+        uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
     [DllImport("advapi32.dll", SetLastError = true)]
     internal static extern bool DuplicateTokenEx(
         IntPtr hExistingToken, uint dwDesiredAccess, IntPtr lpTokenAttributes,

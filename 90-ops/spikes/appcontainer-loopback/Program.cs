@@ -668,11 +668,23 @@ internal static class Program
         si.lpDesktop = @"winsta0\default";
         var cmd = $"cmd.exe /c \"{cmdPath}\"";
         Console.WriteLine("  跑: " + cmd);
-        if (!Native.CreateProcessWithTokenW(hFull, 0, null, cmd,
-                                            Native.CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out var pi))
+
+        // ① 先用 CreateProcessAsUserW —— 受限 token 是自己主令牌的派生,不需要 SeAssignPrimaryToken。
+        Native.PROCESS_INFORMATION pi;
+        bool started = Native.CreateProcessAsUserW(hFull, null, cmd, IntPtr.Zero, IntPtr.Zero, false,
+                                                  Native.CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
+        if (started) Console.WriteLine("  起法: CreateProcessAsUserW ✓");
+        else
         {
-            Console.WriteLine("CreateProcessWithTokenW failed Win32=" + Marshal.GetLastWin32Error());
-            return 1;
+            Console.WriteLine($"  CreateProcessAsUserW 失败 Win32={Marshal.GetLastWin32Error()},退回 CreateProcessWithTokenW");
+            // ② 退回旧路(本机一律 0xC0000142,留着是为了让失败可见而不是静默)
+            started = Native.CreateProcessWithTokenW(hFull, 0, null, cmd,
+                                                     Native.CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi);
+            if (!started)
+            {
+                Console.WriteLine("  CreateProcessWithTokenW 也失败 Win32=" + Marshal.GetLastWin32Error());
+                return 1;
+            }
         }
         Native.WaitForSingleObject(pi.hProcess, 180_000);
         Native.GetExitCodeProcess(pi.hProcess, out var code);
