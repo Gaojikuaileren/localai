@@ -174,11 +174,50 @@ static async Task<int> Selftest()
             Assert(TlsFailure.Classify(srvExpired, profile, t0) == TlsFailureKind.ServerCertExpired,
                    "★ 【主机服务器证书过期】仍判 ServerCertExpired(D49 那条路径没被改坏)");
 
-            var untrusted = new HttpRequestException("x",
-                                new System.Security.Authentication.AuthenticationException(
-                                    "The remote certificate is invalid: UntrustedRoot"));
-            Assert(TlsFailure.Classify(untrusted, profile, t0) == TlsFailureKind.HubIdentityChanged,
-                   "★ 【链不到钉住的 CA】判 HubIdentityChanged(唯一该重新配对的一种)");
+            // ★★★ 下面每一条针都是 2026-08-06 **实测抓到的原文**,不是手写的近似句。
+            //   原先这里写的是 "The remote certificate is invalid: UntrustedRoot" —— 一句 .NET
+            //   **从来不会发出**的话。断言拿一个虚构的输入喂给判据,于是它测的是一个不存在的世界:
+            //   判据在真实消息上失灵,而这条断言照样绿。
+            //   ⇒ 凡是"判据要认某段外部文本"的断言,针必须来自**实测输出**,不能凭印象写。
+            static Exception Wrap(string msg) => new HttpRequestException(
+                "The SSL connection could not be established, see inner exception.",
+                new System.Security.Authentication.AuthenticationException(msg));
+
+            // 形状一:只有链错误 —— 消息里**带**链状态词
+            Assert(TlsFailure.Classify(Wrap("The remote certificate is invalid because of errors in the certificate chain: PartialChain"), profile, t0)
+                   == TlsFailureKind.HubIdentityChanged,
+                   "★ 链不到钉住的 CA(PartialChain)-> HubIdentityChanged"
+                   + " —— ★ 注意是 PartialChain 而**不是** UntrustedRoot:签发者不在 CustomTrustStore 时是前者");
+            Assert(TlsFailure.Classify(Wrap("The remote certificate is invalid because of errors in the certificate chain: UntrustedRoot"), profile, t0)
+                   == TlsFailureKind.HubIdentityChanged,
+                   "★ 对方出示自签名证书(UntrustedRoot)-> HubIdentityChanged");
+
+            // ★★★ 形状二:**还有名字不匹配** —— 消息里一个链状态词都没有。
+            //   这是主机重铸身份时**唯一**会出现的形状(Identity.Init 换 GUID ⇒ 换 CA 也换 SAN),
+            //   也就是 HubIdentityChanged 这一态**存在的理由**。
+            //   ⇒ 只认 UntrustedRoot/PartialChain 的判据在真正需要它的那一刻会全部落空。
+            Assert(TlsFailure.Classify(Wrap("The remote certificate is invalid according to the validation procedure: RemoteCertificateNameMismatch, RemoteCertificateChainErrors"), profile, t0)
+                   == TlsFailureKind.HubIdentityChanged,
+                   "★★★ 【主机重铸了身份】(名字不匹配 + 链不上,消息里**没有**任何链状态词)"
+                   + " -> HubIdentityChanged。这一行红 = 用户在真的换了中枢时会看到「中枢没开机」");
+            Assert(TlsFailure.Classify(Wrap("The remote certificate is invalid according to the validation procedure: RemoteCertificateNameMismatch"), profile, t0)
+                   == TlsFailureKind.HubIdentityChanged,
+                   "★★ 只有名字不匹配(链是好的:陈旧档案 / EdgeUrl 还是 ip 形式)-> HubIdentityChanged");
+
+            // ★★ 排序:两个词同时出现时,**身份问题压过过期**。
+            //   判成 ServerCertExpired 的话,文案会说"在主机上续签即可,不必重新配对" ——
+            //   而那张叶证书根本链不到钉住的 CA,续签多少次都没用。
+            Assert(TlsFailure.Classify(Wrap("The remote certificate is invalid because of errors in the certificate chain: NotTimeValid, PartialChain"), profile, t0)
+                   == TlsFailureKind.HubIdentityChanged,
+                   "★★ 同时带 NotTimeValid 与 PartialChain 时判 **HubIdentityChanged** 而不是过期"
+                   + " —— 链都不通了,续签解决不了");
+
+            // ★★ 不许再把任意握手失败兜底成"必须重新配对"。
+            //   实测:拨到的 IP 上现在跑着普通 HTTP 服务时就是这一条。
+            Assert(TlsFailure.Classify(Wrap("Cannot determine the frame size or a corrupted frame was received."), profile, t0)
+                   == TlsFailureKind.Unknown,
+                   "★★★ 拨到一个非 TLS 服务(地址被别人占了)-> Unknown,**不得**判成"
+                   + "「必须重新配对」—— 重新配对会先删掉本机私钥,为一个填错地址的问题销毁有效身份");
 
             // ★★ 判不出来时**不猜**。裸的 AuthenticationException 不再兜底成 HubIdentityChanged ——
             //   那个兜底给出的建议是"必须重新配对",而重新配对会删掉本机私钥。

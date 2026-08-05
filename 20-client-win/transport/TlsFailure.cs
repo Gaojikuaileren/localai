@@ -14,14 +14,23 @@
 //   | 主机服务器证书过期       | AuthenticationException:「...certificate chain: NotTimeValid」 |
 //
 // HubClient.ClassifyTlsFailure 原来的两轮判据(找 UntrustedRoot/PartialChain/expired/
-// NotTimeValid 这些**英文词**,再兜底找 AuthenticationException)对第二行**一条都命中不了**:
-//   ① 异常链里根本没有 AuthenticationException —— TLS 1.3 下服务端的 alert 在首次读时才到,
-//      包成 IOException,兜底那一轮扑空;
+// NotTimeValid 这些**英文词**)对第二行**一条都命中不了**:
+//   ① 异常链里根本没有 AuthenticationException —— 服务端拒绝客户端证书时,失败是以
+//      IOException -> Win32Exception 的形状浮上来的,兜底那一轮扑空;
+//      ★ 这**与 TLS 版本无关**:2026-08-06 把两端都钉到 TLS 1.2 复测,形状一模一样。
+//        (本文件早先把它归因于「TLS 1.3 的 alert 晚到」,那个解释是错的,已更正。)
 //   ② Win32 层那句话是**本地化**的(本机是中文),英文针对不上。
 //      ★ 而且换英文机器也不行:英文原文是 "The certificate chain was issued by an authority
 //        that is not trusted.",里面没有 "UntrustedRoot" 这个词。
 //   ⇒ 返回 null ⇒ 调用方归到 Offline ⇒ 界面说「中枢没开机」。
 //      用户会一趟趟跑去主机重启 Edge、查防火墙 —— 而主机完全正常。
+//
+// ★ 与之相对:**服务器**证书出问题时,异常是 SslStream 自己抛的 AuthenticationException,
+//   消息里嵌的是 SslPolicyErrors / X509ChainStatusFlags 的 **enum ToString()**
+//   (PartialChain / NotTimeValid / RemoteCertificateNameMismatch)。
+//   枚举名不随系统语言变,所以拿它当针是可靠的 —— 可靠的原因是"它是枚举名",
+//   **不是**"我这台机器上看到的是英文"(装了语言包之后 .NET 自己的那句话仍会被翻译,
+//   而嵌在里面的枚举名不会)。
 //
 // ★ 更坏的一层:Windows 把这次失败报成「不受信任的颁发机构」,而真正的原因是**时间**
 //   (服务端 X509Chain 判的是 NotTimeValid)。所以就算有人把针本地化了,
@@ -99,9 +108,43 @@ public static class TlsFailure
 
         if (ex is null) return TlsFailureKind.Unknown;
 
-        // ② 服务器证书过期。这一句是 **.NET 自己拼的**(不是 Win32 的),所以恒为英文、
-        //    且带明确的 NotTimeValid —— 实测形如
-        //    "The remote certificate is invalid because of errors in the certificate chain: NotTimeValid"。
+        // ② ★★★ 对面不是你钉住的那个中枢。**必须排在过期之前**(理由见下面的排序说明)。
+        //
+        // ★★ 2026-08-06 多路实测纠正了本文件原先的一个错误假设:.NET 在这条路径上会发出
+        //   **两种不同形状**的消息,取决于 SslPolicyErrors 里有没有名字不匹配:
+        //
+        //     只有链错误        -> "...invalid because of errors in the certificate chain: PartialChain"
+        //                          ⇒ 消息里**带**链状态词
+        //     还有名字不匹配    -> "...invalid according to the validation procedure:
+        //                           RemoteCertificateNameMismatch, RemoteCertificateChainErrors"
+        //                          ⇒ 消息里**一个链状态词都没有**
+        //
+        //   而按 Identity.cs 的 Init,主机重铸身份会 **同时** 换掉 CA 和名字
+        //   (新 GUID -> 新 hub short -> 新的 localai-<short>.local SAN)。
+        //   ⇒ **现实中每一次真的"换了中枢",走的都是第二种形状。**
+        //   只认 UntrustedRoot/PartialChain 的判据在那一刻全部落空 —— 这正是本条最初写错的地方:
+        //   实测 S1(重铸)判成 Unknown -> Offline -> 界面说「中枢没开机」,
+        //   而 RediscoverAsync 同时报「扫过…都没找到」,两条错误提示互相印证,
+        //   用户完全看不到"该重新配对"这条唯一出路。
+        //
+        // ★ 另一处纠正:CustomTrustStore 里找不到签发者时,链状态是 **PartialChain**,不是 UntrustedRoot;
+        //   UntrustedRoot 只在对方出示**自签名**证书时出现。两个都留着。
+        // ★ RevocationStatusUnknown 不再检:本路径 RevocationMode=NoCheck,它一次都不会出现。
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            var m = e.Message ?? "";
+            if (m.Contains("RemoteCertificateNameMismatch", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("UntrustedRoot", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("PartialChain", StringComparison.OrdinalIgnoreCase))
+                return TlsFailureKind.HubIdentityChanged;
+        }
+
+        // ③ 主机的服务器证书过期。
+        // ★★ 排序是承重的:必须**在②之后**。一条消息可能同时带两个词
+        //   ("...certificate chain: NotTimeValid, PartialChain" —— 重铸且顺带过期)。
+        //   先判过期的话会得出 ServerCertExpired,而它的处置文案是「在主机上续签即可,不必重新配对」——
+        //   可是那张叶证书**根本链不到你钉住的 CA**,续签一万次也没用。
+        //   ⇒ 只有当名字和信任链都没问题时,"过期"才是真正的病因。
         for (var e = ex; e is not null; e = e.InnerException)
         {
             var m = e.Message ?? "";
@@ -109,22 +152,14 @@ public static class TlsFailure
                 return TlsFailureKind.ServerCertExpired;
         }
 
-        // ③ 链不到钉住的 CA。同样是 .NET 自拼的链状态词。
-        for (var e = ex; e is not null; e = e.InnerException)
-        {
-            var m = e.Message ?? "";
-            if (m.Contains("UntrustedRoot", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("PartialChain", StringComparison.OrdinalIgnoreCase))
-                return TlsFailureKind.HubIdentityChanged;
-        }
-
         // ④ 只知道"TLS 没握成",但不知道是哪一种 ⇒ **别下结论**。
-        // ★ 这里【不再】把裸的 AuthenticationException 兜底成 HubIdentityChanged:
-        //   那个兜底原本是想接住"链不通",实测却接不住任何一种真实情形,
-        //   反而有把别的失败误判成"必须重新配对"的风险 —— 而那条建议是破坏性的。
-        //   宁可说"不知道",也不要给一个会让人删掉私钥的假结论。
-        for (var e = ex; e is not null; e = e.InnerException)
-            if (e is AuthenticationException) return TlsFailureKind.Unknown;
+        // ★★ 这里【不再】把裸的 AuthenticationException 兜底成 HubIdentityChanged。
+        //   实测(2026-08-06)那个兜底会**误伤**:拨到的 IP 上现在跑着一个普通 HTTP 服务
+        //   (路由器/NAS 管理页,或 DHCP 把旧地址分给了别人)时,异常是
+        //   AuthenticationException:「Cannot determine the frame size or a corrupted frame was received.」
+        //   —— 兜底会把它判成"必须重新配对",而重新配对**会先删掉本机私钥**
+        //   (见 Transport.Pair 开头)。为一个"地址填错了"的问题,亲手销毁一个完全有效的身份。
+        //   宁可说"不知道",也不要给一个破坏性的假结论。
         return TlsFailureKind.Unknown;
     }
 

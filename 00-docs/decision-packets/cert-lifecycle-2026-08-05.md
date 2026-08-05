@@ -78,6 +78,50 @@ D49 记录的到期日准确。
 > 若哪天过期校验被挪到应用层、变成 401(可归因性变好),那条断言会**红给人看**,
 > 提示客户端的归因逻辑必须同步改 —— 而不是默默通过。
 
+### (e) ★★ 2026-08-06 追加:`HubIdentityChanged` **不是**死路径,而本包初稿的修法会把它弄死
+
+08-05 收工时我提出「`HubIdentityChanged` 可能从写下来就没生效过」。**这个怀疑是错的**,
+已由 8 路并行实测(6 个场景 + 4 个补充 + 3 路对抗复核)推翻。如实更正:
+
+**1. 它是活的。** 老判据在**全部六种**身份失效场景里都会判出 `HubIdentityChanged`。
+我 08-05 的结论只在 **Win32 那一层**成立(= 服务端拒绝客户端证书那条路径,S9),
+而我把它写成了泛化结论。**范围错了。**
+
+**2. .NET 在这条路上发两种形状的消息** —— 这是全部误判的机械原因:
+
+| 条件 | 消息 | 含链状态词? |
+|---|---|---|
+| 只有链错误 | `...invalid because of errors in the certificate chain: PartialChain` | ✅ 有 |
+| **还有名字不匹配** | `...invalid according to the validation procedure: RemoteCertificateNameMismatch, RemoteCertificateChainErrors` | ❌ **一个都没有** |
+
+**3. 而"主机重铸身份"必然落在第二种形状。** `Identity.Init` 用 `Guid.NewGuid()` 铸 hub_id,
+CA 名与 `server_name` 全由它派生 ⇒ 重铸**同时**换掉 CA 和 `localai-<short>.local` 名字
+⇒ 名字必然不匹配 ⇒ 消息里**没有**任何链状态词。
+⇒ 只认 `UntrustedRoot`/`PartialChain` 的判据,在**唯一真正需要它的那一刻**全部落空。
+
+**4. 老代码在这一格是靠那条"该删的兜底"答对的。** 而兜底确实该删:实测拨到一个跑普通 HTTP 的地址
+(路由器/NAS 管理页,或 DHCP 把旧地址分给了别人)时,异常是
+`AuthenticationException: Cannot determine the frame size or a corrupted frame was received.`,
+兜底会判成「必须重新配对」—— 而重新配对**先删本机私钥**。为一个填错地址的问题销毁有效身份。
+
+**⇒ 结论:兜底删,同时加名字不匹配分支,且它必须排在 `NotTimeValid` 之前。**
+(消息可能同时带 `NotTimeValid, PartialChain`;先判过期会给出"续签即可"的建议,
+而链都不通了,续签一万次也没用。)
+
+**5. 另外两处事实更正(本包 §0(c) 初稿写错了):**
+- 签发者不在 `CustomTrustStore` 时链状态是 **`PartialChain`**,不是 `UntrustedRoot`;
+  后者只在对方出示**自签名**证书时出现;
+- `TlsFailure.cs` 原注释把"异常链里没有 `AuthenticationException`"归因于 **TLS 1.3 的 alert 晚到**,
+  **这个解释是错的** —— 把两端钉到 TLS 1.2 复测,形状一模一样。已更正。
+  判据可靠的真正原因是:消息里嵌的是 `SslPolicyErrors` / `X509ChainStatusFlags` 的**枚举名**,
+  枚举名不随系统语言变(而 .NET 自己那句话装了语言包**是会**被翻译的)。
+
+**6. 两条死代码(顺带查实,均不影响结论):**
+- `HubClient.cs:268` 的 `if (e is X509ChainStatusFlags) break;` —— `X509ChainStatusFlags` 是**枚举**
+  (值类型),`Exception` 引用永远不可能是它;编译器出 `CS0184` 警告,该 `break` **不可达**;
+- 我自己在 `TlsFailure.cs` 里也写了一条同类死代码(`for(...) if (e is AuthenticationException) return Unknown;`
+  与直接 `return Unknown` 等价),已删。
+
 ### 另外更正一处事实
 
 用户说「两台机器 2026-07-29 配的对」。**store.json 实证:那两条(`9bd80666` / `9c412f1c`)都已 revoked。**
@@ -207,8 +251,20 @@ static HubState? ClassifyTlsFailure(Exception ex, ClientProfile? profile) =>
 *为什么*:
 - 现有实现靠**英文异常文本**认因,实测对"本机设备证书过期"完全失灵(§0(c));
 - `TlsFailure.Classify` **先查本机证书这个本地事实**,再去解读会漂移的异常文本 —— 顺序是承重的;
-- ★ 现有的兜底 `if (e is AuthenticationException) return HubIdentityChanged;`(第 280–281 行)**必须删掉**:
-  它接不住任何一种实测情形,却有把别的失败误判成「必须重新配对」的风险 —— 而那条建议是**破坏性的**。
+- ★ 现有的兜底 `if (e is AuthenticationException) return HubIdentityChanged;`(第 280–281 行)**必须删掉**,
+  但**必须连同 §0(e) 的名字不匹配分支一起换**,不能只删不换 —— 见下。
+
+> ### ⚠ 2026-08-06 更正:只删兜底会**制造**一个比原病更重的回归
+>
+> 本节初稿只说"删掉兜底"。多路实测(§0(e))证明:那样做会让**主机重铸身份**这一格
+> 掉进 `Unknown → Offline` =「中枢没开机」—— 而那正是 `HubIdentityChanged` 这一态**存在的理由**。
+> 老代码在那一格是靠**被判死刑的这条兜底**答对的。
+>
+> 兜底**仍然要删**(实测它会在"拨到一个非 TLS 服务"时判出破坏性的"必须重新配对"),
+> 但**同时必须加名字不匹配分支**。`TlsFailure.Classify` 已按此修正(commit 见 §3),
+> client 车道**直接调用它即可**,不需要自己再写判据。
+> ★ 若有人只照初稿删掉兜底而不换判据,**回归会当场发生且没有任何断言拦得住它** ——
+> 所以 transport selftest 已补了 5 条针对**实测原文**的断言把这一格钉死。
 
 ### 2.4 `Services/HubClient.cs:216` —— 调用点跟着改
 
@@ -278,16 +334,24 @@ public string? CertWarning => TlsFailure.LocalCertPhase(Profile, DateTimeOffset.
 |---|---|---|
 | identity selftest / 2 / 3 / 4 / 5 | 11 / 15 / **28** / 14 / **13** | 11 / 15 / **42** / 14 / **57** |
 | lan-edge selftest | 8 | **20** |
-| transport selftest | 5 | **32** |
+| transport selftest | 5 | **37** |
 | Python 18 套件 | 978 | 978(未触碰) |
-| **合计** | — | **PASS=1169 FAIL=0** |
+| **合计** | — | **PASS=1174 FAIL=0** |
 
-净增 **+97** 条断言。
+净增 **+102** 条断言(其中 08-06 修回归时 +5)。
 
 **红测(证明断言不是恒绿的)**
 1. 词表改一个词(`zebra→zebroo`)⇒ 摘要断言**红**,冻结索引断言**保持绿**(= 换表没碰索引的现场证据);
-2. 摘掉 `TlsFailure.Classify` 里"先查本机证书"那两行 ⇒ `LocalDeviceCertExpired` 断言**红**。
-两次都已还原,`TlsFailure.cs` 与红测前备份**逐字节相同**。
+2. 摘掉 `TlsFailure.Classify` 里"先查本机证书"那两行 ⇒ `LocalDeviceCertExpired` 断言**红**;
+3. (08-06)摘掉名字不匹配那一根针 ⇒ **恰好** S1/S3 两条身份断言**红**,其余全绿。
+三次都已还原并逐字节核对。
+
+**★ 一条方法论教训(值得进 ASSERTION-PITFALLS,但那份文件本车道只读)**
+原来那条 `HubIdentityChanged` 断言用的针是我**凭印象手写**的
+`"The remote certificate is invalid: UntrustedRoot"` —— 一句 .NET **从来不会发出**的话。
+判据在真实消息上失灵,而断言拿虚构输入喂它,照样绿。
+⇒ **凡是"判据要认某段外部文本"的断言,针必须来自实测输出,不能凭印象写。**
+这是 ASSERTION-PITFALLS 现有条目没覆盖的一种假绿:不是判据写宽了,而是**输入是假的**。
 
 ---
 
@@ -308,6 +372,20 @@ public string? CertWarning => TlsFailure.LocalCertPhase(Profile, DateTimeOffset.
    本次**未做**。
 5. **任务 4(三服务分权 / 7 步 activation saga)未做** —— 前三项吃满了。
 6. **私钥不轮换** —— §1.2 的明确裁定,不是遗漏。
+7. **(08-06 新查出,未修)三种"本机配对状态已不可用"仍然掉进 `Offline`** ——
+   实测:`CaCertB64` 被截断/损坏(`CryptographicException`)、`CaCertB64` 不是合法 base64
+   (`FormatException`)、CNG 私钥不在了(`CryptographicException:找不到密钥` —— 重装系统、
+   换 Windows 用户、把 `profile.json` 拷到另一台机器都会这样)。
+   三者的正确处置都是**重新配对**,而新旧两套判据都判 `Unknown/null → Offline` =「中枢没开机」。
+   ★ 这是**第五种**归因(「本机配对状态不可用」),不在本次四分类里。
+   未做的原因:它需要再加一个 `HubState`,会扩大 client 车道的改动面;
+   且它与本次任务(证书生命周期)是相邻但不同的问题。**建议单开一条。**
+8. **(08-06 新查出,未修)`SetDial` 只改 `Profile.Dial`,从不改 `Profile.EdgeUrl`** ——
+   若某份档案的 `EdgeUrl` 仍是 `https://<ip>:<port>` 形式(2026-08-04 之前的形状,
+   见 `ClientTransport.cs` 里那段注释),它对**正确的**主机也会永久名字不匹配。
+   修好归因之后,这种档案会稳定显示「必须重新配对」——**结论是错的,主机没问题**。
+   ★ 老代码是**碰巧**躲过的(重新配对会顺手重写 `EdgeUrl`)。属 transport 车道(本车道),
+   但已超出本次任务范围,**未做**,单独记账。
 
 ---
 
