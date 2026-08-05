@@ -113,16 +113,53 @@ def link_llama():
            "" if exe.exists() else "装 llama.cpp 或改路径"
 
 
+def _port_owner(port: int) -> str:
+    """谁在监听这个端口。★ 只读,查不出来就返回空串(不猜)。"""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                             capture_output=True, text=True, timeout=8).stdout
+        pid = ""
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) >= 5 and f[3].upper() == "LISTENING" and f[1].endswith(f":{port}"):
+                pid = f[4]
+                break
+        if not pid:
+            return ""
+        t = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=8).stdout.strip()
+        return t.split(",")[0].strip('"') if t and "," in t else ""
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 def link_backend():
     import tomllib
     cfg = tomllib.load(open(REPO / "config" / "vram-budget.toml", "rb"))
     ports = sorted({int(c["port"]) for c in cfg["components"].values()
                     if c.get("port") and c.get("model_rel")})
-    live = []
+    live, impostor = [], []
     for p in ports:
         st, _ = _http(f"http://127.0.0.1:{p}/health")
+        who = _port_owner(p)
         if st is not None and 200 <= st < 300:
-            live.append(p)
+            # ★★ 2026-08-05:/health 回 2xx **不证明那是我们的后端**。
+            #   实测撞见过:另一条车道的一次性 spike(AcSpike,跑在 %TEMP% 里)
+            #   临时占住了 18081。那种情况下 llama-server 根本绑不上,
+            #   而只看 2xx 的话这一环会报"后端在跑" —— 又是"看着好、实际不是那个东西"。
+            #   ⇒ 顺带把**监听者是谁**查出来。查不出来不猜(返回空串),但对不上就点名。
+            if who and "llama" not in who.lower():
+                impostor.append(f"{p}(被 {who} 占着)")
+            else:
+                live.append(p if not who else f"{p}({who})")
+        elif who:
+            # 端口被占着但 /health 不通 —— 这是最坏的一种:我们的后端起不来,而且不明显
+            impostor.append(f"{p}(被 {who} 占着且不应答 /health)")
+    if impostor:
+        return False, f"★ 后端端口被**别的进程**占着:{impostor}" \
+                      + (f";正常在跑的:{live}" if live else ""), \
+               "我们的后端绑不上这个端口 —— 先看那个进程是什么。" \
+               "本机撞见过另一条车道的一次性 spike 占用 18081"
     if not live:
         return None, f"模型后端**没有在跑**(查过 {ports})", \
                "这不一定是错的 —— D87 之后是【按需装载】,没人用就该是这样。" \
