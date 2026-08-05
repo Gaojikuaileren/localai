@@ -225,6 +225,38 @@ URL 的**主机名**决定 TLS 主机名校验,而服务器证书的 SAN 是 `lo
 > 四个消费点全在 `ClientTransport.cs`(本车道),把"不信任那个字段"做成结构性的,
 > 比在每个写入点记得同步更可靠 —— 后者正是这个 bug 的成因。
 
+### 1.6 (08-06)**第五种归因**:本机配对材料已不可用 ⇒ 只能重新配对
+
+**病灶**:三种坏法在生产里都会在 `Transport.Send` 的**准备阶段**抛出(还没发一个字节):
+
+| 坏法 | 异常 | 现实场景 |
+|---|---|---|
+| `CaCertB64` / `DeviceCertB64` 被截断或损坏 | `CryptographicException` | 磁盘损坏、写盘中断 |
+| 上述字段不是合法 base64 | `FormatException` | 档案被手工编辑过 |
+| CNG 私钥不在了 | `CngKey.Exists` 为 false | **重装系统 / 换 Windows 登录用户 / 把 `profile.json` 拷到另一台电脑** |
+
+三者的正确处置都是**重新配对**,而此前(新旧两套判据都一样)全部落进 `Offline` =「中枢没开机」。
+★ 最后那一行尤其常见:私钥按设计**不可导出**(B17/D44),所以它**拷不过来也找不回来** ——
+用户会拿着一份"看起来完好"的档案,对着一台完全正常的中枢,永远连不上。
+
+**裁定**:新增 `TlsFailureKind.LocalProfileUnusable`,由 `TlsFailure.CheckLocalMaterials(profile)`
+**直接试一遍**判定(读 CA、读设备证书、`CngKey.Exists`),**不解读异常文本** ——
+后两种异常的消息是本地化的,拿它当针又会重蹈 §0(c) 的覆辙。
+
+**★★ 排序:它排在最前面(⓪),在"设备证书过期"之前。** 理由是承重的:
+设备证书**读不出来**时 `LocalCertNotAfter` 返回 null,①那一步会**静默跳过** ——
+于是一份损坏的档案会一路掉到 `Unknown → Offline`。已单独钉一条断言。
+
+**★★★ 它与 `LocalDeviceCertExpired` 的处置正好相反,这是本条最要紧的性质:**
+
+| 归因 | 私钥状态 | 该说什么 |
+|---|---|---|
+| `LocalDeviceCertExpired` | **还在** | 「**不要**点重新配对」—— 重配等于亲手销毁一个只需续签的身份 |
+| `LocalProfileUnusable` | **已经没了** | 「**只能**重新配对」—— 没有任何还有用的东西会被毁掉 |
+
+两者都表现为"连不上"。搞反的代价:要么白等一份永远不会自愈的档案,要么删掉一个本来能救的身份。
+已用逐字断言钉死两段文案的措辞(一段必须含"不要点",另一段必须含"只能重新配对")。
+
 ---
 
 ## §2 ★★ 要 client 车道改的:逐行清单
@@ -251,11 +283,14 @@ URL 的**主机名**决定 TLS 主机名校验,而服务器证书的 SAN 是 `lo
 
 ```csharp
 public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized,
-                       ProtocolMismatch, HubServerError, HubIdentityChanged, LocalCertExpired }
+                       ProtocolMismatch, HubServerError, HubIdentityChanged,
+                       LocalCertExpired, LocalProfileUnusable }
 ```
 
-*为什么*:见 §0(c)。四种症状都是"连不上",而处置各不相同;
-`LocalCertExpired`(本机设备证书过期)这一格此前**是空的**,它的实际归宿是 `Offline` =「中枢没开机」。
+*为什么*:见 §0(c) 与 §1.6。五种症状都是"连不上",而处置各不相同;
+`LocalCertExpired`(本机设备证书过期)与 `LocalProfileUnusable`(本机材料已不可用)
+这两格此前**都是空的**,实际归宿都是 `Offline` =「中枢没开机」。
+★ 这两者的建议**正好相反**(前者劝阻重新配对、后者只能重新配对),**不许合并成一态**。
 
 ### 2.3 `Services/HubClient.cs:264–283` —— `ClassifyTlsFailure` 整个换成调用 transport
 
@@ -265,6 +300,7 @@ public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpi
 static HubState? ClassifyTlsFailure(Exception ex, ClientProfile? profile) =>
     TlsFailure.Classify(ex, profile, DateTimeOffset.UtcNow) switch
     {
+        TlsFailureKind.LocalProfileUnusable   => HubState.LocalProfileUnusable,
         TlsFailureKind.LocalDeviceCertExpired => HubState.LocalCertExpired,
         TlsFailureKind.ServerCertExpired      => HubState.CertExpired,
         TlsFailureKind.HubIdentityChanged     => HubState.HubIdentityChanged,
@@ -302,10 +338,17 @@ State = ClassifyTlsFailure(ex, Profile) ?? HubState.Offline;
 并新增一条 `LocalCertExpired` 分支:
 
 ```csharp
-HubState.LocalCertExpired => TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired),
+HubState.LocalCertExpired     => TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired),
+HubState.LocalProfileUnusable => TlsFailure.Explain(TlsFailureKind.LocalProfileUnusable)
+                                 + " " + TlsFailure.ExplainLocal(TlsFailure.CheckLocalMaterials(Profile)),
 ```
 
-*为什么*:该文案明确劝阻「重新配对」—— 重新配对会删掉本机私钥,把一个**只需要续签**的身份亲手销毁。
+*为什么*:`LocalCertExpired` 的文案明确**劝阻**「重新配对」—— 重新配对会删掉本机私钥,
+把一个**只需要续签**的身份亲手销毁。
+而 `LocalProfileUnusable` 的文案**指向**重新配对 —— 那时私钥/档案已经没了,没有可被毁掉的东西。
+★ 后者再拼上 `ExplainLocal(...)`,说清是三种坏法里的哪一种(尤其"私钥不在了"要点明
+**它按设计拷不过来也找不回来**,否则用户会一直找)。
+★★ **这两条文案不许合并、不许互换** —— 建议正好相反,搞反的代价见 §1.6 那张表。
 
 ### 2.6 `Services/HubClient.cs:286` `ProbeAsync` —— 连之前先自愈,并提前告警
 
@@ -368,19 +411,21 @@ Ui.Body($"中枢:{p.EdgeUrl}"),
 |---|---|---|
 | identity selftest / 2 / 3 / 4 / 5 | 11 / 15 / **28** / 14 / **13** | 11 / 15 / **42** / 14 / **57** |
 | lan-edge selftest | 8 | **20** |
-| transport selftest | 5 | **42** |
+| transport selftest | 5 | **58** |
 | Python 18 套件 | 978 | 978(未触碰) |
-| **合计** | — | **PASS=1179 FAIL=0** |
+| **合计** | — | **PASS=1195 FAIL=0** |
 
-净增 **+107** 条断言(08-05 +97 · 08-06 修归因回归 +5 · 08-06 修 EdgeUrl +5)。
+净增 **+123** 条断言(08-05 +97 · 08-06 修归因回归 +5 · 修 EdgeUrl +5 · 第五种归因 +16)。
 
 **红测(证明断言不是恒绿的)**
 1. 词表改一个词(`zebra→zebroo`)⇒ 摘要断言**红**,冻结索引断言**保持绿**(= 换表没碰索引的现场证据);
 2. 摘掉 `TlsFailure.Classify` 里"先查本机证书"那两行 ⇒ `LocalDeviceCertExpired` 断言**红**;
 3. (08-06)摘掉名字不匹配那一根针 ⇒ **恰好** S1/S3 两条身份断言**红**,其余全绿;
 4. (08-06)把 `EdgeUrlFor` 退回"直接用存的 `EdgeUrl`" ⇒ 陈旧档案那 4 条**红**,
-   且红的消息里直接打出了病因原文 `RemoteCertificateNameMismatch`。
-四次都已还原并逐字节核对。
+   且红的消息里直接打出了病因原文 `RemoteCertificateNameMismatch`;
+5. (08-06)摘掉 `Classify` 里的 ⓪ 材料体检 ⇒ **恰好** CA 损坏 / 设备证书损坏 / 私钥不在
+   三条**红**,其余全绿。
+五次都已还原并逐字节核对。
 
 **★ 第 4 次红测顺带修好了一条自己写坏的断言**:它原来**不接异常**,
 而坏掉时 `Transport.Call` 是**抛**不是返回状态码 ⇒ 整个套件当场崩掉、连汇总行都没有。
@@ -414,14 +459,7 @@ Ui.Body($"中枢:{p.EdgeUrl}"),
    本次**未做**。
 5. **任务 4(三服务分权 / 7 步 activation saga)未做** —— 前三项吃满了。
 6. **私钥不轮换** —— §1.2 的明确裁定,不是遗漏。
-7. **(08-06 新查出,未修)三种"本机配对状态已不可用"仍然掉进 `Offline`** ——
-   实测:`CaCertB64` 被截断/损坏(`CryptographicException`)、`CaCertB64` 不是合法 base64
-   (`FormatException`)、CNG 私钥不在了(`CryptographicException:找不到密钥` —— 重装系统、
-   换 Windows 用户、把 `profile.json` 拷到另一台机器都会这样)。
-   三者的正确处置都是**重新配对**,而新旧两套判据都判 `Unknown/null → Offline` =「中枢没开机」。
-   ★ 这是**第五种**归因(「本机配对状态不可用」),不在本次四分类里。
-   未做的原因:它需要再加一个 `HubState`,会扩大 client 车道的改动面;
-   且它与本次任务(证书生命周期)是相邻但不同的问题。**建议单开一条。**
+7. ~~三种"本机配对状态已不可用"掉进 `Offline`~~ —— **08-06 已修**,见 §1.6。
 8. ~~`SetDial` 只改 `Dial` 不改 `EdgeUrl`~~ —— **08-06 已修**,见 §1.5。
 
 ---

@@ -48,6 +48,7 @@
 //   在还能连上的时候就能提前告警,而不是等握手失败之后再来归因。
 
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using LocalAI.Identity;
 
@@ -64,6 +65,31 @@ public enum TlsFailureKind
     LocalDeviceCertExpired,
     /// <summary>链不到配对时钉住的那个 CA ⇒ 对面不是你配对的中枢,**重新配对是唯一出路**。</summary>
     HubIdentityChanged,
+    /// <summary>
+    /// ★ 本机的配对材料已经用不了(档案损坏 / 私钥不在了)⇒ **只能重新配对**。
+    ///
+    /// ★★ 注意它与 <see cref="LocalDeviceCertExpired"/> 的处置**正好相反**:
+    ///   那一种说「**不要**点重新配对」(私钥还在,重配等于亲手销毁一个只需续签的身份);
+    ///   这一种说「**只能**重新配对」(私钥/档案已经没了,没有任何东西可被销毁)。
+    ///   两者都表现为"连不上",混为一谈会让人要么白等、要么删掉本来能救的身份。
+    /// </summary>
+    LocalProfileUnusable,
+}
+
+/// <summary>本机配对材料的体检结论。★ 逐项分开,因为对用户要说的话不一样。</summary>
+public enum LocalMaterial
+{
+    Ok,
+    /// <summary>档案里的 CA 证书读不出来(截断 / 损坏 / 不是合法 base64)。</summary>
+    CaCertUnreadable,
+    /// <summary>档案里的设备证书读不出来。</summary>
+    DeviceCertUnreadable,
+    /// <summary>
+    /// 设备私钥在 CNG 里已经不存在。★ 实际场景:重装系统、换了 Windows 用户、
+    /// 把 profile.json 拷到另一台机器 —— 档案看着完好,而私钥**不可能**跟过来
+    /// (它按设计就是不可导出的,B17/D44)。
+    /// </summary>
+    PrivateKeyMissing,
 }
 
 public static class TlsFailure
@@ -78,6 +104,35 @@ public static class TlsFailure
             return c.NotAfter;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// 体检本机的配对材料。★ 与本文件其余部分同一条纪律:**看本地事实,不解读异常文本**。
+    ///
+    /// 这三种坏法在生产里都会先在 <see cref="Transport.Send"/> 的**准备阶段**抛出来
+    /// (还没发出任何字节),异常分别是 <c>FormatException</c>(不是合法 base64)、
+    /// <c>CryptographicException</c>(证书读不出 / 找不到密钥)—— 而后两者的消息是
+    /// **本地化的**,拿它当针又会重蹈 §0(c) 的覆辙。所以这里直接**试一遍**。
+    ///
+    /// ★ 没有档案(<paramref name="p"/> 为 null)返回 Ok:那是「从未配对」,是另一件事,
+    ///   不该被说成"材料坏了"。
+    /// </summary>
+    public static LocalMaterial CheckLocalMaterials(ClientProfile? p)
+    {
+        if (p is null) return LocalMaterial.Ok;
+
+        try { using var _ = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(p.CaCertB64)); }
+        catch { return LocalMaterial.CaCertUnreadable; }
+
+        try { using var _ = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(p.DeviceCertB64)); }
+        catch { return LocalMaterial.DeviceCertUnreadable; }
+
+        // ★ CngKey.Exists 对"不存在"是返回 false 而不是抛,所以这里不需要靠异常判。
+        //   套 try 只为兜住 provider 本身出问题的极端情况 —— 那同样属于"本机材料用不了"。
+        try { if (!CngKey.Exists(p.KeyName, new CngProvider(Ca.TlsKeyProvider))) return LocalMaterial.PrivateKeyMissing; }
+        catch { return LocalMaterial.PrivateKeyMissing; }
+
+        return LocalMaterial.Ok;
     }
 
     /// <summary>
@@ -102,6 +157,13 @@ public static class TlsFailure
     /// <param name="now">注入的当前时间。</param>
     public static TlsFailureKind Classify(Exception? ex, ClientProfile? profile, DateTimeOffset now)
     {
+        // ⓪ 本机的配对材料还能用吗?★ 排在最前面,因为它是**最根本**的一层:
+        //   材料坏了的话,下面每一步(读证书有效期、解读 TLS 异常)得到的都是派生结论。
+        //   ★ 尤其:设备证书读不出来时 LocalCertNotAfter 返回 null,①会**静默跳过** ——
+        //     于是一份损坏的档案会一路掉到 Unknown -> Offline =「中枢没开机」。
+        if (CheckLocalMaterials(profile) != LocalMaterial.Ok)
+            return TlsFailureKind.LocalProfileUnusable;
+
         // ① 本机设备证书已经过期?这是本地事实,不受语言、.NET 版本、TLS 版本影响。
         if (LocalCertNotAfter(profile) is { } notAfter && notAfter <= now)
             return TlsFailureKind.LocalDeviceCertExpired;
@@ -174,6 +236,24 @@ public static class TlsFailure
         TlsFailureKind.HubIdentityChanged =>
             "连上了,但对面的证书链不到你配对时钉住的那个中枢 —— 可能是主机重铸了身份,"
             + "或者这个地址上是另一台机器。这种情况【必须重新配对】。",
+        TlsFailureKind.LocalProfileUnusable =>
+            "本机的配对材料已经用不了了 —— 这种情况【只能重新配对】。"
+            + "★ 与「设备证书过期」不同:那一种**不该**重新配对(私钥还在,续签即可);"
+            + "而这一种本机已经没有可用的私钥或档案了,重新配对不会毁掉任何还有用的东西。",
         _ => "连不上中枢(原因未能判定)。先确认中枢已开机、地址正确。",
+    };
+
+    /// <summary>逐种坏法的具体说法 —— 三种的**成因**不同,说清楚人才知道是不是自己刚做过什么。</summary>
+    public static string ExplainLocal(LocalMaterial m) => m switch
+    {
+        LocalMaterial.CaCertUnreadable =>
+            "配对档案里的中枢 CA 证书读不出来(文件损坏或被截断)。只能重新配对。",
+        LocalMaterial.DeviceCertUnreadable =>
+            "配对档案里的设备证书读不出来(文件损坏或被截断)。只能重新配对。",
+        LocalMaterial.PrivateKeyMissing =>
+            "本机的设备私钥已经不在了 —— 常见原因:重装了系统、换了 Windows 登录用户,"
+            + "或者把 profile.json 从别的电脑拷了过来。★ 私钥按设计不可导出、也不会跟着文件走,"
+            + "所以它拷不过来也找不回来,只能在这台机器上重新配对。",
+        _ => "本机配对材料正常。",
     };
 }

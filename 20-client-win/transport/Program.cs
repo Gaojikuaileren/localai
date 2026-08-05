@@ -275,6 +275,65 @@ static async Task<int> Selftest()
             Assert(TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired).Contains("不要点"),
                    "★★ 本机证书过期的文案明确劝阻【重新配对】—— 那会删掉私钥,销毁一个只需续签的身份");
 
+            // ══════════════════════════════════════════════════════════════════
+            //  ★ 第五种归因:本机配对材料已不可用 —— 处置与「设备证书过期」**正好相反**
+            // ══════════════════════════════════════════════════════════════════
+            {
+                ClientProfile Clone() => JsonSerializer.Deserialize<ClientProfile>(JsonSerializer.Serialize(profile))!;
+
+                // 健康档案:必须**不**触发(反向钉住,免得这条判据恒真)
+                Assert(TlsFailure.CheckLocalMaterials(profile) == LocalMaterial.Ok,
+                       "★ 反向:健康档案的材料体检结论是 Ok(判据不是恒真的)");
+                Assert(TlsFailure.Classify(realShape, profile, t0) != TlsFailureKind.LocalProfileUnusable,
+                       "★ 反向:健康档案**不会**被判成材料不可用");
+                Assert(TlsFailure.CheckLocalMaterials(null) == LocalMaterial.Ok,
+                       "★ 没有档案 = 从未配对,不是'材料坏了'(那是另一件事)");
+
+                var truncated = Clone();
+                truncated.CaCertB64 = Convert.ToBase64String(Convert.FromBase64String(profile.CaCertB64)[..20]);
+                Assert(TlsFailure.CheckLocalMaterials(truncated) == LocalMaterial.CaCertUnreadable,
+                       "★ CA 证书被截断 -> CaCertUnreadable");
+
+                var notB64 = Clone(); notB64.CaCertB64 = "这不是 base64!!!";
+                Assert(TlsFailure.CheckLocalMaterials(notB64) == LocalMaterial.CaCertUnreadable,
+                       "★ CA 证书不是合法 base64 -> CaCertUnreadable(FormatException 也算材料坏)");
+
+                var badDev = Clone();
+                badDev.DeviceCertB64 = Convert.ToBase64String(Convert.FromBase64String(profile.DeviceCertB64)[..20]);
+                Assert(TlsFailure.CheckLocalMaterials(badDev) == LocalMaterial.DeviceCertUnreadable,
+                       "★ 设备证书被截断 -> DeviceCertUnreadable");
+
+                var noKey = Clone(); noKey.KeyName = "localai-does-not-exist-" + Guid.NewGuid().ToString("N")[..8];
+                Assert(TlsFailure.CheckLocalMaterials(noKey) == LocalMaterial.PrivateKeyMissing,
+                       "★★ 私钥不在了 -> PrivateKeyMissing(重装系统 / 换 Windows 用户 / 拷贝 profile.json)");
+
+                // ★★★ 这三种此前全都掉进 Offline =「中枢没开机」,而真正的出路是重新配对
+                foreach (var (name, prof) in new[] { ("CA 损坏", truncated), ("设备证书损坏", badDev), ("私钥不在", noKey) })
+                    Assert(TlsFailure.Classify(realShape, prof, t0) == TlsFailureKind.LocalProfileUnusable,
+                           $"★★★ 【{name}】-> LocalProfileUnusable(此前掉进 Offline =「中枢没开机」,"
+                           + "用户会一直去重启一个没病的中枢)");
+
+                // ★★ 设备证书**损坏**必须判成材料不可用,而不是"过期" ——
+                //    读不出来就读不出 NotAfter,①那一步会静默跳过,这正是它必须排在①之前的原因。
+                Assert(TlsFailure.Classify(realShape, badDev, t0) != TlsFailureKind.LocalDeviceCertExpired,
+                       "★★ 设备证书**读不出来**不等于「过期」—— 两者处置相反,不许合并");
+
+                // ★★★ 两种"本机问题"的建议**正好相反**,必须逐字钉住 ——
+                //    搞反的代价:要么白等一个永远不会自愈的档案,要么删掉一个只需续签的身份。
+                var expiredText = TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired);
+                var unusableText = TlsFailure.Explain(TlsFailureKind.LocalProfileUnusable);
+                Assert(expiredText.Contains("不要点") && !expiredText.Contains("只能重新配对"),
+                       "★★★ 【设备证书过期】劝阻重新配对(私钥还在,续签即可)");
+                Assert(unusableText.Contains("只能重新配对"),
+                       "★★★ 【材料不可用】明确指向重新配对(已经没有可被毁掉的东西了)");
+                Assert(expiredText != unusableText, "★ 两种本机问题的文案不同");
+                Assert(TlsFailure.ExplainLocal(LocalMaterial.PrivateKeyMissing).Contains("不可导出"),
+                       "★ 私钥丢失的说法要点出'它按设计拷不过来也找不回来',否则用户会一直找");
+                Assert(new[] { LocalMaterial.CaCertUnreadable, LocalMaterial.DeviceCertUnreadable, LocalMaterial.PrivateKeyMissing }
+                       .Select(TlsFailure.ExplainLocal).Distinct().Count() == 3,
+                       "★ 三种坏法的说法互不相同(成因不同,用户要能对上自己刚做过什么)");
+            }
+
             // ★ 过期【之前】就看得见(不必等握手失败)
             Assert(TlsFailure.LocalCertPhase(profile, t0) == CertPhase.Healthy, "刚配对:本机证书 Healthy");
             Assert(TlsFailure.LocalCertPhase(profile, t0.AddDays(85)) == CertPhase.Critical,
