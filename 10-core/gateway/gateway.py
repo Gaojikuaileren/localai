@@ -629,6 +629,9 @@ ROUTE_TIERS = {
     #   那条断言现在被**有意地**改成一张显式方法表(见 test_gpu_broker.py 第 1 组)——
     #   这是一次语义变更,应当在 diff 里看得见,而不是把断言删掉了事。
     ("POST", "/v1/gpu/lease"): "authenticated",
+    # P4-S16b:续租。★ Broker.renew() 一直在,对外的门此前不存在 ——
+    #   于是客户端保不住自己的租约,而「全网空闲」的判据也就恒真。
+    ("POST", "/v1/gpu/lease/renew"): "authenticated",
     # P4-S4b:客户端退出时通知结束会话 —— ★ 这条路由**此前不存在**,
     #   而客户端 HubClient.cs:230 每次退出都在调它、失败还被吞掉:
     #   一次伪装成成功的静默失败。现在它真的存在了。
@@ -836,6 +839,67 @@ async def gpu_events(request: Request):
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+@app.post("/v1/gpu/lease/renew")
+async def gpu_lease_renew(request: Request):
+    """P4-S16b · 续租。★ `Broker.renew()` 一直存在,而**对外的门此前不存在** ——
+    于是客户端拿到一份租约之后没有任何办法保住它,只能等它过期。
+
+    ★★ 这条端点是「计时器是主机与副机共享的一个」那条裁定的**基座**:
+      任何一台客户端续一次租,中枢那个 `_last_activity_at` 就刷新一次。
+      不补它,「全网都没人在用」这个判据就是个**恒真式** ——
+      而恒真式正是本项目的第一戒律所禁。
+
+    ★ 归 `lease` 档而不是 `change_resident`:续租**不改驻留集合**,
+      而且它会被高频调用(心跳)。算进变更配额的话,用着用着就会撞 429。
+      判据与 `/v1/session/end` 归 read 档同型。
+
+    ★ **不要 if_generation**:续租是条件写,它的条件是 `fence_token` ——
+      那比世代号更严(世代号是全局的,fence_token 是这一份租约专属的)。
+      再叠一个世代号,只会让"别人申请了一份不相干的租约"把你的续租打回。
+    """
+    _tier, _deny = gpu_guard(request, "lease", count_quota=False)
+    if _deny is not None:
+        return _deny
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+    lease_id = str(body.get("lease_id") or "")
+    fence = str(body.get("fence_token") or "")
+    if not lease_id or not fence:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "续租要带 lease_id 与 fence_token ——"
+                                          "后者是这份租约专属的凭据,缺了就无法证明是你",
+                               "type": "missing_lease_credentials"}})
+    ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
+    _tier2, _deny2 = gpu_guard(request, "lease", ttl_s=ttl, holder=_short_echo(body.get("holder")))
+    if _deny2 is not None:
+        return _deny2
+    try:
+        code = await gpu_broker.BROKER.renew(lease_id, fence, ttl_s=ttl)
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "续租时 Broker 出错",
+                               "type": "broker_unavailable", "reason": type(e).__name__}})
+    if code == gpu_broker.LEASE_OK:
+        return {"result": {"ok": True, "code": code, "ttl_s": ttl},
+                "snapshot": gpu_broker.BROKER.snapshot().to_json()}
+    # ★★ 三种失败**分开回**,不合并成"续租失败":
+    #   · NOT_HOLDER = 条件写不匹配 ⇒ 调用方必须**立刻自隐**,不得重试(重试就是双持有);
+    #   · EXPIRED    = 你手上那份不作数了 ⇒ 重新申请一份;
+    #   两者的下一步完全相反。
+    status = 409 if code == gpu_broker.LEASE_NOT_HOLDER else 410
+    hint = ("凭据对不上 —— **立刻停止使用这份租约,不要重试**(重试就是双持有)"
+            if code == gpu_broker.LEASE_NOT_HOLDER
+            else "这份租约已经不在了(过期或已释放)—— 重新申请一份")
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": hint, "type": code},
+                 "snapshot": gpu_broker.BROKER.snapshot().to_json()})
 
 
 @app.post("/v1/gpu/lease")
@@ -1340,7 +1404,32 @@ async def gpu_intended(request: Request):
                                    "type": "generation_conflict"},
                          "snapshot": snap.to_json()},
             )
-        res = await gpu_broker.BROKER.apply_intended(components, interrupt_running=interrupt)
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ P4-S16b:把 permitted_on_demand 接出来(此前**从未传过**)。
+        #
+        #  `apply_intended` 一直有这个形参,而端点从不传、客户端从不发 ⇒
+        #  `permitted_on_demand` 在实际运行中**永远是空的**,I3 退化成 actual ⊆ committed,
+        #  而方案书给按需装载留的那条合法车道从来没有过成员。
+        #
+        #  ★ 用户裁定(2026-08-06):「不做自动触发」的主语**收窄到只管 committed**;
+        #    `permitted_on_demand` 里的成员**允许**被自动装卸。
+        #    ⇒ 这个字段就是那份**授权**本身 —— 它必须由用户显式给出,
+        #      而且只能从主机变更面来(方案书 §8.1.7:「只有主机变更面能写」)。
+        #
+        #  ★★ 判据与 components 同款:**省略 ≠ 空集合**。
+        #    省略 = "这次不动授权"(传 None,Broker 保持原值);
+        #    显式传 [] = "撤销全部按需授权",那是一次明确的意图。
+        #    不这么分的话,任何一次普通变更都会**静默清空**用户的按需授权。
+        # ══════════════════════════════════════════════════════════════
+        _perm_raw = body.get("permitted_on_demand")
+        if _perm_raw is not None and not isinstance(_perm_raw, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": "permitted_on_demand 必须是数组(或整个省略)",
+                                   "type": "bad_permitted_on_demand"}})
+        permitted = ([str(x) for x in _perm_raw] if _perm_raw is not None else None)
+        res = await gpu_broker.BROKER.apply_intended(components, permitted=permitted,
+                                                     interrupt_running=interrupt)
     except Exception as e:                                   # noqa: BLE001
         return JSONResponse(
             status_code=503,

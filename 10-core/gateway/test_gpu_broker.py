@@ -59,6 +59,9 @@ _EXPECTED_GPU_ROUTES = {
     ("POST", "/v1/gpu/lease"),       # S5:★ 第一个变更端点
     ("GET", "/v1/gpu/components"),   # S9:组件目录 —— 挑选面板的数据源(只读)
     ("POST", "/v1/gpu/intended"),    # S9:★ 第二个变更端点 = 「点确定」那一次事务
+    # S16b:续租。★ 它**不是**变更端点 —— 不改驻留集合,只延长一份已有租约的寿命。
+    #   归 lease 档;若哪天有人把它算进 change_resident,下面那条"变更端点逐条列名"会红。
+    ("POST", "/v1/gpu/lease/renew"),
 }
 _gpu_routes = {(m, p) for (m, p) in gateway.ROUTE_TIERS if p.startswith("/v1/gpu")}
 check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
@@ -67,8 +70,26 @@ check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
 # ★ S5 时这条写的是"变更端点只有一个";S9 加了 POST /v1/gpu/intended,于是它被**有意地**
 #   改成逐条列名 —— 数量断言只拦得住"多了几个",拦不住"换了一个"。改成集合相等更严,不更松。
 check("★ 变更端点逐条列名(每多一个都该是一次有意的决定)",
-      {p for m, p in _gpu_routes if m != "GET"} == {"/v1/gpu/lease", "/v1/gpu/intended"},
+      {p for m, p in _gpu_routes if m != "GET"}
+      == {"/v1/gpu/lease", "/v1/gpu/intended", "/v1/gpu/lease/renew"},
       f'{sorted(p for m, p in _gpu_routes if m != "GET")}')
+# ★★ S16b:续租**必须**归 lease 档,不许归 change_resident ——
+#   它不改驻留集合,而且会被高频调用(心跳)。算进变更配额的话用着用着就撞 429。
+_ren = assert_helpers.code_only(gateway.gpu_lease_renew)
+check("★★★ 续租归 lease 档(不吃变更配额 —— 它是心跳,不是变更)",
+      '"lease"' in _ren and "change_resident" not in _ren)
+check("★★ 续租的条件是 fence_token,**不叠 if_generation** —— "
+      "世代号是全局的,别人申请一份不相干的租约不该把你的续租打回",
+      "fence_token" in _ren and "if_generation" not in _ren)
+# ★ 查**文案**要用原始源码,不能用 code_only —— 它会把字符串字面量整个剥掉,
+#   拿它查文案的方向是【恒真】(见 ASSERTION-PITFALLS 第 3c 条)。
+#   第一版我拿 code_only 查,查不到,于是拼了个 docstring 凑数 —— 那是在迁就判据。
+_ren_raw = inspect.getsource(gateway.gpu_lease_renew)
+check("★★★ 两种失败分开回,且各自给出**相反**的下一步:"
+      "NOT_HOLDER 立刻自隐(重试就是双持有)· EXPIRED 重新申请一份",
+      "LEASE_NOT_HOLDER" in _ren and "不要重试" in _ren_raw and "重新申请" in _ren_raw)
+check("★ 且 HTTP 状态也分开(409 条件写不匹配 / 410 那份已经不在了)",
+      "409" in _ren and "410" in _ren)
 
 print("=== 2. 快照形状:该有的字段一个不少 ===")
 snap = gpu_broker.BROKER.snapshot()
@@ -1307,6 +1328,58 @@ check("★★★ SSE 等的是 stream_rev,不是 generation —— "
       "只看 generation 的话显存变化永远等不来一帧", "stream_rev" in _ge)
 check("★★★ 心跳**带数据**(keepalive + 完整快照)—— 裸心跳会去喂客户端的『数据新鲜』判断,"
       "而它一个数字都没带", "keepalive" in _ge and "heartbeat" not in _ge)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S16b · 按需授权(permitted_on_demand)接线
+#
+#  ★★ 此前它**永远是空的**:apply_intended 有形参,而端点从不传、客户端从不发。
+#     于是 I3 退化成 actual ⊆ committed,而方案书给按需装载留的那条合法车道
+#     从来没有过成员。
+#  ★★★ 用户裁定(2026-08-06):「不做自动触发」的主语**收窄到只管 committed**;
+#     permitted_on_demand 里的成员允许被自动装卸 —— 这个字段就是那份**授权**本身。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== P4-S16b:按需授权必须过准入白名单,且省略 ≠ 清空 ===")
+
+
+async def _t_permitted():
+    b = _mkbroker(free=64.0, loader=_FakeLoader())
+    # ① 授权一个已登记的组件 —— 应当收下
+    r1 = await b.apply_intended([], permitted=[_small])
+    check("★ 授权已登记的组件 → 收下", r1.ok, f"{r1.code} {r1.message[:60]}")
+    check("★ 快照里能看到它", list(b.snapshot().permitted_on_demand) == [_small],
+          list(b.snapshot().permitted_on_demand))
+
+    # ② ★★★ 未登记的 id 必须被拒 —— 它是 I3 允许集的一半,撑大它等于把不变式关掉
+    b2 = _mkbroker(free=64.0, loader=_FakeLoader())
+    r2 = await b2.apply_intended([], permitted=["llm.根本没这个东西"])
+    check("★★★ 授权未登记的组件 → 拒(fail-closed)", not r2.ok, r2.code)
+    check("★ 归因到准入闸,并点名是哪个", r2.code == "gate_admission"
+          and "根本没这个东西" in r2.message, f"{r2.code} {r2.message[:70]}")
+    check("★★ 被拒时**状态机没被搅过** —— 参数不合法不该先把状态改一遍",
+          b2.snapshot().state == gpu_broker.STATE_READY, b2.snapshot().state)
+
+    # ③ ★★ 省略 ≠ 清空:一次普通变更不得静默清掉用户的按需授权
+    b3 = _mkbroker(free=64.0, loader=_FakeLoader())
+    await b3.apply_intended([], permitted=[_small])
+    await b3.apply_intended([_small])                    # 不传 permitted
+    check("★★★ 不传 permitted ⇒ 授权**保持不变**(否则每次普通变更都会静默清空它)",
+          list(b3.snapshot().permitted_on_demand) == [_small],
+          list(b3.snapshot().permitted_on_demand))
+    # ④ 显式传空数组 = 明确撤销全部授权
+    await b3.apply_intended([_small], permitted=[])
+    check("★ 显式传 [] ⇒ 撤销全部授权(那是一次明确的意图)",
+          list(b3.snapshot().permitted_on_demand) == [])
+
+
+asyncio.run(_t_permitted())
+
+# ── 网关那一头:端点必须真的把它传下去 ──
+_gi = assert_helpers.code_only(gateway.gpu_intended)
+check("★★★ 端点必须把 permitted 传给 Broker —— 形参在了三个月,端点从来没传过",
+      "permitted=permitted" in _gi or "permitted = permitted" in _gi)
+check("★★ 省略与空数组必须分开(None vs [])—— 合并的话普通变更会清空授权",
+      "is not None" in _gi and "permitted_on_demand" in _gi)
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

@@ -291,6 +291,12 @@ class Snapshot:
     #   (TypeError: non-default argument follows default argument),由门禁抓出。
     loader_error: Optional[str] = None
     loader_present: bool = False
+    # ★ P4-S16b:全网(主机+全部副机)有多久没有活动了。**观测量,不是动作**——
+    #   见 Broker.idle_seconds 上方那段:客户端还没开始持租约之前它只会一直涨。
+    idle_seconds: float = 0.0
+    # ★ 客户端到底有没有在持租约。**它就是 idle_seconds 可不可信的开关** ——
+    #   没有任何租约时,"空闲"这个判据是恒真式,界面/日志必须能看出这一点。
+    lease_count: int = 0
     # P4-S4b:当前租约(拒绝信息要含【占用者】—— 谁持有、何时拿的、是否可驱逐)
     leases: Tuple[Dict, ...] = ()
     reserved: Tuple[str, ...] = ()
@@ -342,6 +348,16 @@ class Snapshot:
             # ★ 装载器在不在、接不上的话为什么 —— 见 loader_error 字段处的说明
             "loader_present": self.loader_present,
             "loader_error": self.loader_error,
+            # ★ P4-S16b 观测量。**成对下发** —— idle_seconds 单独出现会骗人:
+            #   lease_count == 0 时"空闲了 3000 秒"只说明**没人报告过在用**,
+            #   不说明没人在用。判读这个数之前必须先看 lease_count。
+            "idle_seconds": round(self.idle_seconds, 1),
+            "lease_count": self.lease_count,
+            "idle_is_meaningful": self.lease_count > 0,
+            "idle_note": ("有租约在,idle 反映的是真实活动"
+                          if self.lease_count > 0 else
+                          "★ 当前没有任何租约 —— idle 只说明【没人报告过在用】,"
+                          "不说明没人在用。客户端持租约那半边还没接,不得据此卸载"),
         }
 
 
@@ -388,6 +404,25 @@ class Broker:
         #   与世代号**分开**:世代号是事务的乐观锁,不能被显存波动带着涨。
         self._stream_rev = 0
         self._pushed_free: Optional[float] = None
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ P4-S16b:「空闲」的那个时间戳 —— **主机与副机共享的一个**。
+        #
+        #  用户裁定(2026-08-05):「回退计时器是主机和副机共享的」。
+        #  ⇒ 它是**中枢上的一个标量**,不是每台客户端各自的倒计时,
+        #    也**不是一个线程**:模块头写着「不设收割线程 = 第二个写者」,
+        #    而且有断言钉死本模块只许起一个后台任务。
+        #    ★ 这句原来写着那个 API 的名字,而钉它的断言是**数源码里出现几次**
+        #      (inspect.getsource,不去注释)⇒ 我这句注释本身让计数从 1 变成 2,当场判红。
+        #      这是 ASSERTION-PITFALLS 第 1 条的第 10 次:**注释撞在守它的断言上**。
+        #      修法不是删断言,是换个说法 —— 见该文档「绝对不许的两种修法」。
+        #  ⇒ 任何一台客户端的 grant / renew 都刷新它。副机在打字,主机就不算空闲。
+        #
+        #  ★ 初值取"现在"而不是 0:0 会让刚起来的中枢**立刻**被判成已空闲很久。
+        #    ★★ 而且今天客户端**还没有开始持租约** —— 在那半边接上之前,
+        #      这个时间戳只会被 grant/renew 刷新,也就是**几乎永不刷新**。
+        #      所以自动卸载**绝不能**只看它:见 idle_seconds 上方那段。
+        # ══════════════════════════════════════════════════════════════
+        self._last_activity_at: float = time.monotonic()
 
     # ── 配置 ──────────────────────────────────────────────────────
     @property
@@ -578,6 +613,8 @@ class Broker:
             sampler_error=self._sampler_error,
             loader_error=self._loader_error,
             loader_present=self._loader is not None,
+            idle_seconds=self.idle_seconds,
+            lease_count=len(self._leases),
             non_ai_used_gib_inferred=non_ai,
         )
 
@@ -638,6 +675,29 @@ class Broker:
     #    用相邻差的话,缓慢爬升 2 GiB 会一帧都不发。
     # ══════════════════════════════════════════════════════════════════
     VRAM_PUSH_DELTA_GIB = 0.25
+
+    @property
+    def idle_seconds(self) -> float:
+        """全网(主机 + 全部副机)有多久没有任何活动了。★ 纯读,不触发任何动作。
+
+        ══════════════════════════════════════════════════════════════
+        ★★★ 这个数**今天还不能拿来卸载模型**,原因写在这里免得有人接错线:
+
+        它只被 `grant` / `renew` 刷新,而**客户端目前一份租约都不持**
+        (全仓搜 `/v1/gpu/lease` 的客户端调用 = 0)。
+        ⇒ 在客户端那半边接上之前,这个数**只会一直涨** ——
+          拿它当"没人在用"的判据,会把**正在打字的人**卸掉。
+          那正是用户当时补「计时器是主机与副机共享的一个」这条裁定所要防的事。
+
+        ⇒ 规定:自动卸载的放行条件是**三条同时成立**,缺一不可:
+            ① idle_seconds ≥ 阈值
+            ② blocking_leases() 为空        ← 用户裁定「正在跑的不动」
+            ③ 目标组件在 permitted_on_demand 里 ← 用户裁定「禁令只管 committed」
+          而在客户端真的开始持租约之前,**②本身也是恒真式**(一份租约都没有)。
+          ⇒ **本阶段只暴露观测值,不接动作。** 谁要接,先把租约那半边做完。
+        ══════════════════════════════════════════════════════════════
+        """
+        return max(0.0, time.monotonic() - self._last_activity_at)
 
     @property
     def stream_rev(self) -> int:
@@ -714,6 +774,7 @@ class Broker:
                 granted_at=now, expires_at=now + ttl_s,
             )
             self._leases[lease.lease_id] = lease
+            self._last_activity_at = now   # ★ 发一份租约 = 有人开始用(见 _last_activity_at)
             self._generation += 1       # ★ 租约变化也是状态变化,同一把锁下涨号
             self._notify_locked()
             return LEASE_OK, lease
@@ -734,6 +795,7 @@ class Broker:
                 del self._leases[lease_id]
                 return LEASE_EXPIRED
             l.expires_at = now + ttl_s
+            self._last_activity_at = now      # ★ 续租也是"有人在用",见 _last_activity_at 的说明
             return LEASE_OK
 
     async def release(self, lease_id: str, fence_token: str) -> str:
@@ -1012,6 +1074,25 @@ class Broker:
         #   ★ STAGING **不是锁**:它同时接受新事务、且在 SERVING_STATES 里照常提供服务。
         #     所以"面板开着没提交"不会卡住任何人,不需要给它加超时或取消端点 ——
         #     加了反而会在用户正在挑选时把他的选择清掉。
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ P4-S16b:按需授权也要过**准入白名单**,而且要在动任何状态之前。
+        #
+        #  `permitted_on_demand` 是 I3 允许集的一半:
+        #      I3: actual ⊆ committed ∪ permitted_on_demand
+        #  往里塞一个**未登记**的 id,等于把 I3 的允许集任意撑大 ——
+        #  而 I3 正是"接住某个 bug 装了不该装的"那一条。撑大它 = 把检测器关掉。
+        #  ★ 「加一个新值默认落哪边」:落**拒**这一边。
+        #  ★ 放在进 STAGING **之前** —— 参数不合法不该先把状态机搅一遍。
+        # ══════════════════════════════════════════════════════════════
+        if permitted is not None:
+            _unknown = [c for c in permitted if c not in self.cfg.components]
+            if _unknown:
+                return ApplyResult(
+                    False, "gate_admission", self._state,
+                    "按需授权里有未登记的组件:" + "、".join(_unknown)
+                    + "。★ 授权集合是 I3 允许集的一半 —— 塞进未登记的 id 等于把那条不变式关掉。"
+                      "组件必须先进 config/vram-budget.toml。")
+
         async with self._lock:
             if self._state not in ACCEPTS_TRANSACTION:
                 return ApplyResult(False, "busy", self._state,
