@@ -1,0 +1,4 @@
+# 双击 .cmd 会在这里编译;产物一律不进 git。
+# 仓库根的 .gitignore 没有覆盖 obj/ 与 bin/,所以本目录自己挡一道。
+bin/
+obj/
