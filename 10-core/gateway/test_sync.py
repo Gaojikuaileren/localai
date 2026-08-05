@@ -239,6 +239,19 @@ _m2 = _ts.put("messages", {"id": "m2", "session_id": "s1", "text": "还在?"}, "
 check("★★ 会话已删 ⇒ 它的消息不再收(否则留下孤儿消息)",
       not _m2["ok"], _m2)
 
+print("\n=== ★★ 幂等重推不许改写「谁写的」(2026-08-05 实测)===")
+#  「连上就对齐」会让每台机器把它吸收到的东西再以自己的名义推一遍,
+#  于是所有记录的 device 都变成最后上线的那台 —— 而界面上
+#  「这条被另一台改过」正是靠 device 判的,属性一漂提示就开始指错人。
+_as = sync_store.SyncStore(root=tempfile.mkdtemp(prefix="attr_"))
+_as.put("todos", {"id": "a1", "scope": "家庭", "title": "副机写的"}, "PC-B")
+_as.put("todos", {"id": "a1", "scope": "家庭", "title": "副机写的"}, "PC-A")   # 内容一样,只是对齐
+check("★★★ 内容没变的重推**不改**作者(否则对齐一次全变成自己写的)",
+      _as.snapshot()["data"]["todos"][0]["device"] == "PC-B",
+      _as.snapshot()["data"]["todos"][0]["device"])
+_as.put("todos", {"id": "a1", "scope": "家庭", "title": "主机改了"}, "PC-A")   # 真改了内容
+check("★ 内容真变了才换作者", _as.snapshot()["data"]["todos"][0]["device"] == "PC-A")
+
 print("\n=== ★★ 跨端对拍:客户端的单批上限必须与这边的 max_batch 一致 ===")
 #  2026-08-05 实机修复带出来的:客户端原来把整个待推队列**一次**推上来,
 #  而这边 max_batch=200,超了**整批**拒(denied_param)。被拒的那批一条都不出队

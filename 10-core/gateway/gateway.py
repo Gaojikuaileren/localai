@@ -965,6 +965,11 @@ async def session_end(request: Request):
 # 同步面的变更通知。★ 与 Broker 的世代号同款:订阅者等事件,不轮询。
 _sync_waiters: list = []
 
+# ★ 当前挂着同步订阅的设备。key 是**每条连接**自己的身份牌(不是设备名)——
+#   同一台机器开两个客户端也各算一条,断掉其中一个不该让它整台显示离线。
+#   判据是"此刻有没有活着的订阅",不是"最近推过东西"(那是过去式,关了机还会显示在线)。
+_sync_online: dict = {}
+
 
 def _sync_notify() -> None:
     """★ 非阻塞地叫醒所有订阅者。写完就叫,不攒批 ——
@@ -1072,18 +1077,42 @@ async def sync_events(request: Request):
     if _deny is not None:
         return _deny
 
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 在线状态(2026-08-05 用户要求「主机和副机在线状态也要实时同步」)。
+    #
+    #  判据只有一个:**这台设备此刻有没有一条活着的同步订阅**。
+    #  ★ 不用"最近推过东西"来判在线 —— 那是**过去式**,一台关了机的机器
+    #    在那个口径下还会"在线"好几分钟,而在线状态错了比没有更坏。
+    #  ★ 订阅断开(关客户端、关机、拔网线)⇒ finally 里当场摘掉 ⇒ 另一台立刻看到它掉线。
+    #    这同时就是用户说的「主机关闭要同步」。
+    # ══════════════════════════════════════════════════════════════════
+    _who = _short_echo(request.query_params.get("device")) or "unknown"
+    _me = object()                          # 这条连接自己的身份牌(同名多开也各算一条)
+    _sync_online[_me] = _who
+    _sync_notify()                          # ★ 上线也是一次变化,立刻推给别人
+
+    def _roster():
+        return sorted(set(_sync_online.values()))
+
     async def gen():
         try:
             snap = sync_store.store().snapshot()
+            snap["online"] = _roster()
             yield "event: snapshot\ndata: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
             last = snap["generation"]
+            seen_online = _roster()
             while True:
                 if await request.is_disconnected():
                     break
                 ev = asyncio.Event()
                 cur = sync_store.store().snapshot(since_rev=last)
-                if cur["generation"] != last:
+                now_online = _roster()
+                # ★ 数据变了、或者**在线名单变了**,都要推 —— 后者正是"对方掉线了"这件事,
+                #   而它没有任何数据变化伴随,不单独判就永远推不出去。
+                if cur["generation"] != last or now_online != seen_online:
                     last = cur["generation"]
+                    seen_online = now_online
+                    cur["online"] = now_online
                     yield "event: update\ndata: " + json.dumps(cur, ensure_ascii=False) + "\n\n"
                     continue
                 _sync_waiters.append(ev)
@@ -1098,6 +1127,12 @@ async def sync_events(request: Request):
             yield ("event: error\ndata: "
                    + json.dumps({"type": type(e).__name__, "detail": str(e)[:200]},
                                 ensure_ascii=False) + "\n\n")
+        finally:
+            # ★★★ 无论怎么走到这儿(正常断、异常、客户端拔线)都要摘掉自己。
+            #   漏摘一次,那台机器就会**永远显示在线** —— 而"在线状态错了比没有更坏":
+            #   用户会以为东西已经同步过去了。
+            _sync_online.pop(_me, None)
+            _sync_notify()                  # 掉线也是一次变化,立刻推给还连着的那些
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

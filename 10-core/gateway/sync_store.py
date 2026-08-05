@@ -168,7 +168,13 @@ class SyncStore:
         rec = dict(rec)
         rec["rev"] = self._gen
         rec["synced_at"] = time.time()
-        rec["device"] = device
+        # ★★ 内容没变就**保留原作者**(2026-08-05 实测发现):
+        #   「连上就对齐」会让每台机器把它吸收到的东西再以自己的名义推一遍,
+        #   于是所有记录的 device 都变成最后一个上线的那台 ——
+        #   而界面上「这条被另一台改过」的提示正是靠 device 判的。
+        #   ⇒ 一次幂等的重推不该改写"谁写的"。真改了内容才换名字。
+        unchanged = prev is not None and _content_of(prev) == _content_of(rec)
+        rec["device"] = prev.get("device", device) if unchanged else device
         self._cache[kind][rid] = rec
 
         superseded = None

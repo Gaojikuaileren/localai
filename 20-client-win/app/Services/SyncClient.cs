@@ -58,6 +58,26 @@ public sealed class SyncClient : IDisposable
     /// <summary>被另一台改过的记录(kind, id) —— 界面据此提示,不静默覆盖。</summary>
     public IReadOnlyList<(string kind, string id, string byDevice)> Conflicts => _conflicts;
 
+    readonly List<string> _online = new();
+
+    /// <summary>
+    /// 此刻在线的设备名(含自己)。★ 判据是「中枢那边有没有一条活着的订阅」,
+    /// 不是"最近推过东西" —— 后者是过去式,一台关了机的机器还会"在线"好几分钟,
+    /// 而**在线状态错了比没有更坏**:用户会以为东西已经同步过去了。
+    /// </summary>
+    public IReadOnlyList<string> Online { get { lock (_gate) return _online.ToList(); } }
+
+    /// <summary>除自己之外还有谁在线 —— 界面直接显示这个。</summary>
+    public IReadOnlyList<string> Peers
+    {
+        get
+        {
+            lock (_gate)
+                return _online.Where(x => !x.Equals(Environment.MachineName,
+                                                    StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+    }
+
     readonly List<SyncItem> _pending = new();
     readonly List<(string kind, string id, string byDevice)> _conflicts = new();
     readonly object _gate = new();
@@ -300,7 +320,12 @@ public sealed class SyncClient : IDisposable
                     await Task.Delay(TimeSpan.FromSeconds(5), ct);
                     continue;
                 }
-                await Transport.OpenStream(_hub.Profile, ep, "/v1/sync/events", OnLine, ct);
+                // ★ 报上自己的名字 —— 中枢据此维护在线名单,另一台才知道我们在不在。
+                //   判据是"这条订阅活着",所以断线的那一刻对方就会看到我们掉线。
+                await Transport.OpenStream(
+                    _hub.Profile, ep,
+                    "/v1/sync/events?device=" + Uri.EscapeDataString(Environment.MachineName),
+                    OnLine, ct);
                 Link = SyncLink.Reconnecting;
                 LastError = "中枢关闭了同步流";
             }
@@ -366,6 +391,16 @@ public sealed class SyncClient : IDisposable
             var r = d.RootElement;
             if (r.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number)
                 Generation = g.GetInt64();
+            // ★★ 在线名单(2026-08-05):中枢按"有没有活着的订阅"判,断线当场就摘。
+            //   ★ 一帧里没有 online 字段时**不清空** —— 那多半是老版本的中枢,
+            //     清空会让界面显示"全都离线",而那是假的。没有消息 ≠ 都不在。
+            if (r.TryGetProperty("online", out var on) && on.ValueKind == JsonValueKind.Array)
+            {
+                var names = on.EnumerateArray()
+                              .Where(e => e.ValueKind == JsonValueKind.String)
+                              .Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToList();
+                lock (_gate) { _online.Clear(); _online.AddRange(names); }
+            }
             if (!r.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) return;
             foreach (var kind in new[] { "sessions", "todos", "messages" })
             {
@@ -422,6 +457,13 @@ public sealed class SyncClient : IDisposable
         if (PendingCount > 0) return $"正在同步 {PendingCount} 项…";
         if (!IsLive && Link != SyncLink.NeverConnected)
             return "★ 与中枢的同步连接断了 —— 现在的改动只在这台机器上";
+        // ★★ 一切正常时**只在"只有自己在线"时说话**(2026-08-05 用户要求实时在线状态)。
+        //   ★ 不常驻显示"某某在线":常驻的绿字会被当成背景噪声,真出事那天就没人看了
+        //     (这条纪律与上面几行同源)。而"只有你一台在"是**会影响判断**的事实 ——
+        //     你现在改的东西,对面要等它开机才看得到。
+        var peers = Peers;
+        if (IsLive && peers.Count == 0)
+            return "现在只有这台设备在线 —— 改动会存着,对方开机后自动同步过去";
         return "";
     }
 
