@@ -143,8 +143,10 @@ public sealed class StorageView : UserControl
         }
 
         if (s.TidySummarize)
-            // ★ 诚实:AI 未接入,这里【什么都不做】,绝不拿本地规则拼假摘要。
-            done.Add("整理摘要:AI 尚未接入(P4),本次未执行");
+            // ★ 诚实:这里【什么都不做】,绝不拿本地规则拼假摘要。
+            // ★★ 2026-08-05 审计改写:原文说「AI 尚未接入(P4)」—— 模型 S11 就接上了。
+            //   还没有的是**摘要这条链路**(没人把会话喂给模型再写回记忆库)。
+            done.Add("整理摘要:这个功能还没有接上模型,本次未执行");
 
         if (s.TidyCleanMemory)
         {
@@ -213,9 +215,10 @@ public sealed class StorageView : UserControl
         SyncThreshold();
 
         var manual = Ui.Secondary("立即整理并生成摘要", (_, _) =>
-            ConfirmDialog.Show("尚未接入 AI",
-                "摘要必须由 AI 生成,而模型还没接入(P4 GPU Broker)。\n\n接入后这里会真正整理会话并写入记忆库;" +
-                "在那之前不会拿本地规则拼一段假摘要冒充。",
+            // ★★ 2026-08-05 审计改写:原文「模型还没接入(P4 GPU Broker)」是假话(S11 已接入)。
+            ConfirmDialog.Show("摘要还没接上模型",
+                "摘要必须由 AI 生成,而这个功能还没有接上模型(会话对话本身已经能用了)。\n\n" +
+                "接上之后这里会真正整理会话并写入记忆库;在那之前不会拿本地规则拼一段假摘要冒充。",
                 confirmText: "好", cancelText: "关闭"));
         manual.HorizontalAlignment = HorizontalAlignment.Left;
         manual.Margin = new Thickness(0, 10, 0, 0);
@@ -224,7 +227,10 @@ public sealed class StorageView : UserControl
             Ui.Caption("触发方式"), mode,
             _thresholdLabel, slider,
             Ui.Caption($"会话累计超过这个量就提示另开一条(可调 {ThresholdMin / 1000}k–{ThresholdMax / 1000}k)。" +
-                       "★ 真正的约束是模型上下文窗口;模型未接入前用字符数估算,接入后换真 token 计数。"),
+                       // ★ 2026-08-05 审计改写:原文说"模型未接入前用字符数估算" —— 模型早接入了,
+                       //   而估算仍然是字符数,原因是**客户端没有分词器**(见 TokenBudget 的说明),
+                       //   不是"还没接入"。原因写错会让人以为这是个会自动消失的临时状态。
+                       "★ 真正的约束是模型上下文窗口;客户端没有分词器,所以按字符估算(估高不估低)。"),
             manual,
             Ui.Caption("★ 原文永不自动删除 —— 摘要只是索引,原始对话一直留着(超出热层的会移到归档,仍是原文)。"));
     }
@@ -389,7 +395,8 @@ public sealed class StorageView : UserControl
         {
             // ★ 诚实的空态:不是"还没整理",而是根本还没有 AI 来产生记忆
             _memList.Children.Add(Ui.Body("记忆库是空的。", muted: true));
-            _memList.Children.Add(Ui.Caption("摘要必须由 AI 生成,而模型尚未接入(P4)—— 接入后整理出的摘要会出现在这里。"));
+            // ★ 2026-08-05 审计改写:同上,不再声称"模型尚未接入"。
+            _memList.Children.Add(Ui.Caption("摘要必须由 AI 生成,而摘要这条链路还没接上模型 —— 接上后整理出的摘要会出现在这里。"));
             return;
         }
         foreach (var m in items) _memList.Children.Add(MemoryRow(m));

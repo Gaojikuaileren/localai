@@ -106,7 +106,14 @@ try:
         cur.execute("UPDATE mem.l3_fact SET superseded_by=NULL WHERE FALSE")  # no-op,保持只读语义
         cur.execute("DELETE FROM mem.l3_fact WHERE subject_norm=%s", (SUBJ,))
     conn.commit()
-    check("测试数据已清", True)
+    # ★★ 2026-08-05 审计:这里原来是 `check("测试数据已清", True)` —— **恒真**。
+    #   一行都没删掉它也绿。而"没清干净"是有后果的:下一轮跑的时候
+    #   ⑤ 那条「旧行仍在 total == 2」会因为上一轮的残留而红,
+    #   人会去查历史逻辑,真因却是清理没做 —— 假绿把排查引向了错的地方。
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM mem.l3_fact WHERE subject_norm=%s", (SUBJ,))
+        _left = cur.fetchone()[0]
+    check("★ 测试数据真的清干净了(残留会让下一轮的 ⑤ 假红)", _left == 0, f"还剩 {_left} 行")
 finally:
     conn.close()
 

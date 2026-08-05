@@ -834,7 +834,7 @@ public partial class MainWindow : Window
         {
             StatusText.Text = TokenUsage.ExpectedOutputRate is { } r
                 ? $"≈ {r:0} tok/s"
-                : Strings.Get("status.rate_pending");   // 模型未接入(P4)-> 待接入,不编数字
+                : Strings.Get("status.rate_pending");   // 还没量到出字速度 -> 显示待定,不编数字
             StatusDot.Fill = (Brush)FindResource("RiskSafe");
             return;
         }

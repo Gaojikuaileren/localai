@@ -203,10 +203,29 @@ try:
                         hardcoded.append(fn.name)
     check("★★ 没有操作把解封档位硬编码成 TRUSTED_LOCAL(必须用调用方真实档位)",
           not hardcoded, f"→ {sorted(set(hardcoded))}")
-    check("★ 每个公开操作都收 caller 参数",
-          all("caller" in inspect.signature(getattr(panel, n)).parameters
-              for n in ("browse_facts", "trace_fact", "edit_fact", "delete_fact",
-                        "mark_confidential_fact", "search", "confirm_pending")))
+    # ★★★ 2026-08-05 审计:这条原来对着一个**手写的 7 个名字**的元组断言
+    #   「每个公开操作都收 caller」—— 而 panel 有 11 个公开操作。
+    #   漏掉的 4 个里包含 mark_confidential_episode,也就是它自己的注释点名
+    #   「只改 DB 列不迁向量 = §4.11.4 破防」的那一个。
+    #   ★ 判词说的是"每个",实际查的是"我记得的那几个" —— 名单一旦手写,
+    #     漏掉的永远是新加的那个,而新加的那个正是最没被审视过的。
+    #   ⇒ 名单改成从模块**导出**,再用一个显式期望集合钉住"有哪些操作"。
+    _public_ops = sorted(n.name for n in tree.body
+                         if isinstance(n, ast.FunctionDef) and not n.name.startswith("_"))
+    _EXPECTED_OPS = {
+        "browse_facts", "trace_fact", "edit_fact", "delete_fact", "delete_episode",
+        "mark_confidential_fact", "mark_confidential_episode", "search",
+        "list_pending", "confirm_pending", "reject_pending",
+    }
+    check("★★ 公开操作逐条登记(新增一个面板操作必须在这里显式登记)",
+          set(_public_ops) == _EXPECTED_OPS,
+          f"多出 {sorted(set(_public_ops) - _EXPECTED_OPS)} 少了 {sorted(_EXPECTED_OPS - set(_public_ops))}")
+    check("★ 元断言:名单确实数到了操作(空转的话上一条会假绿)", len(_public_ops) >= 11,
+          f"只数到 {len(_public_ops)} 个")
+    _no_caller = [n for n in _public_ops
+                  if "caller" not in inspect.signature(getattr(panel, n)).parameters]
+    check("★★ 每个公开操作都收 caller 参数(名单从模块导出,不是手写)",
+          not _no_caller, f"没收 caller 的:{_no_caller}")
     # 面板只走 unseal_for_client,不【调用】unseal_for_prompt(AST 查调用,不查注释文本)
     prompt_calls = [n for n in ast.walk(tree)
                     if isinstance(n, ast.Call) and (

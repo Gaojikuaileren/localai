@@ -83,8 +83,11 @@ public static class ProjectUi
     };
 
     /// <summary>AI 权限的"这是偏好、尚未生效"横幅(编辑器 + 菜单共用)。★ 现在没有任何 AI 会读或改。</summary>
+    // ★★★ 2026-08-05 审计改写:原文是「AI 尚未接入(P4)」—— S11 之后模型已经能对话了。
+    //   真正还没有的是**文件读写能力**(工具面要等 P6 操控),而那才是这个横幅要说的事。
+    //   ★ 事实没变(没有 AI 会读你的文件),但把原因说错会让人以为整个 AI 都还没有。
     public const string AiNotConnected =
-        "AI 尚未接入(P4):下面是【偏好】—— 现在没有任何 AI 会读或改你的文件;接入后按此设置放行。";
+        "AI 还不能读写你的文件:下面是【偏好】—— 现在没有任何 AI 会读或改你的文件;等能读写了按此设置放行。";
 
     /// <summary>AI 权限的一行解释。★ 一律用【未来时】:现在这三档谁都不生效(见 AiNotConnected)。</summary>
     public static string AiHint(AiPermission a) => a switch
@@ -335,7 +338,11 @@ public static class ProjectUi
                 "· 共享的是项目【信息与会话】,家里其他设备都能看到\n" +
                 $"· 项目【文件夹】仍在「{where}」上 —— 别的设备要读写它,需要那台机器在线\n" +
                 "· ★ 提升之后【无法收回】\n\n" +
-                "(中枢尚未接入,现在只做标记;接入后会上传到主机。)",
+                // ★★★ 2026-08-05 审计改写:原文是「中枢尚未接入,现在只做标记」——
+                //   D86/S13 之后中枢**已经在同步**会话与家庭待办了,这句笼统的话会让人
+                //   以为什么都没同步。真相更窄也更有用:项目共享这一类还没进同步范围
+                //   (sync_store 的 KINDS 只有 todos/sessions/messages)。
+                "(项目共享还没有接入内网同步 —— 会话与家庭待办已经会同步了。现在只做标记。)",
                 confirmText: "提升为共享", danger: true);
             if (ok) Projects.ShareProject(p.ProjectId);
         }), System.Windows.Threading.DispatcherPriority.Background);

@@ -609,10 +609,16 @@ public sealed class ChatCenter
 
         var first = !_messages.Any(m => m.SessionId == sessionId && m.Role == ChatRole.User);
         _messages.Add(new ChatMessage(sessionId, ChatRole.User, text, DateTime.Now, attachments, NewMsgId()));
-        // ★ 诚实:AI 未接入。附件只是【路径/剪贴板指令】,不真发内容(见 ChatAttachment)。
+        // ★ 诚实:这条路径只在**没配对中枢**时走(见 ChatView 发送处的两条路径)。
+        //   附件只是【路径/剪贴板指令】,不真发内容(见 ChatAttachment)。
+        // ★★★ 2026-08-05 审计改写:原文是「AI 模型尚未接入(P4 GPU Broker)」——
+        //   S11 之后模型**已经接入**,这句话把"你这台还没配对"说成了"产品还没做出来"。
+        //   两者的下一步完全不同:一个是去配对(用户三步就能做完),
+        //   一个是干等下个版本。给错原因的提示比不给提示更坏 —— 它把人引向错的方向。
         var note = hasAtt
-            ? "AI 模型尚未接入(P4)。消息与附件引用(路径/剪贴板)已记录;接入后由 AI 自行在本机读取,不会真的把文件发出去。"
-            : "AI 模型尚未接入(P4 GPU Broker)。你的消息已记录;接入后这里会给出真实回复。";
+            ? "还没有配对中枢,所以这条消息没有发给模型。消息与附件引用(路径/剪贴板)已记录;"
+              + "配对后由 AI 自行在本机读取,不会真的把文件发出去。"
+            : "还没有配对中枢,所以这条消息没有发给模型 —— 去「设置 · 中枢」配对后,这里会给出真实回复。";
         _messages.Add(new ChatMessage(sessionId, ChatRole.System, note, DateTime.Now, null, NewMsgId()));
 
         // ★ 标题:接入模型后由 AI 依会话内容起;未接入前用首条消息(截断)作占位。

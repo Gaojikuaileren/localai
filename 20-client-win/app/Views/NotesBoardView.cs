@@ -36,7 +36,8 @@ public sealed class NotesBoardView : UserControl
         {
             _root.Children.Add(Ui.Body("还没有学习笔记。", muted: true));
             _root.Children.Add(Ui.Caption("翻译结果右侧的【收藏】会把它存到这里,并按目标语言分类;一次翻多种语言会拆开分别存。"));
-            _root.Children.Add(Ui.Caption("AI 未接入前,也可以手动新建一条 —— 格式与档位一致。"));
+            // ★ 2026-08-05 审计改写:原文「AI 未接入前」—— 模型 S11 已接入,没接的是翻译引擎。
+            _root.Children.Add(Ui.Caption("翻译引擎接上之前,也可以手动新建一条 —— 格式与档位一致。"));
         }
         else
         {

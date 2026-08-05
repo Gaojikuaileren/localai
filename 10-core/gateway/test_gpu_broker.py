@@ -1088,16 +1088,115 @@ _doc = _DOC_P.read_text(encoding="utf-8") if _DOC_P.exists() else ""
 # ★★ 判据盯【形状】不盯数字:次数本来就会涨(5 → 7 就红过一次,而那不是缺陷,是记录在更新)。
 #   把具体数字写进断言 = 每记一次新实例都要改断言,而"改断言让它绿"正是本项目最该避免的动作。
 _counted = re.findall(r"—— 已踩 (\d+) 次", _doc)
-_headings = re.findall(r"^## \d+\.", _doc, re.M)
+# ★ 2026-08-05:放宽成允许 `## 3b.` 这种子编号 —— 审计新增的两条挂在第 3 条底下
+#   (都是"守卫看起来在守、其实没盖住"的同族)。
+#   ★★ 这是**改判据**不是**改断言的判词**:判词要的是"每条都标了次数",
+#     而我新加的两条**确实都标了**;是提取器只认纯数字标题,漏掉了它们。
+#     —— 这本身就是本文件第 4 条那个坑(判据与判词不一致),
+#     所以下面紧跟着一条元断言,钉住"提取器确实数到了条目"。
+_headings = re.findall(r"^## \d+[a-z]?\.", _doc, re.M)
 check("★★ 每一条都标了【已踩几次】(次数是判断要不要装护栏的依据,不是修辞)",
       len(_counted) == len(_headings) and len(_headings) >= 5,
       f"{len(_counted)} 条标了次数 / 共 {len(_headings)} 条")
 check("★ 至少有一条是重复踩到 3 次以上的(那正是 D85 的收录门槛)",
       any(int(n) >= 3 for n in _counted), _counted)
+# ★ 元断言:提取器没有静默失灵。上面那条比的是两个数**相等** ——
+#   而 0 == 0 也是相等。正则一旦写坏,它会安安静静地全绿。
+check("★★ 元断言:标题提取器确实数到了条目(0 == 0 也是相等,那是零断言)",
+      len(_headings) >= 8, f"只数到 {len(_headings)} 个标题")
 check("★ 文档给每条写了护栏(没有护栏的条目等于没记)",
       _doc.count("护栏") >= 3, f"只有 {_doc.count('护栏')} 处")
 check("★ 文档写明了两种【不许的修法】(删断言 / 改注释迁就测试)",
       "把断言删掉" in _doc and "迁就测试" in _doc)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  审计 2026-08-05 · loader_absent 必须说出【是哪一种】
+#
+#  抓到的问题:装载器接不上时,网关的 except 是个光秃秃的 `pass`,
+#  而 loader_absent 的消息写着「装载器尚未实现(P5)」—— 两处都是假话
+#  (S14 就实现了;P5 是语音 v1)。于是一个**接线断了**的生产故障,
+#  在运维眼里长得和"这个阶段本来就没做"一模一样。
+#
+#  ★★★ 这不是文案问题。拒绝是对的,**把拒绝的理由丢掉**才是缺陷:
+#     一个失败码若把两种成因说成同一句话,它就不再是诊断,只是个借口。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== 审计:loader_absent 的两种成因必须长得不一样 ===")
+
+
+class _BoomLoader:
+    """构造就抛 —— 模拟生产里唯一会发生的那种"接不上"(配置缺字段之类)。"""
+
+    def __init__(self):
+        raise RuntimeError("配置里少了 model_rel")
+
+
+async def _t_loader_absent():
+    # ① 有意没接(测试里的常态)
+    b1 = _mkbroker(free=64.0, loader=None)
+    r1 = await b1.apply_intended([_small])
+    check("① 没接装载器 ⇒ loader_absent", r1.code == "loader_absent", r1.code)
+    m1 = r1.message
+    check("★ 不再声称「尚未实现」(装载器 S14 就落地了)", "尚未实现" not in m1, m1[:70])
+    check("★ 不再把它安给 P5(P5 是语音 v1 —— 名字错了等于把它从清单里摘出去)",
+          "P5" not in m1, m1[:70])
+    check("① 说清是**有意没接**", "有意不接" in m1, m1[:70])
+    s1 = b1.snapshot()
+    check("① 快照如实说没接", s1.loader_present is False)
+    check("★ 且 loader_error 为空 —— 「没试过」不等于「试了失败了」", s1.loader_error is None)
+
+    # ② 接线失败(生产里那种)
+    b2 = _mkbroker(free=64.0, loader=None)
+    try:
+        b2.attach_loader(_BoomLoader())
+    except Exception as e:                                   # noqa: BLE001
+        b2.note_loader_unavailable(f"{type(e).__name__}: {e}")
+    r2 = await b2.apply_intended([_small])
+    m2 = r2.message
+    check("② 接线失败也落 loader_absent(失败关闭没变)", r2.code == "loader_absent", r2.code)
+    check("★★ ② 的消息里**带着原因**(否则查不下去)", "model_rel" in m2, m2[:90])
+    s2 = b2.snapshot()
+    check("② 快照的 loader_error 带原因", "model_rel" in (s2.loader_error or ""), s2.loader_error)
+    check("② loader_present 仍是 False(接线失败 ≠ 接上了)", s2.loader_present is False)
+
+    # ★★★ 核心判据:两种成因**不许长成同一句话**。
+    #   合并了就等于把一个生产故障伪装成预期行为 —— 这条红了不要去改断言。
+    check("★★★ 两种成因的消息不同", m1 != m2, f"都是:{m1[:60]}")
+
+    # ③ 接上之后:两个字段都要跟着翻面(★ 反过来钉,防止字段写死成 False)
+    b3 = _mkbroker(free=64.0, loader=_FakeLoader())
+    s3 = b3.snapshot()
+    check("★ ③ 接上了 ⇒ loader_present 翻成 True(字段不是写死的)", s3.loader_present is True)
+    check("③ 接上了 ⇒ loader_error 清空", s3.loader_error is None)
+
+
+asyncio.run(_t_loader_absent())
+
+# ── 结构:网关那个 except 不许再是光秃秃的 pass ──
+_GW = (_HERE_T / "gateway.py").read_text(encoding="utf-8")
+_gw_code = assert_helpers.code_only(_GW)
+_m = re.search(r"attach_loader\(model_loader\.ModelLoader\(\)\)(.{0,400})", _gw_code, re.S)
+check("★★ 网关确实在启动时接装载器", _m is not None)
+if _m:
+    _tail = _m.group(1)
+    check("★★★ 接不上时**记下原因**(原来是 `except: pass`,原因一个字都没留下)",
+          "note_loader_unavailable" in _tail, _tail[:120])
+    check("★ 且留了一条运维看得见的记录", "log_upstream_problem" in _tail, _tail[:120])
+# ★ 反向:全仓不得再出现那句过期文案(注释里引用旧文的除外 —— code_only 已去掉注释)
+# ★★ 针拼出来,**不写成字面量** —— 第一版写死了,于是这条断言绊在**自己的字符串**上:
+#    code_only 去注释但保留字符串字面量,断言的消息里那句话就成了它自己要找的东西。
+#    (同款形状已踩多次,见 00-docs/ASSERTION-PITFALLS.md「断言绊在解释性文本上」。)
+#    ★ 换成"跳过本文件"也能绿,但那是 fail-open:守卫从此不查自己。拼针才两全。
+_needle = "装载器" + "尚未实现"
+_stale_hits = []
+for _f in sorted(_HERE_T.glob("*.py")):
+    if _needle in assert_helpers.code_only(_f.read_text(encoding="utf-8")):
+        _stale_hits.append(_f.name)
+check(f"★★ 代码里不再有那句过期文案(它 S14 起就是假话)", _stale_hits == [], _stale_hits)
+# ★ 反过来钉一次:针本身必须还能匹配到东西,否则上面那条是【零断言】——
+#   拼错一个字它就永远绿,而"永远绿"正是这套项目最该怕的形状。
+check("★ 针没拼错(拿一段确定含它的文本验一次)",
+      _needle in f"旧文案:{_needle}(S14 前的说法)")
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

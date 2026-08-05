@@ -214,6 +214,18 @@ print("\n=== 7. ★★ 结构:能力来自【表】,不是散落的 if ===")
 _gw = assert_helpers.code_only(gateway)
 _gpu_fns = ("gpu_snapshot", "gpu_events", "gpu_components", "gpu_lease",
             "gpu_intended", "session_end")
+# ★★★ 2026-08-05 审计补的**元断言**:上面这个元组是手写的,而下面整圈检查
+#   (「不自己比档位」「走 gpu_guard」)只作用于列进来的名字。
+#   ⇒ 新增一个 GPU 路由却忘了加进来时,它会被**静默跳过** —— 测试照样全绿,
+#     而那个新端点可能正自己比着档位。漏掉的恰恰是最需要检查的那一个。
+#   ★ 判据取【包含】而非相等:session_end 不在 /v1/gpu 前缀下,是有意多出来的一个。
+_gpu_route_fns = {getattr(r, "endpoint").__name__ for r in gateway.app.routes
+                  if getattr(r, "path", "").startswith("/v1/gpu")
+                  and hasattr(r, "endpoint")}
+check("★★ 元断言:_gpu_fns 覆盖【全部】GPU 路由处理函数(漏一个 = 下面那圈静默跳过它)",
+      _gpu_route_fns <= set(_gpu_fns),
+      f"漏了 {sorted(_gpu_route_fns - set(_gpu_fns))} —— 加进 _gpu_fns,别改这条断言")
+check("★ 且元断言本身不是空转(确实数到了路由)", len(_gpu_route_fns) >= 5, f"只数到 {_gpu_route_fns}")
 for _n in _gpu_fns:
     _src = assert_helpers.code_only(getattr(gateway, _n))
     check(f"{_n} 不再自己比档位(能力来自表)",

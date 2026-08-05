@@ -142,6 +142,43 @@ foreach ($f in $found) {
     if ($res.Fail -gt 0) { ($res.Out -split "`r?`n" | Where-Object { $_ -match 'FAIL' } | Select-Object -First 8) | ForEach-Object { Write-Host "        $_" -ForegroundColor Red } }
 }
 
+# --- 调试工具箱自检(★ 存在才跑,删掉了自动跳过)-----------------------------
+#  ★★★ 2026-08-05 审计:「一键移除」这条承诺**只由 90-ops\debug\selfcheck.py 守着**,
+#    而那个文件不叫 test_*.py,上面的扫描根本不收它 ⇒ 承诺从来没有被自动检查过。
+#    (更糟的是 README 当时还写着由 `10-core\gateway\test_debug_removable.py` 检查 ——
+#     那个文件**压根不存在**。写着有防护、实际没有,正是本项目的签名失败模式。)
+#  ★ 为什么不在 10-core 下建那个测试:那条判据要扫"生产代码里不得出现 90-ops\debug",
+#    而测试文件本身就得写出这个路径 ⇒ 它会绊倒自己。放在被检查的目录之外才成立。
+#  ★ 条件执行:`git rm -r 90-ops\debug` 之后这一段自动变成空操作,门禁照常绿。
+$dbgSelf = Join-Path $repo '90-ops\debug\selfcheck.py'
+if (Test-Path $dbgSelf) {
+    $dbgOut = & py -3 $dbgSelf 2>&1 | Out-String
+    # ★★ 判据**只用 ASCII**:汇总行长这样 —— `=== 调试工具自检:40 PASS · 0 FAIL ===`。
+    #   第一版拿 `·`(U+00B7)当分隔符去匹配,在我的终端里好好的,
+    #   而 pre-commit 钩子是从 git bash 起的、控制台码页是 cp936 ⇒ 中文与 `·` 全成乱码,
+    #   正则匹配不上 ⇒ 门禁报「没跑起来」并拒绝提交。**实测被拒了一次。**
+    #   ★ 这正是 S0 那个老问题的同款(vram_gate 唯一的生产集成因 cp936 坏了 5 天):
+    #     `===` / `PASS` / `FAIL` / 数字都是 ASCII,乱码之后**依然完好**,所以只认它们。
+    #   ★ 并且锚定到汇总行(`^\s*===`),不在整段输出里乱找 ——
+    #     run-tests 自己就栽过一次:非锚定的 `(\d+)\s*FAIL` 匹配到了某行里的 HTTP 状态码。
+    $dbgLine = ($dbgOut -split "`r?`n" |
+                Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } |
+                Select-Object -Last 1)
+    if ($dbgLine -match '(\d+)\s*PASS.*?(\d+)\s*FAIL') {
+        $dp = [int]$Matches[1]; $df = [int]$Matches[2]
+        $totalPass += $dp; $totalFail += $df
+        $ran += '90-ops\debug\selfcheck.py'
+        $c = if ($df -gt 0) { 'Red' } else { 'DarkGray' }
+        Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}" -f '90-ops\debug\selfcheck.py', $dp, $df) -ForegroundColor $c
+        # ★ 挑红行也不认非 ASCII 符号(理由同上:cp936 下 ✘ 会变成乱码)——
+        #   认 selfcheck 的判据是"不是 PASS 行、且不是分隔线",宁可多打两行也别一行不打。
+        if ($df -gt 0) { ($dbgOut -split "`r?`n" | Where-Object { $_.Trim() -and $_ -notmatch '^\s*[-=]+\s*$' -and $_ -notmatch '^\s*===' } | Select-Object -First 8) | ForEach-Object { Write-Host "        $_" -ForegroundColor Red } }
+    } else {
+        $broken += [pscustomobject]@{ File = '90-ops\debug\selfcheck.py'; Why = '没有汇总行 —— 多半没跑起来' }
+        Write-Host "  X 调试工具自检没跑起来" -ForegroundColor Red
+    }
+}
+
 # --- dotnet 与客户端(只在 -Full 时)---------------------------------------
 $dotnetResults = @()
 if ($Full) {
@@ -178,9 +215,39 @@ if ($Full) {
     Write-Host ""
     Write-Host "[客户端自检]" -ForegroundColor Cyan
     $exe = Join-Path $repo '20-client-win\app\bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-client.exe'
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 2026-08-05 审计:这里跑的是**已有的构建产物**,不重新编译。
+    #
+    #  实测抓到的形状:改了 Selftest.cs、加了 3 条断言,门禁照样报
+    #  「client --selftest PASS=1852 FAIL=0」—— 与改动前一模一样。
+    #  那 1852 条是**上一次出包时**的源码跑出来的,而输出读起来像是
+    #  "当前源码通过了"。⇒ 改坏客户端源码但不出包,门禁会一直是绿的。
+    #
+    #  ★ 不在这里强制重编(单文件发布要几分钟,会把门禁拖成没人跑的东西),
+    #    改成**比时间戳**:产物比源码旧就当"没跑起来"报出来。
+    #    失败必须长得和成功不一样 —— 而"跑了旧产物"就是一种失败。
+    # ══════════════════════════════════════════════════════════════════
+    $srcDir = Join-Path $repo '20-client-win\app'
+    $newestSrc = Get-ChildItem $srcDir -Recurse -Include *.cs, *.xaml -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
+                 Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $stale = $false
+    if ((Test-Path $exe) -and $newestSrc) {
+        $exeTime = (Get-Item $exe).LastWriteTimeUtc
+        if ($newestSrc.LastWriteTimeUtc -gt $exeTime) {
+            $stale = $true
+            $rel = $newestSrc.FullName.Substring($repo.Length).TrimStart('\')
+            $broken += [pscustomobject]@{ File = 'client --selftest'
+                                          Why  = "产物比源码旧($rel 改于 $($newestSrc.LastWriteTimeUtc.ToString('MM-dd HH:mm')),产物出于 $($exeTime.ToString('MM-dd HH:mm')))—— 跑它等于测上一版。先跑 90-ops\build-client.ps1" }
+            Write-Host "  X 客户端自检:产物比源码旧,跑它等于测上一版 —— 先出包" -ForegroundColor Red
+            Write-Host "     最新改动:$rel" -ForegroundColor DarkGray
+        }
+    }
     if (-not (Test-Path $exe)) {
         $broken += [pscustomobject]@{ File = 'client --selftest'; Why = "没有构建产物($exe)—— 先跑 90-ops\build-client.ps1" }
         Write-Host "  X 客户端自检:没有构建产物,先出一次包" -ForegroundColor Red
+    } elseif ($stale) {
+        # 已在上面报过;这里**不跑** —— 跑出来的绿数字比不跑更有害
     } else {
         $log = Join-Path ([IO.Path]::GetTempPath()) ("localai-ci-selftest-" + [Guid]::NewGuid().ToString('N') + ".txt")
         $proc = Start-Process -FilePath $exe -ArgumentList '--selftest' -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $log

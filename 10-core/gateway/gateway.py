@@ -596,12 +596,23 @@ def gpu_guard(request: Request, action: str, *, components=None, lease_kind: str
         return tier, None
     # 401 = 你是谁没确定;403 = 知道你是谁,但不给;429 = 太快了
     status = 401 if tier == "remote-unauthenticated" else (429 if d.code == "denied_quota" else 403)
+    detail = dict(d.detail or {})
+    if d.code == "denied_quota":
+        # ★★ 撞额度时把【用了几次 / 上限多少 / 窗口多长】如实回带 ——
+        #   只说"太快了"是句没有信息量的话:用户不知道该等 10 秒还是 10 分钟。
+        # ★ quota_state 是 S10 写下的,docstring 写着「供响应体如实回报」,
+        #   却**一直没有调用点** —— 2026-08-05 由一次死代码扫描抓出来。
+        #   ★ 这里**不写工具的路径**:那套调试工具承诺可以整目录删掉,
+        #     注释里留着路径,移除那天它就成了指向不存在文件的死引用。
+        #   「函数还在、调用点没了」正是编译与行为都抓不到的那类缺陷。
+        used, cap = gpu_policy.quota_state(tier, holder)
+        detail.update({"used_this_window": used, "per_min": cap, "window_s": 60})
     return tier, JSONResponse(
         status_code=status,
         content={"error": {"message": d.message, "type": d.code,
                            # ★ 点名是哪一维 —— 这决定用户下一步该做什么
                            "dimension": d.dimension, "tier": tier, "action": action},
-                 "detail": d.detail},
+                 "detail": detail},
     )
 
 
@@ -707,8 +718,15 @@ async def _start_gpu_broker():
     #     而 S7 里那条钉住恒真性的断言会红 —— 那正是它被写下来的目的。
     try:
         gpu_broker.BROKER.attach_loader(model_loader.ModelLoader())
-    except Exception:                                        # noqa: BLE001
-        pass   # ★ 装载器接不上不该拖垮网关:退回 loader_absent 那条路径,如实拒绝事务
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 接不上不该拖垮网关:退回 loader_absent 那条路径,如实拒绝事务。
+        # ★★★ 但 2026-08-05 审计发现这里原来是 `pass` —— **原因一个字都没留下**。
+        #   后果:网关照常起、每次事务都退 loader_absent,而那条消息当时还说
+        #   「装载器尚未实现」⇒ 运维读到的是"意料之中",真相是接线断了。
+        #   拒绝是对的,**把拒绝的理由丢掉不对** —— 与上面采样器那条同款处理。
+        gpu_broker.BROKER.note_loader_unavailable(f"{type(e).__name__}: {e}")
+        log_upstream_problem("(loader)", "-", "loader_attach_failed",
+                             f"装载器接不上,所有 GPU 事务将退 loader_absent:{e}")
     try:
         # ★★ 先认领已经在跑的后端(中枢重启后的孤儿),**再**判 STARTING 的出口。
         #   顺序反了的话:finish_startup 看到 actual(空) == committed(空) ⇒ 宣布 READY,
@@ -1165,7 +1183,9 @@ async def gpu_intended(request: Request):
     ★★ 事务的每一种失败都有**自己的** code,不合并成一个"失败了":
       · gate_*            预检不过 —— **一个组件都没卸**,回编辑态
       · needs_user_choice 有任务在跑 —— 给了 5 秒排空窗口仍未空,交还用户裁定
-      · loader_absent     装载器尚未实现(P5)—— 事务失败关闭,**不是**"装好了"
+      · loader_absent     装载器没接上 —— 事务失败关闭,**不是**"装好了"
+                          (消息里会说清是**接线失败**还是**这台实例有意没接**;
+                           快照的 loader_present / loader_error 是同一件事的字段版)
       · load_failed_rolled_back / rollback_failed
       合并成一个失败码会让客户端只能弹一句"失败",而这四种的下一步动作**完全不同**。
     """

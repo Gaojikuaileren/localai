@@ -78,13 +78,22 @@ check("动态闸说『改桌面预留没用』", "改桌面预留没用" in vd.m
 check("两条消息不同", vs.message != vd.message)
 check("两条都带具体数字", any(ch.isdigit() for ch in vs.message) and any(ch.isdigit() for ch in vd.message))
 
-print("=== 5. NVML 读不到 → fail-closed ===")
-v = evaluate(["llm.assistant.8b@16k"], cfg, free=None, skip_dynamic=False)
-# 真机上 nvidia-smi 可能成功;只断言「若读不到则拒」的逻辑分支存在
-if v.gate == "dynamic" and "读不到" in v.message:
-    check("读不到 NVML → 拒(fail-closed)", not v.ok)
-else:
-    check("真机 NVML 可读,跳过该分支断言", True)
+print("=== 5. NVML 读不到 → fail-closed(★ 判据已下移到第 11 组)===")
+# ★★★ 2026-08-05:这一组原来长这样 ——
+#     if v.gate == "dynamic" and "读不到" in v.message:
+#         check("读不到 NVML → 拒(fail-closed)", not v.ok)
+#     else:
+#         check("真机 NVML 可读,跳过该分支断言", True)      ← **恒真**
+#   这台机器上 nvidia-smi 一直是好的,所以它**永远走 else**,那条 `True` 从没红过、也不可能红。
+#   ★ 更刺眼的是:第 11 组的注释早就把这件事写明白了
+#     (「原第 5 组在本机总是走 else 分支,那条 fail-closed 从没被执行过」)——
+#     **发现了、写下来了、却把恒真的那条留在原地**。
+#   ⇒ 今天由一次恒真断言扫描重新抓出来,现在删掉。
+#     (★ 不写扫描器的路径:那套调试工具可整目录移除,写了路径就成了死引用。)
+#     真正的判据在第 11 组:那里**注入** nvml_free_gib = lambda: None,
+#     于是 fail-closed 分支**真的被执行过**。
+#   ★ 这里不留任何 check() —— 留一条"占位"的断言,下一个人会以为这一组还在守着什么。
+print("    (本组无断言:见第 11 组的注入版本)")
 
 print("=== 6. 余量必须用实际 peak 算,不能用 budget(§8.1「余量核算」)===")
 v = evaluate(["llm.assistant.8b@16k"], cfg, free=15.0)          # 5.92

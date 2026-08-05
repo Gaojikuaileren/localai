@@ -4125,9 +4125,17 @@ public static class Selftest
                     //   用户刚跟模型聊完,输入框底下还印着「AI 模型尚未接入…现在还不会有回答」。
                     //   原断言(要求这句话在)在那一刻是**在保护一句谎言**。
                     //   ⇒ 反过来钉:那句话必须【不在了】,且提示按真实前提分层。
-                    Assert(!CodeOnly(cv3).Contains("AI 模型尚未接入"),
-                           "★★★ 模型接入后那句「尚未接入」必须删掉 —— 留着就是界面在说假话"
-                           + "(与 PDF 预览那次同款:接上了还留着『尚未接入』就是骗人)");
+                    // ★★★ 2026-08-05 审计:这里原来还有一条
+                    //       Assert(!CodeOnly(cv3).Contains("AI 模型尚未接入"), …)
+                    //     它**恒真** —— CodeOnly 会把每个字符串字面量整个换成 "",
+                    //     而这句话只可能出现在字符串里。⇒ 文案改回去它也不会红。
+                    //   ★ 更值得记住的是它的来历:它本身就是为了修一句谎言而写的
+                    //     (上面那段注释还写着"⇒ 反过来钉:那句话必须【不在了】"),
+                    //     修得对、写得诚恳,**而修法是空的**。
+                    //   ⇒ 已被本文件后面那条【全仓 + NoComments】的扫描取代,
+                    //     那一条第一次跑就把这行的针给抓了出来。
+                    //     (同款教训见 00-docs/ASSERTION-PITFALLS.md:文案断言用 NoComments,
+                    //      CodeOnly 只能用来查代码结构。)
                     Assert(cv3.Contains("还没有配对到中枢") && cv3.Contains("主机未开启"),
                            "★★ 提示按【真实前提】分层:没配对 / 主机不在线 —— 每层只说自己那件事");
                     Assert(cv3.Contains("if (!TheApp.Hub.IsPaired)"),
@@ -4292,7 +4300,9 @@ public static class Selftest
                 // ★ System 消息不上行 —— 那是我们自己的界面文案
                 var s11mixed = new List<Services.ChatMessage> {
                     new("s", Services.ChatRole.User, "问", DateTime.Now, null, "a"),
-                    new("s", Services.ChatRole.System, "AI 模型尚未接入(P4)", DateTime.Now, null, "b"),
+                    // ★ 夹具文本换成中性的:原来这里写着那句被明令禁止的界面文案,
+                    //   而下面的全仓扫描会(正确地)把它当成一处违规 —— 夹具不该逼守卫留后门。
+                    new("s", Services.ChatRole.System, "(系统说明占位)", DateTime.Now, null, "b"),
                     new("s", Services.ChatRole.Assistant, "答", DateTime.Now, null, "c"),
                 };
                 var s11p2 = Services.TokenBudget.Plan(s11mixed, "再问", null);
@@ -4370,6 +4380,53 @@ public static class Selftest
             //    并且**不要用会随别处进展变化的笼统主语**(「中枢」「AI」「后端」)。
             // ══════════════════════════════════════════════════════════════
             {
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ 2026-08-05 审计:过期文案的守卫必须扫【全部源码】,不是一个文件
+                //
+                //  原来这两条断言写在这里,只读 Views/ChatView.cs。而实测:
+                //    · 「AI 模型尚未接入(P4 GPU Broker)」躺在 Services/ChatCenter.cs
+                //    · 「中枢尚未接入,现在只做标记」  躺在 Views/ProjectUi.cs
+                //  两句都被这条断言**逐字点名**禁止过,两句都活得好好的 ——
+                //  守卫写对了内容,却看不见它要守的地方。
+                //
+                //  ★ 这类断言的判据天生是全仓的:一句谎话搬个文件就绕过去了。
+                //  ★ 针拼出来、夹具改中性 ⇒ 扫描**包含 Selftest.cs 自己**,不留后门。
+                // ══════════════════════════════════════════════════════════
+                {
+                    var banned = new[] {
+                        ("AI 模型" + "尚未接入",
+                         "模型 S11 已接入 —— 这句话留着就是界面在说假话。要说的是【这个功能】还没接上模型"),
+                        ("中枢" + "尚未接入",
+                         "中枢已经能对话、也在同步会话与家庭待办了。笼统这么说会让用户以为什么都没好"),
+                    };
+                    var allSrc = TryReadAllSources();
+                    // ★★ 两种"读到 0 个"必须分开,它们的含义相反:
+                    //   · 发布产物旁边**根本没有源码** ⇒ 与 TryReadSource 同款:跳过。
+                    //     (实测:发布产物原位跑自检时 1852 → 834,近千条源码类断言都是这么跳的。)
+                    //   · 开发环境**有源码但只扫到 1 个** ⇒ 枚举写坏了,下面几条在空转,必须红。
+                    //   把两者合成一条 `Count >= 20`,发布产物那次就会红在一个根本不是缺陷的地方
+                    //   —— 第一版正是这么写的,当场被出包门禁拦下。
+                    if (allSrc.Count == 0)
+                    {
+                        Console.WriteLine("  (跳过:此处没有源码 —— 发布产物原位跑,不是缺陷)");
+                    }
+                    else
+                    {
+                        Assert(allSrc.Count >= 20,
+                               $"★★ 元断言:源码枚举没写坏(只读到 {allSrc.Count} 个 ⇒ 下面几条在空转)");
+                        foreach (var (needle, why) in banned)
+                        {
+                            var hits = allSrc.Where(f => NoComments(f.Text).Contains(needle))
+                                             .Select(f => f.Path).ToList();
+                            Assert(hits.Count == 0, $"★★★ 「{needle}」还在:{string.Join(", ", hits)} —— {why}");
+                        }
+                        // ★ 反过来钉一次:针本身必须还能匹配得到东西。拼错一个字这几条就永远绿,
+                        //   而"永远绿"正是本项目最该怕的形状(这条红了说明针写坏了,不是代码坏了)。
+                        foreach (var (needle, _) in banned)
+                            Assert($"示例:{needle}".Contains(needle), $"★ 针拼错了:{needle}");
+                    }
+                }
+
                 var s12cv = TryReadSource(Path.Combine("Views", "ChatView.cs"));
                 if (s12cv is not null)
                 {
@@ -4377,11 +4434,6 @@ public static class Selftest
                     //   2026-08-05 我这里先写错了一版,五条当场红 —— 而其中「不得出现」那条
                     //   本来会**恒绿**,那才是真正危险的:它在文案改回去的那天也不会红。
                     var code = NoComments(s12cv);
-                    Assert(!code.Contains("AI 模型尚未接入"),
-                           "★★★ 模型已接入(S11):那句「尚未接入」必须删掉 —— 留着就是界面在说假话");
-                    Assert(!code.Contains("中枢尚未接入"),
-                           "★★★ 不得再用笼统的「中枢尚未接入」—— 中枢已经能对话了,"
-                           + "这句话会让用户以为别的功能也好了(实测:共享提升后主机看不见)");
                     // ★★★ 2026-08-05:这三条**自己过期了**。
                     //   它们当时在守「会话同步还没有做」这句话在场 —— 而同一晚 D86/S13
                     //   把同步做出来之后,守住那句话就等于**守住一句谎言**。
@@ -6858,6 +6910,35 @@ public static class Selftest
             sb.Append(src[i]);
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 枚举【全部】客户端源码(开发/CI)。发布环境没源码 -> 空表,调用方靠元断言察觉。
+    /// ★ 为什么要有它:文案类断言原来逐个写死路径(TryReadSource("Views/ChatView.cs")),
+    ///   于是同一句谎话搬到另一个文件里就没人管了 —— 2026-08-05 审计实测到两处。
+    ///   这类判据天生是全仓的。
+    /// </summary>
+    static IReadOnlyList<(string Path, string Text)> TryReadAllSources()
+    {
+        var dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 8 && dir is not null; i++)
+        {
+            // ★ 锚点用 Selftest.cs 自己:它一定在客户端源码根下
+            if (File.Exists(Path.Combine(dir, "Selftest.cs")))
+            {
+                var outp = new List<(string, string)>();
+                foreach (var f in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+                {
+                    var rel = Path.GetRelativePath(dir, f).Replace('\\', '/');
+                    if (rel.StartsWith("bin/") || rel.StartsWith("obj/")) continue;
+                    try { outp.Add((rel, File.ReadAllText(f))); }
+                    catch (IOException) { /* 读不到就跳过这一个:少扫一个文件好过整套自检崩掉 */ }
+                }
+                return outp;
+            }
+            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        return Array.Empty<(string, string)>();
     }
 
     /// <summary>

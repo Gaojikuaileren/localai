@@ -258,6 +258,18 @@ class Snapshot:
     #   对全部进程的 used_memory 都是 [N/A](WDDM 不暴露逐进程显存)。
     #   字段名带 _inferred 后缀,快照里也标 inferred=True —— 不让调用方把它当成实测。
     non_ai_used_gib_inferred: Optional[float]
+    # ★★★ 2026-08-05 审计:装载器**接不上**的原因原来一个字都没留下。
+    #   网关启动时 `attach_loader(ModelLoader())` 外面包着 `except: pass`,
+    #   于是构造失败(比如配置里少了 model_rel)之后:网关照常起、每次事务都退
+    #   `loader_absent`、而那条消息当时还写着「装载器尚未实现」——
+    #   运维读到的是"意料之中",真相却是"接线断了,去修"。
+    #   ⇒ 与 sampler_error 同款:失败的**原因**必须能被看见。
+    #     loader_error=None 有两种含义,靠 loader_present 区分:接上了 / 压根没试过。
+    # ★ 这两个字段带默认值,所以必须排在**所有无默认值字段之后** ——
+    #   第一版塞在 non_ai_used_gib_inferred 前面,整个 gpu_broker 模块当场 import 不了
+    #   (TypeError: non-default argument follows default argument),由门禁抓出。
+    loader_error: Optional[str] = None
+    loader_present: bool = False
     # P4-S4b:当前租约(拒绝信息要含【占用者】—— 谁持有、何时拿的、是否可驱逐)
     leases: Tuple[Dict, ...] = ()
     reserved: Tuple[str, ...] = ()
@@ -306,6 +318,9 @@ class Snapshot:
             "age_s": self.age_s,
             "stale": self.stale,
             "sampler_error": self.sampler_error,
+            # ★ 装载器在不在、接不上的话为什么 —— 见 loader_error 字段处的说明
+            "loader_present": self.loader_present,
+            "loader_error": self.loader_error,
         }
 
 
@@ -340,6 +355,9 @@ class Broker:
         #     若给它一个空实现,每次事务都会"成功"而显存里什么都没有 ——
         #     那是比"3 个装了 2 个仍报 READY"更坏的版本。
         self._loader = None
+        # ★ 接装载器时**失败的原因**。None 不等于"没问题" —— 它只是"没人试过或试成了",
+        #   要连着 `self._loader is not None` 一起看。见 Snapshot.loader_error。
+        self._loader_error: Optional[str] = None
         # ★ 装载器的观测结果缓存。actual_resident 是**同步**属性(快照、不变式都在读它),
         #   而探活是 async I/O —— 不能在同步路径里跑。
         #   ⇒ 由采样循环刷新;None = 还没探过,此时退回账本并保持 self_reported。
@@ -415,6 +433,20 @@ class Broker:
     def attach_loader(self, loader) -> None:
         """接上装载器(P4-S14)。★ 只此一处 —— 装载器是唯一能动系统进程的东西。"""
         self._loader = loader
+        self._loader_error = None
+
+    def note_loader_unavailable(self, reason: str) -> None:
+        """记下**接不上的原因**。★ 这不是日志,是快照里的一个字段。
+
+        ★★ 为什么非要有这个方法:接不上时事务照样失败关闭(那部分本来就对),
+          但失败关闭**不解释原因**的话,`loader_absent` 这个码就退化成了
+          「反正装不了」—— 而它至少有两种成因,下一步动作完全相反:
+            · 这个 Broker 实例有意没接装载器(测试里)   ⇒ 什么都不用做
+            · 生产启动时 ModelLoader() 构造抛了        ⇒ 去修配置/装载器
+          分不清这两种,就等于把一个真缺陷伪装成了预期行为。
+        """
+        self._loader = None
+        self._loader_error = reason
 
     async def adopt_running(self) -> List[str]:
         """认领已经在跑的后端(中枢重启后的孤儿)。★ 以**现实**为准,不以账本为准。
@@ -515,6 +547,8 @@ class Broker:
             age_s=age,
             stale=stale,
             sampler_error=self._sampler_error,
+            loader_error=self._loader_error,
+            loader_present=self._loader is not None,
             non_ai_used_gib_inferred=non_ai,
         )
 
@@ -770,8 +804,12 @@ class Broker:
     # ══════════════════════════════════════════════════════════════
     #  P4-S8 · 「确定 = 一次事务」(方案书 §8.1「确定 = 一次事务」+ §8.1.6)
     #
-    #  ★★★ 本节最大的诚实边界:**装载器不存在**。
-    #      没有任何进程会真的把模型装进显存 —— 这是 P5 的活。
+    #  ★★★ 本节写于 S8,当时最大的诚实边界是:**装载器不存在**。
+    #      (原文说"这是 P5 的活" —— 那句话有两处错,留着是因为它记录了当时的判断:
+    #       ① 装载器 S14 就落地了,见 model_loader.py;② P5 是语音 v1,不是装载器。
+    #       ★ 给一件事起个方案书里没有的名字,等于把它从任何清单里摘出去 —— 已记入
+    #         00-docs/ASSERTION-PITFALLS.md。)
+    #      下面这条**规定本身没有过期**:装载器缺席时事务必须失败关闭。
     #      于是 S8 有一个极容易掉进去的坑:把 `load()` 写成空实现,
     #      于是每次事务都"成功",状态机一路走到 READY,四个集合全部相等,
     #      I2 永远绿 —— 而显存里【一个字节都没有】。
@@ -930,9 +968,16 @@ class Broker:
 
         # ★★★ 装载器缺席 → 在这里失败关闭。**不得**继续走到 APPLYING/READY。
         if self._loader is None:
+            # ★ 2026-08-05 审计:这条消息原来写的是「装载器尚未实现(P5)」。
+            #   两处都是假话 —— 装载器 S14 就实现了(model_loader.py),而 P5 是语音 v1。
+            #   照着这条消息去查的人会得出"意料之中,等下个阶段"的结论,
+            #   而真相是**接线断了**。⇒ 消息必须说出**这一次**是哪一种。
+            why = (f"装载器接入失败:{self._loader_error}" if self._loader_error
+                   else "这个 Broker 实例没有接装载器(生产路径在网关启动时接;"
+                        "测试里有意不接,用来验失败关闭)")
             return await self._back_to_staging(
                 "loader_absent",
-                "装载器尚未实现(P5)。事务在此失败关闭 —— 若放行,状态机会报 READY "
+                f"{why}。事务在此失败关闭 —— 若放行,状态机会报 READY "
                 "而显存里一个字节都没有,那正是 I2 存在的理由所要禁止的事")
 
         # ── ④ APPLYING:一律先卸后装 ──

@@ -134,7 +134,15 @@ try:
     conn.commit()
     repo.redact(conn, rdel.fact_id, f"{TAG} 演练删除", table="l3_fact")
     conn.commit()
-    check("★ 满载夹具已种(含 S0/S2 事实·情节·pending·L4·quarantine)", True)
+    # ★★ 2026-08-05 审计:这里原来是 `check("★ 满载夹具已种(…)", True)` —— **恒真**。
+    #   夹具一条都没种进去它照样绿,而后面整套演练全都建立在"种进去了"之上:
+    #   夹具是空的时,pg_dump/restore 会"成功"、对拍会"相等"、演练报全绿 ——
+    #   一次**什么都没验证过**的恢复演练,比不做演练更坏(它会让人以为验过了)。
+    #   ⇒ 改成真的去数。数不对就红在这里,而不是让后面 20 条断言集体空转。
+    _fact_ct, _ = psql("memory",
+                       f"SELECT count(*) FROM mem.l3_fact WHERE subject_norm LIKE '{TAG}%'")
+    check("★★ 满载夹具真的种进去了(S0/S2 事实 ≥ 4 行)", int(_fact_ct or 0) >= 4,
+          f"只有 {_fact_ct} 行 —— 后面所有对拍都会因此空转")
     q_before, _ = psql("memory", "SELECT count(*) FROM mem.quarantine")
     check("★ 源库 quarantine 有数据(待证明它被排除)", int(q_before or 0) >= 1, q_before)
 
