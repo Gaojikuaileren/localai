@@ -1977,7 +1977,7 @@ G:\localAI-backup\  ★手动全量(不加密 — D21)· 12 代保留
 | **B13** | **★ 联网搜索(出入网,待定)** | **须先有出入境裁定** | D42.5:更新知识库+搜索,内置非单独界面。出站碰 L5/出境闸,入站是不可信内容须过 E1/走 pending。**主门=每任务手动【放行】按钮**(trusted-local 带外动作、每按一任务、不可被派生内容触发,是 E1 带内解除的正确版)。**预留,不本期做**,方案如 D38/D39 那样先裁定再动手 |
 | **B14** | 课件预设文件的内容与格式 | 做 PPT 工作室时 | D42.3:声明式模板(课程名/听众/版式/章节骨架/术语表/常设指令);用户手管、不进记忆;AI 代改则走 P6 文件区+哈希绑定 |
 | **B15** | **换本地模型时的替换评测** | 未来换模型/换量化时(约 P4 附近) | Codex 交付评测包 `90-ops/localai-model-replacement-eval/`(55 题 + RUBRIC + scorecard + 6 视觉夹具)。★ **五步纪律(别忘)**:①先用当前模型建基线 ②按别名分测 assistant.fast/deep/vision ③依次 smoke→core→safety→full ④**安全硬失败不能被其他高分抵消** ⑤通过后才改语义别名映射。只比模型、不改架构/registry/中央文档;不因接入它打断 P3b |
-| **B16** | **curated 六词 SAS 词表** | P3c UI 落地配对界面时 | 现 `Wordlist.cs` = v0 占位(CVC 生成词);换成 curated 中/英(或 BIP-39)2048 词表,提升人工比对可读性。**只换显示词,不改索引/HKDF/安全性质**;词表须冻结+版本号(与 SAS transcript 同护) |
+| ~~**B16**~~ | ~~curated 六词 SAS 词表~~ | ✅ **2026-08-06 已交付(D89)** | `localai-sas-wordlist-v1-en2048`(2048 词)取代 v0 CVC 占位。判据全部反向钉死:恰好 2048 · 互不相同 · 3–8 位小写 ASCII · **前 4 字母互不相同** · **不含同音词对**(已逐对剔除 `right/write`、`pair/pear`、`peace/piece`、`wear/where` —— 念出口比对是它的**主要**用法,同音词会让一次真正的不一致被听成"对上了")。**版本与内容机械绑定**:`KnownVersions` 是 `(版本, 内容 SHA-256)` 冻结表,改任何一个词就当场判红,想变绿只能新加一行版本 ⇒ **版本字符串无法不跟着变**(已红测:`zebra→zebroo`)。「只换显示词,不改索引/HKDF/安全性质」由一条**冻结索引向量**断言钉死(固定 transcript → `274,9,590,909,1496,1156`,红测期间保持绿色 = 现场证据) |
 | ~~**B17** TPM↔TLS~~ | ✅ **2026-07-29 裁定=选项②(D44)** | — | 攻坚选项①(`b17-tpm-tls` spike)全败(CngKey+CopyWithPrivateKey / AllUsages / New-SelfSignedCertificate PCP 均不行)。裁定:**TLS 叶密钥用不可导出软件 CNG,CA 仍 TPM**(修订 D35/D43 S0.7)。S4 生产路径 selftest 8/8 通。未来解决 TPM↔SChannel 可迁回 |
 
 **复核规则**:每次版本更新时逐条复核;同时复核 `snapshots/` 里的第三方条款是否已变。
@@ -2180,7 +2180,12 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
         host-admin CLI(init/status/list-devices/revoke-device)· `${state}/identity` 根 + 幂等 fail-closed · **15/15**(D43 S0.8)
       - [x] **S2.3** **双向六词 SAS**(自写确定性 CBOR→SHA256→HKDF→66bit→6 词;MITM 换服务器叶即被抓)·
         enroll/status/claim/complete 幂等状态机 · 窗口门 + 队列封顶 8 · **单条批准**(拒 re-approve/批量)· **22/22**
-      - [ ] **推迟 S4/P3b.2**:HTTP `/pair/*` 路由(LAN Edge)· 续期状态机 · **curated SAS 词表(B16,现 v0 占位)** · client-transport CLI
+      - [x] ~~**推迟 S4/P3b.2**~~ **✅ 四件已全部交付**(HTTP `/pair/*` 路由 → S4 · 其余三件 → **D89**,2026-08-06):
+        `/pair/*` 匿名路由(LAN Edge,见 S4)· **续期状态机**(`enroll`/`complete` **两条**独立路由 + 两张独立状态表;
+        ★ `complete` 之前绝不退休旧证书)· **curated SAS 词表 B16 v1**(`localai-sas-wordlist-v1-en2048`,
+        2048 词,版本与内容 SHA-256 机械绑定)· client-transport CLI(`20-client-win/transport/`)
+        > ★ 2026-08-06 更正勾选:此前这一格记作「推迟」,而四件在 D89 落地时已全部做完 ——
+        > 方案书落后于实测。**不是把新决定伪装成旧决定的延续**:D89 是新决议,这里只是把勾选对齐到事实。
 - [x] **S3 · 网关先加固 ✅**(LAN 监听前必须完成 · 10/10 + 全回归:caller_policy 15 · gateway_e1 36 · e1 50 · egress 12):
       · ★ 带证书指纹头→查 S2 成员表→**封顶 `LAN_DEVICE`**;即便 classify_caller fail-open 成 trusted-local,
         带指纹请求也拿不到 trusted-local 能力(尤其**解不了 E1**);本机进程伪设此头只会降权;主体只来自成员表,不认自报 device_id
@@ -2196,12 +2201,18 @@ P3d 外联通道(独立,前置=响应侧出境闸) ─────────�
       **防火墙窄化脚本已写** `90-ops/lan/lan-firewall.ps1`(选定网卡+Private+LocalSubnet+EdgeTraversal=Block+程序限定,
       拒 Public,扫冲突宽规则;`-Remove` 关闭)—— **你 elevated 运行**(网络/防火墙改动=用户执行)。
       activation 精简(启动对账+不满足即回环)+ Edge 绑选定网卡 = 随 S6 真机联调时收尾。7 步持久 saga 推迟 P3b.2
-- [ ] **S6 · 第二台 Windows PC 实机验收**(Q4=有 · **需你的第二台 PC**):
-      **验收清单已写** `90-ops/lan/S6-acceptance-checklist.md`(初次配对/六词SAS · 拔WAN冷启动 · 换DHCP免重配 ·
-      单台吊销+流式中吊销 · 暴露面扫描 · 权限回归 · 拒绝且告警)。有第二台机器时按清单走,全过即签 P3b 完成。
+- [x] **S6 · 第二台 Windows PC 实机验收 ✅**(2026-07-29,两台真 PC):
+      **验收清单** `90-ops/lan/S6-acceptance-checklist.md`(初次配对/六词SAS · 拔WAN冷启动 · 换DHCP免重配 ·
+      单台吊销+流式中吊销 · 暴露面扫描 · 权限回归 · 拒绝且告警)**已按清单走完,全过**。
+      实测:配对(mTLS + 六词 SAS,`SENIORBIRDS` → active/`LAN_DEVICE`)· 成员调用 200 且 Edge 注入的是**已验证指纹**
+      (客户端伪造的 `X-LocalAI-*` 被剥离)· **吊销后 401** · 重配对新证书 active。真 hub = `f6hsduipeesexb6f`。
+      > ★ 2026-08-06 更正勾选:`STATE.md` 自 2026-07-29 起就记着「P3b ✅ 实机上线完成(两台真 PC)· S0–S6 全绿」,
+      > 而这一格一直是 `[ ]` —— **两份中央文档对同一件事给出相反的状态**。实测支持 STATE ⇒ 改方案书。
 - [ ] **S7 · 串行更新中央文档**(DECISIONS/PLAN/STATE/worklog,唯一由主 Claude 一次性写)
 
-**推迟 P3b.2(不丢核心安全属性)**:三服务分权(edge/registry/signer named-pipe SID 互验)· 双证书**自动**轮换状态机 ·
+**推迟 P3b.2(不丢核心安全属性)**:三服务分权(edge/registry/signer named-pipe SID 互验)·
+~~双证书**自动**轮换状态机~~ **✅ 已于 2026-08-06 交付(D89)** —— `ServerCertRotator`,**没有自己的持久状态**
+(每一跳重读 `server.cer` 的 `NotAfter`,证书自己就是进度);Kestrel 改 `ServerCertificateSelector` ⇒ **不中断已有连接** ·
 7 步持久 activation saga · DNS-SD 自动发现(先静态配置对端)。
 
 **★★ 铁律**:网关绑 LAN 与 LAN 上有 TLS 是**同一个不可分割交付项** —— 在 `90-ops` 加断言:未带 TLS 则**拒绝绑非回环**(fail-closed)。
