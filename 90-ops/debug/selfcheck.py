@@ -207,6 +207,179 @@ if scan_fake is not None:
         check(f"★ 散文过滤器:{_why}", _got is _want_prose,
               f"期望 is_prose={_want_prose} 实得 {_got}")
 
+# ── ⑨ ★★★ 扫描器的**覆盖面**:.ps1 / .json / .toml 的过期文案(2026-08-06)──
+#
+#  ★ 起因(第二个实例,而且**已经出厂了**):`90-ops\build-client.ps1` 的
+#    【已知边界(如实说)】here-string 里写着「AI 模型尚未接入(P4)」,
+#    而模型早已接入。那段话进了**每一份出厂包的安装说明** —— 用户唯一会读的那份文本。
+#    客户端 .cs 里的同一句话被断言钉着、被抓住了;而扫描器看不见 .ps1,
+#    于是**同一句谎话在没人看的那一侧发了出去**。
+#
+#  ★★ 这里**只喂合成字符串,一条都不断言真文件的内容**。
+#    ASSERTION-PITFALLS 第 5 条:一条会因为「那句话终于被改对了」而变红的断言,
+#    测的就不是它自称在测的东西 —— 而这个扫描器**存在的目的**正是促成那次修改。
+#    钉真文件等于让"修好了"和"坏了"长得一样红。
+#
+#  ★★★ 两个方向都钉。**只钉一边等于没钉**:
+#    只钉"能报" ⇒ 一个"什么都报"的扫描器也能全绿,而噪声太大的扫描器没人看;
+#    只钉"不误报" ⇒ 一个"什么都不报"的扫描器也能全绿,那正是 08-06 撞过的那次
+#    (`test_route.py` 被判成"需后端",只因为它的**禁止字符串清单**里字面写着 `requests.`)。
+if scan_fake is not None:
+    _PS1_SHIPPED = ('$notes = @"\n【已知边界】\n· AI 模型尚未接入(P4):不会有回答。\n"@\n')
+    # ★★★ 两条反向用例里**必须带引号**。第一版没带,于是它们是绿的 ——
+    #   但绿的原因是「这一行没有引号 ⇒ 不像字符串字面量 ⇒ 跳过」,
+    #   **跟块注释/行注释识别一点关系都没有**。红测当场戳穿了它:
+    #   把块注释的正则改成永不匹配,这两条**照样全绿**(实测)。
+    #   ⇒ 那是一条"为了别的理由而绿"的假断言 —— 本项目最恨的形状,而它出现在
+    #     一条专门用来防假断言的自检里。带上引号之后,唯一能排除它的就只剩
+    #     `_in(blocks, …)` / 行首判据本身,这条用例才真的在测它自称在测的东西。
+    _PS1_BLOCKC = ('<#\n  说明:那句 "尚未接入" 已经删掉了,别再加回来。\n#>\nWrite-Host "ok"\n')
+    _PS1_LINEC = ('# 说明:界面上那句 "尚未接入" 已经不在了\nWrite-Host "ok"\n')
+    _STALE_CASES = [
+        # (后缀, 源码, 期望报几条以上, 说明)
+        (".ps1", _PS1_SHIPPED, True,
+         "★★★ 正向:here-string 里的出厂文本必须报 —— 那是发给用户的那份字"),
+        (".ps1", _PS1_BLOCKC, False,
+         "★★ 反向:`<# … #>` 块注释里的说明不报(守卫撞在解释它所守之物的文本上,已踩 9 次)"),
+        (".ps1", _PS1_LINEC, False,
+         "★★ 反向:`#` 行注释里的说明不报"),
+        (".json", '{ "usage.pending": { "zh-CN": "待接入" } }\n', True,
+         "★ 正向:.json 里的界面文案必须报(strings.json 此前完全在盲区里)"),
+        (".toml", "note = '这一段暂未启用'\n", True,
+         "★ 正向:.toml 里的值必须报"),
+        (".cs", 'Assert(!CodeOnly(s).Contains("尚未接入"), "那句话必须已经不在了");\n', False,
+         "★★ 反向:守着这句话【不在了】的断言消息不报 —— 它是守卫,不是谎话本身"),
+    ]
+    for _sfx, _src, _want, _why in _STALE_CASES:
+        _hits = scan_fake.stale_hits(_sfx, _src)
+        check(f"过期文案扫描:{_why}", bool(_hits) is _want,
+              f"期望{'报' if _want else '不报'},实得 {len(_hits)} 条:{_hits[:1]}")
+
+    # ★★ here-string 与块注释的**归类**也要对:两者都在 .ps1 里、长得很像,
+    #   混了的话"出厂文本"这个标签就成了随口一说 —— 而它正是让人一眼看出严重性的那个词。
+    _h = scan_fake.stale_hits(".ps1", _PS1_SHIPPED)
+    check("★★ here-string 命中被标成【出厂文本】而不是普通字符串",
+          bool(_h) and "here-string" in _h[0][2], f"实得 {_h[:1]}")
+
+    # ★★★ 钉住那个 **fail-open 后门已经被拿掉**,并且拿掉之后扫描器**不撞自己**。
+    #   这两条必须一起钉:只钉前者,针写成字面量时它会报自己 8 次,
+    #   下一个人为了消噪声会把后门加回来 —— 那就绕了一整圈回到原点。
+    check("★★★ `debug` 不在 SKIP 里 —— 假防护扫描器必须扫得到调试工具箱**包括它自己**"
+          "(D88:工具自己也要被测)",
+          "debug" not in scan_fake.SKIP, f"SKIP={sorted(scan_fake.SKIP)}")
+    check("★★★ 拿掉后门之后,扫描器**不报自己的针清单** —— 针是拼出来的,不是字面量。"
+          "这条一红就说明有人把 `_STALE_WORDS` 写回了字面量",
+          not [w for _, w, _ in
+               (lambda: (scan_fake.found.clear(), scan_fake.scan_stale_claims(),
+                         scan_fake.found)[-1])()
+               if w.startswith("90-ops/debug/scan_fake.py")],
+          "scan_fake.py 报了自己")
+    scan_fake.found.clear()          # ★ 还回去:上面那条借用了模块级的 found
+
+    check("★ `config` 在 CODE_DIRS 里 —— 全仓 6 个 .toml 有 5 个在那儿,"
+          "不加它就只是把后缀写进表里好看",
+          "config" in scan_fake.CODE_DIRS, f"{scan_fake.CODE_DIRS}")
+
+    # ★★★ **够得着**这件事要单独钉。
+    #   上面那几条合成用例是直接调 `stale_hits(".ps1", …)` 的 —— 它们**绕过了**
+    #   `STALE_EXTS` 与 `CODE_DIRS`。⇒ 有人把 `.ps1` 从后缀表里删掉,
+    #   合成用例照样全绿,而 build-client.ps1 从此不再被扫。**判据会静默瞎掉。**
+    #
+    # ★★★ 期望值写成**独立的字面量**,再和 `STALE_EXTS` 做集合相等 —— 反向全表。
+    #   第一版是 `for _ext in scan_fake.STALE_EXTS:` —— **拿被检查的那张表当遍历源**,
+    #   于是删掉 `.ps1` 时循环少转一圈,一条都不红(红测实测:EXITCODE=0,全绿)。
+    #   那正是 ASSERTION-PITFALLS 3b:手写名单只能当**期望值**,不能当**遍历源**;
+    #   两者的区别就是"少一项会红"和"少一项被跳过"。
+    _EXPECT_EXTS = {".cs", ".py", ".ps1", ".json", ".toml"}
+    check("★★★ 过期文案扫描的后缀表**逐个对得上**(少一个 = 一整类文件从此不被扫,"
+          "而那不会让任何东西变红 —— 所以只能在这里拦)",
+          set(scan_fake.STALE_EXTS) == _EXPECT_EXTS,
+          f"实得 {sorted(scan_fake.STALE_EXTS)} 期望 {sorted(_EXPECT_EXTS)}")
+    #   ⇒ 再走一遍真正的 `sources()`,只问「够不够得着」,**不问文件里写了什么** ——
+    #     所以它不会因为某句话被改对了而变红(那是第 5 条坑)。
+    for _ext in sorted(_EXPECT_EXTS):
+        _n = sum(1 for _ in scan_fake.sources((_ext,)))
+        check(f"★★ 扫描器**够得着** {_ext} 文件(零命中判红:够不着与全清白在终端上长得一样)",
+              _n > 0, f"{_ext} 实测扫到 {_n} 个")
+
+
+# ── ⑩ ★★★ doctor 第 ④ 环不许再替【不存在的机制】背书(2026-08-06)──
+#
+#  ★ 它此前写着「后端没在跑不一定是错的 —— D87 之后是【按需装载】,没人用就该是这样」。
+#    实测:`/v1/chat/completions` 全路径 192 行代码里,Broker / 装载器 / 租约**一个都没有**
+#    ⇒ 后端没起的真实后果是**聊天直接失败**,而体检报告说这可能很正常。
+#    **一个在系统坏了的时候报"这可能很正常"的体检工具**,正是这套工具存在的理由所指的东西。
+#
+#  ★★ 这里钉的是**识别器**,不是今天的答案。
+#    「今天必须返回 False」那种断言会在**按需装载终于接上**的那天变红 ——
+#    而那正是我们盼着发生的事(第 5 条坑)。钉现状 = 让"修好了"和"坏了"长得一样红。
+try:
+    import doctor as _doc                                      # noqa: E402
+except Exception as e:                                        # noqa: BLE001
+    check("★★ doctor 能被导入", False, f"{e}")
+    _doc = None
+if _doc is not None:
+    _CHAT = '@app.post("/v1/chat/completions")\nasync def chat_completions(r):\n'
+    _AUTOLOAD_CASES = [
+        (_CHAT + "    x = 1\n", False,
+         "★★★ 正向:chat 路径不碰 Broker ⇒ 判「没有按需装载」"),
+        (_CHAT + "    await BROKER.ensure_loaded(alias)\n", True,
+         "★★★ 反向:接上了就要认出来 —— 否则修好的那天工具会继续说反话"),
+        (_CHAT + "    # 这里【没有】接 BROKER,理由见 D87\n    x = 1\n", False,
+         "★★ 注释里提到 BROKER 不算接上(守卫撞在解释它所守之物的文本上,已踩 9 次)"),
+        ("def something_else(): pass\n", None,
+         "★★ 找不到 chat 路由 ⇒ 返回 None(**不猜**)—— 读不到与没问题必须长得不一样"),
+    ]
+    for _src, _want, _why in _AUTOLOAD_CASES:
+        _got, _why2 = _doc.autoload_in(_src)
+        check(f"按需装载识别器:{_why}", _got is _want, f"期望 {_want} 实得 {_got}({_why2})")
+
+
+# ── ⑪ ★★★ 产物身份:「产物落后于源码」必须是**会红的东西**(2026-08-06)──
+#
+#  ★ 落地那天的实况:`grep dist` 在 `run-tests.ps1` 与本文件里**零命中**,
+#    而 `doctor.py` 第 ⑨ 环**只查 `.dirty`、从不比提交号**,判 ✔。
+#    `.dirty` 只回答「出包那一刻工作区干不干净」,它**不问这份产物是哪个提交出的**。
+#    ⇒ 最常见的那种不一致完全不被发现:**在一个干净的旧提交上出的包**。
+#      版本戳里明明写着提交号,而没有任何东西读它 ——
+#      「产物落后于源码」此前只能靠人记得出包,而这个项目已经被
+#      「跑的不是刚改的那个产物」咬过 4 次(ASSERTION-PITFALLS 第 3 条)。
+#
+#  ★★ 同样只钉**解析器**,不钉今天 dist 里那份产物的状态:
+#    后者会因为「刚出了一次包」或「刚提交了一次」而来回红绿,那是环境漂移(第 5 条坑)。
+if _doc is not None:
+    _BID_CASES = [
+        ("版本戳: 20260806-1655+4e5da1f\n", ("20260806-1655", "4e5da1f", None),
+         "★★★ 正向:干净树的版本戳 —— **提交号必须被取出来**,这是整条判据的立足点"),
+        ("版本戳: 20260806-1655+4e5da1f.dirty-ab12cd34\n",
+         ("20260806-1655", "4e5da1f", "ab12cd34"),
+         "★★ 脏树戳:提交号与脏树指纹要分得开(此前只认 `.dirty` 三个字)"),
+        ("版本戳: 20260806-1655+4E5DA1F\n", ("20260806-1655", "4e5da1f", None),
+         "★ 大写十六进制归一到小写 —— 否则和 `git rev-parse` 的输出比会假红"),
+        ("localai-client\n构建于: 2026-08-06\n", (None, None, None),
+         "★★ 反向:没有版本戳就返回 None,**不许编一个** —— "
+         "「说不清这是什么」和「没问题」必须长得不一样"),
+    ]
+    for _txt, _want, _why in _BID_CASES:
+        check(f"产物身份解析:{_why}", _doc.parse_build_id(_txt) == _want,
+              f"期望 {_want} 实得 {_doc.parse_build_id(_txt)}")
+
+    # ★★ 钉住「第 ⑨ 环真的会去比提交号」。只钉解析器是不够的 ——
+    #   解析器好好的、而调用方把比较那一步删掉,一样退回"只查 .dirty"。
+    #   ⇒ 从**源码**上钉:那一环必须同时出现 parse_build_id 与 rev-parse。
+    #   ★ 针拼出来,理由同 scan_fake(本文件也会被扫)。
+    _pkg_src = ast.get_source_segment(
+        (REPO / "90-ops" / "debug" / "doctor.py").read_text(encoding="utf-8"),
+        next(n for n in ast.walk(ast.parse(
+            (REPO / "90-ops" / "debug" / "doctor.py").read_text(encoding="utf-8")))
+            if isinstance(n, ast.FunctionDef) and n.name == "link_client_pkg")) or ""
+    check("★★★ 第 ⑨ 环**真的去比提交号**了(不是只查 .dirty)—— "
+          "解析器还在而比较被删掉,一样退回原样",
+          ("parse_" + "build_id") in _pkg_src and ("rev-" + "parse") in _pkg_src,
+          "link_client_pkg 里找不到 parse_build_id / rev-parse")
+    check("★★ 「没有 VERSION.txt」也判红 —— 一个身份不明的产物和一个过期的产物一样不能装出去",
+          "VERSION.txt" in _pkg_src and "没有 VERSION" in _pkg_src)
+
 print("-" * 78)
 print(f"  === 调试工具自检:{_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)
