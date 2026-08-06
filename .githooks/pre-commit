@@ -74,10 +74,15 @@ fi
 #    记忆套件连真实库且需 ai-mem 身份、dotnet 与客户端自检要数分钟 ——
 #    两者都由 90-ops\run-tests.ps1 -Full 显式跑,不进提交钩子。
 # =============================================================================
-changed_core=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^10-core/(gateway|gpu-broker)/' || true)
+# ★★ 2026-08-06 加 memory:test_tainted.py 已提级进快速门禁(75 条断言,不连数据库),
+#   而它就在 10-core/memory/ 下 —— 不加的话,改了它却不会触发自检,
+#   于是"提级"这件事只在 run-tests 里成立、在提交钩子里不成立。
+# ★ **只加 memory,不加 10-core/** 全部**:本文件自己的注释警告过 ——
+#   「20 秒的钩子每次都跑,人会习惯性 --no-verify」。范围扩大一次,钩子就废一次。
+changed_core=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^10-core/(gateway|gpu-broker|memory)/' || true)
 
 if [ -n "$changed_core" ]; then
-  echo "→ 动了 10-core/gateway 或 gpu-broker,跑一遍自检…"
+  echo "→ 动了 10-core/gateway、gpu-broker 或 memory,跑一遍自检…"
   if command -v powershell >/dev/null 2>&1; then
     powershell -ExecutionPolicy Bypass -NoProfile -File "90-ops/run-tests.ps1" >/tmp/localai-precommit.log 2>&1
     rc=$?

@@ -40,7 +40,18 @@ $SysPy = (Get-Command python -ErrorAction SilentlyContinue).Source
 # --- 规则表:目录 → 怎么跑 ------------------------------------------------
 #  ★ 这是【唯一】的分类来源。新增测试目录必须在这里登记,否则反向全表会判红。
 #  runnable = $false 的条目不是"忽略",是**已裁定不在本机自动跑**,并写明理由。
+#  ★★★ 顺序有语义:Get-Rule **首个匹配胜出**。文件级例外必须排在它所属目录那条**之前**,
+#     排在后面会**静默失效** —— 不报错、不告警、-ListOnly 照样显示 manual。
+#     下面那条顺序护栏就是为这件事写的,别把它删了。
+#  ★ 字段名 `Dir` 从此**名不副实**:它现在也接文件路径片段(见 test_tainted.py 那条)。
+#    改名单独提交,不在这次混改 —— 一次提交只做一件事。
 $RULES = @(
+    # ★★ 文件级例外,必须在 '10-core\memory' 之前(见上方顺序说明)。
+    #   test_tainted.py **不连数据库**:它验的是密封/解封与档位允许表(纯逻辑),
+    #   而它一直被 memory 目录那条规则连坐成 manual ⇒ 75 条断言从来没有人跑过。
+    #   ★ 独立复核过:75 PASS / 0 FAIL · 退出码 0 · 零 DB import。
+    @{ Dir = 'memory\test_tainted.py'; Tier = 'fast'; Interp = $SysPy; Runnable = $true
+       Reason = '不连数据库,纯逻辑(密封/解封 + 档位允许表)—— 此前被 memory 目录整条连坐成 manual' }
     @{ Dir = '10-core\gateway';    Tier = 'fast'; Interp = $SysPy; Runnable = $true
        Reason = '纯逻辑,无外部状态' }
     @{ Dir = '10-core\gpu-broker'; Tier = 'fast'; Interp = $SysPy; Runnable = $true
@@ -56,6 +67,29 @@ function Get-Rule([string]$fullPath) {
         if ($fullPath -like ('*' + $r.Dir + '*')) { return $r }
     }
     return $null
+}
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 顺序护栏 —— 把「排错位置」这种**静默失效**变成当场判红。
+#
+#  Get-Rule 首个匹配胜出。文件级例外若排到它所属目录那条**后面**,
+#  目录规则会先命中 ⇒ 例外**永远不生效**,而且:
+#    · 不报错 · 不告警 · -ListOnly 照样把它显示成 manual
+#  ⇒ 那 75 条断言会继续没人跑,而门禁看起来一切正常。
+#    这正是本仓反复吃亏的那个形状:**看着被守住了,实际没守**。
+#
+#  ★ 判据用**真实的规则表 + 真实的 Get-Rule**,不另建一份模型 ——
+#    另建一份的话,它验的是那份模型,不是这个脚本。
+# ══════════════════════════════════════════════════════════════════════════
+$__probe = Join-Path $repo '10-core\memory\test_tainted.py'
+$__hit = Get-Rule $__probe
+if (-not $__hit -or -not $__hit.Runnable -or $__hit.Tier -ne 'fast') {
+    Write-Host ""
+    Write-Host "X 规则表顺序错了:test_tainted.py 命中的是 '$($__hit.Dir)'(Tier=$($__hit.Tier))" -ForegroundColor Red
+    Write-Host "  ★ 文件级例外必须排在 '10-core\memory' 那条【之前】—— Get-Rule 首个匹配胜出。" -ForegroundColor Red
+    Write-Host "  ★ 排在后面不会报错、不会告警、-ListOnly 也照显 manual —— 它会【静默失效】," -ForegroundColor Red
+    Write-Host "    而那 75 条断言继续没人跑。这条护栏就是为了让它当场红。" -ForegroundColor Red
+    exit 1
 }
 
 # --- 发现:扫盘,不写死清单 ------------------------------------------------

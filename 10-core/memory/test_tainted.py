@@ -152,6 +152,29 @@ check("★ 新增档位默认无权(allowlist 形状)",
           for tier in (CallerTier.LAN_DEVICE, CallerTier.CHANNEL_RELAY,
                        CallerTier.REMOTE_UNAUTH)))
 
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 别误读:**本文件进了门禁,不等于 P3d 那道闸被守住了。**
+#
+#  2026-08-06 本文件从 manual 提级进快速门禁(75 条断言从此真的有人跑)。
+#  很容易顺着以为「那 channel-relay 也被盯住了」—— **不是**。
+#
+#  channel-relay 在本文件里只出现两处,**两处都只管 S2**:
+#    · 上面这条(只查 _ALLOWED_CALLERS["S2"])
+#    · 以及更上面那条 unseal_for_client(s2, caller=CHANNEL_RELAY) 必须被拒
+#  ⇒ **S0 / S1 对 channel-relay 一个字都没说。**
+#    把 channel-relay 加进 S0 的允许集,**本文件不会有任何一条变红**。
+#
+#  ★ 对照组就在下面几行:NO_PLAINTEXT_TIERS(resident-observer / ext-operator)
+#    才是强形式 —— 它跨**全部敏感度**、且跨**全部 allowlist** 断言"哪儿都不许出现"。
+#    channel-relay **不在**那个集合里。
+#
+#  ⇒ P3d 若要放行 channel-relay 读 S0 记忆正文,那是**一次安全裁定**,
+#    而这道门禁**拦不住它**。要不要把 channel-relay 也钉成强形式,
+#    属于 P3d 那两道闸的裁定内容之一 —— 本文件不代裁,只把这个缺口写明白。
+#  ★ 写这段是因为:不写的话,"提级"这件事本身会制造一次
+#    「看着被守住了、实际没守」—— 正是这套门禁要打的那个形状。
+# ══════════════════════════════════════════════════════════════════════
+
 # ★★ 两个「结构上取不到任何正文」的档位(D66 / §6.3 档位表 · §17.7)。
 #    _ALLOWED_CALLERS 的形状是 {敏感度: 允许档位集},没有「把某档位登记为空集」的位置,
 #    所以 tainted.py 里那句「由 test_tainted.py 的一条正面断言守着」指的就是下面这条。
