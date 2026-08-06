@@ -214,6 +214,7 @@ print("\n=== 7. ★★ 结构:能力来自【表】,不是散落的 if ===")
 _gw = assert_helpers.code_only(gateway)
 _gpu_fns = ("gpu_snapshot", "gpu_events", "gpu_components", "gpu_lease",
             "gpu_lease_renew",          # S16b 新增 —— 由下面那条元断言抓出来要求登记的
+            "gpu_intent",               # S16b 接动作:「意图即起」—— 同样是元断言抓出来的
             "gpu_intended", "session_end")
 # ★★★ 2026-08-05 审计补的**元断言**:上面这个元组是手写的,而下面整圈检查
 #   (「不自己比档位」「走 gpu_guard」)只作用于列进来的名字。

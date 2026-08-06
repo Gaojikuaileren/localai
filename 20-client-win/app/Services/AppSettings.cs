@@ -182,10 +182,15 @@ public sealed class AppSettings
     public bool DemoDataPurged { get; set; }
     /// <summary>被【停用】的模型 key(存停用项 -> 新模型默认启用)。</summary>
     public List<string> DisabledModels { get; set; } = new();
-    /// <summary>空闲时自动卸载模型腾显存(接入后由 Broker 执行)。</summary>
+    /// <summary>空闲时自动卸载模型腾显存。★ 今天仍**没有读取方**且界面上拨不动 ——
+    /// 「空闲即卸」(D87②)已在中枢落地,但那个计时器是主机与副机**共享的一个**(D87⑧),
+    /// 做成每台客户端各自的开关正是那条裁定要防的事。它要么变成主机上的中枢设置、
+    /// 要么撤掉,在那件事被裁之前保持现状。见 Views/ModelsView.cs ③ 那段。</summary>
     public bool AutoUnloadIdle { get; set; } = true;
-    /// <summary>开机/连上中枢时自动启用哪一组预设(none/daily/long_context/deep/vision)。</summary>
-    public string AutoStartPreset { get; set; } = "daily";
+    // ★★★ 2026-08-06(D90 未决项④的处置):`AutoStartPreset`(连上中枢就自动装预设)
+    //   **已删**。它与 D87 裁定①「不做开机预热」正面矛盾,而 D90 放行按需装载的
+    //   全部依据就是 D87 —— 不能一边引用它、一边把与它相反的开关留在原地。
+    //   ★ 按 D25 的做法:**写出来,不静默删**。旧档案里的这个键会被忽略,不报错。
 
     // ★★ 2026-08-04(P4-S9)删掉 IsModelEnabled / SetModelEnabled。
     //   它们存的是 ModelCatalog 那套自造 key(chat.8b…),而【没有任何代码再读它】——

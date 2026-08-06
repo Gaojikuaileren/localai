@@ -33,7 +33,11 @@ public sealed record HubGpuSnapshot(
     IReadOnlyList<string> Committed,
     IReadOnlyList<string> Intended,
     bool Stale,
-    string? SamplerError)
+    string? SamplerError,
+    // ★★ P4-S16b:**按需驻留**那一半。与 Committed 分成两个字段,**永不合并** ——
+    //   「驻留」从此有两层含义(你勾的常驻 / 系统按你的授权临时装的),
+    //   合并会让用户以为自己勾过它(D90 裁定③:D24「cap」那个亏)。
+    IReadOnlyList<string> TransientResident)
 {
     /// <summary>★ 非 AI 占用永远是**推算**值 —— WDDM 不暴露逐进程显存,说不出占用者的名字。</summary>
     public const string NonAiNote = "桌面/其它程序的占用是算出来的,说不出是哪个程序(系统不提供)";
@@ -42,7 +46,34 @@ public sealed record HubGpuSnapshot(
 /// <summary>目录里的一个组件。peak / display / note 全部由中枢下发,客户端不自己编。</summary>
 public sealed record GpuComponent(
     string Id, string Display, string Kind, double PeakGiB, string Note,
-    bool Intended, bool Committed, IReadOnlyList<string> Aliases);
+    bool Intended, bool Committed, IReadOnlyList<string> Aliases,
+    // ★ P4-S16b:这个组件有没有被授权按需装载 · 此刻是不是正按需装着。
+    //   两件事分开:授权是**用户的意思**,按需装着是**当前事实**。
+    bool PermittedOnDemand, bool TransientResident);
+
+/// <summary>一次「意图即起」的结果(POST /v1/gpu/intent)。</summary>
+public sealed record IntentOutcome(bool Ok, string Code, string Alias, string Component,
+                                   string Message, string Plane)
+{
+    /// <summary>给用户看的一句话。★ 每种不成立的下一步**完全不同**,不合并成"起不来"。</summary>
+    public string Advice => Code switch
+    {
+        "OK" => "",                       // 装上了 —— 没什么要说的
+        "ALREADY_RESIDENT" => "",         // 本来就在跑
+        "no_gpu_needed" => "",            // 这个功能不占显存(比如常驻助手跑 CPU)
+        // ★★★ D90 裁定①的代价段,原样说给用户听:
+        "NOT_PERMITTED" or "not_permitted" =>
+            "这个模型还没有被授权按需装载。请到**主机**的「系统 › 模型」里,"
+            + "给它勾上『允许按需装载』。★ 这一步不能省 —— 没有它,"
+            + "系统就是在你没同意的情况下自己动显存。",
+        "GATE" or "gate" => Message,      // 闸的理由本身就写好了该怎么办
+        "LOADER_ABSENT" or "loader_absent" =>
+            "中枢的装载器没有接上,这次没有真的装载。" + Message,
+        "LOAD_FAILED" or "load_failed" => "模型起不来:" + Message,
+        "unknown_alias" => "中枢不认识这个功能名 —— 客户端与中枢的版本可能对不上。",
+        _ => Message,
+    };
+}
 
 public sealed record GpuCatalog(
     long Generation,
@@ -60,7 +91,12 @@ public sealed record GpuCatalog(
 public sealed record BlockingLease(string LeaseId, string Kind, string Holder,
                                    double HeldSeconds, bool Evictable)
 {
-    /// <summary>给人看的一行。★ 说清三件事:什么在占 · 谁的 · 能不能被自动让开。</summary>
+    /// <summary>给人看的一行。★ 说清三件事:什么在占 · 谁的 · 能不能被自动让开。
+    /// <para>★★ 2026-08-06 审计 B1:这里的 <c>Holder</c> 从此是**中枢解析出来的**设备名
+    /// (证书指纹 → 成员表),不再是对方自报的 <c>MachineName</c>。
+    /// 那件事很具体:这一行会出现在「有任务正在跑」的对话框里,而看对话框的人
+    /// 正要据此决定要不要打断 —— 自报等于**占用者的名字由被中断方自己填**。</para>
+    /// </summary>
     public string Describe()
     {
         var who = string.IsNullOrWhiteSpace(Holder) ? "未署名" : Holder;
@@ -107,8 +143,9 @@ public sealed record ApplyOutcome(bool Ok, string Code, string Message, string S
         "denied_quota" =>
             "变更太频繁了(每分钟有上限)。★ 这不是权限不够 —— 等一分钟再试即可,不必去要权限。",
         "denied_action" =>
-            "这台设备不能做这个操作。★ 最常见的一种:把组件**全部取消勾选** = 卸掉中枢上的全部模型,"
-            + "那只能在主机上做 —— 它和一次普通变更长得一模一样,只差参数。",
+            "这台设备不能做这个操作。★ 有两种最常见:①把组件**全部取消勾选** = 卸掉中枢上的全部模型;"
+            + "②改『允许按需装载』的授权 —— 那是在授权系统自己动显存(D90),"
+            + "只能在主机上做。两者都和一次普通变更长得一模一样,只差参数。",
         "denied_param" =>
             "请求里有个参数超出了这台设备的允许范围(比如租约时长上限、或独占型租约)。" + Message,
         "denied_tier" =>
@@ -286,7 +323,11 @@ public sealed class HubGpu : IDisposable
                 Intended: sets.ValueKind == JsonValueKind.Object ? Strs(sets, "intended_resident") : Array.Empty<string>(),
                 Stale: r.TryGetProperty("stale", out var stale) && stale.GetBoolean(),
                 SamplerError: r.TryGetProperty("sampler_error", out var se) && se.ValueKind == JsonValueKind.String
-                              ? se.GetString() : null);
+                              ? se.GetString() : null,
+                // ★ P4-S16b:按需驻留那一半。★ 中枢没给(旧版)⇒ 空表,**不是**退回 Committed:
+                //   退回去会让"系统临时装的"显示成"你勾的",正是要防的那种混淆。
+                TransientResident: sets.ValueKind == JsonValueKind.Object
+                                   ? Strs(sets, "transient_resident") : Array.Empty<string>());
         }
         catch { return null; }
     }
@@ -336,7 +377,11 @@ public sealed class HubGpu : IDisposable
                     Note: Str(c, "note") ?? "",
                     Intended: c.TryGetProperty("intended", out var i) && i.GetBoolean(),
                     Committed: c.TryGetProperty("committed", out var cm) && cm.GetBoolean(),
-                    Aliases: aliases));
+                    Aliases: aliases,
+                    PermittedOnDemand: c.TryGetProperty("permitted_on_demand", out var po)
+                                       && po.ValueKind == JsonValueKind.True,
+                    TransientResident: c.TryGetProperty("transient_resident", out var tr)
+                                       && tr.ValueKind == JsonValueKind.True));
             }
             return new GpuCatalog(
                 Generation: r.GetProperty("generation").GetInt64(),
@@ -358,15 +403,121 @@ public sealed class HubGpu : IDisposable
     /// 提交一次驻留集合变更。★ 必带 if_generation —— 挑组件要几十秒,期间桌面会变,
     /// 「预览过、确定时不过」是**必然**会发生的,世代号是两边唯一能对上账的东西。
     /// </summary>
+    /// <param name="permittedOnDemand">
+    /// 「允许按需装载」的授权集合。★★ <c>null</c> 与空数组**不是一回事**:
+    /// null = 这次不动授权;空数组 = 撤销全部授权。合并的话,任何一次普通变更
+    /// 都会**静默清空**用户的按需授权(服务端那半边同款判据)。
+    /// ★ 只有主机档能写它(审计 B6);副机传了会拿到 403 + dimension=tool。
+    /// </param>
     public async Task<ApplyOutcome> ApplyAsync(IReadOnlyList<string> ids, long ifGeneration,
-                                               bool interruptRunning, CancellationToken ct = default)
+                                               bool interruptRunning,
+                                               IReadOnlyList<string>? permittedOnDemand = null,
+                                               CancellationToken ct = default)
     {
         var ep = _hub.TryDial();
         if (_hub.Profile is null || ep is null)
             return new ApplyOutcome(false, "not_paired", "尚未配对", "", Array.Empty<BlockingLease>(), 0);
-        var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post, "/v1/gpu/intended",
-            new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning }, ct);
+        // ★ 省略 ≠ 空集合 —— 所以这里也**分两个载荷**,而不是给一个默认值。
+        object payload = permittedOnDemand is null
+            ? new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning }
+            : new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning,
+                    permitted_on_demand = permittedOnDemand };
+        var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post,
+                                                  "/v1/gpu/intended", payload, ct);
         return ParseOutcome(status, body);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  P4-S16b · 「意图即起」(D87①)—— 在对应功能里开始输入的那一刻起模型
+    //
+    //  ★★ 客户端**只点别名不点组件**(§8.1「换模型时客户端一行都不用改」)。
+    //    别名 → 组件的桥在服务端;这里连组件 id 都不该出现。
+    //  ★★ 去抖:输入是每敲一个字符触发一次,而这是一次真的网络请求 + 可能的装载。
+    //    ⇒ 同一个别名在 IntentCooldown 内只发一次。★ 冷却窗口**远小于**中枢那边的
+    //    租约 TTL,否则会出现"还在打字但租约已经过期"的窗口。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>同一别名两次意图之间的最小间隔。★ 必须显著小于中枢的租约 TTL。</summary>
+    public static readonly TimeSpan IntentCooldown = TimeSpan.FromSeconds(20);
+
+    readonly Dictionary<string, DateTime> _lastIntent = new(StringComparer.Ordinal);
+    readonly object _intentLock = new();
+
+    /// <summary>最后一次意图的结果 —— 界面据此显示"正在为你启动…"或那句"要先授权"。</summary>
+    public IntentOutcome? LastIntent { get; private set; }
+
+    /// <summary>
+    /// 声明一次「我要用这个功能」。★ 即发即忘:**绝不阻塞输入**。
+    /// 调用方(输入框)只管说"有人在这里打字",拿不拿得到模型是另一件事。
+    /// </summary>
+    public void NoteIntent(string alias)
+    {
+        if (string.IsNullOrWhiteSpace(alias)) return;
+        lock (_intentLock)
+        {
+            if (_lastIntent.TryGetValue(alias, out var last)
+                && DateTime.UtcNow - last < IntentCooldown) return;
+            _lastIntent[alias] = DateTime.UtcNow;
+        }
+        // ★ 不 await:意图是"顺手说一声",不是用户在等的操作。
+        //   异常一律吞在里面 —— 一次起不来的模型不该把输入框掀翻。
+        _ = Task.Run(async () =>
+        {
+            try { LastIntent = await RequestIntentAsync(alias); Notify(); }
+            catch { }
+        });
+    }
+
+    /// <summary>发一次意图并解析结果。★ 抽成公开方法是为了让自检能直接喂形状。</summary>
+    public async Task<IntentOutcome> RequestIntentAsync(string alias, CancellationToken ct = default)
+    {
+        var ep = _hub.TryDial();
+        if (_hub.Profile is null || ep is null)
+            return new IntentOutcome(false, "not_paired", alias, "", "尚未配对", "");
+        var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post,
+                                                  "/v1/gpu/intent", new { alias }, ct);
+        return ParseIntent(status, body);
+    }
+
+    /// <summary>
+    /// 解析 <c>POST /v1/gpu/intent</c> 的响应。
+    /// <para>★★★ <c>CONTRACT:gpu.intent</c> —— 这半条断言与 <c>test_gpu_broker.py</c> 里
+    /// 钉顶层键集合的那半条**成对**存在(D92 硬前置)。单独任何一条都抓不住 A1 那族缺陷:
+    /// 服务端那条只证明"我发的是这个形状",客户端这条只证明"这个形状我读得懂",
+    /// **合起来**才证明这根线是通的。</para>
+    /// <para>★ 成功形状:<c>{"status","intent":{...},"lease":{...}|null,"fence_token","generation"}</c>
+    /// —— 与 <c>/v1/gpu/lease</c> 有意保持一致,<b>intent 里才有 code/component</b>。</para>
+    /// </summary>
+    public static IntentOutcome ParseIntent(int status, string body)
+    {
+        try
+        {
+            using var d = JsonDocument.Parse(body);
+            var r = d.RootElement;
+            var hasIntent = r.TryGetProperty("intent", out var it)
+                            && it.ValueKind == JsonValueKind.Object;
+            var alias = hasIntent ? (Str(it, "alias") ?? "") : "";
+            var comp = hasIntent ? (Str(it, "component") ?? "") : "";
+            var plane = hasIntent ? (Str(it, "plane") ?? "") : "";
+            var code = hasIntent ? (Str(it, "code") ?? "") : "";
+            var msg = hasIntent ? (Str(it, "message") ?? "") : "";
+            if (r.TryGetProperty("error", out var er) && er.ValueKind == JsonValueKind.Object)
+            {
+                // ★ error.type 是权威的失败码(intent.code 在错误响应里也有,两者一致);
+                //   取不到 intent 时至少还有它 —— 不能让失败退化成一句读不懂。
+                if (string.IsNullOrEmpty(code)) code = Str(er, "type") ?? "";
+                if (string.IsNullOrEmpty(msg)) msg = Str(er, "message") ?? "";
+            }
+            var ok = status == 200 && (code == "OK" || code == "ALREADY_RESIDENT"
+                                       || code == "no_gpu_needed");
+            return new IntentOutcome(ok, code, alias, comp, msg, plane);
+        }
+        catch
+        {
+            // ★ 读不懂**不能**当成成功。HTTP 状态是唯一还可信的东西。
+            return new IntentOutcome(false, "unreadable_response", "", "",
+                                     $"中枢回了 {status},但响应读不懂", "");
+        }
     }
 
     public static ApplyOutcome ParseOutcome(int status, string body)

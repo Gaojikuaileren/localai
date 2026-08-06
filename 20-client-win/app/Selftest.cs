@@ -342,8 +342,18 @@ public static class Selftest
             if (mdlView is not null)
             {
                 Assert(mdlView.Contains("ModelStorePath"), "模型页可设统一存放路径");
-                Assert(mdlView.Contains("new ComponentPicker()") && mdlView.Contains("AutoStartPreset"),
-                       "模型页的启用清单来自 ComponentPicker(中枢下发)+ 自动启用规则");
+                Assert(mdlView.Contains("new ComponentPicker()"),
+                       "模型页的启用清单来自 ComponentPicker(中枢下发)");
+                // ★★★ 2026-08-06(D90 未决项④的处置):`AutoStartPreset` 已作废撤掉 ——
+                //   「连上中枢就自动装预设」与 D87 裁定①「不做开机预热」正面矛盾,
+                //   而 D90 放行按需装载的全部依据就是 D87。
+                //   ⇒ 这条断言从"它必须在"翻成"它必须不在"。**这是一次语义变更**,
+                //     应当在 diff 里看得见,而不是把断言删掉了事。
+                Assert(!CodeOnly(mdlView).Contains("AutoStartPreset"),
+                       "★★★ AutoStartPreset 已从模型页撤掉(与 D87 裁定①「不做开机预热」矛盾)");
+                Assert(mdlView.Contains("model.idle_unload"),
+                       "★ 而「空闲自动卸载」那个复选框**留着**且仍置灰 —— 理由不同:"
+                       + "它是中枢的策略(计时器主副机共享,D87⑧),做成每台各自的开关正是那条裁定要防的事");
                 Assert(mdlView.Contains("model.not_connected"), "模型页顶部诚实标注未接 Broker(不假装加载)");
                 // ★★ P4-S9 反向断言:那套【自造词汇】必须**不在了**。
                 //   原来这里遍历 ModelCatalog.All(chat.8b / speech / image),跟网关别名与
@@ -7020,6 +7030,176 @@ public static class Selftest
                         "★★ AcquireAsync 里不得再留一份手写的 lease_id 解析 —— "
                         + "两份解析会漂移,而漂移的那天自检只盯着其中一份");
                 }
+            }
+
+            // ══════════════════════════════════════════════════════════
+            //  ★★★ D92 硬前置 · 跨进程响应契约:客户端那半边
+            //
+            //  服务端那半在 `10-core/gateway/test_gpu_broker.py` 的
+            //  `CROSS_PROCESS_CONTRACTS` 表里 —— 它对着**真实端点**钉顶层键集合,
+            //  并有一条**元断言**去这份文件里找同名契约号,**缺配对即判红**。
+            //  ⇒ 下面每个 `CONTRACT:` 标记都不是注释,它是那条元断言的检索目标。
+            //    删掉任何一行,服务端那半会当场变红并说清缺的是哪一条。
+            // ══════════════════════════════════════════════════════════
+            {
+                // ── CONTRACT:gpu.lease.grant ──
+                //   {status, lease{...}, fence_token, generation} —— 上面那一组断言已经逐条钉过
+                //   (lease_id 在子对象 / fence_token 在顶层 / 三条反向)。这里补 holder 那一维:
+                //   ★★ 审计 B1:holder 现在是**中枢解析出来的**,客户端不再自报。
+                const string grantWire =
+                    "{\"status\":\"ok\"," +
+                    "\"lease\":{\"lease_id\":\"L-9\",\"kind\":\"client_session\",\"holder\":\"PC-A\"," +
+                    "\"components\":[],\"granted_at\":1.0,\"expires_at\":91.0,\"held_s\":0.0," +
+                    "\"evictable\":false,\"blocking\":\"USER_BLOCKING\",\"exclusive\":false}," +
+                    "\"fence_token\":\"F-9\",\"generation\":12}";
+                Assert(LeaseKeeper.TryParseHolder(grantWire) == "PC-A",
+                    "★★★ CONTRACT:gpu.lease.grant —— 拿服务端真实形状能读出**中枢认定**的 holder");
+                var lkSrc2 = TryReadSource("Services/LeaseKeeper.cs");
+                if (lkSrc2 is not null)
+                {
+                    var lkCode = CodeOnly(lkSrc2);
+                    Assert(!lkCode.Contains("holder = Environment.MachineName"),
+                        "★★★ 审计 B1:客户端**不再自报 holder** —— 那个值是中枢限流桶的 key,"
+                        + "而且会被印进「正在跑:xxx」对话框:自报等于占用者的名字由被中断方自己填");
+                    Assert(!lkCode.Contains("device = Environment.MachineName"),
+                        "★★★ 审计 B2:/v1/session/end 不再发自报 device —— "
+                        + "中枢曾拿它逐条比 holder,于是一台副机能点名释放另一台的全部租约");
+                    Assert(lkCode.Contains("ReleaseByHolderAsync"),
+                        "★ 而「拿到了却记不住就当场还回去」那条路**仍然在**(它修的是幽灵租约,"
+                        + "别在改身份的时候顺手删掉)");
+                }
+
+                // ── CONTRACT:gpu.intent ──
+                //   {status, intent{alias,component,code,message,plane}, lease|null, fence_token, generation}
+                const string intentWire =
+                    "{\"status\":\"ok\"," +
+                    "\"intent\":{\"alias\":\"assistant.fast\",\"component\":\"llm.assistant.8b@16k\"," +
+                    "\"code\":\"OK\",\"message\":\"已按需装载\",\"plane\":\"transient\"}," +
+                    "\"lease\":{\"lease_id\":\"L-1\",\"kind\":\"model_ref\",\"holder\":\"PC-A\"," +
+                    "\"components\":[\"llm.assistant.8b@16k\"],\"granted_at\":1.0,\"expires_at\":61.0," +
+                    "\"held_s\":0.0,\"evictable\":true,\"blocking\":\"USER_ASYNC\",\"exclusive\":false}," +
+                    "\"fence_token\":\"F-1\",\"generation\":13}";
+                var io1 = HubGpu.ParseIntent(200, intentWire);
+                Assert(io1.Ok && io1.Code == "OK" && io1.Component == "llm.assistant.8b@16k"
+                       && io1.Plane == "transient",
+                    "★★★ CONTRACT:gpu.intent —— 服务端真实形状能解析出 code/component/plane"
+                    + $"(实得 code={io1.Code} comp={io1.Component} plane={io1.Plane})");
+                Assert(HubGpu.ParseIntent(200, intentWire).Alias == "assistant.fast",
+                    "★ 别名回带得到 —— 客户端只点别名不点组件(§8.1),它是对上账的那一头");
+                // ★ 那条**必须存在的授权**没给时的形状 —— 用户看到的就是这一句
+                const string notPermittedWire =
+                    "{\"error\":{\"message\":\"这个模型没有被授权按需装载 —— 请在**主机**的" +
+                    "「系统 › 模型」里勾一次『允许按需装载』。\",\"type\":\"not_permitted\"}," +
+                    "\"intent\":{\"alias\":\"assistant.fast\",\"component\":\"llm.assistant.8b@16k\"," +
+                    "\"code\":\"NOT_PERMITTED\",\"message\":\"这个模型没有被授权按需装载\",\"plane\":\"\"}}";
+                var io2 = HubGpu.ParseIntent(409, notPermittedWire);
+                Assert(!io2.Ok && io2.Code == "NOT_PERMITTED",
+                    "★★ 反向:没被授权 ⇒ 判失败(不能因为 HTTP 有 body 就当成起来了)");
+                Assert(io2.Advice.Contains("主机") && io2.Advice.Contains("授权"),
+                    "★★★ D90 裁定①的代价段要**说给用户听**:去主机上勾一次 —— "
+                    + "没有它,系统就是在你没同意的情况下自己动显存");
+                Assert(!HubGpu.ParseIntent(200, "not json").Ok,
+                    "★ 垃圾输入判失败 —— 读不懂**不能**当成成功");
+
+                // ── CONTRACT:gpu.lease.renew ──
+                //   {result{ok,code,ttl_s}, snapshot{...}} —— 客户端只看 HTTP 状态,
+                //   ★ 那**本身**就是这条契约的内容:200/409/410 三态的下一步完全不同,
+                //     而 body 里的 result 是给人读日志用的。这里钉住"状态码是判据"这件事。
+                var lkSrc3 = TryReadSource("Services/LeaseKeeper.cs");
+                if (lkSrc3 is not null)
+                {
+                    var renew = Slice(lkSrc3, "async Task RenewAsync", "public void Dispose");
+                    var renewCode = renew is null ? null : Body(renew);
+                    Assert(renewCode is not null && renewCode.Contains("st == 409")
+                           && renewCode.Contains("LeaseState.Fenced"),
+                        "★★★ CONTRACT:gpu.lease.renew —— 409(条件写不匹配)⇒ **立刻自隐**,"
+                        + "绝不重试(重试就是双持有)");
+                    Assert(renewCode is not null && renewCode.Contains("st == 200"),
+                        "★ 200 才算续上 —— 其余一律丢掉本地那份、下一轮重新申请");
+                    Assert(renewCode is not null && !renewCode.Contains("Environment.MachineName"),
+                        "★ 续租也不自报 holder(审计 B1)");
+                }
+
+                // ── CONTRACT:session.end ──
+                //   {status, released_leases, device, reason}(+ 自报值被忽略时多一个 ignored_device)
+                //   ★ 客户端这半边是"发的时候不带 device" —— 上面已钉。这里钉**语义**:
+                //     released_leases 是一个数,不是布尔;0 不是错误(可能本来就没有租约)。
+                Assert("released_leases".Length > 0,
+                    "★ CONTRACT:session.end —— 契约号在此登记(客户端不解析它的 body:"
+                    + "释放是尽力而为,而它的成败由中枢的 HTTP 状态表达)");
+
+                // ── CONTRACT:gpu.intended.blocking ──
+                //   result.blocking[i] = Lease.to_json():{lease_id,kind,holder,components,
+                //   granted_at,expires_at,held_s,evictable,blocking,exclusive}
+                const string blockingWire =
+                    "{\"result\":{\"ok\":false,\"code\":\"needs_user_choice\",\"state\":\"READY\"," +
+                    "\"message\":\"有任务在跑\",\"blocking\":[{\"lease_id\":\"L-3\",\"kind\":\"agent_task\"," +
+                    "\"holder\":\"PC-B\",\"components\":[\"llm.assistant.8b@16k\"],\"granted_at\":1.0," +
+                    "\"expires_at\":61.0,\"held_s\":12.0,\"evictable\":false," +
+                    "\"blocking\":\"USER_ASYNC\",\"exclusive\":false}]}," +
+                    "\"error\":{\"message\":\"有任务在跑\",\"type\":\"needs_user_choice\"}," +
+                    "\"snapshot\":{\"generation\":9}}";
+                var bo = HubGpu.ParseOutcome(409, blockingWire);
+                Assert(!bo.Ok && bo.Code == "needs_user_choice" && bo.Blocking.Count == 1,
+                    "★★★ CONTRACT:gpu.intended.blocking —— 服务端真实形状能解析出占用者列表");
+                Assert(bo.Blocking[0].Holder == "PC-B" && bo.Blocking[0].Kind == "agent_task"
+                       && bo.Blocking[0].HeldSeconds == 12.0 && !bo.Blocking[0].Evictable,
+                    "★★ 四件事都读得到:什么在占 · 谁的 · 已多久 · 能不能被自动让开");
+                Assert(bo.Blocking[0].Describe().Contains("PC-B")
+                       && bo.Blocking[0].Describe().Contains("不可驱逐"),
+                    "★★★ 审计 B1:对话框里那个名字来自**中枢**(证书指纹经成员表),"
+                    + "不再是对方自报的 MachineName —— 看对话框的人正要据此决定要不要打断");
+                Assert(HubGpu.ParseOutcome(409,
+                           "{\"result\":{\"blocking\":[]},\"error\":{\"type\":\"needs_user_choice\"}}")
+                       .Blocking.Count == 0,
+                    "★ 反向:空列表就是空列表 —— 不是【解析器永远返回一条】");
+
+                // ── 按需驻留:客户端必须能把「你勾的常驻」与「系统临时装的」分开 ──
+                const string snapWire =
+                    "{\"generation\":5,\"committed\":[\"a\"],\"state\":\"READY\"," +
+                    "\"sets\":{\"intended_resident\":[\"a\"],\"committed_resident\":[\"a\"]," +
+                    "\"actual_resident\":[\"a\",\"b\"],\"permitted_on_demand\":[\"b\"]," +
+                    "\"transient_resident\":[\"b\"]}," +
+                    "\"vram\":{\"free_gib\":3.0,\"total_gib\":15.92,\"vram_budget\":8.52," +
+                    "\"desktop_floor\":6.6,\"non_ai_used_gib_inferred\":1.0}," +
+                    "\"stale\":false,\"sampler_error\":null}";
+                var sp = HubGpu.TryParseSnapshot(snapWire);
+                Assert(sp is not null && sp.TransientResident.Count == 1
+                       && sp.TransientResident[0] == "b" && sp.Committed.Count == 1,
+                    "★★★ 按需驻留与常驻是**两个字段**,客户端读得出差别 —— "
+                    + "合并会让用户以为自己勾过它(D90 裁定③:D24「cap」那个亏)");
+                var spOld = HubGpu.TryParseSnapshot(
+                    "{\"generation\":5,\"committed\":[\"a\"],\"vram\":{\"total_gib\":1.0," +
+                    "\"vram_budget\":1.0,\"desktop_floor\":1.0}}");
+                Assert(spOld is not null && spOld.TransientResident.Count == 0,
+                    "★★ 旧中枢没有这个键 ⇒ 空表,**不是**退回 Committed —— "
+                    + "退回去会把【系统临时装的】显示成【你勾的】");
+
+                // ── 「允许按需装载」那一列:省略 ≠ 空数组 ──
+                var cpSrc = TryReadSource(Path.Combine("Views", "ComponentPicker.cs"));
+                if (cpSrc is not null)
+                {
+                    var cpCode = CodeOnly(cpSrc);
+                    Assert(cpCode.Contains("PermittedPayload()"),
+                        "★★ 两次提交(第一次 + 「优雅中断」重试)走**同一个**授权载荷 —— "
+                        + "两处各写一遍的话,重试那次会带上一个不同的授权集合");
+                    Assert(cpCode.Contains("SetEquals(_permittedAsFetched)"),
+                        "★★★ 用户没动过那一列就**省略**它(省略 = 不动授权,空数组 = 撤销全部)—— "
+                        + "每次都发等于把【撤销全部】交给一个用户没碰过的控件,"
+                        + "而且副机每次普通变更都会撞上那道只有主机能过的闸");
+                }
+                var hgSrc2 = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (hgSrc2 is not null)
+                {
+                    var hgCode2 = CodeOnly(hgSrc2);
+                    Assert(hgCode2.Contains("permittedOnDemand is null"),
+                        "★★ ApplyAsync 里 null 与空数组**走两个不同的载荷**,不是一个默认值");
+                    Assert(hgCode2.Contains("IntentCooldown"),
+                        "★ 意图有去抖 —— 输入是每敲一个字符触发一次,而它是一次真的网络请求");
+                }
+                Assert(HubGpu.IntentCooldown < LeaseKeeper.Ttl,
+                    "★★★ 意图冷却窗口必须**显著小于**租约 TTL —— 否则会出现"
+                    + "「还在打字但租约已经过期」的窗口,而那正好让空闲收割把它卸掉");
             }
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }

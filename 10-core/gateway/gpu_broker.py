@@ -216,6 +216,22 @@ ADMISSION_GUARD_WINDOW_S = 5.0   # 行 1623:5 s 内
 ADMISSION_GUARD_DROP_GIB = 1.0   # 行 1623:降幅 > 1.0 GiB
 FREE_HISTORY_MAX        = 32     # 1 Hz 采样,够覆盖 5 s 窗口且不无界增长
 
+# ── P4-S16b:按需驻留(transient)平面的常量 ─────────────────────────
+# D87 裁定②「空闲 10 分钟自动卸」。★ 它管的是**这个组件**多久没被意图点名过,
+#   不是"全网有没有人在"—— 后者被客户端心跳每 30 秒刷新一次,拿它当条件永不成立。
+#   见 sweep_idle_transient 上方那段。
+IDLE_UNLOAD_AFTER_S = 600.0
+
+# 按需装载的结果码。★ 与租约同款:**可区分**的返回值,不能都用 False ——
+#   「没被授权」要引导用户去主机上勾一次,「装不下」要引导他去关程序,两者的下一步完全相反。
+ON_DEMAND_OK            = "OK"
+ON_DEMAND_ALREADY       = "ALREADY_RESIDENT"    # 已经在跑(常驻或按需),什么都不用做
+ON_DEMAND_UNKNOWN       = "UNKNOWN_COMPONENT"   # 不在准入白名单里
+ON_DEMAND_NOT_PERMITTED = "NOT_PERMITTED"       # ★ D90 裁定①的代价段:机主还没授权过它
+ON_DEMAND_LOADER_ABSENT = "LOADER_ABSENT"
+ON_DEMAND_GATE          = "GATE"                # 三道闸之一拦住了
+ON_DEMAND_LOAD_FAILED   = "LOAD_FAILED"
+
 
 class IllegalTransition(RuntimeError):
     """非法状态转换。★ 抛异常而不是静默忽略 —— 忽略会让状态机看着有约束、实际没有。"""
@@ -296,6 +312,14 @@ class Snapshot:
     idle_seconds: float = 0.0
     # ★ 客户端到底有没有在持租约。**它就是 idle_seconds 可不可信的开关** ——
     #   没有任何租约时,"空闲"这个判据是恒真式,界面/日志必须能看出这一点。
+    # ★★★ 2026-08-06 审计 B5:这个数**曾经是全模块唯一不过滤过期的租约读数**。
+    #   `leases` 那一行早就写着 `l.expires_at > now`,而这里写的是 `len(self._leases)`
+    #   —— 过期条目要等下一次进锁才被扫掉,于是有一个**可复现**的窗口:
+    #       leases=[] 而 lease_count=1 且 idle_is_meaningful=True
+    #   实跑:发一份 ttl=0.05s 的租约,等 0.2 秒,取快照,三个字段就是上面这样。
+    #   ⇒ 方向是 **fail-open**:它把"没人报告过在用"说成"有人在用",
+    #     而这个字段正是「idle 可不可信」的**开关** —— 开关坏在"永远说可信"那一边。
+    #   ⇒ 已改成与 `leases` 读**同一份**已过滤列表(见 snapshot():两者取同一个 _live)。
     lease_count: int = 0
     # P4-S4b:当前租约(拒绝信息要含【占用者】—— 谁持有、何时拿的、是否可驱逐)
     leases: Tuple[Dict, ...] = ()
@@ -304,6 +328,12 @@ class Snapshot:
     intended: Tuple[str, ...] = ()
     permitted_on_demand: Tuple[str, ...] = ()
     actual: Tuple[str, ...] = ()
+    # ★★★ P4-S16b:按需驻留。**第五个集合,不是 committed 的一部分**(D90 裁定③)。
+    #   字段名一律 transient_ 前缀 —— 「驻留」从此有两层含义(常驻 / 按需驻留),
+    #   而本项目在 D24「cap」上吃过"一个词两层含义"的亏。永不复用同一个名字。
+    transient_resident: Tuple[str, ...] = ()
+    # 每个按需成员**多久没被意图点名过**(秒)。见 sweep_idle_transient。
+    transient_idle_s: Tuple[Tuple[str, float], ...] = ()
     state: str = STATE_STARTING
     power_on: bool = True
     invariants: Tuple[Dict, ...] = ()
@@ -323,7 +353,17 @@ class Snapshot:
                 "committed_resident": list(self.committed),
                 "actual_resident": list(self.actual),
                 "permitted_on_demand": list(self.permitted_on_demand),
+                # ★★ P4-S16b:**新键,不改任何既有键的含义**。
+                #   界面要能一眼分清「你勾的」与「系统按你的授权临时装的」——
+                #   混在 committed_resident 里显示,就是让用户以为自己勾过它。
+                "transient_resident": list(self.transient_resident),
             },
+            # 每个按需成员空了多久(秒)。★ 与 idle_seconds 是**两个不同的钟**,见 idle_note_transient。
+            "transient_idle_s": {k: round(v, 1) for k, v in self.transient_idle_s},
+            "transient_idle_threshold_s": IDLE_UNLOAD_AFTER_S,
+            "transient_note": (
+                "按需驻留 = 你在主机上授权过『允许按需装载』的成员,系统按意图自动装、空闲自动卸。"
+                "★ 常驻集合(你勾选并点确定的那些)不在此列,系统一个字节都不会自动改它。"),
             "state": self.state,
             "power_on": self.power_on,
             # ★ RECONCILE_WATCH 的结果:**只报告不修复**。每条自带 confidence ——
@@ -356,8 +396,16 @@ class Snapshot:
             "idle_is_meaningful": self.lease_count > 0,
             "idle_note": ("有租约在,idle 反映的是真实活动"
                           if self.lease_count > 0 else
-                          "★ 当前没有任何租约 —— idle 只说明【没人报告过在用】,"
-                          "不说明没人在用。客户端持租约那半边还没接,不得据此卸载"),
+                          "★ 当前没有任何**未过期**租约 —— idle 只说明【没人报告过在用】,"
+                          "不说明没人在用。不得据此卸载任何东西"),
+            # ★★ P4-S16b:说清 idle_seconds **不是**按需卸载的放行条件,免得下一个人接错线。
+            #   它被客户端心跳(TTL/3 ≈ 30 秒一次)刷新,所以只要有任何一台客户端活着,
+            #   它就永远到不了 10 分钟 —— 拿它当条件是把一个恒真式换成一个**恒假式**,
+            #   两者都不是检测器。按需卸载看的是 transient_idle_s(逐组件、被意图刷新)。
+            "idle_note_transient": (
+                "idle_seconds 回答的是「全网有没有人在」(客户端心跳刷新它);"
+                "按需卸载看的是 transient_idle_s —— 「这个组件多久没被意图点名过」。"
+                "两个钟不同源,不可互相替代。"),
         }
 
 
@@ -390,6 +438,28 @@ class Broker:
         # ── P4-S7:四个集合 + 状态 + 电源轴 ──────────────────────
         self._intended: List[str] = []            # 只有主机变更面能写
         self._permitted_on_demand: List[str] = []  # 只有主机变更面能写(与 intended 分开)
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ P4-S16b · 按需驻留(transient)平面 —— D90 裁定①的落点。
+        #
+        #  D90 裁定③(结构性强制)原文:「只动 permitted_on_demand、绝不碰 committed」
+        #  这条边界**如果只写在注释里,就是又一个"看着有防护、实际没有"**。
+        #  ⇒ 自动路径不得复用 `apply_intended`(它第一行就写 `self._committed = list(requested)`),
+        #    必须是一条**结构上够不着 committed** 的独立路径 ——
+        #    就是下面的 `request_on_demand` / `sweep_idle_transient`,
+        #    它们的源码里**不许出现对 `_committed` 的赋值**,由反向断言逐字检查。
+        #
+        #  ★ 字段名一律 `transient_` 前缀,**永不复用 committed 那一半的任何名字**
+        #    (D90 裁定③:本项目在 D24「cap」上吃过"一个词两层含义"的亏)。
+        #
+        #  ★★ D90 §3② 是**留给用户的未决项**(「走 committed 还是新开 transient 平面」),
+        #    本车道的处置与其代价写在 decision-packets/gpu-identity-ondemand-2026-08-06.md,
+        #    并在 `check_invariants` 里把 I2 作用域的收窄**写成代码**而不是藏进注释。
+        # ══════════════════════════════════════════════════════════════
+        self._transient_resident: List[str] = []
+        #: 组件 → 最后一次被【意图】点名的单调时刻。★ 中枢上的一份,任何一台机器的意图都刷新它。
+        self._transient_last_intent: Dict[str, float] = {}
+        #: 正在装载中的按需组件 —— 防止两次意图同时把同一个模型起两遍(锁内判、锁内加)。
+        self._transient_inflight: List[str] = []
         self._state: str = STATE_STARTING
         self._power_on: bool = True                # I4 的电源轴,与意图轴分离
         self._last_watch: Tuple[InvariantReport, ...] = ()
@@ -492,6 +562,12 @@ class Broker:
                 #   不做这一步的话,开一局游戏吃掉 4 GiB 推送流**一帧都不发**,
                 #   而心跳照样把客户端的"数据新鲜"喂成真 —— 数字纹丝不动且看不出来是旧的。
                 self._note_free_for_push()
+                # ── P4-S16b:空闲即卸(D87②)★ **搭在这个循环里,不另起一个 task** ──
+                #   模块头写着「不设收割线程 = 第二个写者 = 双持有从侧门回来」,
+                #   而且有断言钉死本模块只许起一个后台任务(数源码里那个 API 出现几次)。
+                #   ⇒ 按需卸载是一次收割,它必须跟采样共用**同一个**写者节奏。
+                #   ★ 它自己会先判三条放行条件;不满足时是一次极便宜的空转。
+                await self.sweep_idle_transient()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -564,7 +640,11 @@ class Broker:
         async with self._lock:
             if self._state != STATE_STARTING:
                 return self._state
-            actual, committed = set(self.actual_resident), set(self._committed)
+            # ★ 与 I2 用**同一个**作用域(减掉 transient 平面)—— 见 check_invariants 那段。
+            #   开机时 transient 必为空,所以这里今天减了个空集;写成一样是为了
+            #   「放行条件就是 I2 的后件」这句话继续成立,而不是两处各写各的。
+            actual = set(self.actual_resident) - set(self._transient_resident)
+            committed = set(self._committed)
             if actual == committed:
                 await self._transition(STATE_READY, "开机装载完成(actual == committed)")
             else:
@@ -600,12 +680,16 @@ class Broker:
             non_ai = round(cfg.budget.total_vram - free - ai_now, 2)
         _now = time.monotonic()
         _live = [l for l in self._leases.values() if l.expires_at > _now]
+        _tr = list(self._transient_resident)
         return Snapshot(
             leases=tuple(l.to_json() for l in _live),
             reserved=tuple(self.reserved_components()),
             intended=tuple(self._intended),
             permitted_on_demand=tuple(self._permitted_on_demand),
             actual=tuple(self.actual_resident),
+            transient_resident=tuple(_tr),
+            transient_idle_s=tuple(
+                (c, max(0.0, _now - self._transient_last_intent.get(c, _now))) for c in _tr),
             state=self._state,
             power_on=self._power_on,
             invariants=tuple(r.to_json() for r in (self._last_watch or self.check_invariants())),
@@ -622,7 +706,9 @@ class Broker:
             loader_error=self._loader_error,
             loader_present=self._loader is not None,
             idle_seconds=self.idle_seconds,
-            lease_count=len(self._leases),
+            # ★★★ 审计 B5:与 `leases` 读**同一份**已过滤列表 —— 不是 len(self._leases)。
+            #   见 Snapshot.lease_count 上方那段:那个写法有一个可复现的 fail-open 窗口。
+            lease_count=len(_live),
             non_ai_used_gib_inferred=non_ai,
         )
 
@@ -697,12 +783,19 @@ class Broker:
           拿它当"没人在用"的判据,会把**正在打字的人**卸掉。
           那正是用户当时补「计时器是主机与副机共享的一个」这条裁定所要防的事。
 
-        ⇒ 规定:自动卸载的放行条件是**三条同时成立**,缺一不可:
-            ① idle_seconds ≥ 阈值
-            ② blocking_leases() 为空        ← 用户裁定「正在跑的不动」
-            ③ 目标组件在 permitted_on_demand 里 ← 用户裁定「禁令只管 committed」
-          而在客户端真的开始持租约之前,**②本身也是恒真式**(一份租约都没有)。
-          ⇒ **本阶段只暴露观测值,不接动作。** 谁要接,先把租约那半边做完。
+        ★★★ 2026-08-06(S16b 接动作)后的准确说法,**上面那段原文保留**因为它记录了
+          为什么曾经不能接:客户端已经在持租约了(`LeaseKeeper.cs`),所以这个数
+          终于会被刷新;但**它仍然不是自动卸载的放行条件**,理由变了:
+
+          它被心跳刷新(TTL/3 ≈ 30 秒一次)⇒ 只要有任何一台客户端活着,
+          它**永远到不了 10 分钟**。拿它当条件,是把一个恒真式换成一个**恒假式** ——
+          两者都不是检测器。⇒ 按需卸载改看 `transient_idle_seconds()`(逐组件、被意图刷新)。
+
+        ⇒ 现行的三条放行条件(全部落在 `sweep_idle_transient`,缺一不可):
+            ① 这个组件的 transient 空闲 ≥ 阈值   ← D87②
+            ② blocking_leases() 为空             ← D90 裁定②「正在跑的不动」
+            ③ 目标在 transient 平面里            ← D90 裁定①「禁令只管 committed」
+        ★ 本属性从此是**纯观测量**:界面用它说"全网有没有人在",没有任何动作读它。
         ══════════════════════════════════════════════════════════════
         """
         return max(0.0, time.monotonic() - self._last_activity_at)
@@ -869,17 +962,39 @@ class Broker:
         committed = set(self._committed)
         intended = set(self._intended)
         permitted = set(self._permitted_on_demand)
+        transient = set(self._transient_resident)
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ P4-S16b:**I2 的作用域被显式收窄**,这是一次对不变式的修改。
+        #
+        #  方案书 I2 的原文作用域写的就是「限 residency_class = resident」——
+        #  而在按需装载接通之前,`resident` 只有一层含义,所以从来不需要写出来。
+        #  D90 裁定①把「驻留」拆成两层(常驻 committed / 按需驻留 transient)之后,
+        #  不收窄的话 I2 会因为多出来的按需组件而**永久违反**,
+        #  而"永久违反且消解不掉的不变式"会逼着系统去自动改写锚点 —— 那正是 D10 禁的事。
+        #
+        #  ⇒ I2 从此判的是 **`actual − transient == committed`**。
+        #    ★ 这个减法**只减 transient 平面登记过的成员**:一个既不在 committed
+        #      也不在 transient 的野组件**减不掉**,I2 照样红 —— 收窄的是作用域,
+        #      不是把检测器关小。而"在 transient 里"本身还要过 I3(⊆ permitted)。
+        #  ★ 写成代码而不是写进注释,是因为 D90 §3② 是**留给用户的未决项**:
+        #    一次对不变式的修改必须在 diff 里看得见,并在决议包里被点名。
+        # ══════════════════════════════════════════════════════════════
+        actual_resident_plane = actual - transient
         out: List[InvariantReport] = []
 
         # ── I2 · 该在的都在 ──────────────────────────────────
-        #  ★★ 必须保留【蕴含】形态:state == READY ⟹ actual == committed。
+        #  ★★ 必须保留【蕴含】形态:state == READY ⟹ actual(常驻面) == committed。
         #     DEGRADED_SAFE 不是 READY ⇒ 前件为假 ⇒ I2 自动成立。
         #     写成双条件会造出「永久违反不变式、告警无法消解」的状态,
         #     进而逼着系统去自动改写锚点 —— 而那恰好违反「不做自动触发」。
         if self._state == STATE_READY:
-            ok = (actual == committed)
-            detail = ("READY 且 actual == committed" if ok else
-                      f"READY 却不等:缺 {sorted(committed - actual)} 多 {sorted(actual - committed)}"
+            ok = (actual_resident_plane == committed)
+            detail = ("READY 且 actual(常驻面) == committed"
+                      + (f";另有按需驻留 {sorted(transient)} 不参与本条判定"
+                         if transient else "")
+                      if ok else
+                      f"READY 却不等:缺 {sorted(committed - actual_resident_plane)} "
+                      f"多 {sorted(actual_resident_plane - committed)}"
                       f" ⇒ state 必须是 {I2_TOLERATED_STATES} 之一,且 UI 须常驻显示差异")
         else:
             ok = True
@@ -923,6 +1038,12 @@ class Broker:
             self._power_on = on
             if not on:
                 self._committed = []          # 关电 ⇒ 实际驻留清空
+                # ★★ P4-S16b:按需驻留那一半**也要清** —— I4 判的是 `actual == ∅`,
+                #   漏掉 transient 会让一次 OFF 之后 I4 永久违反,而告警指不出原因。
+                #   ★ 授权集合(_permitted_on_demand)**不清**:它与 intended 同属"用户的意思",
+                #     和 intended 一个字都不动是同一条理由 —— 关机不该吞掉用户的勾选。
+                self._transient_resident = []
+                self._transient_last_intent = {}
                 # ★ self._intended 一个字都不动 —— 这就是 I4 的全部要点
             else:
                 # ★ P4-S8:DEGRADED_SAFE 的**唯一**出口 —— 人手动重开电源轴。
@@ -938,6 +1059,12 @@ class Broker:
 
         ★ 只读路径不取锁(与 snapshot 同理)。这里做的是惰性判断而非清理:
           过期条目在下一次进锁时才被真正删掉,而它们在这里已经不算数。
+
+        ★★ P4-S16b:「已装载」现在有**两个**平面(常驻 + 按需驻留)。
+          漏掉 transient 那一半的后果很具体:一个已经装进显存的按需组件会被当成
+          「已批准但尚未装载」再从 free 里减一次 —— 正是 `vram_gate.evaluate` 文档里
+          点名的**重复计**,方向是把闸算得更严,于是"明明装得下却被拒",
+          而拒绝理由会指向"别处的预留",把人支去找一个不存在的占用者。
         """
         now = time.monotonic()
         out = []
@@ -945,9 +1072,172 @@ class Broker:
             if l.expires_at <= now:
                 continue
             for c in l.components:
-                if c not in self._committed and c not in out:
+                if (c not in self._committed and c not in self._transient_resident
+                        and c not in out):
                     out.append(c)
         return out
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★★★ P4-S16b · 按需装载 / 空闲卸载 —— **结构上够不着 `_committed` 的独立路径**
+    #
+    #  D90 裁定③原文:自动路径**不得复用 `apply_intended`**(它第一行就写
+    #  `self._committed = list(requested)`),必须是一条结构上够不着 committed 的
+    #  独立路径,并配**反向断言**:自动路径的源码里不许出现对 `_committed` 的赋值。
+    #  ⇒ 下面两个方法就是那条路径。它们**读** `_committed`(要算闸、要判"是不是常驻"),
+    #    但**从不写它**。这一点由 test_gpu_broker.py 逐字扫源码钉死,不靠自觉。
+    #
+    #  ★ 三条放行条件(D87⑦ + D90 裁定①②),缺一不可,全部写进 `sweep_idle_transient`:
+    #    ① 这个组件已经空了够久      ← D87②
+    #    ② `blocking_leases()` 为空  ← D90 裁定②「正在跑的不动」(**硬条件**,不是"提醒后仍卸")
+    #    ③ 目标在 transient 平面里    ← D90 裁定①「禁令只管 committed」
+    #
+    #  ★★ **本节不实现 D87③「显存压力即让」。** D90 明写它「若指让给别的程序,
+    #    仍需单独裁」,而 D90 的两个未决项由用户保留、不得在实现里用默认值替它裁掉。
+    #    ⇒ `admission_guard()` 照旧只**报告**降幅,不触发任何卸载。这是**有意留空**,
+    #      不是没做完 —— 写在这里免得下一个人以为是遗漏而顺手补上。
+    # ══════════════════════════════════════════════════════════════
+
+    def transient_idle_seconds(self, component: str) -> float:
+        """这个按需组件多久没被【意图】点名过。★ 纯读。
+
+        ★★ 为什么**不用** `idle_seconds`(全网有没有人在):
+          那个数被客户端心跳刷新(TTL/3 ≈ 30 秒一次),只要有任何一台客户端活着,
+          它**永远到不了 10 分钟** ⇒ 拿它当放行条件,是把一个恒真式换成一个**恒假式**。
+          两者都不是检测器,而第一戒律禁的正是这个。
+        ★ D87⑧「计时器是主机与副机共享的一个」在这里的落点是:
+          这份时刻表**在中枢上**,任何一台机器的意图都刷新它 —— 共享的是"一份",
+          不是"一个全局标量必须同时管所有组件"。
+        """
+        last = self._transient_last_intent.get(component)
+        if last is None:
+            return 0.0
+        return max(0.0, time.monotonic() - last)
+
+    async def request_on_demand(self, component: str) -> Dict[str, object]:
+        """「意图即起」(D87①):把一个**已获授权**的组件装进 transient 平面。
+
+        ★ 返回 dict 而不是布尔:每一种不成立的下一步动作完全不同 ——
+          没授权 → 去主机上勾一次;装不下 → 去关占显存的程序;装载器没接上 → 去修接线。
+          合并成一个 False 会让调用方只能弹一句"起不来"。
+        """
+        cfg = self.cfg
+        if component not in cfg.components:
+            return {"code": ON_DEMAND_UNKNOWN, "component": component,
+                    "message": f"未登记的组件 {component} —— 组件必须先进 config/vram-budget.toml"}
+
+        async with self._lock:
+            # ★ 意图 = 有人在用。两个钟都刷新:全网活动钟 + 这个组件自己的钟。
+            now = time.monotonic()
+            self._last_activity_at = now
+            self._transient_last_intent[component] = now
+            if component in self._committed:
+                return {"code": ON_DEMAND_ALREADY, "component": component, "plane": "committed",
+                        "message": "它是常驻组件,本来就在跑"}
+            if component in self._transient_resident:
+                return {"code": ON_DEMAND_ALREADY, "component": component, "plane": "transient",
+                        "message": "按需装载过了,还在跑"}
+            if component not in self._permitted_on_demand:
+                # ★★★ D90 裁定①的**代价段**在这里变成一句用户看得见的话:
+                #   「用户要先授权一次『哪些模型允许按需装载』,才有按需可言。
+                #     这一步存在的理由正是禁令要防的事:没有它,系统就是在你没同意的情况下自己动显存。」
+                return {"code": ON_DEMAND_NOT_PERMITTED, "component": component,
+                        "message": "这个模型没有被授权按需装载 —— 请在**主机**的「系统 › 模型」里"
+                                   "勾一次『允许按需装载』。★ 这一步不能省:没有它,"
+                                   "系统就是在你没同意的情况下自己动显存。"}
+            if self._loader is None:
+                why = (f"装载器接入失败:{self._loader_error}" if self._loader_error
+                       else "这个 Broker 实例没有接装载器")
+                return {"code": ON_DEMAND_LOADER_ABSENT, "component": component, "message": why}
+            if component in self._transient_inflight:
+                return {"code": ON_DEMAND_ALREADY, "component": component, "plane": "loading",
+                        "message": "正在装载中(另一次意图已经在起它了)"}
+            self._transient_inflight.append(component)
+
+        # ── 闸:现采、现判(与 apply_intended 第 1 条同一条纪律:不用预览时的快照)──
+        #   ★ 采样与装载都是 I/O,**在锁外**做 —— 模块头的硬约束:锁绝不跨 await 网络 I/O。
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, self._sample_once)
+            loaded = list(self._committed) + list(self._transient_resident)
+            v = vram_gate.evaluate(loaded + [component], cfg, free=self._free,
+                                   resident=loaded, reserved=self.reserved_components())
+            if not v.ok:
+                return {"code": ON_DEMAND_GATE, "component": component,
+                        "gate": v.gate, "message": v.message}
+            await self._loader.load([component])
+        except Exception as e:                                # noqa: BLE001
+            # ★ 装不上就是装不上 —— **不进 transient 平面**。
+            #   记进账本而显存里没有,正是 I2/I3 存在的理由所要禁止的事。
+            return {"code": ON_DEMAND_LOAD_FAILED, "component": component,
+                    "message": f"{type(e).__name__}: {e}"}
+        finally:
+            async with self._lock:
+                if component in self._transient_inflight:
+                    self._transient_inflight.remove(component)
+
+        async with self._lock:
+            if component not in self._transient_resident:
+                self._transient_resident.append(component)
+            self._generation += 1        # 驻留面貌变了 —— 与租约同款,同一把锁下涨号
+            self._notify_locked()
+        return {"code": ON_DEMAND_OK, "component": component, "plane": "transient",
+                "message": "已按需装载"}
+
+    async def sweep_idle_transient(self, idle_after_s: Optional[float] = None
+                                   ) -> Dict[str, object]:
+        """「空闲即卸」(D87②)。★ 三条放行条件缺一不可 —— 见本节头。
+
+        ★★ 它**只**动 transient 平面。`_committed` 一个字节都不碰 ——
+          这不是靠自觉,是靠这条路径结构上就没有写 `_committed` 的那一行(反向断言逐字扫)。
+
+        ★ 返回值如实说明"这一轮为什么没卸",而不是静默返回 —— 一条永远静默的收割逻辑
+          与一条**根本没跑**的收割逻辑在外面看来一模一样。
+        """
+        threshold = IDLE_UNLOAD_AFTER_S if idle_after_s is None else idle_after_s
+        async with self._lock:
+            self._sweep_expired_locked()
+            if not self._transient_resident:
+                return {"unloaded": [], "reason": "no_transient"}
+            # ── 条件②:正在跑的不动(D90 裁定②,**硬条件**)──
+            blockers = self.blocking_leases()
+            if blockers:
+                return {"unloaded": [], "reason": "blocking_leases",
+                        "blocking": [l.to_json() for l in blockers]}
+            # ── 条件① + ③:空得够久,且**只在 transient 平面里挑** ──
+            #   ★ 这一行就是"结构上够不着 committed":候选池从 _transient_resident 来。
+            now = time.monotonic()
+            victims = [c for c in self._transient_resident
+                       if now - self._transient_last_intent.get(c, now) >= threshold
+                       and c not in self._committed]
+            if not victims:
+                return {"unloaded": [], "reason": "not_idle_enough",
+                        "threshold_s": threshold}
+            if self._loader is None:
+                # ★ 没有装载器就没有"卸载"这回事。**不清账本** ——
+                #   清了就是账面上卸了而显存里还在,那比不卸更坏。
+                return {"unloaded": [], "reason": "loader_absent", "victims": victims}
+            self._transient_inflight.extend(v for v in victims
+                                            if v not in self._transient_inflight)
+
+        try:
+            await self._loader.unload(victims)               # ★ 锁外 I/O
+        except Exception as e:                                # noqa: BLE001
+            async with self._lock:
+                for v in victims:
+                    if v in self._transient_inflight:
+                        self._transient_inflight.remove(v)
+            return {"unloaded": [], "reason": "unload_failed",
+                    "message": f"{type(e).__name__}: {e}", "victims": victims}
+
+        async with self._lock:
+            for v in victims:
+                if v in self._transient_resident:
+                    self._transient_resident.remove(v)
+                self._transient_last_intent.pop(v, None)
+                if v in self._transient_inflight:
+                    self._transient_inflight.remove(v)
+            self._generation += 1
+            self._notify_locked()
+        return {"unloaded": victims, "reason": "idle", "threshold_s": threshold}
 
     # ══════════════════════════════════════════════════════════════
     #  P4-S8 · 「确定 = 一次事务」(方案书 §8.1「确定 = 一次事务」+ §8.1.6)
@@ -1224,6 +1514,21 @@ class Broker:
             self._intended = list(requested)
             if permitted is not None:
                 self._permitted_on_demand = list(permitted)
+            # ══════════════════════════════════════════════════════════
+            #  ★★ P4-S16b:一个组件**不能同时挂在两个平面上**。
+            #
+            #  用户把一个原本按需装着的组件勾进常驻集合之后,若 transient 那份还留着:
+            #    · I2 判的是 `actual − transient == committed` ⇒ 它会被从常驻面**减掉**,
+            #      于是 I2 报「缺了它」而它明明在跑 —— 一个**理由是假的**告警;
+            #    · 空闲收割还会把它当按需成员卸掉,而用户以为自己把它设成了常驻。
+            #  ⇒ 提级为常驻的那一刻,从 transient 平面摘掉。**不卸载**:它本来就在跑,
+            #    这只是换一个平面记账。
+            #  ★ 反过来(常驻被取消勾选)不需要处理:它走上面 drop 那条,真的被卸掉了。
+            # ══════════════════════════════════════════════════════════
+            for c in list(requested):
+                if c in self._transient_resident:
+                    self._transient_resident.remove(c)
+                    self._transient_last_intent.pop(c, None)
             await self._transition(STATE_READY, "事务完成")
         return ApplyResult(True, "", STATE_READY, "已应用")
 

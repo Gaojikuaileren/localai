@@ -581,6 +581,60 @@ def gpu_principal(request: Request) -> str:
     return caller
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ P4-S16b / 审计 B3 · 设备身份的**唯一**解析口(GPU 面与同步面合一)
+#
+#  开工前实测到的状态(2026-08-06):**同一台机器在两个面上叫两个名字。**
+#    · GPU 面   —— holder 完全来自 `body["holder"]`,客户端填 `Environment.MachineName`;
+#    · 同步面   —— device 由 `_sync_device` 从**证书指纹经成员表反查**出 device_id(审计 C1 已修)。
+#  两边**各自自洽所以不炸**。而 `/v1/session/end` 恰好横跨两者:它拿一个自报的
+#  `device` 去逐条比 GPU 面的 `holder` —— 只改一边,这条路径当场失配 ⇒
+#  **退出不再释放任何租约**,而那条路径吞异常、外面看不出来。
+#  ⇒ 所以 B1(不再采信自报 holder)与 B3(两套身份合一)**必须同一提交落地**。
+#
+#  ★ 这不是新增机制,是把**已经存在**的解析结果接到另一个面上:
+#    lan-edge 注入验证过的证书指纹并剥掉客户端自带的 X-LocalAI-*,
+#    `membership.active_device()` 能由指纹反查出 device_id。
+#    本仓的铁律本来就写着「主体只来自成员表,客户端自报一律忽略」(membership.py:4)。
+# ══════════════════════════════════════════════════════════════════════
+
+#: 解析不出身份时的落点。★ 它**不是一个身份** —— 见 `session_end` 里对它的特判。
+UNKNOWN_DEVICE = "unknown"
+#: 回环(主机本身)的固定名字。★ 同样不看自报值。
+LOCAL_DEVICE = "local"
+
+
+def principal_device(request: Request, tier: str = "") -> str:
+    """这次请求算**哪台设备**。★ 只认服务端解析得出来的身份,客户端自报一律不信。
+
+    ★★★ 采信自报值的三处后果(审计 C1 在同步面记过,B1/B2 在 GPU 面又踩了一遍):
+      ① **可以冒名**:副机报主机的名字 —— 在线名单显示主机在线两次;
+         在 GPU 面更具体:那个名字会被印进「正在跑:xxx」对话框,
+         ⇒ **占用者的名字由被中断方自己填**,而看对话框的人正要据此决定要不要打断;
+      ② **可以点名释放别人的租约**:`/v1/session/end` 按 holder 匹配,
+         而 fence_token 是从中枢自己的记录里读出来的 —— 条件写必然成立;
+      ③ **额度维可绕过**:令牌桶 key 含 holder,每换一个名字就是一个新桶。
+         实测:同一 holder 打 22 次,第 21 次被拒;换成 `PC-A-0…24` 打 25 次 **25/25 全过**。
+
+    ★ `tier` 只用来区分"回环即主机"这一种情形,**不参与身份判定** ——
+      判定的依据只有证书指纹这一件事(它是 lan-edge 验过的)。不传 tier 时现解一次。
+    """
+    fp = request.headers.get("x-localai-cert-sha256", "")
+    if fp:
+        p = resolve_lan_principal(fp)
+        if p is not None:
+            # ★ 成员表给不出 device_id 时,退到**指纹**本身 —— 它同样是服务端验过的,
+            #   只是可读性差一点。**绝不**因此退回客户端自报值:那正是这条要修的东西,
+            #   退回去等于绕了一圈把洞留在原地。
+            return str(p.get("device_id") or ("cert:" + fp[:12]))
+    # ★ 回环(trusted-local)没有证书 —— 它就是主机本身,给一个**固定**名字,
+    #   同样不看自报值:让本机进程随便自称,上面三条后果一条不少。
+    if (tier or gpu_principal(request)) == "trusted-local":
+        return LOCAL_DEVICE
+    # 解析不出身份 ⇒ 不给名字。fail-closed:宁可显示 unknown,不让它冒充别人。
+    return UNKNOWN_DEVICE
+
+
 def gpu_guard(request: Request, action: str, *, components=None, lease_kind: str = "",
               ttl_s=None, holder: str = "", count_quota: bool = True):
     """判一次。通过返回 (tier, None);不通过返回 (tier, JSONResponse)。
@@ -605,8 +659,11 @@ def gpu_guard(request: Request, action: str, *, components=None, lease_kind: str
         #   ★ 这里**不写工具的路径**:那套调试工具承诺可以整目录删掉,
         #     注释里留着路径,移除那天它就成了指向不存在文件的死引用。
         #   「函数还在、调用点没了」正是编译与行为都抓不到的那类缺陷。
-        used, cap = gpu_policy.quota_state(tier, holder)
-        detail.update({"used_this_window": used, "per_min": cap, "window_s": 60})
+        # ★ 必须把 action 带进去:变更桶与租约桶是**两个桶、两个上限**(审计 B4)。
+        #   不带的话,撞了租约桶的人会收到变更桶的数字 —— 一个假的"还能用几次"。
+        used, cap = gpu_policy.quota_state(tier, holder, action)
+        detail.update({"used_this_window": used, "per_min": cap, "window_s": 60,
+                       "bucket": gpu_policy.bucket_of(action)})
     return tier, JSONResponse(
         status_code=status,
         content={"error": {"message": d.message, "type": d.code,
@@ -632,6 +689,10 @@ ROUTE_TIERS = {
     # P4-S16b:续租。★ Broker.renew() 一直在,对外的门此前不存在 ——
     #   于是客户端保不住自己的租约,而「全网空闲」的判据也就恒真。
     ("POST", "/v1/gpu/lease/renew"): "authenticated",
+    # P4-S16b:★ 「意图即起」的触发点(D87①)。一条端点同时是"起"的触发、
+    #   "我在用"的心跳锚点、和 model_ref 租约的发放口 —— 见 gpu_intent 的说明。
+    #   ★ 它**碰不到 committed**(走 Broker 的 transient 平面),所以归 lease 档而非 change_resident。
+    ("POST", "/v1/gpu/intent"): "authenticated",
     # P4-S4b:客户端退出时通知结束会话 —— ★ 这条路由**此前不存在**,
     #   而客户端 HubClient.cs:230 每次退出都在调它、失败还被吞掉:
     #   一次伪装成成功的静默失败。现在它真的存在了。
@@ -854,6 +915,11 @@ async def gpu_lease_renew(request: Request):
     ★ 归 `lease` 档而不是 `change_resident`:续租**不改驻留集合**,
       而且它会被高频调用(心跳)。算进变更配额的话,用着用着就会撞 429。
       判据与 `/v1/session/end` 归 read 档同型。
+      ★★★ 2026-08-06 审计 B4:这句话在今天之前**是假的**。归档确实归对了,
+        但 `lease` 与 `change_resident` **共用同一个令牌桶、同一个上限** ——
+        实测 lan-device 连打 20 次续租之后,用户点一次确定就吃 `denied_quota`(第 21 次判红)。
+        而钉住这句话的断言查的是**源码里有没有 `change_resident` 这个词** ⇒ 恒绿。
+        ⇒ 桶已按动作类别拆开(`gpu_policy.QUOTA_BUCKETS`),断言也已改成**打满再点确定**。
 
     ★ **不要 if_generation**:续租是条件写,它的条件是 `fence_token` ——
       那比世代号更严(世代号是全局的,fence_token 是这一份租约专属的)。
@@ -875,7 +941,10 @@ async def gpu_lease_renew(request: Request):
                                           "后者是这份租约专属的凭据,缺了就无法证明是你",
                                "type": "missing_lease_credentials"}})
     ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
-    _tier2, _deny2 = gpu_guard(request, "lease", ttl_s=ttl, holder=_short_echo(body.get("holder")))
+    # ★★ holder 只来自服务端解析(审计 B1)。body 里的 holder **看都不看** ——
+    #   它是限流桶的 key,采信自报值等于"每换个名字就是一个新桶"。
+    _tier2, _deny2 = gpu_guard(request, "lease", ttl_s=ttl,
+                               holder=principal_device(request, _tier))
     if _deny2 is not None:
         return _deny2
     try:
@@ -939,7 +1008,21 @@ async def gpu_lease(request: Request):
                                                "type": "bad_if_generation"}})
 
     kind = str(body.get("kind") or "")
-    holder = _short_echo(body.get("holder"))
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 2026-08-06 审计 B1:holder **不再采信客户端自报**。
+    #
+    #  这里原来是 `_short_echo(body.get("holder"))`,而这个值有两个承重用途:
+    #    ① 它是限流桶的 key ⇒ 每换一个名字就是一个新桶。实测:
+    #       同一 holder 打 22 次,第 21 次被拒;换成 `PC-A-0…24` 打 25 次 **25/25 全过**;
+    #    ② ★ 它会被印进客户端那个「正在跑:xxx」对话框(ApplyResult.blocking → BlockingLease)
+    #       ⇒ **占用者的名字由被中断方自己填**,而看对话框的人正要据此决定要不要打断。
+    #  ⇒ 改成服务端解析(证书指纹 → 成员表 → device_id;回环 → "local")。
+    #  ★ 不对自报值报 400,而是**无声忽略**:报错会让一个版本略旧的客户端
+    #    **一份租约都持不住**,而那正好把「全网有没有人在用」变回恒真式 —— 病比药重。
+    #    诚实那一半由响应给出:`lease.holder` 回带的是**服务端认定**的名字,
+    #    客户端据此显示"本机在中枢上的名字",看得见它和自己报的不是一回事。
+    # ══════════════════════════════════════════════════════════════════
+    holder = principal_device(request, _tier)
     components = [str(c) for c in (body.get("components") or [])][:16]
     ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
 
@@ -979,6 +1062,119 @@ async def gpu_lease(request: Request):
             "generation": gpu_broker.BROKER.snapshot().generation}
 
 
+@app.post("/v1/gpu/intent")
+async def gpu_intent(request: Request):
+    """P4-S16b · 「意图即起」(D87①)—— 一条端点同时是三件事:
+
+      · **起**的触发点(在对应功能里开始输入的那一刻);
+      · **「我在用」的心跳锚点**(刷新这个组件的按需空闲钟);
+      · **租约发放口**(发一份点名了组件的 `model_ref` 租约 ——
+        它一存在,`blocking_leases()` 就非空,空闲收割在结构上碰不到这个组件)。
+
+    ★★ 归 `lease` 档,不是 `read`、也不是 `change_resident`:
+      · 不是 `change_resident` —— 它**碰不到 `committed`**(结构上够不着,见 Broker);
+        而且意图是每次打字都可能发生的事,算进变更配额会把用户的确定按钮吃掉。
+      · 不是 `read` —— 它**真的发租约、真的动显存**,叫它"读"是句假话。
+      ★ D90 包 §4.3 当时建议归 `read`,理由是「后者会吃掉用户的变更配额」;
+        那条理由今天由**桶的拆分**(审计 B4)解决了,所以取更诚实的那一档。
+        ⇒ 归档变了,理由写在这里,而不是悄悄换掉。
+
+    ★★★ 客户端**只点别名不点组件**(§8.1「换模型时客户端一行都不用改」)——
+      别名 → 组件的桥在服务端(`components_any_of`,S2 建的)。
+
+    ★ 响应形状与 `/v1/gpu/lease` **有意保持一致**(顶层 status/lease/fence_token/generation
+      + 多一个 `intent`),这样客户端能复用同一个解析器;
+      而两侧各有一条**成对断言**钉住它(D92 的硬前置)—— 服务端钉顶层键集合,
+      客户端钉「拿这个形状能解析出目标字段」。缺任何一条都抓不住 A1 那族缺陷。
+    """
+    _tier, _deny = gpu_guard(request, "lease", count_quota=False)
+    if _deny is not None:
+        return _deny
+    try:
+        body = await request.json()
+    except Exception:                                        # noqa: BLE001
+        body = {}
+    alias = _short_echo(body.get("alias"))
+    if not alias:
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": "缺少 alias —— 意图要说清是哪个功能",
+                                               "type": "missing_alias"}})
+    if alias not in REGISTRY:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"message": f"未知别名 '{alias}'。可用别名见 /v1/models。",
+                               "type": "unknown_alias"}})
+    _who = principal_device(request, _tier)
+    ttl = float(body.get("ttl_s") or gpu_broker.DEFAULT_TTL_S)
+    _tier2, _deny2 = gpu_guard(request, "lease", lease_kind="model_ref", ttl_s=ttl, holder=_who)
+    if _deny2 is not None:
+        return _deny2
+
+    comps = components_for_alias(alias)
+    if not comps:
+        # ★ 零显存别名(如 Vigil 常驻助手)是**显式声明**过的,不是"查不到" ——
+        #   registry 启动期就强制它写 no_gpu_reason。如实回话,不发租约、不装任何东西。
+        return {"status": "ok",
+                "intent": {"alias": alias, "component": "", "code": "no_gpu_needed",
+                           "message": str(REGISTRY[alias].get("no_gpu_reason") or
+                                          "这个别名不占显存")},
+                "lease": None, "fence_token": None,
+                "generation": gpu_broker.BROKER.snapshot().generation}
+
+    # ★ any_of:挑**已经在跑的**那一个;都没在跑就挑第一个(registry 的顺序就是偏好顺序)。
+    #   ★ 不在这里另造一套"选最省显存的"策略 —— 那会变成第二处决定该用哪个组件,
+    #     而 §8.1 说清单只有一份权威。
+    try:
+        snap0 = gpu_broker.BROKER.snapshot()
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(status_code=503,
+                            content={"error": {"message": "Broker 不可用",
+                                               "type": "broker_unavailable",
+                                               "reason": type(e).__name__}})
+    _live = set(snap0.committed) | set(snap0.transient_resident)
+    target = next((c for c in comps if c in _live), comps[0])
+
+    try:
+        res = await gpu_broker.BROKER.request_on_demand(target)
+    except Exception as e:                                   # noqa: BLE001
+        return JSONResponse(status_code=503,
+                            content={"error": {"message": "按需装载时 Broker 出错",
+                                               "type": "broker_unavailable",
+                                               "reason": type(e).__name__}})
+    code = str(res.get("code") or "")
+    ok = code in (gpu_broker.ON_DEMAND_OK, gpu_broker.ON_DEMAND_ALREADY)
+    intent = {"alias": alias, "component": target, "code": code,
+              "message": str(res.get("message") or ""), "plane": str(res.get("plane") or "")}
+    if not ok:
+        # ★ 每一种不成立的下一步完全不同,所以状态码也分开:
+        #   · NOT_PERMITTED = 机主还没授权过它(D90 裁定①的代价段)⇒ 409,去主机上勾一次;
+        #   · GATE          = 装不下 ⇒ 422,去关占显存的程序;
+        #   · LOADER_ABSENT / LOAD_FAILED = 接线或后端的问题 ⇒ 502。
+        status = (409 if code == gpu_broker.ON_DEMAND_NOT_PERMITTED
+                  else 422 if code == gpu_broker.ON_DEMAND_GATE else 502)
+        return JSONResponse(
+            status_code=status,
+            content={"error": {"message": intent["message"], "type": code.lower()},
+                     "intent": intent,
+                     "snapshot": gpu_broker.BROKER.snapshot().to_json()})
+
+    # ★★ 发一份**点名了组件**的 model_ref 租约 —— 这一条是承重的:
+    #   `blocking_leases()` 要求租约点名组件才算「有活在跑」(2026-08-06 审计 A1②),
+    #   所以只有点名了,空闲收割才会在结构上避开它。空组件的租约声明的是"有人在",不是"有活在跑"。
+    lstatus, lease = await gpu_broker.BROKER.grant("model_ref", _who, [target], ttl)
+    if lstatus != gpu_broker.LEASE_OK:
+        # 装是装上了,租约没发出来 —— **如实说**,不要伪装成完全成功:
+        # 没有租约,这个组件在下一轮收割里就可能被卸掉,而调用方以为它被钉住了。
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"message": f"已装载,但租约未发放:{lstatus}", "type": lstatus.lower()},
+                     "intent": intent,
+                     "snapshot": gpu_broker.BROKER.snapshot().to_json()})
+    return {"status": "ok", "intent": intent, "lease": lease.to_json(),
+            "fence_token": lease.fence_token,
+            "generation": gpu_broker.BROKER.snapshot().generation}
+
+
 @app.post("/v1/session/end")
 async def session_end(request: Request):
     """P4-S4b:客户端退出时结束会话,释放它持有的租约。
@@ -990,6 +1186,23 @@ async def session_end(request: Request):
 
     ★ 语义是**尽力而为但如实回话**:没有活跃租约不是错误(客户端可能从没申请过),
       但要在响应里说清"释放了几条",而不是一律回 200 空体让调用方无从分辨。
+
+    ══════════════════════════════════════════════════════════════════
+    ★★★ 2026-08-06 审计 B2:**一台副机可以点名释放另一台的全部租约。**
+
+    这里原来拿 `body["device"]`(客户端自报)逐条比 `l.holder`,匹配上就释放。
+    而 `release()` 要的 `fence_token` 是**从中枢自己的记录里读出来的**
+    (`l.fence_token`)—— 条件写必然成立,fence 在这条路径上一点保护都不提供。
+    准入只需 `read` 档(为了不吃变更配额),于是任何一台已配对的副机都能做。
+    **实测**:PC-B 提交 `{"device":"PC-A"}` → 200 `released_leases=2`,
+    中枢上 PC-A 的两份 `client_session` 当场消失。
+
+    ⇒ 改成:**只释放服务端认定的这台设备自己持有的租约**。
+      body 里的 `device` 不再参与匹配,只在与真实身份不一致时如实回带 `ignored_device`
+      —— 静默丢弃会让一个旧版客户端"看着成功、其实没释放"(又是失败与成功长得一样)。
+    ★ 身份解析不出来(`unknown`)时**一条都不释放**:`unknown` 不是一个身份,
+      拿它当 holder 匹配等于给所有解析失败的请求发一把公用钥匙。
+    ══════════════════════════════════════════════════════════════════
     """
     # ★ 只释放**自己持有**的租约,不改驻留集合 ⇒ 归 read 档,不占变更额度。
     #   否则一次正常退出会吃掉用户的变更配额,而退出是客户端每次都做的事。
@@ -1000,8 +1213,20 @@ async def session_end(request: Request):
         body = await request.json()
     except Exception:                                        # noqa: BLE001
         body = {}
-    device = str(body.get("device") or "")[:64]
+    # ★ 自报值只用于**回带说明**,绝不用于匹配(见 docstring)。
+    claimed = _short_echo(body.get("device"))
+    device = principal_device(request, _tier)
     reason = str(body.get("reason") or "")[:64]
+
+    if device == UNKNOWN_DEVICE:
+        # fail-closed:解析不出身份 ⇒ 什么都不放,并说清为什么(而不是回 0 让人以为"本来就没有")
+        return JSONResponse(
+            status_code=403,
+            content={"error": {
+                "message": "解析不出这次请求属于哪台设备 —— 不释放任何租约。"
+                           "★ 身份只来自证书指纹经成员表反查,或本机回环;"
+                           "自报的 device 一律不采信(审计 B2)。",
+                "type": "unresolved_device", "dimension": "device"}})
 
     released = 0
     try:
@@ -1015,8 +1240,13 @@ async def session_end(request: Request):
             content={"error": {"message": "会话结束时释放租约失败", "type": "broker_unavailable",
                                "reason": type(e).__name__}},
         )
-    return {"status": "ok", "released_leases": released,
-            "device": device, "reason": reason}
+    out = {"status": "ok", "released_leases": released,
+           "device": device, "reason": reason}
+    if claimed and claimed != device:
+        # ★ 如实说:你报的那个名字被忽略了。旧版客户端据此能看出自己该升级,
+        #   而不是拿着一个"成功"的 200 以为租约放掉了。
+        out["ignored_device"] = claimed
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1055,35 +1285,21 @@ _sync_online: dict = {}
 
 
 def _sync_device(request: Request, tier: str) -> str:
-    """这次请求算**哪台设备**。★ 只认服务端解析得出来的身份,客户端自报一律不信。
+    """同步面的设备身份。★★ 2026-08-06 审计 B3:**它不再有自己的实现**。
 
     ══════════════════════════════════════════════════════════════════
-    ★★★ 2026-08-05 审计 C1:原来 device 完全由客户端 body/query 自报,三处后果 ——
-      ① **在线名单可任意命名**:副机报主机的名字,界面就显示主机在线两次;
-         或反过来让用户以为对方开着。而在线状态错了比没有更坏。
-      ② **冲突归因指错人**:「这条被另一台改过」就是拿它判的。
-      ③ **额度维可绕过**:sync_policy 的令牌桶 key 是 (tier, holder),
-         holder 就是这个自报值 —— 每换一个名字就是一个新桶,pushes_per_min 形同虚设。
-    ★ 而正确的值**就在手边**:lan-edge 注入验证过的证书指纹并剥掉客户端自带的
-      X-LocalAI-*,membership.active_device() 能由指纹反查出 device_id。
-      本文件自己写着的铁律就是「主体只来自成员表,客户端自报一律忽略」。
-    ⇒ 这不是新增机制,是**把已经存在的解析结果接上去**。
+    这里原本是全仓唯一一处"只认服务端解析"的设备身份(2026-08-05 审计 C1 修的),
+    而 GPU 面同时另有一套(客户端自报的 `body["holder"]`)。
+    **两套各自自洽,所以谁也不炸** —— 直到 `/v1/session/end` 横跨两者:
+    它拿自报的 device 去比 GPU 面的 holder,一边改了另一边没改,退出就不再释放租约。
+
+    ⇒ 合一的做法不是"把同步面这套抄一份到 GPU 面"(那是**两份**会漂的实现),
+      而是把这一份**提上去**成为唯一入口 `principal_device`,这里只留一条转发。
+    ★ 同步面的行为**一个字节都没变**:同一段逻辑,换了个位置。
+      (若哪天两面真的需要不同的身份,那必须是一次有名字的决定,而不是各写各的。)
     ══════════════════════════════════════════════════════════════════
     """
-    fp = request.headers.get("x-localai-cert-sha256", "")
-    if fp:
-        p = resolve_lan_principal(fp)
-        if p is not None:
-            # ★ 成员表给不出 device_id 时,退到**指纹**本身 —— 它同样是服务端验过的,
-            #   只是可读性差一点。**绝不**因此退回客户端自报值:那正是这条要修的东西,
-            #   退回去等于绕了一圈把洞留在原地。
-            return str(p.get("device_id") or ("cert:" + fp[:12]))
-    # ★ 回环(trusted-local)没有证书 —— 它就是主机本身,给一个**固定**名字,
-    #   同样不看自报值:让本机进程随便自称,上面三条后果一条不少。
-    if tier == "trusted-local":
-        return "local"
-    # 解析不出身份 ⇒ 不给名字。fail-closed:宁可显示 unknown,不让它冒充别人。
-    return "unknown"
+    return principal_device(request, tier)
 
 
 def _sync_notify() -> None:
@@ -1291,6 +1507,9 @@ async def gpu_components(request: Request):
     intended = set(snap.intended)
     committed = set(snap.committed)
     permitted = set(snap.permitted_on_demand)
+    # ★ P4-S16b:面板要能分清「你勾的常驻」与「系统按你的授权临时装的」——
+    #   混成一个勾会让用户以为自己勾过它,那正是 D90 裁定③「一个词两层含义」要防的事。
+    transient = set(snap.transient_resident)
     items = []
     for cid in sorted(cfg.components):
         meta = cfg.components[cid]
@@ -1305,6 +1524,7 @@ async def gpu_components(request: Request):
             "intended": cid in intended,
             "committed": cid in committed,
             "permitted_on_demand": cid in permitted,
+            "transient_resident": cid in transient,
         })
     # ★ 别名映射一并回带:让面板能说清"勾掉它,哪些功能会停"。
     #   这层桥是 S2 建的;客户端**不得**自己再猜一遍 id 与功能的对应。
@@ -1390,10 +1610,32 @@ async def gpu_intended(request: Request):
     #   所以它被映射成【另一个动作】(unload_all),而不是同一个动作的一个取值。
     #   §6.2 原话:「同一个『写文件』工具,路径参数决定它是安全还是灾难」。
     _act = gpu_policy.resolve_action(components, is_change=True)
-    _tier2, _deny2 = gpu_guard(request, _act, components=components,
-                               holder=_short_echo(body.get("holder")))
+    # ★ holder 只来自服务端解析(审计 B1)—— 它是限流桶的 key,采信自报值 = 额度维形同虚设。
+    _who = principal_device(request, _tier)
+    _tier2, _deny2 = gpu_guard(request, _act, components=components, holder=_who)
     if _deny2 is not None:
         return _deny2
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 2026-08-06 审计 B6:「`permitted_on_demand` 只有主机变更面能写」
+    #  写在方案书 §8.1.7、写在 Broker 的四集合注释里、写在下面那段注释里 ——
+    #  **代码里没有那道闸**。实测:副机(lan-device)带上这个数组 POST 一次,
+    #  中枢的授权集合当场被它写成了它想要的样子。
+    #
+    #  而这份授权正是 D90 裁定①的代价段所说的那一步:
+    #  「没有它,系统就是在你没同意的情况下自己动显存。」
+    #  ⇒ 副机能自己签这个字,等于那条代价段被绕过,而绕过它的人不是机主。
+    #
+    #  ★ 它必须是**另一个动作**(`permit_on_demand`),不是 change_resident 的一个字段:
+    #    带不带这个数组的两次 POST 在 HTTP 上长得一模一样 —— §6.2「参数决定它是安全还是灾难」。
+    #  ★ 判在 `if_generation` 之前:参数不合法不该先把状态机搅一遍(与准入白名单同序)。
+    # ══════════════════════════════════════════════════════════════════
+    _perm_present = body.get("permitted_on_demand") is not None
+    if _perm_present:
+        _tier3, _deny3 = gpu_guard(request, "permit_on_demand",
+                                   components=components, holder=_who)
+        if _deny3 is not None:
+            return _deny3
 
     try:
         snap = gpu_broker.BROKER.snapshot()
