@@ -1,5 +1,16 @@
 # 记忆套件跑不起来 · 那道墙的形状 + 四条路的代价 · 裁定材料 **D?**
 
+> ## ★★ 本包已停手,记忆套件这条线交给 **3 号执行层**(2026-08-06)
+>
+> 协调层告知:本包与 3 号车道(`worktree: memory-suite-revival-survey-94f0d0`)**正面重合** ——
+> 3 号是协调层派去做记忆套件复活的,已提交 `b7a9d62`
+> `memory-suite-revival-2026-08-06.md`(408 行)+ `run-memory-suite.ps1/.cmd`。
+> **这是派重,不是本车道越界**(协调层未给本车道划这条边)。
+>
+> ⇒ **本包不再往前推进**;已写的内容**不删不改**,作为独立佐证保留。
+> 唯一新增的是 **§11「交接给 3 号车道」** —— 协调层点名要过去的那一格。
+> §5 的四条路、§6 的建议**不再更新**,以 3 号的裁定材料为准。
+
 > 日期:2026-08-06
 > 性质:**裁定材料**。要裁的是「**怎样才能让 `10-core/memory` 的断言真的被跑一次**」,
 > 而它的难点不是工程量,是**每条可行的路都要削弱一部分「正被这些断言验证」的隔离**。
@@ -340,3 +351,200 @@ Qdrant-s2   .\ai-mem    Running   Auto
   [sink-axis-change-list-2026-08-06.md](sink-axis-change-list-2026-08-06.md) ·
   [egress-b-gates-impact-2026-08-06.md](egress-b-gates-impact-2026-08-06.md)
 - worklog:`2026-08.md:222-227`(`verify-isolation.ps1` 新增 `pg_ident` 反向全表断言)
+
+---
+
+## 11. ★★ 交接给 3 号车道:那道墙给的不是「读库权限」,是 **PG 超级用户**
+
+> 协调层点名要这一格,理由是 3 号是从「范围」那头进来的(哪些套件不需要活库),
+> 可能量不到「让它跑起来要付什么代价」这一格。以下是**判据 + 我怎么量出来的**。
+
+### 11.1 结论一句话
+
+**任何让人能跑这套测试的路,授出的都不是「读记忆库」,而是「这台机器上 PG 的超级用户」。**
+因此「先让它跑起来再说」这个直觉是错的:它不是降低门槛,是**授出最高权限**。
+
+### 11.2 判据链(三步,每步都可复核)
+
+**第一步 · 认证只认一个 Windows 账户。**
+`D:\AI\state\memory\pg\18\data\pg_ident.conf`(去注释后**全文只有四行**):
+
+```
+mem        ai-mem           postgres
+mem        ai-mem           mem_rw
+mem        ai-mem           ai_mem_local
+mem        ai-mem           ai_mem_remote
+```
+
+`pg_hba.conf`(去注释后**全文只有四行**):
+
+```
+host    all       postgres        127.0.0.1/32    sspi  map=mem  include_realm=0
+host    memory    mem_rw          127.0.0.1/32    sspi  map=mem  include_realm=0
+host    memory    ai_mem_local    127.0.0.1/32    sspi  map=mem  include_realm=0
+host    memory    ai_mem_remote    127.0.0.1/32    sspi  map=mem  include_realm=0
+```
+
+**第二步 · ★ 第一行是 `all` + `postgres`。**
+即 Windows 账户 `ai-mem` 可以 **PG 超级用户身份连所有数据库**。
+这不是推断 —— **测试自己就在用它**:
+`test_s3_acceptance.py:39` 与 `test_s3_repo.py:18` 的清场注释原话是
+「用 `postgres` 清场 —— `ai_mem_local` **故意没有 DELETE 权限**(§12.4)」。
+⇒ 超级用户不是副作用,是**这套测试的既有前提**。
+
+**第三步 · 那个 env 缝不构成第三条路。**
+`repo.py:87` 有 `user = os.environ.get("LOCALAI_PG_USER", "ai_mem_local")`,
+看着像可以换身份;但四个角色**共用同一张 `map=mem`** ⇒ 换角色不换 Windows 主体,
+以机主身份一个都认证不上。`dbname=memory` 则**写死**在 `:88`,没有对应的 env 缝。
+
+**独立印证(不靠我读文件):** `90-ops/verify-isolation.ps1` 实跑
+(2026-08-06,机主身份,只读,**17 PASS · 0 FAIL · 3 SKIP**,退出码 0)其中两条:
+
+```
+PASS  ★★ pg_ident 的 SYSTEM-USERNAME 列有且只有 ai-mem(反向全表)
+PASS  ★ pg_hba 无 trust/md5/password 兜底行(只认 SSPI 绑 SID)
+SKIP  DB 角色分离 — 连不上 —— 需以 ai-mem 身份运行(生产即如此)
+```
+
+★ 而该脚本自己也已经把超级用户这条记下来了(`:212-217`):
+
+> ⚠ 有 N 条映射指向 PG 超级用户 postgres —— 超级用户绕过一切权限检查,
+> 故 `roles.sql` 的 REVOKE 只对非超级角色成立(**文档不得声称 append-only 绝对**)
+
+⇒ **这条不是我的新发现,是既有认知**;我补的是它对「怎么让套件跑起来」的**定价**。
+
+### 11.3 对 P3a S4/S9 那批「验隔离本身」的断言意味着什么
+
+有一批断言,**验的正是 PG 角色的权限边界**:
+
+| 断言 | 验什么 |
+|---|---|
+| `test_s3_repo.py:47-51` | `★ ai_mem_local 对 {tbl} 无 DELETE 权限`(§12.4 永不 delete) |
+| `test_s6_acceptance.py:124-132` | `★ ai_mem_local 不得删除冷启动标记(权限层拒绝)` —— 否则可重开 |
+| `test_s8_acceptance.py:154` | `ai_mem_remote 对 l4_procedure 零授权` |
+
+**它们的价值来自「跑它的身份恰好是生产身份」。** 于是:
+
+1. **以 `postgres`(超级用户)跑 ⇒ 这三条必然「通过」而毫无意义** ——
+   超级用户绕过一切权限检查,`REVOKE` 对它不成立(见 §11.2 那段 ⚠)。
+   ★ 更糟的是它们会打印 **PASS**;
+2. **以一个新造的宽权限测试角色跑 ⇒ 同样退化**,它验的是那个角色的授权,不是生产角色的;
+3. ⇒ **想让这三条继续有意义,泳道里必须复刻角色名 + 逐条复刻授权**,
+   并加一条**授权一致性断言**(用 `postgres` 比对两库同名角色的
+   `information_schema.role_table_grants`,不一致判红)。
+   没有这条,复活出来的是**一屏没有意义的 PASS** —— 比一直 SKIP 更坏,
+   因为 SKIP 是诚实的(`test_repo.py:168` / `test_s1_acceptance.py:40` 现在就是这么做的)。
+
+### 11.4 ★ 我这份的数字与 3 号的「4 个不需要活库」**不矛盾**,别当成互相打架
+
+我的静态扫描报的是 **1 PURE / 13 NEEDS-BACKEND**;3 号的提交标题是「**4 个**不需要活库」。
+**两个数回答的是两个不同的问题:**
+
+| | 我问的 | 3 号问的 |
+|---|---|---|
+| 问题 | 能不能**静态排除**「跑起来会写真实库」? | 哪些套件**实际上**不需要活库? |
+| 判据 | 传递 import 图上碰到任一连库模块即判不许跑 | 需要逐文件看那个 connect 有没有被 guard 住 |
+| 性质 | **刻意偏保守的下界** | 更细的真实值 |
+
+我的工具是钝的,而且是**故意**钝的(脚本注释原话:「宁可少跑,不可误写生产库」)。
+它把「import 了 `repo` 但把连库包在 guard 里、连不上就 skip」的那些**一律算进不许跑**——
+而那正是 `test_repo.py:5` 与 `:168` 的形状(「连不上则跳过并明确说明,不静默假通过」)。
+
+⇒ **以 3 号的 4 为准**;我的 1 只应被读作「在不做逐文件人工判断的前提下,能安全断定的最小集」。
+**不要把我的 1 当成对 4 的反驳。**
+
+### 11.5 交接清单(3 号可直接取用的实测值)
+
+| 实测值 | 来源 |
+|---|---|
+| `pg_ident` 全文四行,SYSTEM-USERNAME 列**只有** `ai-mem` | 读文件 + `verify-isolation.ps1` 反向全表断言 PASS |
+| `pg_hba` 全文四行,全 `sspi map=mem`;**第一行 `all`+`postgres`** | 读文件 |
+| 「能跑套件」⇒ **PG 超级用户** | 上两条 + `test_s3_acceptance.py:39` 用 `postgres` 清场 |
+| `ai-mem` 密码**无人持有**;`UserMayChangePassword=False` | `setup-accounts.ps1:11-13` + `Get-LocalUser` |
+| **四个**服务跑在 `.\ai-mem`:`pg-mem` · `Qdrant` · `Qdrant-s2` · `Embedding`(全 Running/Auto) | `Get-CimInstance Win32_Service` |
+| ⇒ 重置密码必须**同步改四个服务凭据**,漏一个下次重启整栈起不来 | 上一条 |
+| 墙是 **PG 专属**:Qdrant 的 api_key 从磁盘 `config.yaml` 读,**管理员可读** | `vectors.py:162-182` + 实测两个 config 可读 |
+| `LOCALAI_PG_USER` 缝**无用**;`dbname=memory` 写死 | `repo.py:87-88` |
+| 「验隔离本身」的三条断言在换身份后会**退化成 PASS** | §11.3 |
+
+★ **本车道未测**:`ai-mem` 密码是否在凭据管理器 / DPAPI / 服务凭据存储里有留存
+(那是敏感面,不在本轮授权内)。**这一条是 P1 定价的推翻条件** ——
+若其实有留存,「重置密码」的代价大幅下降,四条路要重比价。**建议 3 号把它列进自己的待核实。**
+
+---
+
+## 12. 上一条指示的收尾:`verify-isolation.ps1` 接进门禁(**已测完,不再推进**)
+
+> 协调层在「停手」之前要过这份清单,数据已全部测到,故一并交出。**本节不扩展。**
+
+**它今天就是绿的,而且几乎不花时间** —— 接进去是低风险的:
+
+| 实测项 | 值 |
+|---|---|
+| 以机主身份跑(不需要 `ai-mem`) | **17 PASS · 0 FAIL · 3 SKIP**,退出码 **0** |
+| 耗时 | **0.5 秒** |
+| 汇总行 | `=== 隔离验证:17 PASS · 0 FAIL · 3 SKIP ===` |
+| 是否只读 | ✔ 静态扫零处写操作;唯一 SQL 是对 `pg_roles` / `information_schema` 的 `SELECT` |
+| ★ 对照:`run-tests.ps1` fast 层现耗时 | **189.3 秒**(≈3 分钟)—— 见 §12.3 |
+
+### 12.1 汇总行**已经**匹配现成的判据(不用改正则)
+
+`run-tests.ps1` 的锚定正则 `^\s*===.*\d+\s*PASS.*\d+\s*FAIL` 与抽取式
+`(\d+)\s*PASS[^0-9]+(\d+)\s*FAIL` **全是 ASCII**,而 `=== 隔离验证:17 PASS · 0 FAIL · 3 SKIP ===`
+里 `===` / `PASS` / `FAIL` / 数字都是 ASCII ⇒ **即使在 cp936 下中文与 `·` 变成乱码,判据依然命中。**
+
+★ 这一条必须写出来,因为 `run-tests.ps1:161-171` 记着一次**实测被拒**的事故:
+第一版拿 `·`(U+00B7)当分隔符去匹配,作者终端里好好的,而 pre-commit 是从 git bash 起、
+码页 cp936 ⇒ 匹配不上 ⇒ 门禁报「没跑起来」并拒绝提交。
+⇒ **接线时不得引入任何非 ASCII 判据**,照那一节的体例。
+
+### 12.2 建议的接法(照「调试工具箱自检」那一节的体例)
+
+在 `run-tests.ps1` 的调试工具箱自检那一节**之后**,加一节:
+
+```powershell
+# --- 隔离验证(★ 存在才跑,删掉了自动跳过)---------------------------------
+#  ★ 它验账户存在 / ACL 是真 Deny 而不是空 Allow / secrets 排除出备份 /
+#    pg_ident 的 SYSTEM-USERNAME 反向全表 / pg_hba 无 trust 兜底行。
+#    这些是「隔离到底还在不在」,最不该靠人记得去跑。
+#  ★ 它不需要 ai-mem 身份:DB 角色分离那一段连不上会 Skip-It(生产即如此)。
+#  ★ 判据只认 ASCII(理由同上一节:cp936 下中文与 · 会变乱码)。
+$isoScript = Join-Path $repo '90-ops\verify-isolation.ps1'
+if (Test-Path $isoScript) {
+    $isoOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $isoScript 2>&1 | Out-String
+    $isoLine = ($isoOut -split "`r?`n" |
+                Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } |
+                Select-Object -Last 1)
+    if ($isoLine -match '(\d+)\s*PASS.*?(\d+)\s*FAIL') {
+        $ip = [int]$Matches[1]; $if_ = [int]$Matches[2]
+        $totalPass += $ip; $totalFail += $if_
+        $ran += '90-ops\verify-isolation.ps1'
+        $c = if ($if_ -gt 0) { 'Red' } else { 'DarkGray' }
+        Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}" -f '90-ops\verify-isolation.ps1', $ip, $if_) -ForegroundColor $c
+        if ($if_ -gt 0) { ($isoOut -split "`r?`n" | Where-Object { $_ -match 'FAIL' } | Select-Object -First 8) | ForEach-Object { Write-Host "        $_" -ForegroundColor Red } }
+    } else {
+        $broken += [pscustomobject]@{ File = '90-ops\verify-isolation.ps1'; Why = '没有汇总行 —— 多半没跑起来' }
+        Write-Host "  X 隔离验证没跑起来" -ForegroundColor Red
+    }
+}
+```
+
+### 12.3 ★ 两条接线前必须先处理的
+
+1. **它需要「能读 ACL」的令牌。** 它 `Get-Acl` 读 `{state}\memory` 与 `{state}\secrets`,
+   而那两处的 ACL 只给 `Administrators` / `SYSTEM` / `ai-mem`。
+   本机 `EnableLUA=0`,一切进程皆 High ⇒ **今天恒可读**;
+   但在**UAC 开启**的机器上,普通 `git commit` 起的是 Medium 令牌(Administrators 只用于拒绝)
+   ⇒ `Get-Acl` 会抛,而脚本第 25 行是 `$ErrorActionPreference='Stop'`
+   ⇒ **脚本中止 → 没有汇总行 → 门禁判「没跑起来」→ 提交被拒。**
+   ⇒ **接线前应先让它在权限不足时 `Skip-It` 并写明理由**,而不是中止。
+   ★ 该脚本自己就修过一次同族问题(`:129-134` 那段注释:一个「优雅降级分支」因为
+   `ErrorActionPreference='Stop'` 而是**死代码**,一次都没跑过)—— 同一个坑,换个位置。
+2. **fast 层现在要 189.3 秒,不是钩子注释说的「20 秒」。**
+   `.githooks/pre-commit` 的注释写着「20 秒的钩子如果每次提交都跑,人会开始习惯性 `--no-verify`」——
+   **那个前提已经不成立了**(实测 ≈3 分钟)。`verify-isolation.ps1` 只加 0.5 秒,不是问题;
+   **问题是 189 秒本身**已经进入「人会开始绕过钩子」的区间。
+   ⇒ 这一条**归 ops 车道另议**,本包只报数,不给方案。
+
+⇒ 综合建议:**先接进 `-Full`(零风险,今天就绿)**;
+把「权限不足降级为 Skip」和「fast 层 189 秒」处理掉之后,再考虑进 always-on 那一路。
