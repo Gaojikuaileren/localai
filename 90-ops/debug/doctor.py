@@ -133,6 +133,58 @@ def _port_owner(port: int) -> str:
         return ""
 
 
+def chat_path_autoloads():
+    """聊天那条路径上,**有没有任何东西会把后端拉起来**?
+
+    返回 (答案, 依据)。答案 True/False/None(None = 读不到源码,不猜)。
+
+    ★★★ 为什么要**当场查**,而不是照着记忆写一句话:
+      这一环原本写着「后端没在跑不一定是错的 —— D87 之后是【按需装载】,
+      没人用就该是这样」。**那句话给一个不存在的机制背了书**:
+      `/v1/chat/completions` 全路径(268 行)一次都没碰过 Broker / 装载器 / 租约,
+      于是"后端没起"的真实后果是**聊天直接失败**,而体检报告说这可能很正常。
+      ⇒ 一个在系统坏了的时候报"这可能很正常"的体检工具,正是本套工具存在的理由所指的东西。
+
+    ★★ 而"直接把那句话改成相反的"会在**另一个方向**上重犯同样的错:
+      按需装载哪天真接上了,这句话又变成新的假话,而且没有任何东西会提醒。
+      ⇒ 判据必须是**当场量出来的**,让它自己跟着源码翻面。
+      (ASSERTION-PITFALLS 第 9 条:判据问的是「我做不做得到」,不是「我是什么身份」。)
+
+    ★ 只把 gateway.py 当**文本**读,不 import —— selfcheck 第 ② 组钉着
+      「工具不 import 项目代码」:项目坏了的时候工具还得能跑,那正是最需要它的时刻。
+    """
+    gw = REPO / "10-core" / "gateway" / "gateway.py"
+    if not gw.exists():
+        return None, "读不到 gateway.py"
+    try:
+        return autoload_in(gw.read_text(encoding="utf-8", errors="replace"))
+    except Exception:                                        # noqa: BLE001
+        return None, "读不到 gateway.py"
+
+
+#  ★ 抽成纯函数是为了**能被合成输入两个方向各问一遍**(selfcheck.py 第 ⑩ 组)。
+#    ★★ selfcheck 里**不断言今天的答案是 False** —— 那条断言会在
+#      「按需装载终于接上了」那天变红,而那正是我们盼着发生的事
+#      (ASSERTION-PITFALLS 第 5 条:一条会因为「功能终于能用了」而变红的断言,
+#       测的就不是它自称在测的东西)。⇒ 只钉**识别器**,不钉现状。
+def autoload_in(src: str):
+    anchor = '@app.post("/v1/chat/completions")'
+    if anchor not in src:
+        return None, "源码里找不到 chat 路由(路由写法变了?)"
+    i = src.index(anchor)
+    j = src.find("\n@app.", i + len(anchor))
+    body = src[i:(j if j > 0 else len(src))]
+    # 去掉整行注释:本仓的习惯是把「为什么没做」写在注释里,照字面搜会把
+    # **说明它没接**的那段话读成"它接了"(ASSERTION-PITFALLS 第 1 条,已踩 9 次)。
+    code = "\n".join(ln for ln in body.split("\n") if not ln.strip().startswith("#"))
+    hits = sorted({w for w in ("BROKER", "gpu_broker", "ensure_loaded",
+                               "ModelLoader", "_loader", "acquire_lease")
+                   if w in code})
+    return bool(hits), (f"chat 路径引用了 {hits}" if hits
+                        else f"chat 路径 {code.count(chr(10))} 行代码里,"
+                             "Broker / 装载器 / 租约**一个都没有**")
+
+
 def link_backend():
     import tomllib
     cfg = tomllib.load(open(REPO / "config" / "vram-budget.toml", "rb"))
@@ -161,9 +213,23 @@ def link_backend():
                "我们的后端绑不上这个端口 —— 先看那个进程是什么。" \
                "本机撞见过另一条车道的一次性 spike 占用 18081"
     if not live:
-        return None, f"模型后端**没有在跑**(查过 {ports})", \
-               "这不一定是错的 —— D87 之后是【按需装载】,没人用就该是这样。" \
-               "要它常驻请跑 90-ops\\start-stack.ps1"
+        # ★★★ 这一环此前写着「不一定是错的 —— D87 之后是【按需装载】,没人用就该是这样」。
+        #   **那是替一个不存在的机制背书。** 现在当场去量(见 chat_path_autoloads)。
+        auto, why = chat_path_autoloads()
+        if auto is True:
+            return None, f"模型后端**没有在跑**(查过 {ports})", \
+                   f"按需装载**已接线**({why})—— 没人用就该是这样。" \
+                   "要它常驻请跑 90-ops\\start-stack.ps1"
+        if auto is None:
+            # ★ 读不到 ⇒ 不猜。**也不许倒回那句好听的话** ——
+            #   "读不到" 与 "没问题" 必须长得不一样。
+            return False, f"模型后端**没有在跑**(查过 {ports})", \
+                   f"★ 而且查不出有没有按需装载({why})—— 在查清楚之前," \
+                   "别把「没在跑」读成「正常」。先跑 90-ops\\start-stack.ps1"
+        return False, f"模型后端**没有在跑**(查过 {ports})", \
+               f"★★ 没有任何东西会把它拉起来:{why}。" \
+               "⇒ 现在去聊天会**直接失败**,不是「等它按需装载」。" \
+               "先跑 90-ops\\start-stack.ps1;【按需装载】仍是 P4 的未完项"
     return True, f"后端在跑:{live}", ""
 
 
@@ -229,6 +295,39 @@ def link_lan_edge():
         "★ 但先看上一行:网关没起的话,lan-edge 起着也没用(它的上游就是 8080)"
 
 
+#  ── 产物身份:版本戳 → (时间戳, 提交号, 脏树指纹)──────────────────────
+#  ★ 抽成纯函数是为了能被合成输入两个方向各问一遍(selfcheck.py 第 ⑪ 组)。
+_BUILD_ID = re.compile(r"版本戳:\s*([0-9]{8}-[0-9]{4})\+([0-9a-fA-F]{7,40})(?:\.dirty-(\w+))?")
+
+
+def parse_build_id(version_txt: str):
+    """从 VERSION.txt 里取出产物的身份。取不到返回 (None, None, None)。
+
+    ★★★ 为什么这个函数必须存在:
+      `.dirty` 那一半此前是**唯一**被检查的东西 —— 它只回答「出包那一刻工作区干不干净」。
+      它**从来不问「这份产物是哪个提交出的、那个提交是不是最新的」**。
+      于是最常见的那种不一致完全不被发现:**在一个干净的旧提交上出的包**。
+      版本戳里明明写着提交号(`20260806-1655+4e5da1f`),而没有任何东西读它。
+      ⇒ 「产物落后于源码」此前**只能靠人记得出包**,而这个项目已经被
+        「跑的不是刚改的那个产物」咬过 4 次(ASSERTION-PITFALLS 第 3 条)。
+    """
+    m = _BUILD_ID.search(version_txt)
+    if not m:
+        return None, None, None
+    return m.group(1), m.group(2).lower(), m.group(3)
+
+
+def _git(*args):
+    """只读地问 git 一句。★ 用 subprocess.run(查询型),不用 Popen ——
+    selfcheck 第 ④ 组钉着「doctor.py 承诺只读」,而它的识别器把 Popen 算作起进程。"""
+    try:
+        r = subprocess.run(("git", "-C", str(REPO)) + args,
+                           capture_output=True, text=True, timeout=8)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 def link_client_pkg():
     p = REPO / "dist" / "client" / "localai-client.exe"
     if not p.exists():
@@ -240,10 +339,39 @@ def link_client_pkg():
         return False, f"客户端 exe 只有 {mb:.1f} MB —— **这是裸 apphost,不是单文件自包含产物**", \
                "别直接拷 bin/Release 里的 exe。跑 90-ops\\build-client.ps1 出包,再拷 dist/client-pack 那个"
     v = (REPO / "dist" / "client" / "VERSION.txt")
-    ver = v.read_text(encoding="utf-8-sig").splitlines()[1] if v.exists() else "(无 VERSION.txt)"
-    dirty = ".dirty" in ver
-    return (not dirty), f"{mb:.0f} MB · {ver.strip()}", \
-        "★ 版本戳带 .dirty = 出包时工作区有未提交改动,装出去的东西与仓库对不上" if dirty else ""
+    if not v.exists():
+        # ★ exe 在、身份不在 ⇒ 判红。**「说不清这是什么」不许当成「没问题」** ——
+        #   一个身份不明的产物,和一个过期的产物一样不能装出去。
+        return False, f"{mb:.0f} MB · **没有 VERSION.txt**", \
+               "这份 exe 说不清是哪个提交出的。重新跑 90-ops\\build-client.ps1"
+    raw = v.read_text(encoding="utf-8-sig")
+    ver = raw.splitlines()[1].strip() if len(raw.splitlines()) > 1 else raw.strip()
+    stamp, sha, dirty_id = parse_build_id(raw)
+    if sha is None:
+        return False, f"{mb:.0f} MB · 版本戳解析不出提交号:{ver[:60]}", \
+               "★ 解析不出 ≠ 没问题:格式变了就得把 doctor.py 的 _BUILD_ID 跟着改," \
+               "否则这一环从此恒绿而什么都没在查"
+
+    # ── 产物落后于源码?──────────────────────────────────────────────
+    head = _git("rev-parse", "HEAD")[:len(sha)].lower()
+    if not head:
+        # 问不到 git(不是仓库 / 没装 git)⇒ 不猜,但也不报"没问题"。
+        return None, f"{mb:.0f} MB · {ver}", \
+               "★ 问不到 git,**无法判断产物是不是落后于源码** —— 这不等于它没落后"
+    if dirty_id:
+        return False, f"{mb:.0f} MB · {ver}", \
+               "★ 版本戳带 .dirty = 出包时工作区有未提交改动,装出去的东西与仓库对不上"
+    if sha == head:
+        return True, f"{mb:.0f} MB · {ver} · **与 HEAD 同一个提交**", ""
+    # 落后多少个提交?算不出来也要如实说"算不出来"。
+    behind = _git("rev-list", "--count", f"{sha}..HEAD")
+    if not behind:
+        return False, f"{mb:.0f} MB · {ver} · 提交号 {sha} **不在当前历史里**", \
+               "★ 这份产物是从一个本仓已经没有的提交出的(分支被 rebase / 重写过?)" \
+               " —— 它的内容无从核对。重新出包"
+    return False, f"{mb:.0f} MB · {ver} · **落后 HEAD {behind} 个提交**(HEAD={head})", \
+           "★ 装在用户机器上的不是当前源码。这一条此前【只查 .dirty、从不比提交号】," \
+           "所以「在一个干净的旧提交上出的包」完全不会被发现。重新跑 90-ops\\build-client.ps1"
 
 
 def link_pairing():

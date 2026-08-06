@@ -302,6 +302,84 @@ if scan_fake is not None:
         check(f"★★ 扫描器**够得着** {_ext} 文件(零命中判红:够不着与全清白在终端上长得一样)",
               _n > 0, f"{_ext} 实测扫到 {_n} 个")
 
+
+# ── ⑩ ★★★ doctor 第 ④ 环不许再替【不存在的机制】背书(2026-08-06)──
+#
+#  ★ 它此前写着「后端没在跑不一定是错的 —— D87 之后是【按需装载】,没人用就该是这样」。
+#    实测:`/v1/chat/completions` 全路径 192 行代码里,Broker / 装载器 / 租约**一个都没有**
+#    ⇒ 后端没起的真实后果是**聊天直接失败**,而体检报告说这可能很正常。
+#    **一个在系统坏了的时候报"这可能很正常"的体检工具**,正是这套工具存在的理由所指的东西。
+#
+#  ★★ 这里钉的是**识别器**,不是今天的答案。
+#    「今天必须返回 False」那种断言会在**按需装载终于接上**的那天变红 ——
+#    而那正是我们盼着发生的事(第 5 条坑)。钉现状 = 让"修好了"和"坏了"长得一样红。
+try:
+    import doctor as _doc                                      # noqa: E402
+except Exception as e:                                        # noqa: BLE001
+    check("★★ doctor 能被导入", False, f"{e}")
+    _doc = None
+if _doc is not None:
+    _CHAT = '@app.post("/v1/chat/completions")\nasync def chat_completions(r):\n'
+    _AUTOLOAD_CASES = [
+        (_CHAT + "    x = 1\n", False,
+         "★★★ 正向:chat 路径不碰 Broker ⇒ 判「没有按需装载」"),
+        (_CHAT + "    await BROKER.ensure_loaded(alias)\n", True,
+         "★★★ 反向:接上了就要认出来 —— 否则修好的那天工具会继续说反话"),
+        (_CHAT + "    # 这里【没有】接 BROKER,理由见 D87\n    x = 1\n", False,
+         "★★ 注释里提到 BROKER 不算接上(守卫撞在解释它所守之物的文本上,已踩 9 次)"),
+        ("def something_else(): pass\n", None,
+         "★★ 找不到 chat 路由 ⇒ 返回 None(**不猜**)—— 读不到与没问题必须长得不一样"),
+    ]
+    for _src, _want, _why in _AUTOLOAD_CASES:
+        _got, _why2 = _doc.autoload_in(_src)
+        check(f"按需装载识别器:{_why}", _got is _want, f"期望 {_want} 实得 {_got}({_why2})")
+
+
+# ── ⑪ ★★★ 产物身份:「产物落后于源码」必须是**会红的东西**(2026-08-06)──
+#
+#  ★ 落地那天的实况:`grep dist` 在 `run-tests.ps1` 与本文件里**零命中**,
+#    而 `doctor.py` 第 ⑨ 环**只查 `.dirty`、从不比提交号**,判 ✔。
+#    `.dirty` 只回答「出包那一刻工作区干不干净」,它**不问这份产物是哪个提交出的**。
+#    ⇒ 最常见的那种不一致完全不被发现:**在一个干净的旧提交上出的包**。
+#      版本戳里明明写着提交号,而没有任何东西读它 ——
+#      「产物落后于源码」此前只能靠人记得出包,而这个项目已经被
+#      「跑的不是刚改的那个产物」咬过 4 次(ASSERTION-PITFALLS 第 3 条)。
+#
+#  ★★ 同样只钉**解析器**,不钉今天 dist 里那份产物的状态:
+#    后者会因为「刚出了一次包」或「刚提交了一次」而来回红绿,那是环境漂移(第 5 条坑)。
+if _doc is not None:
+    _BID_CASES = [
+        ("版本戳: 20260806-1655+4e5da1f\n", ("20260806-1655", "4e5da1f", None),
+         "★★★ 正向:干净树的版本戳 —— **提交号必须被取出来**,这是整条判据的立足点"),
+        ("版本戳: 20260806-1655+4e5da1f.dirty-ab12cd34\n",
+         ("20260806-1655", "4e5da1f", "ab12cd34"),
+         "★★ 脏树戳:提交号与脏树指纹要分得开(此前只认 `.dirty` 三个字)"),
+        ("版本戳: 20260806-1655+4E5DA1F\n", ("20260806-1655", "4e5da1f", None),
+         "★ 大写十六进制归一到小写 —— 否则和 `git rev-parse` 的输出比会假红"),
+        ("localai-client\n构建于: 2026-08-06\n", (None, None, None),
+         "★★ 反向:没有版本戳就返回 None,**不许编一个** —— "
+         "「说不清这是什么」和「没问题」必须长得不一样"),
+    ]
+    for _txt, _want, _why in _BID_CASES:
+        check(f"产物身份解析:{_why}", _doc.parse_build_id(_txt) == _want,
+              f"期望 {_want} 实得 {_doc.parse_build_id(_txt)}")
+
+    # ★★ 钉住「第 ⑨ 环真的会去比提交号」。只钉解析器是不够的 ——
+    #   解析器好好的、而调用方把比较那一步删掉,一样退回"只查 .dirty"。
+    #   ⇒ 从**源码**上钉:那一环必须同时出现 parse_build_id 与 rev-parse。
+    #   ★ 针拼出来,理由同 scan_fake(本文件也会被扫)。
+    _pkg_src = ast.get_source_segment(
+        (REPO / "90-ops" / "debug" / "doctor.py").read_text(encoding="utf-8"),
+        next(n for n in ast.walk(ast.parse(
+            (REPO / "90-ops" / "debug" / "doctor.py").read_text(encoding="utf-8")))
+            if isinstance(n, ast.FunctionDef) and n.name == "link_client_pkg")) or ""
+    check("★★★ 第 ⑨ 环**真的去比提交号**了(不是只查 .dirty)—— "
+          "解析器还在而比较被删掉,一样退回原样",
+          ("parse_" + "build_id") in _pkg_src and ("rev-" + "parse") in _pkg_src,
+          "link_client_pkg 里找不到 parse_build_id / rev-parse")
+    check("★★ 「没有 VERSION.txt」也判红 —— 一个身份不明的产物和一个过期的产物一样不能装出去",
+          "VERSION.txt" in _pkg_src and "没有 VERSION" in _pkg_src)
+
 print("-" * 78)
 print(f"  === 调试工具自检:{_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

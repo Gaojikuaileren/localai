@@ -966,6 +966,53 @@ if ($VerifyEnv) {
     Write-Host "      ★ 不进自动门禁是**有意的**:它们验本机环境,进门禁会因'换台机器'而红," -ForegroundColor DarkYellow
     Write-Host "        而那种红会训练人用 --no-verify(ASSERTION-PITFALLS 第 5 条已量过这个代价)。" -ForegroundColor DarkYellow
 }
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 出厂产物的身份 —— 2026-08-06(D?)
+#
+#  落地那天的实况:`grep dist` 在本文件里**零命中**。门禁比过 `bin\Release` 那个
+#  **构建**产物的时间戳(A2),却从来没看过 `dist\client` 那个**出厂**产物 ——
+#  而后者才是装到用户机器上的东西。
+#  `doctor.py` 第 ⑨ 环只查 `.dirty`(出包那刻工作区干不干净),**从不比提交号**
+#  ⇒ 「在一个干净的旧提交上出的包」完全不会被发现,判 ✔。
+#
+#  ★★ 为什么这里**只报不判红**:「有没有重新出包」不是一次提交的性质。
+#    判红的话,每次提交之后到下次出包之前门禁都是红的 ——
+#    又一台永久红灯机器,而那训练人用 --no-verify(第 5 条坑量过这个代价)。
+#  ⇒ 它和「契约欠配对」同一档:**一个必须每次都看得见、但不拦提交的事实**。
+#    真正会红的那一半在 `doctor.py` 第 ⑨ 环(体检的职责就是问"这台机器现在什么状态")。
+# ══════════════════════════════════════════════════════════════════════════
+$distExe = Join-Path $repo 'dist\client\localai-client.exe'
+$distVer = Join-Path $repo 'dist\client\VERSION.txt'
+if (Test-Path $distExe) {
+    $distSha = $null; $distLine = '(读不到 VERSION.txt)'
+    if (Test-Path $distVer) {
+        $vtxt = Get-Content $distVer -Raw -Encoding UTF8
+        if ($vtxt -match '版本戳:\s*([0-9]{8}-[0-9]{4})\+([0-9a-fA-F]{7,40})(\.dirty-\w+)?') {
+            $distSha = $Matches[2].ToLower(); $distDirty = $Matches[3]
+            $distLine = "$($Matches[1])+$distSha$distDirty"
+        }
+    }
+    $headSha = (& git -C $repo rev-parse HEAD 2>$null)
+    if ($distSha -and $headSha) {
+        $headShort = $headSha.Substring(0, $distSha.Length).ToLower()
+        if ($distSha -eq $headShort) {
+            Write-Host ("  √ 出厂产物 dist\client:{0} —— 与 HEAD 同一个提交" -f $distLine) -ForegroundColor DarkGray
+        } else {
+            $behind = (& git -C $repo rev-list --count "$distSha..HEAD" 2>$null)
+            $howfar = if ($behind) { "落后 HEAD $behind 个提交" } else { "提交号不在当前历史里" }
+            Write-Host ("  ★ 出厂产物 dist\client:{0} —— **{1}**" -f $distLine, $howfar) -ForegroundColor Yellow
+            Write-Host "      装在用户机器上的不是当前源码。要出包:90-ops\build-client.ps1" -ForegroundColor DarkYellow
+            Write-Host "      ★ 这里【不判红】:'有没有重新出包'不是一次提交的性质。会红的那半在 doctor.py 第 ⑨ 环。" -ForegroundColor DarkYellow
+        }
+    } else {
+        # ★ 有 exe 却说不清它是什么 —— 不许静默略过。
+        Write-Host ("  ★ 出厂产物 dist\client 存在,但**说不清是哪个提交出的**({0})" -f $distLine) -ForegroundColor Yellow
+    }
+} else {
+    # ★ 没有 dist 是 worktree 的常态(dist/ 不进 git),但**要说出来** ——
+    #   "没检查" 与 "检查过了没问题" 必须长得不一样。
+    Write-Host "  ★ 出厂产物 dist\client 不存在 —— 本次**没有核对过出厂产物的身份**(worktree 里本来就没有)" -ForegroundColor Yellow
+}
 if ($skipped.Count -gt 0) {
     Write-Host "  ★ 没跑的(不是忽略,是已裁定 + 写明理由):" -ForegroundColor Yellow
     # 按理由归并 —— 同一条理由重复十几遍会把覆盖账淹掉,而覆盖账正是本脚本的重点。
