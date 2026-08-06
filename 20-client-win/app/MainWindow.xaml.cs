@@ -834,6 +834,21 @@ public partial class MainWindow : Window
         // ★ 连上中枢后,顶栏右上角改显【当前预期 token 输出速率】(用户裁定 2026-07-31)——
         //   连接这件事已由绿点表达,这块地方留给更有用的读数。其它状态(尚未配对/证书过期/被解除/
         //   连不上)仍如实显示,那些是必须让用户看见的事,不能被一个速率盖掉。
+        // ★★★ 本机设备证书快到期的告警要排在【在线】这一格**之前**。
+        //   这一条是「过期**之前**就要看得见」唯一能落地的地方,而它反直觉:
+        //   过期之前客户端**正是在线的** —— 告警只挂在断线那几格的话,它永远等到过期之后才出现,
+        //   而那时续签路由已经够不着了(lan-edge selftest 甲2 实测),唯一的出路只剩重新配对。
+        //   ⇒ 挡住这块地方的是那个 tok/s 读数;它有用,但比不上"你还有 N 天可以自愈"。
+        //   ★ RenewDue 段不会走到这里(CertWarning 在那一段返回 null)—— 正常自愈不打扰用户。
+        if (TheApp.Hub.CertWarning is { Length: > 0 })
+        {
+            StatusText.Text = Strings.Get("status.local_cert_expired");
+            StatusDot.Fill = (Brush)FindResource("RiskDanger");
+            StatusText.ToolTip = TheApp.Hub.CertWarning;
+            return;
+        }
+        StatusText.ToolTip = null;
+
         if (TheApp.Hub.State == HubState.Online)
         {
             StatusText.Text = TokenUsage.ExpectedOutputRate is { } r
@@ -854,8 +869,12 @@ public partial class MainWindow : Window
             //   显示成"未连接"会把人支去重启 Edge / 查防火墙 / 改地址,整整一趟无用功。
             HubState.HubServerError => ("status.hub_error", "RiskDanger"),
             HubState.ProtocolMismatch => ("status.proto_mismatch", "RiskWarning"),
-            // ★ 链不到钉住的 CA:处置与"过期"正好相反(那边不必重配,这边必须重配)
+            // ★ 链不到钉住的 CA:处置与"主机证书过期"正好相反(那边不必重配,这边必须重配)
             HubState.HubIdentityChanged => ("status.hub_changed", "RiskDanger"),
+            // ★★ 本机这一侧的两态。此前都掉进下面那条 _ => "未连接" —— 而"未连接"会把人支去
+            //   重启中枢 / 查防火墙 / 改地址,那台中枢从头到尾一点毛病没有。
+            HubState.LocalCertExpired => ("status.local_cert_expired", "RiskDanger"),
+            HubState.LocalProfileUnusable => ("status.local_unusable", "RiskDanger"),
             _ => ("status.offline", "FgMuted"),
         };
         StatusText.Text = Strings.Get(key);

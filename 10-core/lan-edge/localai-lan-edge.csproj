@@ -11,6 +11,9 @@
   <ItemGroup>
     <Compile Include="..\identity\Ca.cs" />
     <Compile Include="..\identity\CertLifecycle.cs" />
+    <!-- 跨进程响应契约的唯一登记表:服务端与客户端**编译同一份**(D92 硬前置 / 审计 A1)。
+         两侧各抄一份期望值的话,它们分家那天两边都不会红 —— 那正是 A1 的形状。 -->
+    <Compile Include="..\identity\WireContracts.cs" />
     <Compile Include="..\identity\Renewal.cs" />
     <Compile Include="..\identity\ServerCertRotator.cs" />
     <Compile Include="..\identity\Store.cs" />

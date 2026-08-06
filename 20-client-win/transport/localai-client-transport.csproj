@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="..\..\10-core\identity\Ca.cs" />
     <Compile Include="..\..\10-core\identity\CertLifecycle.cs" />
+    <Compile Include="..\..\10-core\identity\WireContracts.cs" />
     <Compile Include="..\..\10-core\identity\Renewal.cs" />
     <Compile Include="..\..\10-core\identity\ServerCertRotator.cs" />
     <Compile Include="..\..\10-core\identity\Store.cs" />

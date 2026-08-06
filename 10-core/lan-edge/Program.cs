@@ -649,7 +649,12 @@ static async Task<int> Selftest()
         await upstream.StartAsync();
 
         // --- the Edge, using the identity's REAL server cert (software-KSP key per B17/D44 -> SChannel-usable) ---
-        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upstreamPort}", 18443));
+        // ★ 这里带上 AdminPort:下面那条 /admin/ping 的**跨语言成对断言**要一个真的回环管理面。
+        //   ★★ 为什么不放进 admin-e2e:门禁只跑 `lan-edge selftest` 这一条(run-tests.ps1 的 Args),
+        //     放进 admin-e2e 就是写一条**没人跑的断言** —— ASSERTION-PITFALLS 第 10 条那种形状,
+        //     而且它会躺在覆盖账里显得已被认真处置过。
+        const int AdminPort = 18442;
+        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upstreamPort}", 18443, AdminPort: AdminPort));
         await edge.StartAsync();
 
         // client helper: custom root trust (CA), dial loopback, optional client cert
@@ -763,6 +768,84 @@ static async Task<int> Selftest()
                 Assert(!exShape.Contains("AuthenticationException"),
                        "★★ 异常链里**没有** AuthenticationException —— 客户端旧判据靠它兜底,故对这一格完全失灵");
 
+                // ══════════════════════════════════════════════════════════════
+                //  D? 甲2 · ★★★ 把上面那条和第 3 节【连起来】:过期之后用户还能不能自救?
+                // ══════════════════════════════════════════════════════════════
+                //  上面钉住了「过期证书死在 TLS 层」,第 3 节钉住了「不带证书能走匿名 /pair/enroll」。
+                //  **两条各自都绿,而中间那条缝谁也没看** —— 那条缝就是"所以过期之后该怎么办",
+                //  也正是客户端文案唯一的依据。这一段把它补上,三问三答:
+                //
+                //    ① 带着过期证书,连**续签**路由都够不着;
+                //    ② 带着过期证书,连**匿名**的 /pair/enroll 也够不着
+                //       ——「匿名」只在你**真的不出示证书**时成立,TLS 死在路由匹配之前;
+                //    ③ 把证书摘掉,同一个中枢、同一秒,/pair/enroll 立刻 200 + 六个词。
+                //
+                //  ⇒ 承重结论:**设备证书过期之后,唯一的出路是重新配对,而且必须先摘掉那张证书。**
+                //    ★ 由此 TlsFailure.Explain(LocalDeviceCertExpired) 里那句「本机会自动续签」
+                //      在它**唯一会被显示的时刻**(判据就是 notAfter <= now)是假的,
+                //      而「不要点重新配对」否掉的正是这里实测出来的唯一出路。见该文件的更正。
+                //    ★ 这三条**同时**成立才有意义:只钉①会读成"续签坏了",只钉③会读成"随时能重配"。
+                string EnrollJson(string who)
+                {
+                    using var k = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                    return JsonSerializer.Serialize(new
+                    {
+                        csr = Convert.ToBase64String(new CertificateRequest("CN=" + who, k, HashAlgorithmName.SHA256).CreateSigningRequest()),
+                        clientNonce = Convert.ToBase64String(R(32)),
+                        claimSecretHash = Convert.ToBase64String(SHA256.HashData(R(32))),
+                        protocolVersion = 1,
+                        displayName = who,
+                    });
+                }
+
+                // ① 过期证书够不着续签路由 —— 续签本身要用这张证书握手
+                int? renewStatus = null;
+                try
+                {
+                    using var c = MkClient(expiredWithKey);
+                    var rb = JsonSerializer.Serialize(new
+                    {
+                        csr = Convert.ToBase64String(new CertificateRequest("CN=client", expEc, HashAlgorithmName.SHA256).CreateSigningRequest()),
+                    });
+                    using var r = await c.PostAsync(baseUrl + "/identity/renew/enroll", new StringContent(rb, Encoding.UTF8, "application/json"));
+                    renewStatus = (int)r.StatusCode;
+                }
+                catch { /* TLS 层就断 —— 正是要钉的形状 */ }
+                Assert(renewStatus is null,
+                       "★★★ 过期设备证书**够不着续签路由**(实得 " + (renewStatus?.ToString() ?? "连状态码都没有") + ")"
+                       + " —— 续签要用这张证书握手,而它已经握不上了 ⇒ 「已过期了,本机会自动续签」是一句【结构上不可能兑现】的话");
+
+                // ② 仍然出示过期证书时,连匿名入口也够不着
+                int? pairWithExpired = null;
+                try
+                {
+                    using var c = MkClient(expiredWithKey);
+                    using var r = await c.PostAsync(baseUrl + "/pair/enroll",
+                                                    new StringContent(EnrollJson("rescue-with-expired"), Encoding.UTF8, "application/json"));
+                    pairWithExpired = (int)r.StatusCode;
+                }
+                catch { }
+                Assert(pairWithExpired is null,
+                       "★★★ **仍然出示**过期证书时,连匿名的 /pair/enroll 也够不着(实得 "
+                       + (pairWithExpired?.ToString() ?? "连状态码都没有") + ")—— 「匿名」只在真的不出示证书时才成立");
+
+                // ③ 摘掉证书 —— 同一个中枢、同一秒,自救路径立刻可达
+                int? pairWithout = null; var sasLen = 0;
+                try
+                {
+                    using var c = MkClient(null);
+                    using var r = await c.PostAsync(baseUrl + "/pair/enroll",
+                                                    new StringContent(EnrollJson("rescue-no-cert"), Encoding.UTF8, "application/json"));
+                    pairWithout = (int)r.StatusCode;
+                    if (r.IsSuccessStatusCode)
+                        sasLen = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("sas").GetArrayLength();
+                }
+                catch { }
+                Assert(pairWithout == 200 && sasLen == 6,
+                       "★★★ 摘掉那张过期证书后,**同一个中枢、同一秒**,/pair/enroll 立刻 200 + 六个词(实得 "
+                       + (pairWithout?.ToString() ?? "连状态码都没有") + " / " + sasLen + " 词)"
+                       + " ⇒ 【过期之后唯一的自救路径 = 重新配对】—— 客户端文案不许否掉它");
+
                 Store.Mutate(idDir, s => s.RevokeDevice("expired-test"));   // 收拾干净,别影响后面的断言
             }
             finally { Ca.DeleteKey(expKeyName); }
@@ -781,6 +864,13 @@ static async Task<int> Selftest()
                 using var r = await c.PostAsync(baseUrl + "/identity/renew/enroll", new StringContent(body, Encoding.UTF8, "application/json"));
                 Assert((int)r.StatusCode == 200, "续签 enroll(旧证书 mTLS)-> 200 (" + (int)r.StatusCode + ")");
                 var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+                // ★★ D92 成对断言(服务端半边):顶层键集合**正好**等于登记表那一组。
+                //   用集合相等而不是"包含" —— 「包含」放过"多发一个键"和"改了名还留着旧的",
+                //   而那两种正是字段搬家的实际形状(A1 就是搬了家)。
+                var enrollKeys = d.EnumerateObject().Select(x => x.Name).ToArray();
+                Assert(WireContracts.KeysMatch(enrollKeys, WireContracts.RenewEnroll),
+                       "★★ 成对断言/服务端:/identity/renew/enroll 顶层键 == 登记表("
+                       + WireContracts.Describe(enrollKeys, WireContracts.RenewEnroll) + ")");
                 renewalId = d.GetProperty("renewalId").GetString()!;
                 candB64 = d.GetProperty("candidateCert").GetString()!;
             }
@@ -801,6 +891,11 @@ static async Task<int> Selftest()
             {
                 using var r = await c.PostAsync(baseUrl + "/identity/renew/complete?renewalId=" + renewalId, new StringContent(""));
                 Assert((int)r.StatusCode == 200, "续签 complete(候选证书 mTLS)-> 200 (" + (int)r.StatusCode + ")");
+                var cKeys = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement
+                            .EnumerateObject().Select(x => x.Name).ToArray();
+                Assert(WireContracts.KeysMatch(cKeys, WireContracts.RenewComplete),
+                       "★★ 成对断言/服务端:/identity/renew/complete 顶层键 == 登记表("
+                       + WireContracts.Describe(cKeys, WireContracts.RenewComplete) + ")");
                 // 幂等:成功响应丢了、客户端重试
                 using var r2 = await c.PostAsync(baseUrl + "/identity/renew/complete?renewalId=" + renewalId, new StringContent(""));
                 Assert((int)r2.StatusCode == 200 &&
@@ -836,6 +931,59 @@ static async Task<int> Selftest()
             //   它证明的是"退休证书不能用",而不是"吊销起作用了"。
             currentCert = newCert.CopyWithPrivateKey(clientEcdsa);
         }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 丙 · ★★ 跨语言【成对断言】的服务端半边(D92 硬前置)
+        // ══════════════════════════════════════════════════════════════════════
+        //  客户端半边在 20-client-win/app/Selftest.cs(拿这个形状喂 HubAdmin.ParseServerCert)。
+        //  两侧**读同一份** WireContracts —— 期望值只有一份,它没法跟自己分家。
+        //  ★ A1 的教训:两边各写各的、各自都绿,而中间那条缝谁也没看。
+        var coveredContracts = new List<string> { "POST /identity/renew/enroll", "POST /identity/renew/complete" };
+        {
+            using var adminHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{AdminPort}") };
+            using var pr = await adminHttp.GetAsync("/admin/ping");
+            Assert((int)pr.StatusCode == 200, "回环管理面可达 /admin/ping(" + (int)pr.StatusCode + ")");
+            var pj = JsonDocument.Parse(await pr.Content.ReadAsStringAsync()).RootElement;
+
+            var topKeys = pj.EnumerateObject().Select(x => x.Name).ToArray();
+            Assert(WireContracts.KeysMatch(topKeys, WireContracts.AdminPing),
+                   "★★ 成对断言/服务端:/admin/ping 顶层键 == 登记表("
+                   + WireContracts.Describe(topKeys, WireContracts.AdminPing) + ")");
+            coveredContracts.Add("GET /admin/ping");
+
+            // ★★★ serverCert 子对象。**这一格此前没有任何读取方** —— 而 lan-edge 那行注释
+            //   写着「主机界面据此报警」。吐出来却没人读 = 轮换器 fail-closed 的最后一段路是断的。
+            //   客户端侧的读取方(HubAdmin.ParseServerCert)与这条断言是同一次改动里加上的。
+            // ★ 这里必须真的有一个轮换器:selftest 走的是生产路径(没传 serverCertOverride),
+            //   所以 Rotator 装着,读的是这份**临时**身份的 server.cer —— 副作用不落到实机。
+            Assert(pj.TryGetProperty("serverCert", out var sc) && sc.ValueKind == JsonValueKind.Object,
+                   "★★ /admin/ping 真的吐出了 serverCert 子对象(轮换器装上了 —— 零命中不算通过)");
+            if (sc.ValueKind == JsonValueKind.Object)
+            {
+                var scKeys = sc.EnumerateObject().Select(x => x.Name).ToArray();
+                Assert(WireContracts.KeysMatch(scKeys, WireContracts.AdminPingServerCert),
+                       "★★ 成对断言/服务端:/admin/ping .serverCert 顶层键 == 登记表("
+                       + WireContracts.Describe(scKeys, WireContracts.AdminPingServerCert) + ")");
+                coveredContracts.Add("GET /admin/ping .serverCert");
+                // 反向:健康的新身份**不该**报 needsAttention —— 否则这条告警恒真,等于噪音
+                Assert(sc.GetProperty("needsAttention").GetBoolean() == false,
+                       "★ 反向:刚 init 的身份不报 needsAttention(恒真的告警两周内就会被学会忽略)");
+                Assert(sc.GetProperty("daysLeft").GetDouble() > 0,
+                       "★ 反向:刚 init 的身份 daysLeft > 0(判据不是恒红的)");
+            }
+        }
+
+        // ★★ 元断言:登记表里的**每一条**都要在上面被核对过。
+        //   新加一条路由却忘了写成对断言 ⇒ 这里当场红,而不是静默少测一条。
+        //   (ASSERTION-PITFALLS 第 3b 条:判词说"每一个"时,遍历源必须是表本身,不是手写名单。
+        //    这里手写的是**已覆盖清单**,遍历源是 WireContracts.All —— 新增一项会红。)
+        var missing = WireContracts.All.Select(c => c.Name).Except(coveredContracts).ToArray();
+        Assert(missing.Length == 0,
+               "★★★ 元断言:WireContracts 登记的每一条契约都要有服务端成对断言 —— 缺:["
+               + string.Join(", ", missing) + "]");
+        Assert(coveredContracts.Count == WireContracts.All.Length,
+               $"★ 元断言的两个方向:核对过 {coveredContracts.Count} 条 / 登记 {WireContracts.All.Length} 条"
+               + "(核对数多于登记数 = 有人重复核对或表漏登记)");
 
         // 4. revoke the paired device -> its cert can no longer reach business
         var store = Store.LoadOrEmpty(idDir);

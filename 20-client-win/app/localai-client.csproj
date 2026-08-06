@@ -39,6 +39,10 @@
          ★ 修在这里是对的:csproj 归客户端车道,而它要跟上共享源码的新依赖。
          ★ 不是去改 ClientTransport.cs —— 那是 core/identity 的地盘。 -->
     <Compile Include="..\..\10-core\identity\CertLifecycle.cs" />
+    <!-- 2026-08-06(证书生命周期车道):跨进程响应契约的唯一登记表。
+         客户端的 HubAdmin.ParseServerCert 与 lan-edge 的 /admin/ping 断言**读同一组常量** ——
+         各抄一份的话,分家那天两边都不会红(审计 A1 就是这么漏的)。 -->
+    <Compile Include="..\..\10-core\identity\WireContracts.cs" />
     <Compile Include="..\transport\TlsFailure.cs" />
     <Compile Include="..\transport\ClientTransport.cs" />
   </ItemGroup>

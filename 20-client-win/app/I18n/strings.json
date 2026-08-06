@@ -65,6 +65,8 @@
   "status.hub_error":     { "zh-CN": "中枢报错(它在)",     "en-US": "Hub error (it is up)",     "ja-JP": "ハブのエラー(起動中)" },
   "status.proto_mismatch":{ "zh-CN": "协议对不上",          "en-US": "Protocol mismatch",        "ja-JP": "プロトコル不一致" },
   "status.hub_changed":   { "zh-CN": "不是你配对的那台",    "en-US": "Not the hub you paired",   "ja-JP": "ペアリング済みのハブではありません" },
+  "status.local_cert_expired": { "zh-CN": "本机证书已过期",  "en-US": "This device's certificate expired", "ja-JP": "このデバイスの証明書が期限切れ" },
+  "status.local_unusable":     { "zh-CN": "本机配对材料已损坏", "en-US": "Local pairing material unusable", "ja-JP": "ローカルのペアリング資材が使用不能" },
 
   "pairing.title":        { "zh-CN": "与中枢配对",          "en-US": "Pair with the hub",       "ja-JP": "ハブとペアリング" },
   "pairing.start":        { "zh-CN": "开始配对",            "en-US": "Start pairing",           "ja-JP": "ペアリングを開始" },

@@ -53,6 +53,22 @@ public sealed record PendingPair(string RequestId, string DisplayName, string[] 
 /// <summary>主机成员库里的一台设备(比 HubDevice 多了指纹短码 —— 同名设备很常见,只按名字分不开)。</summary>
 public sealed record AdminDevice(string DeviceId, string DisplayName, string Status, string? CertShort);
 
+/// <summary>
+/// 主机侧**服务器证书自动轮换**的可观测状态,来自 <c>/admin/ping</c> 的 <c>serverCert</c>。
+///
+/// ★★ 这个类型存在的全部理由:在它之前,`serverCert` 这个字段**全仓没有任何读取方** ——
+///   而 lan-edge 那一行的注释写着「主机界面据此报警」。轮换器 fail-closed 的最后一段路
+///   (状态已经吐出来了)就断在这里:**吐出来而没人读,等于没响**。
+///   另一条通道(stderr 的 `[cert] !!` 横幅)只落在那个控制台窗口里,
+///   而用户平时看的是这个 WPF 客户端 —— 两条通道都到不了人眼前,轮换失败就会一路静默滑到过期。
+///
+/// ★ `NeedsAttention` **由主机算好后直接吐出**,客户端不自己再推一遍:
+///   判据(连续失败次数 / 相位)在主机那边,重算一份就是给"两边说法相反"留门
+///   (CertLifecycle 顶部那段注释说的就是这件事)。
+/// </summary>
+public sealed record ServerCertStatus(double DaysLeft, string Phase, int ConsecutiveFailures,
+                                      string? LastError, bool NeedsAttention);
+
 public sealed class HubAdmin
 {
     /// <summary>
@@ -114,12 +130,30 @@ public sealed class HubAdmin
     public string? LastError { get; private set; }
 
     /// <summary>
+    /// 主机侧服务器证书轮换的最新状态。null = 这次 ping 里主机没报(老中枢,或轮换器没装上)。
+    /// ★ 「没报」与「报了说一切正常」是两件事,所以用 null 区分,不塞一个假的"健康"进去。
+    /// </summary>
+    public ServerCertStatus? ServerCert { get; private set; }
+
+    /// <summary>
+    /// 主机侧证书要不要惊动人 —— 界面直接读这一句。null = 不必打扰。
+    /// ★ 措辞里必须**同时**有剩余天数和该做什么:只说"需要注意"的告警等于没说。
+    /// </summary>
+    public string? ServerCertWarning => ServerCert is { NeedsAttention: true } s
+        ? $"主机的服务器证书还有 {s.DaysLeft:0.#} 天到期,自动续签"
+          + (s.ConsecutiveFailures > 0 ? $"**已连续失败 {s.ConsecutiveFailures} 次**" : "尚未把它续上")
+          + (string.IsNullOrWhiteSpace(s.LastError) ? "" : $"(最后一次的错误:{s.LastError})")
+          + " —— 请在主机上执行 localai-identity renew-server。"
+          + "★ 不必重新配对:CA 不变,已配对的设备全部照常有效。"
+        : null;
+
+    /// <summary>
     /// 探测回环管理面。★ 只有【连得上】且【hubId 与本机档案一致】才算可用。
     /// 未配对时没有档案可比,这时只要连得上就认 —— 那正是"主机第一次自己配自己"的场景。
     /// </summary>
     public async Task<bool> ProbeAsync(string? expectHubId)
     {
-        Available = false; HubId = null; LastError = null; LastProbe = AdminProbeResult.Unknown;
+        Available = false; HubId = null; LastError = null; ServerCert = null; LastProbe = AdminProbeResult.Unknown;
         try
         {
             using var ping = new HttpRequestMessage(HttpMethod.Get, Base + "/admin/ping");
@@ -134,6 +168,7 @@ public sealed class HubAdmin
             var j = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
             HubId = j.TryGetProperty("hubId", out var h) ? h.GetString() : null;
             PairingWindowOpen = j.TryGetProperty("pairingWindowOpen", out var w) && w.GetBoolean();
+            ServerCert = ParseServerCert(j);
             if (!string.IsNullOrWhiteSpace(expectHubId) && !string.Equals(HubId, expectHubId, StringComparison.Ordinal))
             {
                 // 连得上但不是【我们这个】中枢 —— 同机跑着另一个中枢时会这样。如实说,不糊弄过去。
@@ -169,6 +204,43 @@ public sealed class HubAdmin
             }
             return false;
         }
+    }
+
+    /// <summary>
+    /// 从 <c>/admin/ping</c> 的响应里取出 <c>serverCert</c>。**这就是 D92 那条成对断言的客户端半边** ——
+    /// 主机侧钉「这个子对象有哪些顶层键」,这里钉「拿那个形状能不能解析出目标字段」。
+    ///
+    /// ★★ A1 就是这条缝漏出来的:服务端把 `lease_id` 放在 `body["lease"]["lease_id"]`,
+    ///   客户端在**顶层**找;两边各自都有断言、各自都绿,**中间那条缝谁也没看**。
+    ///   所以这个方法被单独提出来、做成 <c>internal static</c>:断言能拿一段**真的 JSON 原文**喂它,
+    ///   而不是去测一个仿造的解析器(测仿造品的话,真解析器改坏了也不会红)。
+    ///
+    /// ★ 主机没报(老中枢 / 轮换器没装)时返回 null —— 不编一个"健康"出来。
+    /// ★ 键缺一个就整条判 null:半份状态比没有状态更坏(会显示一个可信但错误的天数)。
+    /// </summary>
+    internal static ServerCertStatus? ParseServerCert(JsonElement ping)
+    {
+        if (!ping.TryGetProperty("serverCert", out var sc) || sc.ValueKind != JsonValueKind.Object) return null;
+        try
+        {
+            // ★★ 拿**登记表**核对键集合,而不是只挑自己要用的那几个键。
+            //   只挑要用的会放过"服务端把字段搬了家、顺手改了别的键名"这一整类改动 ——
+            //   而那正是 A1 的形状。认不出的形状一律判 null:**半份状态比没有状态更坏**,
+            //   它会在界面上显示一个可信但错误的天数,而人会照着它决定要不要动手。
+            if (!LocalAI.Identity.WireContracts.KeysMatch(
+                    sc.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPingServerCert))
+                return null;
+            if (!sc.TryGetProperty("daysLeft", out var d) || !sc.TryGetProperty("phase", out var ph)
+                || !sc.TryGetProperty("consecutiveFailures", out var cf)
+                || !sc.TryGetProperty("needsAttention", out var na)) return null;
+            return new ServerCertStatus(
+                d.GetDouble(),
+                ph.GetString() ?? "",
+                cf.GetInt32(),
+                sc.TryGetProperty("lastError", out var le) && le.ValueKind == JsonValueKind.String ? le.GetString() : null,
+                na.GetBoolean());
+        }
+        catch { return null; }
     }
 
     async Task<(int status, string body)> Call(HttpMethod m, string path, object? body = null)

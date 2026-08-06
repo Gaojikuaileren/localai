@@ -23,7 +23,13 @@ namespace LocalAI.Client.Services;
 // 但处置**正好相反**:过期要在主机上续签、不必重配;链不通则意味着对面不是你配对的那个中枢
 // (主机重铸了身份、或你拨到了别人家),那时**重新配对才是唯一出路**。
 // 以前这两种全塌进 CertExpired,而界面还加粗写着"不需要重新配对" —— 把唯一的出路否掉了。
-public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch, HubServerError, HubIdentityChanged }
+// LocalCertExpired / LocalProfileUnusable(D89 §1.6 + 决议包 §2.2):**本机这一侧**的两种坏法。
+// 五种症状全是"连不上",而处置各不相同 —— 此前这两格是空的,实际归宿都是 Offline =「中枢没开机」,
+// 于是用户一趟趟跑去重启一个完全正常的中枢。
+// ★ 两者**不许合并**:一个是"证书到期了"(重配要搭上一把本来有用的私钥),
+//   一个是"私钥/档案已经没了"(重配不毁掉任何还有用的东西)。代价不同,话就得分开说。
+public enum HubState { NotPaired, Connecting, Online, Offline, Revoked, CertExpired, Unauthorized, ProtocolMismatch, HubServerError, HubIdentityChanged,
+                       LocalCertExpired, LocalProfileUnusable }
 
 /// <summary>主机成员库里的一台设备。DisplayName 是设备**自报**的,只作显示、永不进 prompt。</summary>
 public sealed record HubDevice(string DeviceId, string DisplayName, string Status);
@@ -212,15 +218,21 @@ public sealed class HubClient
         }
         catch (Exception ex)
         {
-            // 证书过期与"中枢没开机"症状相同、处置不同 -> 必须分开报,否则用户会瞎折腾。
-            State = ClassifyTlsFailure(ex) ?? HubState.Offline;
+            // 五种坏法症状相同("连不上")、处置各不相同 -> 必须分开报,否则用户会瞎折腾。
+            State = ClassifyTlsFailure(ex, Profile) ?? HubState.Offline;
+            // ★★ 文案**全部来自 transport 的 TlsFailure.Explain** —— 不在这里另写一份。
+            //   判据与说法必须同源:它们一旦分家,归因改了而话没改(或反过来)的那一天
+            //   不会有任何东西变红,而用户看到的是一句与结论对不上的建议。
             LastError = State switch
             {
-                HubState.CertExpired =>
-                    "主机证书已过期 —— 在主机上续签(localai-identity renew-server)即可,不必重新配对。",
-                HubState.HubIdentityChanged =>
-                    "连上了,但对面的证书链不到你配对时钉住的那个中枢 —— "
-                    + "可能是主机重铸了身份,或者这个地址上是另一台机器。这种情况【必须重新配对】。",
+                HubState.CertExpired          => TlsFailure.Explain(TlsFailureKind.ServerCertExpired),
+                HubState.HubIdentityChanged   => TlsFailure.Explain(TlsFailureKind.HubIdentityChanged),
+                // ★ 本机设备证书过期:处置是「重新配对」—— 续签路由那时已经够不着了(实测)。
+                HubState.LocalCertExpired     => TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired),
+                // ★ 本机材料不可用:再拼上**是三种坏法里的哪一种**,尤其"私钥不在了"要点明
+                //   它按设计拷不过来也找不回来,否则用户会一直找。
+                HubState.LocalProfileUnusable => TlsFailure.Explain(TlsFailureKind.LocalProfileUnusable)
+                                                 + " " + TlsFailure.ExplainLocal(TlsFailure.CheckLocalMaterials(Profile)),
                 _ => ex.Message,
             };
             throw;
@@ -249,47 +261,88 @@ public sealed class HubClient
         body.Contains("lan_device_unknown", StringComparison.OrdinalIgnoreCase) ||
         body.Contains("revoked", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>异常链里是否有"证书过期/链无效"的痕迹。</summary>
     /// <summary>
-    /// TLS 失败分两类,处置正好相反,所以必须分开:
-    ///   · CertExpired        —— 服务器证书过期:在主机上续签即可,**不必**重新配对;
-    ///   · HubIdentityChanged —— 链不到配对时钉住的那个 CA:对面不是你配对的那个中枢
-    ///     (主机重铸了身份、或拨错了地方),这时**重新配对是唯一出路**。
+    /// TLS 失败的五分类 —— **整个判据都在 transport 的 <see cref="TlsFailure.Classify"/> 里**,
+    /// 这里只做枚举映射。决议包 cert-lifecycle-2026-08-05 §2.3。
     ///
-    /// ★★ 以前这里是 `e is AuthenticationException → true`,把**所有** TLS 失败都判成"过期",
-    ///   而界面加粗写着"不需要重新配对" —— 恰好把唯一的出路否掉了。
-    ///   而且拿异常 Message 里的英文单词当判据本身就不可靠(随 .NET 版本和语言变)。
-    /// ★ 判不出来时【不猜过期】:返回 null,由调用方归到普通的连不上,别给一个假的结论。
+    /// ★★ 为什么这里一行判据都不许自己写(这一条是承重的):
+    ///   老实现靠**异常 Message 里的英文单词**认因,而实测有两处结构性失灵 ——
+    ///   ① 「本机设备证书过期」的异常链是 IOException -> Win32Exception,消息是**本地化**的,
+    ///      英文针一条都对不上,于是掉进 Offline =「中枢没开机」;
+    ///   ② 「主机重铸身份」时 .NET 发的是 `RemoteCertificateNameMismatch, RemoteCertificateChainErrors`,
+    ///      里面**一个链状态词都没有**,只认 UntrustedRoot/PartialChain 的判据全部落空。
+    ///   `TlsFailure.Classify` 先查**本机证书这个确定的本地事实**,再去解读会漂移的异常文本 ——
+    ///   顺序是承重的,而且它被 transport selftest 用**实测原文**钉着。两边各写一份必然漂开。
+    ///
+    /// ★★★ 老代码那条兜底 `if (e is AuthenticationException) return HubIdentityChanged;` **已删**:
+    ///   实测拨到一个跑普通 HTTP 的地址(路由器/NAS 管理页,或 DHCP 把旧地址分给了别人)时,
+    ///   异常是 `AuthenticationException: Cannot determine the frame size...`,兜底会判成
+    ///   「必须重新配对」—— 而重新配对**先删本机私钥**。为一个填错地址的问题销毁有效身份。
+    ///   ★ 但**不能只删不换**:重铸身份那一格原来正是靠这条兜底答对的。名字不匹配的分支
+    ///   已在 `TlsFailure.Classify` 里(②),所以这里直接调用它即可 —— 见决议包 §2.3 的显著警告。
+    ///
+    /// ★ 判不出来返回 null,由调用方归到普通的"连不上" —— **别猜**。
     /// </summary>
-    static HubState? ClassifyTlsFailure(Exception ex)
-    {
-        for (var e = ex; e is not null; e = e.InnerException)
+    static HubState? ClassifyTlsFailure(Exception ex, ClientProfile? profile) =>
+        TlsFailure.Classify(ex, profile, DateTimeOffset.UtcNow) switch
         {
-            if (e is System.Security.Cryptography.X509Certificates.X509ChainStatusFlags) break;
-            var m = e.Message ?? "";
-            // 链不到钉住的 CA:这是"换了中枢",不是"过期"
-            if (m.Contains("UntrustedRoot", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("PartialChain", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("RevocationStatusUnknown", StringComparison.OrdinalIgnoreCase))
-                return HubState.HubIdentityChanged;
-            if (m.Contains("expired", StringComparison.OrdinalIgnoreCase) ||
-                m.Contains("NotTimeValid", StringComparison.OrdinalIgnoreCase))
-                return HubState.CertExpired;
-        }
-        // ★ 只知道"TLS 没握成",但不知道是哪一种 —— 那就【别下结论】
-        for (var e = ex; e is not null; e = e.InnerException)
-            if (e is System.Security.Authentication.AuthenticationException) return HubState.HubIdentityChanged;
-        return null;
-    }
+            TlsFailureKind.LocalProfileUnusable   => HubState.LocalProfileUnusable,
+            TlsFailureKind.LocalDeviceCertExpired => HubState.LocalCertExpired,
+            TlsFailureKind.ServerCertExpired      => HubState.CertExpired,
+            TlsFailureKind.HubIdentityChanged     => HubState.HubIdentityChanged,
+            _ => null,                              // ★ 判不出来就【别猜】
+        };
 
-    /// <summary>轻量连通性探测:启动时用,判断中枢在不在线 / 本机是否仍是成员。</summary>
+    /// <summary>
+    /// 本机设备证书的**提前**告警。null = 不该打扰用户。
+    ///
+    /// ★★ 这是「过期**之前**就要看得见」的落点。此前整套归因都发生在**握手失败之后** ——
+    ///   而那时已经晚了:实测证书一旦真过期,续签路由就够不着了(lan-edge selftest 甲2),
+    ///   自愈的窗口恰好在**还连得上**的那段时间里,也就是这个属性唯一有机会说话的时候。
+    /// ★ RenewDue 段不出声(系统正在正常自愈);Critical / 已过期才出声。判据在 CertLifecycle,
+    ///   两侧共用同一份,免得"主机以为还早、客户端以为该急了"。
+    /// ★ 时间单独开一个可注入的重载 —— 断言不许读真实时钟(ASSERTION-PITFALLS 第 5 条)。
+    /// </summary>
+    public string? CertWarning => CertWarningAt(DateTimeOffset.UtcNow);
+
+    /// <summary><see cref="CertWarning"/> 的可注入时间版本(断言用这个)。</summary>
+    public string? CertWarningAt(DateTimeOffset now) => TlsFailure.WarnLocalCert(Profile, now);
+
+    /// <summary>
+    /// 轻量连通性探测:启动时用,判断中枢在不在线 / 本机是否仍是成员。
+    ///
+    /// ★★ 连之前先**自愈一次**:设备证书进入续签窗口(或上一次续签崩在半路)就把它做完。
+    ///   这是 `Transport.RenewDeviceCertIfDue` 在客户端里**唯一**的调用点 ——
+    ///   在它接上之前,那套续签代码是随包发布的死代码,而实机上设备证书 90 天一到就只能重新配对。
+    /// </summary>
     public async Task<HubState> ProbeAsync()
     {
         if (Profile is null) { State = HubState.NotPaired; return State; }
         State = HubState.Connecting;
+        await TryRenewDeviceCertAsync();
         try { await CallAsync("/v1/models"); }
         catch { /* State 已在 CallAsync 里置为 Offline */ }
         return State;
+    }
+
+    /// <summary>
+    /// 到点就续一次设备证书。**best-effort,绝不把探测顶掉**。
+    ///
+    /// ★★ 为什么必须包 try/catch(决议包 §2.6 给的片段里没有,那是个真缺口):
+    ///   `RenewDeviceCertIfDue` 内部走的是 `Transport.Send`,中枢不在线时它**抛**。
+    ///   不接住的话,`ProbeAsync` 会在调 `/v1/models` **之前**就抛出去,
+    ///   于是 State 永远停在 Connecting,归因一格都跑不到 —— 「中枢没开机」这个最常见的情形
+    ///   反而变成了转圈。★ 续签失败**不是**一个要报给用户的状态:证书还没到期,
+    ///   下一次探测还会再试;真到了该喊的时候由 CertWarning 出声。
+    /// </summary>
+    async Task TryRenewDeviceCertAsync()
+    {
+        if (Profile is null || TryDial() is not { } ep) return;
+        try
+        {
+            await Transport.RenewDeviceCertIfDue(Profile, ep, AppPaths.StateDir, DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex) { LastError = "设备证书自动续签这次没成:" + ex.Message; }
     }
 
     // ---------------------------------------------------------------- 主机管理 API(P3c S2)

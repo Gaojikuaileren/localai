@@ -635,12 +635,20 @@ public sealed class DevicesView : UserControl
                 HubState.Online => "status.online",
                 HubState.Connecting => "status.connecting",
                 HubState.Revoked => "status.revoked",
-                HubState.CertExpired => "status.cert_expired",   // ★ 就在“解除本机配对”红按钮上方:说清“是证书过期、别解除”最要紧
+                HubState.CertExpired => "status.cert_expired",   // ★ 就在“解除本机配对”红按钮上方:说清“是【主机】证书过期、别解除”最要紧
                 HubState.Unauthorized => "status.unauthorized",
                 HubState.HubServerError => "status.hub_error",       // ★ 中枢在,是它内部出错 —— 别读成"连不上"
                 HubState.ProtocolMismatch => "status.proto_mismatch",
                 HubState.HubIdentityChanged => "status.hub_changed",
+                // ★★ 本机这一侧的两态。这张卡上就有那个红色的「解除本机配对」按钮,
+                //   所以这两格尤其要说对:一格是"过期了,只能重新配对"(下面 LastError 会说清代价),
+                //   一格是"材料没了,重配不毁掉任何还有用的东西"。判成"未连接"会让人去重启一台没病的中枢。
+                HubState.LocalCertExpired => "status.local_cert_expired",
+                HubState.LocalProfileUnusable => "status.local_unusable",
                 _ => "status.offline" })}"),
+            // ★★ 过期【之前】的提醒:此刻客户端**还是在线的**,所以它不会出现在上面那个状态词里。
+            //   不在这里露一次,用户就只能等到过期之后才知道 —— 而那时续签路径已经够不着了。
+            TheApp.Hub.CertWarning is { Length: > 0 } certWarn ? Ui.Caption(certWarn) : new Border { Height = 0 },
             // ★ 状态行只有一个词,处置办法在 LastError 里 —— 不显示出来等于没说
             TheApp.Hub.LastError is { Length: > 0 } lastWhy ? Ui.Caption(lastWhy) : new Border { Height = 0 },
             new Border { Height = 12 },
@@ -736,6 +744,18 @@ public sealed class DevicesView : UserControl
             Ui.Caption("★ 本机的连接地址是探出来的,不用你填 —— 而且这里【不能】填 127.0.0.1:"
                        + "业务口只绑在网卡 IP 上(run-lan 那个参数),回环上只有管理面。"));
 
+        // ★★★ 主机侧证书自动轮换的告警落点。**这一格在此之前是空的**:
+        //   /admin/ping 一直在吐 serverCert,lan-edge 那行注释写着「主机界面据此报警」,
+        //   而全仓没有任何读取方 —— fail-closed 的最后一段路断在这里,状态吐出来了却没人读。
+        //   轮换器另一条通道(stderr 的 [cert] !! 横幅)只落在那个控制台窗口里,
+        //   用户平时看的是这个界面 ⇒ 两条通道都到不了人眼前,失败就会一路静默滑到证书过期。
+        // ★ 只在 NeedsAttention 时出现:轮换正常工作时一个字都不说(否则两周内就被学会忽略)。
+        if (admin.ServerCertWarning is { Length: > 0 } scw)
+        {
+            stack.Children.Add(new Border { Height = 10 });
+            stack.Children.Add(Ui.Body(scw));
+        }
+
         if (TheApp.Hub.IsPaired)
         {
             stack.Children.Add(new Border { Height = 10 });
@@ -753,7 +773,13 @@ public sealed class DevicesView : UserControl
                 HubState.Unauthorized => "status.unauthorized",
                 HubState.HubServerError => "status.hub_error",
                 HubState.ProtocolMismatch => "status.proto_mismatch",
+                // ★ 这张是**主机自己那台**的卡片,而上面那张漏了 HubIdentityChanged、
+                //   本机两态也没有 —— 三格一起补齐。主机自己也会遇到设备证书过期(它同样是一台配对过的客户端)。
+                HubState.HubIdentityChanged => "status.hub_changed",
+                HubState.LocalCertExpired => "status.local_cert_expired",
+                HubState.LocalProfileUnusable => "status.local_unusable",
                 _ => "status.offline" })}", muted: true));
+            if (TheApp.Hub.CertWarning is { Length: > 0 } hcw) stack.Children.Add(Ui.Caption(hcw));
             if (TheApp.Hub.LastError is { Length: > 0 } lw) stack.Children.Add(Ui.Caption(lw));
         }
         else

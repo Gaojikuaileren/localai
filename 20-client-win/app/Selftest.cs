@@ -6157,8 +6157,19 @@ public static class Selftest
                                + "而「过期」不必重配。旧代码把所有 TLS 失败都判成过期,界面还加粗说不必重配");
                         Assert(!Body(hcCls).Contains("static bool IsCertExpiry"),
                                "★ 那个把所有 AuthenticationException 判成过期的旧函数不许再存在");
-                        Assert(Body(hcCls).Contains("必须重新配对"),
+                        // ★★ 2026-08-06 改判据(**不是**放宽):原来查的是 HubClient.cs 的**源码里**
+                        //   有没有「必须重新配对」这几个字。那句话现在搬到了 TlsFailure.Explain ——
+                        //   判据与文案同源是这次改动的**目的**(两份必然漂开,而漂开那天两边都不会红),
+                        //   于是这条断言开始因为**正确的重构**而红,说的还是一句假话(它确实在说)。
+                        //   ⇒ 判词没变,判据改成查【用户真会看到的那句话】,并另钉一条"这一态真的路由到它"。
+                        //   这比查源码文本强:它测的是**输出**,不是那句话存在哪个文件里。
+                        //   (ASSERTION-PITFALLS 第 3b 条:判词说"文案要说清",判据却写死了一个文件。)
+                        Assert(LocalAI.ClientTransport.TlsFailure
+                                   .Explain(LocalAI.ClientTransport.TlsFailureKind.HubIdentityChanged)
+                                   .Contains("必须重新配对"),
                                "★ 换了中枢时要说清唯一出路就是重新配对");
+                        Assert(CodeOnly(hcCls).Contains("HubState.HubIdentityChanged   => TlsFailure.Explain"),
+                               "★★ 而且这一态真的路由到那句话 —— 否则文案对了、界面上却看不到它");
                     }
 
                     // ⑫ UI 侧不许 sync-over-async —— 2026-08-04 实机卡死就是一行 .GetAwaiter().GetResult()
@@ -6441,6 +6452,140 @@ public static class Selftest
                        "★ 有【改连接地址】入口 —— 重新配对会删掉本机私钥,把有效身份亲手销毁");
                 var dv = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
                 Assert(dv is null || dv.Contains("ChangeDialRow(p)"), "★ 已配对卡片上真的把改地址露出来了");
+
+                // ══════════════════════════════════════════════════════════════
+                //  D? · 证书生命周期真的接上了(审计 A5:此前三样东西**零调用点**)
+                // ══════════════════════════════════════════════════════════════
+                //  A5 的形状值得记住:core 车道**完全遵守了纪律** —— 没越界,写了决议包点名
+                //  client 半边要改 HubClient.cs 哪一行 —— 而那一行至今没人改。
+                //  同一轮里 TlsFailure.cs 却被链进了客户端构建 ⇒ **随包发布的死代码**。
+                //  ⇒ 判据不是"库写好了",是"用户在过期之前看得见,而且给的建议他能执行"。
+                {
+                    var hc = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+
+                    // ---- ① 三样东西真的有调用点 ----
+                    Assert(hc is not null && CodeOnly(hc).Contains("TlsFailure.Classify("),
+                           "★★★ ClassifyTlsFailure 走 transport 的 TlsFailure.Classify —— "
+                           + "不在客户端里另写一份判据(两份必然漂开,而漂开那天两边都不会红)");
+                    Assert(hc is not null && CodeOnly(hc).Contains("Transport.RenewDeviceCertIfDue("),
+                           "★★★ RenewDeviceCertIfDue 在客户端里**有调用点** —— "
+                           + "没有它,那套续签代码就是随包发布的死代码,设备证书 90 天一到只能重新配对");
+                    Assert(hc is not null && CodeOnly(hc).Contains("TlsFailure.WarnLocalCert("),
+                           "★★★ 证书相位判据接上了(CertLifecycle 经 WarnLocalCert)—— 这是「过期之前看得见」的来源");
+
+                    // ---- ② 老判据的两处病灶都已拆掉 ----
+                    var hcCode = hc is null ? "" : CodeOnly(hc);
+                    Assert(!hcCode.Contains("UntrustedRoot") && !hcCode.Contains("PartialChain"),
+                           "★★ 客户端里不再有靠**异常英文文本**认因的针(它们在 TlsFailure 里,由实测原文钉着)");
+                    Assert(!hcCode.Contains("is System.Security.Authentication.AuthenticationException"),
+                           "★★★ 那条 AuthenticationException 兜底**已删** —— 实测它会把「拨到一个普通 HTTP 服务」"
+                           + "判成「必须重新配对」,而重新配对先删本机私钥");
+                    Assert(!hcCode.Contains("X509ChainStatusFlags"),
+                           "★ 那条 `e is X509ChainStatusFlags`(枚举与 Exception 永不同类,CS0184 死代码)也一并清掉");
+
+                    // ---- ③ 五种归因都到得了界面 ----
+                    var mwCert = TryReadSource("MainWindow.xaml.cs");
+                    var dvCert = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                    foreach (var localState in new[] { "LocalCertExpired", "LocalProfileUnusable" })
+                    {
+                        Assert(hc is not null && hcCode.Contains("HubState." + localState),
+                               $"★★ HubState 有 {localState} 这一格(此前是空的,实际归宿是 Offline =「中枢没开机」)");
+                        Assert(mwCert is not null && mwCert.Contains("HubState." + localState),
+                               $"★★ 顶栏有 {localState} 的文案 —— 掉进 _ => 未连接 等于没单列");
+                        Assert(dvCert is not null && dvCert.Contains("HubState." + localState),
+                               $"★★ 设备页有 {localState} 的文案(那张卡上就有红色的「解除本机配对」按钮)");
+                    }
+                    // ★★ 两态**不许合并**:代价不同 —— 一个重配要搭上一把本来有用的私钥,一个没有可搭的。
+                    Assert(Strings.Get("status.local_cert_expired") != Strings.Get("status.local_unusable"),
+                           "★★★ 两态的界面词不同(合并成一句 = 把「损失了什么」这件事对用户藏起来)");
+                    Assert(Strings.Get("status.local_cert_expired") != Strings.Get("status.cert_expired"),
+                           "★★★ 【本机】证书过期 ≠ 【主机】证书过期 —— 处置一个是重新配对,一个是去主机上续签");
+
+                    // ---- ④ 过期【之前】就看得见:告警必须排在【在线】那一格**之前** ----
+                    // ★ 这条反直觉,也正是它容易被写错的原因:过期之前客户端**正是在线的**。
+                    //   告警只挂在断线那几格的话,它永远等到过期之后才出现 —— 而那时续签路由已经够不着了。
+                    if (mwCert is not null)
+                    {
+                        var rs = Slice(mwCert, "public void RefreshStatus()", "// 左下角状态行");
+                        Assert(rs is not null, "切片得真的取到(取不到就跳过 = 假断言)");
+                        var iWarn = rs?.IndexOf("Hub.CertWarning", StringComparison.Ordinal) ?? -1;
+                        var iOnline = rs?.IndexOf("State == HubState.Online", StringComparison.Ordinal) ?? -1;
+                        // ★ 两个下标都先确认存在再比大小 —— IndexOf 找不到返回 -1,而 -1 恒小于任何下标,
+                        //   照着写 a < b 的话,把那行删掉断言反而会变绿(ASSERTION-PITFALLS 第 9 条第 3 种)。
+                        Assert(iWarn >= 0 && iOnline >= 0 && iWarn < iOnline,
+                               "★★★ 证书告警排在【在线】那一格之前 —— 否则它永远等到过期之后才出现,"
+                               + "而那时唯一的自愈窗口已经关了");
+                    }
+
+                    // ---- ⑤ 主机侧轮换的 fail-closed 最后一段路:界面真的读了 ----
+                    Assert(dvCert is not null && dvCert.Contains("ServerCertWarning"),
+                           "★★★ 主机卡片读 /admin/ping 的 serverCert —— 此前它**全仓没有读取方**,"
+                           + "而 lan-edge 那行注释写着「主机界面据此报警」:吐出来没人读 = 没响");
+                }
+
+                // ══════════════════════════════════════════════════════════════
+                //  D92 硬前置 · 跨语言【成对断言】的**客户端半边**
+                // ══════════════════════════════════════════════════════════════
+                //  服务端半边在 10-core/lan-edge/Program.cs 丙 节(钉顶层键集合)。
+                //  ★★ 这一半钉的是另一件事:**拿那个形状能不能解析出目标字段**。
+                //     A1 就死在这两件事之间 —— 服务端测键、客户端测解析,各测各的,
+                //     而客户端喂给自己的是**自己造的**形状,于是服务端把字段搬了家也照样绿。
+                //  ⇒ 所以这里的形状**由 WireContracts 生成**,不是手抄的:表变了这里立刻跟着变。
+                {
+                    string Shape(string[] keys, Func<string, string> val)
+                        => "{" + string.Join(",", keys.Select(k => $"\"{k}\":{val(k)}")) + "}";
+                    string ServerCertVal(string k) => k switch
+                    {
+                        "notAfter" => "\"2026-08-28T15:14:18+02:00\"",
+                        "daysLeft" => "3.5",
+                        "phase" => "\"Critical\"",
+                        "consecutiveFailures" => "2",
+                        "lastError" => "\"TPM busy\"",
+                        "needsAttention" => "true",
+                        _ => "null",
+                    };
+                    var pingJson = "{" + string.Join(",", LocalAI.Identity.WireContracts.AdminPing.Select(k => k switch
+                    {
+                        "ok" => "\"ok\":true",
+                        "hubId" => "\"hubId\":\"11111111-2222-3333-4444-555555555555\"",
+                        "pairingWindowOpen" => "\"pairingWindowOpen\":false",
+                        "serverCert" => "\"serverCert\":" + Shape(LocalAI.Identity.WireContracts.AdminPingServerCert, ServerCertVal),
+                        _ => $"\"{k}\":null",
+                    })) + "}";
+
+                    var parsed = Services.HubAdmin.ParseServerCert(JsonDocument.Parse(pingJson).RootElement);
+                    Assert(parsed is not null,
+                           "★★★ 成对断言/客户端:拿【登记表生成的】/admin/ping 形状,真解析器解得出 serverCert");
+                    Assert(parsed is { NeedsAttention: true, ConsecutiveFailures: 2 } && parsed.Phase == "Critical",
+                           "★★★ 成对断言/客户端:目标字段逐个解得对(needsAttention / consecutiveFailures / phase)");
+                    Assert(parsed is not null && Math.Abs(parsed.DaysLeft - 3.5) < 0.001,
+                           "★★★ 成对断言/客户端:daysLeft 是数字不是字符串(服务端 Math.Round 出来的就是数字)");
+
+                    // ★★ 反向一:少一个键 ⇒ 整条判 null。**半份状态比没有状态更坏** ——
+                    //   它会在界面上显示一个可信但错误的天数,而人会照着它决定要不要动手。
+                    // ★ 每一个键都算 —— 包括 lastError:它的**值**可以是 null(没出过错),
+                    //   但**键**服务端每次都发(上面 lan-edge 那条键集合断言在一个全新身份上就是 6 个键)。
+                    //   少一个键 = 对面不是我认识的那个形状,这时不该猜。
+                    foreach (var drop in LocalAI.Identity.WireContracts.AdminPingServerCert)
+                    {
+                        var partial = "{\"serverCert\":" + Shape(
+                            LocalAI.Identity.WireContracts.AdminPingServerCert.Where(k => k != drop).ToArray(), ServerCertVal) + "}";
+                        Assert(Services.HubAdmin.ParseServerCert(JsonDocument.Parse(partial).RootElement) is null,
+                               $"★★ 反向:serverCert 少了 `{drop}` ⇒ 判 null,不拼一份半截状态出来");
+                    }
+                    // ★★ 反向二:老中枢根本不报 serverCert ⇒ null,而不是编一个"健康"出来
+                    Assert(Services.HubAdmin.ParseServerCert(
+                               JsonDocument.Parse("{\"ok\":true,\"hubId\":\"x\"}").RootElement) is null,
+                           "★★ 反向:主机没报 serverCert(老中枢/没装轮换器)⇒ null,不假装它健康");
+
+                    // ★★ 元断言:登记表里凡是**客户端要解析**的契约,这里都得有对应的断言。
+                    //   renew/* 两条的客户端解析在 transport selftest 里端到端测(那边有真的 Edge),
+                    //   所以这里只认 /admin/ping 那两条 —— 但**数目由表算出来**,不写死。
+                    var clientSide = LocalAI.Identity.WireContracts.All
+                                     .Where(c => c.Name.StartsWith("GET /admin/ping", StringComparison.Ordinal)).ToArray();
+                    Assert(clientSide.Length == 2,
+                           $"★★ 元断言:登记表里归本处核对的契约有 {clientSide.Length} 条(表里新增 /admin/ping 相关的键组就得在这儿补断言)");
+                }
 
                 // ---- Open WebUI 退役(判据项)----
                 var stack = TryReadSource(Path.Combine("..", "..", "90-ops", "start-stack.ps1"));

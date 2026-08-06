@@ -272,8 +272,18 @@ static async Task<int> Selftest()
                                 TlsFailureKind.HubIdentityChanged, TlsFailureKind.Unknown }
                         .Select(TlsFailure.Explain).ToArray();
             Assert(texts.Distinct().Count() == 4, "★ 四种根因的处置文案互不相同");
-            Assert(TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired).Contains("不要点"),
-                   "★★ 本机证书过期的文案明确劝阻【重新配对】—— 那会删掉私钥,销毁一个只需续签的身份");
+            // ★★★ 2026-08-06 更正:这条原来钉的是「过期文案必须含『不要点』」。
+            //   实测(lan-edge selftest 甲2)推翻了它的前提:过期之后续签路由**够不着**,
+            //   所以那句劝阻否掉的是唯一的出路,而同一段文案还许诺了一件不可能发生的自动续签。
+            //   ⇒ 判据反过来钉:过期这一格**不许**再劝阻重新配对、**不许**再许诺自动续签。
+            //   那句劝阻仍然要有,只是搬到了**过期之前**(WarnLocalCert),见下面那一节。
+            var expiredNow = TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired);
+            Assert(!expiredNow.Contains("不要点"),
+                   "★★★ 【已经过期】这一格不许再写「不要点重新配对」—— 实测那时重新配对是唯一出路");
+            Assert(!expiredNow.Contains("会自动续签"),
+                   "★★★ 【已经过期】这一格不许再许诺「本机会自动续签」—— 续签要用这张证书握手,实测够不着");
+            Assert(expiredNow.Contains("只能重新配对"),
+                   "★★★ 【已经过期】必须明确指向重新配对(等下去不会自愈)");
 
             // ══════════════════════════════════════════════════════════════════
             //  ★ 第五种归因:本机配对材料已不可用 —— 处置与「设备证书过期」**正好相反**
@@ -322,10 +332,15 @@ static async Task<int> Selftest()
                 //    搞反的代价:要么白等一个永远不会自愈的档案,要么删掉一个只需续签的身份。
                 var expiredText = TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired);
                 var unusableText = TlsFailure.Explain(TlsFailureKind.LocalProfileUnusable);
-                Assert(expiredText.Contains("不要点") && !expiredText.Contains("只能重新配对"),
-                       "★★★ 【设备证书过期】劝阻重新配对(私钥还在,续签即可)");
+                // ★★★ 更正后两者的**动作**都是重新配对(实测:过期之后续签够不着),
+                //   但**成因与代价**不同,必须还能分辨 —— 否则等于把两态合并,
+                //   而 D89 §1.6 真正要保住的是"用户知道自己损失了什么、以及本来能不能避免"。
                 Assert(unusableText.Contains("只能重新配对"),
                        "★★★ 【材料不可用】明确指向重新配对(已经没有可被毁掉的东西了)");
+                Assert(expiredText.Contains("过期") && !expiredText.Contains("私钥已经不在"),
+                       "★★★ 【设备证书过期】说的是过期,不是'私钥没了' —— 成因不同,用户要能对上自己刚做过什么");
+                Assert(unusableText.Contains("没有可用的私钥或档案"),
+                       "★★★ 【材料不可用】要点明本机已经没有可用的私钥/档案(所以重配不毁掉任何还有用的东西)");
                 Assert(expiredText != unusableText, "★ 两种本机问题的文案不同");
                 Assert(TlsFailure.ExplainLocal(LocalMaterial.PrivateKeyMissing).Contains("不可导出"),
                        "★ 私钥丢失的说法要点出'它按设计拷不过来也找不回来',否则用户会一直找");
@@ -340,6 +355,23 @@ static async Task<int> Selftest()
                    "★★ 到期前 5 天:Critical —— **握手还好着的时候**就看得见,不是失败之后才归因");
             Assert(TlsFailure.LocalCertPhase(profile, t0.AddDays(65)) == CertPhase.RenewDue,
                    "★ 到期前 25 天:RenewDue(自动续签动手,但**不打扰用户**)");
+
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★ WarnLocalCert:提醒必须**跟着相位走**,建议才不会说反
+            // ══════════════════════════════════════════════════════════════════
+            Assert(TlsFailure.WarnLocalCert(profile, t0) is null, "★ Healthy 段:不打扰用户");
+            Assert(TlsFailure.WarnLocalCert(profile, t0.AddDays(65)) is null,
+                   "★★ RenewDue 段:**不出声** —— 系统正在正常自愈,正常运转也报警的告警两周内就会被学会忽略");
+            var warnCrit = TlsFailure.WarnLocalCert(profile, t0.AddDays(85));
+            Assert(warnCrit is not null && warnCrit.Contains("不要点"),
+                   "★★★ Critical 段(还没过期、私钥还在、续签还通)才是「不要点重新配对」该出现的地方");
+            Assert(warnCrit is not null && warnCrit.Contains("过期【之前】"),
+                   "★★★ Critical 段要给出**截止期限**:过期之后就只剩重新配对 —— 不说期限,提醒就只是噪音");
+            var warnExp = TlsFailure.WarnLocalCert(profile, t0.AddDays(95));
+            Assert(warnExp == TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired),
+                   "★★★ 已过期时,提醒与归因文案**是同一句** —— 两处说法不一致会让人以为还有别的路");
+            Assert(warnExp is not null && !warnExp.Contains("不要点"),
+                   "★★★ 已过期时**不许**再劝阻重新配对(承接上面那条更正:那时它是唯一出路)");
         }
 
         // ══════════════════════════════════════════════════════════════════════
@@ -378,6 +410,23 @@ static async Task<int> Selftest()
                                                     new { csr = Convert.ToBase64String(csr2) });
                 Assert(es == 200, "重入用例:先签出一张候选证书 (" + es + ")");
                 var ed = JsonDocument.Parse(eb).RootElement;
+
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ D92 成对断言的**客户端半边**(续签两条路由)
+                // ══════════════════════════════════════════════════════════
+                //  ★ 这里钉的**不只是**"我这个测试服务器发了什么" —— 那样只测了自己。
+                //    本套件的测试 Edge 是**同一个文件里的桩**,它与真的 lan-edge 是两份实现;
+                //    桩漂了而真服务端没漂(或反过来),这个套件照样全绿,而生产是坏的。
+                //    ⇒ 两边都对着 WireContracts 这**同一份**登记表核对:
+                //      lan-edge 丙 节钉真服务端,这里钉桩 —— 期望值只有一份,没法跟自己分家。
+                var eKeys = ed.EnumerateObject().Select(x => x.Name).ToArray();
+                Assert(WireContracts.KeysMatch(eKeys, WireContracts.RenewEnroll),
+                       "★★★ 成对断言/客户端侧:测试 Edge 的 renew/enroll 形状 == 登记表(与真 lan-edge 同一份)("
+                       + WireContracts.Describe(eKeys, WireContracts.RenewEnroll) + ")");
+                // ★ 而且这个形状**真的解得出**客户端要用的那两个字段 —— 这是"能解析"那一半。
+                Assert(ed.TryGetProperty("candidateCert", out var _cc) && _cc.GetString()!.Length > 0
+                       && ed.TryGetProperty("renewalId", out var _ri) && _ri.GetString()!.Length > 0,
+                       "★★★ 成对断言/客户端侧:拿这个形状解得出 candidateCert 与 renewalId(A1 死的就是这一步)");
                 crashed.PendingDeviceCertB64 = ed.GetProperty("candidateCert").GetString()!;
                 crashed.PendingRenewalId = ed.GetProperty("renewalId").GetString()!;
                 File.WriteAllText(Path.Combine(stateDir, "profile.json"), JsonSerializer.Serialize(crashed));
