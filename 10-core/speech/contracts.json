@@ -1,0 +1,28 @@
+{
+  "_why": [
+    "跨进程响应契约的【唯一登记表】—— 服务端与消费者**读同一份文件**。",
+    "★★ 为什么是一个文件而不是两边各写一份常量:审计 A1 的形状就是",
+    "   『服务端测顶层有哪些键、客户端测这个形状能不能解析,各测各的,",
+    "    中间那条缝谁也没看』。两份手抄的期望值迟早分家,而分家那天两边都不会红。",
+    "   ⇒ 期望值只有一份,它没法跟自己分家。",
+    "★ 契约号是 ASCII(ASSERTION-PITFALLS 第 8 条:cp936 的钩子环境里要仍然完好)。",
+    "★ 改这里任何一个键 ⇒ 服务端那半与消费者那半会**同时**红,而不是只红一边。"
+  ],
+  "contracts": {
+    "CONTRACT:speech.health": {
+      "what": "GET /health",
+      "keys": ["ok", "ready", "kind", "tier", "asr_loaded", "tts_loaded", "detail"],
+      "note": "就绪判据。★ 未就绪回 503(与 llama-server 同形状:进程活着 != 能服务)"
+    },
+    "CONTRACT:speech.asr": {
+      "what": "POST /v1/speech/asr",
+      "keys": ["text", "language", "duration_s", "tier", "provenance"],
+      "note": "★★ provenance 由**通道**决定、服务端算出来,不由调用方自报 —— 它是记忆写入的准入判据"
+    },
+    "CONTRACT:speech.tts": {
+      "what": "POST /v1/speech/tts",
+      "keys": ["audio_b64", "sample_rate", "format", "voice", "frames"],
+      "note": "半双工按住说话的回放。★ v1 用 base64 装在 JSON 里:一次按住说话的音频很短,换来的是形状可钉"
+    }
+  }
+}

@@ -1,0 +1,94 @@
+# =============================================================================
+#  speech 后端的【启动规格】—— D? · P5 语音 v1
+#
+#  ★★★ 这个文件存在的唯一理由,是 model_loader.py 文件头那条硬规矩:
+#
+#      「按 kind 分派,未登记的 kind fail-closed。start-stack.ps1 从来只起过 8B
+#        一个后端 —— speech / vlm / comfyui 怎么起没有人验证过。装载器对它们
+#        如实报『启动方式尚未验证』,不猜。」
+#
+#    ⇒ 所以这里写下的每一个数,都必须是**真的跑出来过**的,不是抄来的。
+#      本文件下方 [verified] 段记的就是那次实测的原始读数。
+#      **没有 [verified] 段的规格,装载器一律不认** —— 见 model_loader.speech_spec()。
+#
+#  ★ 为什么不写进 config/vram-budget.toml:
+#    那份文件是**准入闸的唯一数据源**,归 config/ 车道;本车道按纪律不改它。
+#    而启动规格恰恰应该和**它所启动的那个服务**放在一起 ——
+#    改了服务却忘了改规格这件事,放在同一个目录里比隔着两条车道更难发生。
+#    ★ peak(显存)仍然只由 vram-budget.toml 说了算,本文件**不重复登记** ——
+#      两处都写一个数,迟早对不上,而准入闸会照着错的那个放行。
+# =============================================================================
+
+schema_version = 1
+
+[service]
+# ★ 端口与 vram-budget.toml 里 speech.lite/full 的 port 一致(18085)。
+#   那边的 port 字段今天"仅登记用、没有代码读它"(该文件 :60 自己写着),
+#   本文件这个是**真的会被用**的那个。收敛成一处属于 Broker 的活,不在本车道。
+port = 18085
+# 就绪判据:/health 回 2xx。★ 与 llm 同一条规矩 —— 进程起来 ≠ 能服务:
+#   模型没加载完时本服务的 /health 回 **503**,和 llama-server 一个形状。
+health_path = "/health"
+# 冷启动上限。实测(见 [verified])turbo 1.9s / large-v3 6.5s,给足余量。
+ready_timeout_s = 120
+
+[venv]
+# ★ 相对 paths.toml 的哪个根 —— §11.1:配置里不写绝对路径。
+root = "state_sibling"          # venvs 目录与 state 根同级(§11.1:不写绝对路径)
+rel  = "venvs/speech/Scripts/python.exe"
+
+[asr]
+# faster-whisper。★ 档位映射见 D27:large-v3 = full / turbo = lite。
+lite_repo = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+full_repo = "Systran/faster-whisper-large-v3"
+device = "cpu"                  # ★ v1 只走 CPU:0 显存 ⇒ 不必等任何 GPU 裁定,也不抢租约
+compute_type = "int8"
+# ★★★ 权重必须**本地**。faster-whisper 默认联网拉权重(STATE:643 / D41),
+#   所以这里两条都钉死,而且是**双保险**:
+#     · local_files_only = true  ⇒ 库层面不许下载
+#     · HF_HUB_OFFLINE   = 1     ⇒ 进程层面硬断网(任何一次联网尝试立刻失败,
+#                                   而不是"慢慢超时"——后者会让一次断网表现成"启动很慢")
+#   ⇒ 缺权重时**起不来并说清缺哪个**,而不是偷偷联网补齐。
+local_files_only = true
+hub_offline = true
+
+[tts]
+# Piper,全档 CPU。★ onnxruntime 实测只有 CPU/Azure 两个 provider(没有 CUDA),
+#   所以"Piper 走 CPU"不是取舍,是这套装置今天唯一能走的路。
+voices_rel = "piper"            # 相对 models 根
+default_voice = "en_US-lessac-medium"
+
+# =============================================================================
+#  [verified] —— ★ 这一段是装载器认这份规格的**唯一依据**
+#
+#  规矩:改了上面任何一个字段,就必须重跑 `python 10-core/speech/verify_launch.py`
+#  并把新读数写回这里。装载器只检查这一段**在不在**、以及它自报的 spec_fingerprint
+#  与上面的字段对不对得上 —— 对不上就退回「启动方式尚未验证」。
+#
+#  ★ 为什么这样设计:它让"我改了启动参数但没验证过"变成一件**会红**的事,
+#    而不是一件"下次真去起的时候才发现"的事。那正是文件头那条规矩要防的东西。
+# =============================================================================
+[verified]
+date = "2026-08-06"
+host = "本机(speech venv,onnxruntime 1.28.0 CPU-only)"
+by = "10-core/speech/verify_launch.py"
+faster_whisper = "1.2.1"
+ctranslate2 = "4.8.1"
+onnxruntime = "1.28.0"
+piper_tts = "1.6.0"
+# 实测原始读数(秒)—— verify_launch.py 的原始输出,**两个档位都真的加载过**
+asr_lite_load_s = 1.9
+asr_lite_transcribe_1s_s = 5.6
+asr_full_load_s = 3.6
+asr_full_transcribe_1s_s = 6.5
+tts_load_s = 0.99
+tts_synth_s = 0.07
+tts_sample_rate = 22050
+# ★ 实测证据:两个 ASR 仓库都在本地,且在 HF_HUB_OFFLINE=1 + local_files_only=true 下
+#   **两个都加载成功**(不是只验了 lite 就推断 full 也行)。
+asr_offline_load_ok = true
+# ★★ 如实记账:权重今天住在 **cache 根**的 hf 子目录下,而 paths.toml 自己写着
+#   cache 是「唯一可静默清理的根」⇒ 一次正常的缓存清理就会把它们删掉。
+#   这**不是**「构建期预置」(D41/STATE:643 要求的那个)。见决议包 §2.2。
+#   ⇒ 本字段如实记下今天的位置,不假装它已经合规。
+weights_live_in = "cache_root"   # 应为 models_root;迁移动作见决议包,本车道不搬 3.5 GB

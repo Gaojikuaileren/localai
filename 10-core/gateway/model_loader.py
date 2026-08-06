@@ -43,7 +43,28 @@ from typing import Dict, List, Optional, Set
 import httpx
 
 #: 已验证过启动方式的 kind。★ 反向全表:不在表里的一律拒绝,不试着用别的方式起。
-SUPPORTED_KINDS: Set[str] = {"llm"}
+#
+#  ★★★ 2026-08-06(P5 语音 v1 / D?):`speech` **加进来了**,而加它的依据不是
+#    "我写了一份启动规格",是 `10-core/speech/verify_launch.py` **真的起过一次**:
+#      · 两个 ASR 档位都在 HF_HUB_OFFLINE=1 + local_files_only=true 下加载成功
+#        (turbo 1.9s / large-v3 3.6s),转写跑通;
+#      · Piper 加载 0.99s、合成 0.07s、22050 Hz 出声。
+#    读数写在 `10-core/speech/launch.toml` 的 [verified] 段,而
+#    `_speech_spec()` **只认带 [verified] 段的规格** —— 没有它就退回本文件头那句
+#    「启动方式尚未验证」。⇒「改了启动参数但没重新验证」是一件**会红**的事,
+#    而不是一件"下次真去起的时候才发现"的事。
+#
+#  ★ vlm / comfyui 仍然不在表里 —— 它们的启动方式**依然没有人验证过**。
+#    别看见 speech 进来了就顺手把它们也加上:那正是这条规矩要防的动作。
+SUPPORTED_KINDS: Set[str] = {"llm", "speech"}
+
+#: speech 的启动规格所在(**不在 config/vram-budget.toml 里**)。
+#  ★ 为什么:那份文件是准入闸(peak)的唯一数据源,归 config 车道;
+#    而启动规格该和它所启动的那个服务放在一起 —— 改了服务却忘了改规格,
+#    放在同一个目录里比隔着两条车道更难发生。
+#  ★★ peak(显存)**仍然只由 vram-budget.toml 说了算**,launch.toml 里不重复登记:
+#    两处都写一个数,迟早对不上,而准入闸会照着错的那个放行。
+SPEECH_SPEC_REL = "10-core/speech/launch.toml"
 
 #: 就绪轮询:llama-server 加载中 /health 回 503,必须等到 2xx。
 READY_TIMEOUT_S = 180.0
@@ -67,6 +88,31 @@ def _paths_root(key: str) -> Path:
     raise LoaderError(f"paths.toml 里找不到 {key} —— 拒绝猜一个路径(§11.1)")
 
 
+def _repo_root() -> Path:
+    """代码根。★ 同样不写绝对路径 —— 从本文件往上找带 config/paths.toml 的那一层。"""
+    here = Path(__file__).resolve()
+    for p in [here.parents[i] for i in range(1, 6)]:
+        if (p / "config" / "paths.toml").exists():
+            return p
+    raise LoaderError("找不到仓库根(没有 config/paths.toml 的那一层)")
+
+
+def _speech_python(spec: dict) -> Path:
+    """
+    speech venv 的 python。★ 路径由 paths.toml 的根推出,不写绝对路径(§11.1)。
+
+    ★ `root = "state_sibling"` 的含义:venvs 目录与 **state 根**同级。
+      ⇒ 这条推导在这里写明,而不是在别处硬编码一个带盘符的路径(§11.1)。
+    """
+    v = spec["venv"]
+    if v.get("root") != "state_sibling":
+        raise LoaderError(f"speech venv 的 root 形状不认识:{v.get('root')} —— 不猜")
+    py = _paths_root("state").parent / v["rel"]
+    if not py.exists():
+        raise LoaderError(f"找不到 speech venv 的 python:{py}")
+    return py
+
+
 class ModelLoader:
     """真的起停后端进程。
 
@@ -81,6 +127,7 @@ class ModelLoader:
         self._adopted: Set[str] = set()      # 认领的孤儿(不是我起的,所以也不该由我杀)
         self._llama: Optional[Path] = None
         self._models: Optional[Path] = None
+        self._speech: Optional[dict] = None   # speech 的启动规格(只认带 [verified] 的)
 
     # ── 配置 ────────────────────────────────────────────────────────
     @property
@@ -103,10 +150,45 @@ class ModelLoader:
                 f"已验证的只有 {sorted(SUPPORTED_KINDS)}。"
                 f"★ 这里拒绝猜一套参数:猜错的后果不是「可能起不来」,"
                 f"是【看起来支持而第一次真用时才炸】")
+        # ★ 按 kind 分派要什么参数。speech 的启动规格不在 vram-budget.toml 里
+        #   (它只管 peak),而在 10-core/speech/launch.toml —— 见 SPEECH_SPEC_REL。
+        if kind == "speech":
+            self._speech_spec()          # 只为触发 fail-closed 校验;缺 [verified] 会抛
+            if c.get("port") in (None, ""):
+                raise LoaderError(f"组件 {cid} 缺 port(见 config/vram-budget.toml)")
+            return c
         for need in ("model_rel", "ctx", "ngl", "port"):
             if c.get(need) in (None, ""):
                 raise LoaderError(f"组件 {cid} 缺启动参数 {need}(见 config/vram-budget.toml)")
         return c
+
+    def _speech_spec(self) -> dict:
+        """
+        读 speech 的启动规格。★★ **只认带 [verified] 段的规格**。
+
+        没有 [verified] ⇒ 抛出本文件头那句「启动方式尚未验证」——
+        因为一份没被真的起过一次的规格,和"猜一套参数"是同一件事,
+        而猜错的后果不是"可能起不来",是**看起来支持而第一次真用时才炸**。
+        """
+        import tomllib
+
+        if self._speech is None:
+            p = _repo_root() / SPEECH_SPEC_REL
+            if not p.exists():
+                raise LoaderError(
+                    f"speech 的**启动方式尚未验证**:找不到 {SPEECH_SPEC_REL}")
+            with open(p, "rb") as f:
+                spec = tomllib.load(f)
+            if "verified" not in spec:
+                raise LoaderError(
+                    f"speech 的**启动方式尚未验证**:{SPEECH_SPEC_REL} 缺 [verified] 段 —— "
+                    f"请跑 `10-core/speech/verify_launch.py` 真的起一次,再把读数写回去")
+            if not spec["verified"].get("asr_offline_load_ok"):
+                raise LoaderError(
+                    f"speech 的**启动方式尚未验证**:[verified].asr_offline_load_ok 不为真 —— "
+                    f"权重没在本地离线加载成功过,而本服务不会联网补齐")
+            self._speech = spec
+        return self._speech
 
     def _llama_exe(self) -> Path:
         if self._llama is None:
@@ -217,11 +299,20 @@ class ModelLoader:
                 # ★ 端口已经有人 —— 认领而不是再起一个(否则端口冲突)
                 self._adopted.add(cid)
                 continue
-            exe = self._llama_exe()
-            model = self._model_path(str(c["model_rel"]))
-            args = [str(exe), "-m", str(model), "-ngl", str(int(c["ngl"])),
-                    "-c", str(int(c["ctx"])), "--host", "127.0.0.1", "--port", str(port),
-                    "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+            if str(c.get("kind")) == "speech":
+                # ★ speech 后端:自己那个 venv 的 python 起 10-core/speech/server.py。
+                #   档位由组件 id 决定(speech.full -> --full),与 D27 的档位映射一致。
+                spec = self._speech_spec()
+                py = _speech_python(spec)
+                args = [str(py), str(_repo_root() / "10-core" / "speech" / "server.py")]
+                if cid.endswith(".full"):
+                    args.append("--full")
+            else:
+                exe = self._llama_exe()
+                model = self._model_path(str(c["model_rel"]))
+                args = [str(exe), "-m", str(model), "-ngl", str(int(c["ngl"])),
+                        "-c", str(int(c["ctx"])), "--host", "127.0.0.1", "--port", str(port),
+                        "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
             try:
                 # ★ 不继承父进程的控制台:中枢将来做成服务时没有控制台可继承。
                 proc = subprocess.Popen(

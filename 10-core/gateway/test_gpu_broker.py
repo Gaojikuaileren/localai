@@ -1230,9 +1230,20 @@ with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
     _r_over = _c.post("/v1/gpu/intended",
                       json={"if_generation": _c.get("/v1/gpu/snapshot").json()["generation"],
                             "components": ["llm.assistant.30b-a3b@32k"]})
+    # ★★★ 2026-08-06(P5 语音 v1 / D?):例子从 `speech.lite` 换成 `vlm.small`。
+    #   **这是本断言第二次因为同一个原因改** —— 上一次是 S14(见下面那段注释)。
+    #   原因一模一样:它守的性质是「**启动方式尚未验证**的 kind 必须 fail-closed」,
+    #   而它拿来举例的那个组件**被验证了** ⇒ 例子失效,断言开始守一句已经不成立的话。
+    #   · speech 的启动方式已由 `10-core/speech/verify_launch.py` **真的起过一次**
+    #     (两档 ASR 在 HF_HUB_OFFLINE=1 下离线加载 + Piper 合成),
+    #     读数在 `10-core/speech/launch.toml` 的 [verified] 段;
+    #   · `vlm` / `comfyui` **今天仍然没有人验证过** ⇒ 换它举例,性质原样守住。
+    #   ★ 没有删断言、没有放宽判据 —— 换的是**例子**,守的还是那条性质。
+    #     这正是这条断言上一次改动时自己写下的规矩:「拒绝理由变了,断言必须跟着变;
+    #     守着旧理由就是守一句已经不成立的话」。
     _r_ok_path = _c.post("/v1/gpu/intended",
                          json={"if_generation": _c.get("/v1/gpu/snapshot").json()["generation"],
-                               "components": ["speech.lite"]})
+                               "components": ["vlm.small"]})
     check("★ if_generation 必填(省略不等于「我不在乎」,那是 fail-open)",
           _r_miss_gen.status_code == 400
           and _r_miss_gen.json()["error"]["type"] == "missing_if_generation", _r_miss_gen.status_code)

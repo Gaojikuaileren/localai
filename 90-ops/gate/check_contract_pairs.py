@@ -197,6 +197,36 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
                 "⇒ 今天它的响应体没有任何消费者,顶层键集合改成什么都不会有人红",
     },
 
+    # ── speech 后端(Python / 独立进程)⇒ 网关(Python) ────────────────────
+    #  ★ 又一次"同语言不等于同进程":speech 是自己的 venv、自己的进程,
+    #    网关跨进程去读它的应答 —— 那正是 A1 死掉的那一步。
+    #  ★★ 两半**读同一份** 10-core/speech/contracts.json(期望值只有一份,没法跟自己分家)。
+    ("speech", "GET", "/health"): {
+        "state": "paired", "cid": "CONTRACT:speech.health",
+        "lane": "语音切片(P5 v1)",
+        "server_file": "10-core/speech/selftest.py",
+        "client_file": "10-core/gateway/test_speech_contract.py",
+        "note": "就绪判据。★ 未就绪回 503(与 llama-server 同形状:进程活着 != 能服务)——"
+                "装载器的 _wait_ready 就靠这个 2xx。",
+    },
+    ("speech", "POST", "/v1/speech/asr"): {
+        "state": "paired", "cid": "CONTRACT:speech.asr",
+        "lane": "语音切片(P5 v1)",
+        "server_file": "10-core/speech/selftest.py",
+        "client_file": "10-core/gateway/test_speech_contract.py",
+        "note": "★★ provenance 是**安全判据**:它决定这段转写能不能直通记忆写入,"
+                "由**通道**(回环 / lan-edge 注入的已验证指纹头)在服务端算出,**不由调用方自报**。"
+                "读错的后果不是少个字段,是记忆库的准入交给了调用方。",
+    },
+    ("speech", "POST", "/v1/speech/tts"): {
+        "state": "paired", "cid": "CONTRACT:speech.tts",
+        "lane": "语音切片(P5 v1)",
+        "server_file": "10-core/speech/selftest.py",
+        "client_file": "10-core/gateway/test_speech_contract.py",
+        "note": "半双工按住说话的回放。v1 用 base64 装在 JSON 里 —— 一次按住说话的音频很短,"
+                "换来的是形状可钉;将来要流式(SSE)时按帧重登记,不在本条。",
+    },
+
     # ── lan-edge(C# / Kestrel)⇒ 客户端(C#) ────────────────────────────
     #  ★ 同语言不等于同进程。D92 的措辞是「跨**进程**响应契约」,
     #    而 A1 那条缝的成因是"两边各自都绿",与语言无关。
@@ -448,6 +478,35 @@ else:
     _le = {("lan-edge", m, p) for (m, p) in lan_edge_endpoints(_le_src)}
     actual |= _le
     check(f"★★ lan-edge 端点**零命中判红**(实测 {len(_le)} 条)", len(_le) > 0)
+
+#  ── speech 后端(P5 v1 / D?)—— 第三个跨进程服务,同样要被枚举 ──────────
+#  ★★ 为什么必须加这一段:枚举不到的服务,它的契约会被第 ② 组判成
+#    「登记了一条已经不存在的契约」(过期登记)⇒ **登记它反而判红**,
+#    而唯一能变绿的做法是不登记 —— 那正好把一个新服务放在了账外。
+#    枚举源必须跟着"今天有几个跨进程服务"走,不能只有两个写死的。
+#  ★ 枚举源取 `10-core/speech/contracts.json` 的 `what` 字段,而不是再写一个源码提取器:
+#    那份文件**服务端与消费者都读**,拿它当枚举源比再写一份正则更难说谎;
+#    并且下面配了元断言,逐条核对它写的路径在服务端源码里**真的存在**。
+_SP_FILE = REPO / "10-core" / "speech" / "server.py"
+_SP_REG_FILE = REPO / "10-core" / "speech" / "contracts.json"
+if _SP_FILE.exists() and _SP_REG_FILE.exists():
+    import json as _json
+
+    _sp_src = _SP_FILE.read_text(encoding="utf-8", errors="replace")
+    _sp_reg = _json.loads(_SP_REG_FILE.read_text(encoding="utf-8"))["contracts"]
+    _sp = set()
+    for _cid, _meta in _sp_reg.items():
+        # ★ 变量名避开 _p/_f —— 那是本文件的**全局计数器**(check() 里 global _p)。
+        #   第一版这里写了 `_m, _p = ...`,把计数器覆盖成字符串,整个脚本当场崩。
+        _sp_m, _sp_p = _meta["what"].split(" ", 1)
+        _sp.add(("speech", _sp_m.strip(), _sp_p.strip()))
+    actual |= _sp
+    check(f"★★ speech 端点**零命中判红**(实测 {len(_sp)} 条)", len(_sp) > 0)
+    for _cid, _meta in _sp_reg.items():
+        _pth = _meta["what"].split(" ", 1)[1].strip()
+        check(f"★★ contracts.json 写的 {_pth} 在 speech 服务端源码里真的存在 —— "
+              f"枚举源不许自说自话(否则它成了一份可以随便写、却在决定账面的清单)",
+              f'"{_pth}"' in _sp_src, _pth)
 
 
 # ══════════════════════════════════════════════════════════════════════════
