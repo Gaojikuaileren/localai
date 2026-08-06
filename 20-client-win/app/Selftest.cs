@@ -7031,15 +7031,21 @@ public static class Selftest
             try { Directory.Delete(tmp, true); } catch { }
         }
 
-        // ★★★ 源码可读性的反向钉(2026-08-06):**源码读得到的时候,一次都不许读不到**。
-        //   判据分两种处境,它们的下一步完全相反:
-        //     · _srcHit == 0 ⇒ 这是**发布产物**,旁边本来就没有源码 —— 全部落空是设计如此,不判红;
-        //     · _srcHit > 0  ⇒ 源码就在旁边,而某一次仍然读不到 ⇒ **那是路径写错了**,
+        // ★★★ 源码可读性的反向钉(2026-08-06):**源码根在旁边时,一次都不许读不到**。
+        //   判据的前提是 SourceRootPresent(),两种处境的下一步完全相反:
+        //     · 源码根**不在** ⇒ 这是发布产物 —— 全部落空是设计如此,不判红
+        //       (它待在仓库里时还会摸到几个仓库级文件,**部分可读是合法状态**);
+        //     · 源码根**在**,而某一次仍然读不到 ⇒ **那是路径写错了**,
         //       后果是那几条断言【静默不跑】而不是报错 —— 必须当场红。
         //   ★ 没有这条,把一个源文件改名/挪走就会让一批断言无声消失,而 PASS 只是小了一点。
-        Assert(_srcHit == 0 || _srcMiss == 0,
-            $"★★★ 源码可读时不得有读不到的:命中 {_srcHit} 次 · 落空 {_srcMiss} 次"
-            + (_srcMiss > 0 && _srcHit > 0 ? " —— 有路径写错了,那几条断言正在【静默不跑】" : ""));
+        //   ★★ 第一版把判据写成「有命中就必须全命中」,**当场被出包门禁拦下**
+        //     (发布产物在仓库内实测 SRCHIT=2 · SRCMISS=234)。留痕:判据比它想判的东西宽,
+        //     是 ASSERTION-PITFALLS 第 4 条;而这次是门禁替我发现的,不是我自己想到的。
+        var _srcRoot = SourceRootPresent();
+        Assert(!_srcRoot || _srcMiss == 0,
+            $"★★★ 源码根在旁边时不得有读不到的:源码根={( _srcRoot ? "在" : "不在")} · "
+            + $"命中 {_srcHit} 次 · 落空 {_srcMiss} 次"
+            + (_srcRoot && _srcMiss > 0 ? " —— 有路径写错了,那几条断言正在【静默不跑】" : ""));
 
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
         // ★★ 口径必须跟着数字走。发布产物里源码不可读 ⇒ 一批结构/接线断言整段跳过,
@@ -7048,11 +7054,14 @@ public static class Selftest
         if (_srcMiss > 0)
         {
             Console.WriteLine(
-                $"  ★ 口径:本次有 {_srcMiss} 处源码读不到(命中 {_srcHit} 处)⇒ "
-                + "那些【结构/接线】断言整段没跑,既不计 PASS 也不计 FAIL。");
+                $"  ★ 口径:本次有 {_srcMiss} 处源码读不到(命中 {_srcHit} 处 · 源码根{(_srcRoot ? "在" : "不在")})⇒ "
+                + "那些【结构/接线】断言整段没跑,既不计 PASS、也不计 FAIL、更不计 SKIP。");
             Console.WriteLine(
                 "    发布产物旁边没有源码,这是设计如此 —— 但它意味着 "
                 + "**这个 PASS 数不能和开发树的基线直接比**。");
+            Console.WriteLine(
+                "    ★ 而且它还取决于 exe 待在哪儿:放在仓库里能多摸到几个仓库级文件,"
+                + "比放在仓库外多跑几条。两次出包的数字不一致时,先看这一行再去找回归。");
         }
         WriteSentinel(pass, fail);
         return fail > 0 ? 1 : 0;
@@ -7301,6 +7310,32 @@ public static class Selftest
 
     /// <summary>本次自检里源码读取的命中/落空次数(见上方那段)。</summary>
     internal static (int Hit, int Miss) SourceReadTally => (_srcHit, _srcMiss);
+
+    /// <summary>
+    /// 客户端**源码根**在不在旁边。以 <c>Selftest.cs</c> 作锚点 —— 它一定在源码根下。
+    /// <para>
+    /// ★★ 为什么不能用「有没有任何一次命中」当判据(我第一版就是这么写的,当场被出包门禁拦下):
+    /// exe 待在仓库里时(例如 <c>dist\client-pack</c>),往上翻 8 层会摸到**仓库级**的文件,
+    /// 于是实测 <c>SRCHIT=2 · SRCMISS=234</c> —— **部分可读是一个合法状态**,
+    /// 而「有命中就必须全命中」会把它误判成"路径写错了"。
+    /// </para>
+    /// <para>
+    /// ★ 顺带量出来一件事:同一个 exe,**放仓库里 852 条、放仓库外 849 条** ——
+    /// 跑多少条断言**取决于它待在哪儿**。这不是缺陷,但必须说出来,
+    /// 否则两次出包的数字对不上时,人会去找一个并不存在的回归。
+    /// </para>
+    /// ★ 本探测**不计入** SRCHIT/SRCMISS —— 它是判据的前提,不是被判的对象。
+    /// </summary>
+    static bool SourceRootPresent()
+    {
+        var dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 8 && dir is not null; i++)
+        {
+            if (File.Exists(Path.Combine(dir, "Selftest.cs"))) return true;
+            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        return false;
+    }
 
     /// <summary>
     /// 读源码文件(开发/CI 环境)。发布环境没有源码 -> 返回 null,调用方跳过接线自检。
