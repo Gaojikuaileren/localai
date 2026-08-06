@@ -1970,8 +1970,170 @@ check("★ 而收割确实被采样循环调用了(判据不是空转)",
       "sweep_idle_transient()" in assert_helpers.code_only(gpu_broker.Broker._sampler_loop))
 # ── D87③「显存压力即让」**有意留空**,不是没做完 ──
 check("★★ admission_guard 仍然只报告降幅、不触发任何卸载 —— "
-      "D90 明写「压力即让」仍需单独裁,而未决项不许在实现里被默认值悄悄裁掉",
+      "它是**降幅**规则(5 秒内掉 1 GiB),与 D87③ 的**水位**判据不是一回事",
       "unload" not in assert_helpers.code_only(gpu_broker.Broker.admission_guard))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  V8 · D87③「显存压力即让」(2026-08-07 用户裁定后落地)
+#
+#  用户裁定原文:「AI,让,任务暂停,并弹提示。然后在任务进度里面可以再开,
+#  然后启动需要的模型,前提是显存允许的情况,不然开始按钮是不可用的。」
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== V8 · D87③:压力让位与 D90 空闲回收是【两条独立路径】 ===")
+
+_yield_src = assert_helpers.code_only(gpu_broker.Broker.yield_under_pressure)
+_sweep_src2 = assert_helpers.code_only(gpu_broker.Broker.sweep_idle_transient)
+check("★★★ 两条路径是**两个方法**,不是一个方法的两个参数 —— "
+      "合并之后没人说得清某次卸载是哪条规则干的",
+      hasattr(gpu_broker.Broker, "yield_under_pressure")
+      and hasattr(gpu_broker.Broker, "sweep_idle_transient"))
+# ★★ 判据要落在**进入条件**上,不是"这段代码提没提过某个名字"。
+#   第一版写成「压力那条不许出现 _transient_last_intent」—— **当场变红**,
+#   因为让位之后要把那条组件的时刻表项清掉(`pop`),那是**清理**不是**判据**。
+#   ⇒ 那是 ASSERTION-PITFALLS 第 4 条(判据比想判的东西宽)。改成只问进入条件:
+check("★★★ 进入条件不同:压力那条看 under_pressure(NVML 水位),"
+      "空闲那条看空闲阈值 —— 两个判据互不出现在对方里",
+      "under_pressure" in _yield_src and "under_pressure" not in _sweep_src2
+      and "idle_after_s" in _sweep_src2 and "idle_after_s" not in _yield_src)
+check("★★★ 每次自动卸载都带**是哪条规则**,而且两条的值不同 —— "
+      "不带的话日志里两种卸载长得一模一样,而它们的允许范围完全不同",
+      gpu_broker.UNLOAD_BY_IDLE != gpu_broker.UNLOAD_BY_PRESSURE
+      and "UNLOAD_BY_PRESSURE" in _yield_src and "UNLOAD_BY_IDLE" in _sweep_src2)
+# ★ 允许范围仍受 D90 约束:压力路径同样够不着 committed
+_hit_y = _WRITE_PAT.search(inspect.getsource(gpu_broker.Broker.yield_under_pressure))
+check("★★★ 压力路径的源码里同样**没有任何**对 _committed 的写(D90 裁定③照旧管着它)",
+      _hit_y is None, _hit_y.group(0) if _hit_y else "")
+#   ★ 而"读得到 committed"这条要问**挑人的那个函数**(pressure_victims),
+#     不是 yield_under_pressure —— 排除常驻成员是在挑人那一步做的。
+#     第一版问错了地方,红得对:判据必须落在真的做那件事的那段代码上。
+_hit_pv = _WRITE_PAT.search(inspect.getsource(gpu_broker.Broker.pressure_victims))
+check("★★ 挑人那段同样不写 _committed,只**读**它来排除常驻成员",
+      _hit_pv is None and "self._committed" in
+      inspect.getsource(gpu_broker.Broker.pressure_victims))
+check("★★ 仍然只有**一个**后台任务:压力那条也搭在采样循环里,没另起 task",
+      inspect.getsource(gpu_broker).count("create_task") == 1)
+check("★ 而它确实被采样循环调用了(判据不是空转)",
+      "yield_under_pressure()" in assert_helpers.code_only(gpu_broker.Broker._sampler_loop))
+
+
+def _mk_pressure_broker(free, transient=(), committed=(), loader=None):
+    b = _mkbroker(free=free, loader=loader or _FakeLoader())
+    b._committed = list(committed)
+    b._transient_resident = list(transient)
+    b._permitted_on_demand = list(transient)
+    for c in transient:
+        b._transient_last_intent[c] = time.monotonic()
+    return b
+
+
+print("\n=== V8 · 判据:NVML free 掉到阈值以下,而且要【连续】 ===")
+_bp = _mk_pressure_broker(free=0.5, transient=[_small])
+check("★★★ 单次低于阈值**不算** —— 按一次波动去打断用户正在跑的任务,"
+      "是这条规则最容易造成的伤害",
+      not _bp.under_pressure())
+for _i in range(gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES):
+    _bp._note_pressure_sample()
+check(f"★★ 连续 {gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES} 次之后才算压力态", _bp.under_pressure())
+_bp._free = 8.0
+_bp._note_pressure_sample()
+check("★ 一次回到阈值以上就清零(压力解除是立刻的,不用等)", not _bp.under_pressure())
+# ★★ 读不到 free 时:既不清零也不累加
+_bp2 = _mk_pressure_broker(free=0.5, transient=[_small])
+for _i in range(gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES):
+    _bp2._note_pressure_sample()
+_bp2._free = None
+_bp2._note_pressure_sample()
+check("★★★ 读不到 free ⇒ **既不清零也不累加**:清零 = 一次读失败就把压力态抹掉"
+      "(而读失败可能正是压力造成的);累加 = 拿【不知道】当【很紧】去打断任务",
+      _bp2.under_pressure() and _bp2._pressure_low_streak
+      == gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES)
+check("★ 阈值高于 safety_margin(要在桌面撞墙**之前**让),低于最小组件 peak(否则一让就是全让)",
+      gpu_broker.PRESSURE_FREE_FLOOR_GIB > gpu_broker.BROKER.cfg.budget.safety_margin
+      and gpu_broker.PRESSURE_FREE_FLOOR_GIB
+      < min(gpu_broker.BROKER.cfg.peak(c) for c in gpu_broker.BROKER.cfg.components),
+      gpu_broker.PRESSURE_FREE_FLOOR_GIB)
+
+print("\n=== V8 · 让谁:按 peak 从大到小,【与 kind 无关】 ===")
+_pv_src = assert_helpers.code_only(gpu_broker.Broker.pressure_victims)
+check("★★★ 选择判据里**不出现任何 kind 名**(llm / speech / vlm / comfyui)—— "
+      "写成 kind 白名单的话,新增一种组件会**默认落在【不让】那边**,"
+      "于是压力来了让不出东西,而日志里什么都看不出来",
+      not any(k in _pv_src for k in ("llm", "speech", "vlm", "comfyui")), _pv_src[:200])
+# ★ 正面验:一个 speech 组件同样会被选中(不是"没写死"就完了,要真的能覆盖它)
+_speech = next((c for c in gpu_broker.BROKER.cfg.components
+                if str(gpu_broker.BROKER.cfg.components[c].get("kind") or "").startswith("speech")),
+               None)
+check("★ 前提:配置里确实有 speech 类组件(否则下面那条测的是空集)", _speech is not None, _speech)
+if _speech:
+    _bs = _mk_pressure_broker(free=0.5, transient=[_speech])
+    check("★★★ speech 组件同样会被选中 —— V7 正在把它接成可装载组件,这条路径要能自然覆盖",
+          _bs.pressure_victims(1.0) == [_speech], _bs.pressure_victims(1.0))
+_big = max(gpu_broker.BROKER.cfg.components, key=gpu_broker.BROKER.cfg.peak)
+_bm = _mk_pressure_broker(free=0.5, transient=[_small, _big])
+check("★★ 从大到小:同样腾出 N GiB,动的组件数最少 ⇒ 被打断的任务最少",
+      _bm.pressure_victims(0.1) == [_big], _bm.pressure_victims(0.1))
+_bc = _mk_pressure_broker(free=0.5, transient=[], committed=[_small])
+check("★★★ 常驻成员**永不入选**(D90:committed 一个字节都不许自动改)——"
+      "用户裁定里的『让』指的只是按需那一层",
+      _bc.pressure_victims(99.0) == [], _bc.pressure_victims(99.0))
+
+
+async def _t_pressure():
+    ld = _FakeLoader()
+    b = _mk_pressure_broker(free=0.5, transient=[_small], loader=ld)
+    ld.loaded.add(_small)
+    # 还没连续够 ⇒ 不动
+    r0 = await b.yield_under_pressure()
+    check("★★ 没到连续次数 ⇒ 什么都不做,并**说出**为什么",
+          r0["code"] == gpu_broker.YIELD_NO_PRESSURE, r0)
+    for _ in range(gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES):
+        b._note_pressure_sample()
+    # 给它一份点名了该组件的租约 —— 它正在跑
+    await b.grant("agent_task", "PC-A", [_small], ttl_s=60)
+    _n_leases = len(b._leases)
+    r1 = await b.yield_under_pressure()
+    check("★★★ 压力下**正在跑的也让**(与 D90「正在跑的不动」正相反,这是两条路径的分界)",
+          r1["code"] == gpu_broker.YIELD_DONE and r1["yielded"] == [_small], r1)
+    check("★★★ 而且**点名了谁被打断** —— 客户端据它把任务转成暂停(不是失败)",
+          len(r1["affected_leases"]) == 1
+          and r1["affected_leases"][0]["kind"] == "agent_task", r1.get("affected_leases"))
+    check("★★★ 但**不撤销任何租约**:不变式 I1 只允许拒发新租约,不允许撤销已发的。"
+          "让位动的是**显存**,不是别人手里的凭据",
+          len(b._leases) == _n_leases, f"{_n_leases} → {len(b._leases)}")
+    check("★ 装载器真的被调了(不是只改账本)", ("unload", [_small]) in ld.calls, ld.calls)
+    check("★★ committed 一个字节没动", list(b._committed) == [])
+    j = b.snapshot().to_json()
+    check("★★★ 通知进快照 ⇒ 走 SSE 推给**所有**客户端 —— D87③ 点名要防的就是"
+          "「只在主机上弹,副机那边任务凭空失败而人不知道为什么」",
+          j["pressure"]["notice"] is not None
+          and j["pressure"]["notice"]["unload_reason"] == gpu_broker.UNLOAD_BY_PRESSURE,
+          j["pressure"]["notice"])
+    check("★★ 通知里明说【已暂停,不是失败】—— 失败是终点,暂停不是",
+          "暂停" in j["pressure"]["notice"]["message"]
+          and "不是失败" in j["pressure"]["notice"]["message"],
+          j["pressure"]["notice"]["message"])
+    check("★ 诚实边界照抄 D87③ 与 §8.1:这是**策略不是保证**(WDDM 不按优先级驱逐)",
+          j["pressure"]["guarantee"] is False and "不是保证" in j["pressure"]["note"])
+    check("★★ 让完清零连续计数 —— 否则一次压力会把 transient 平面一口气全掏空",
+          not b.under_pressure())
+    # 通知过期
+    b._pressure_notice_at = time.monotonic() - gpu_broker.PRESSURE_NOTICE_TTL_S - 1
+    b._expire_pressure_notice()
+    check("★ 通知挂满 TTL 就摘掉(不摘的话几小时前那次会一直挂在界面上)",
+          b.snapshot().to_json()["pressure"]["notice"] is None)
+
+    # 有压力但没东西可让 ⇒ **不是成功**,要说出来
+    b2 = _mk_pressure_broker(free=0.5, transient=[], committed=[_small])
+    for _ in range(gpu_broker.PRESSURE_CONSECUTIVE_SAMPLES):
+        b2._note_pressure_sample()
+    r2 = await b2.yield_under_pressure()
+    check("★★★ 有压力却让不出东西 ⇒ 明确回 NOTHING_TO_YIELD(D24:失败落在 AI 侧,"
+          "而【我们让不出东西】必须看得见,否则界面会显示一切正常)",
+          r2["code"] == gpu_broker.YIELD_NOTHING_TO, r2)
+
+
+asyncio.run(_t_pressure())
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1999,6 +2161,11 @@ _SNAPSHOT_TOP_KEYS = {
     "loader_present", "loader_error", "idle_seconds", "lease_count",
     "idle_is_meaningful", "idle_note", "idle_note_transient",
     "transient_idle_s", "transient_idle_threshold_s", "transient_note",
+    # ★ 2026-08-07(V8 · D87③):新增 pressure 段。**这一行是被门禁逼出来的** ——
+    #   加上 `pressure` 那一刻,V5 钉的三条断言(gpu.snapshot 顶层键 · SSE 帧载荷 ·
+    #   409 里那份完整快照)**同时变红**,理由都写着「多 ['pressure']」。
+    #   ⇒ 成对断言在这里第一次挡住了**自己人**的契约漂移,不是只挡"别人改坏了"。
+    "pressure",
 }
 
 CROSS_PROCESS_CONTRACTS = {

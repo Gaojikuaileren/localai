@@ -37,10 +37,45 @@ public sealed record HubGpuSnapshot(
     // ★★ P4-S16b:**按需驻留**那一半。与 Committed 分成两个字段,**永不合并** ——
     //   「驻留」从此有两层含义(你勾的常驻 / 系统按你的授权临时装的),
     //   合并会让用户以为自己勾过它(D90 裁定③:D24「cap」那个亏)。
-    IReadOnlyList<string> TransientResident)
+    IReadOnlyList<string> TransientResident,
+    // ★★★ D87③:显存压力让位。**主机与副机都靠它知道刚才发生了什么** ——
+    //   D87③ 原文点名要防的就是「只在主机上弹,副机那边任务凭空失败而人不知道为什么」。
+    GpuPressure? Pressure)
 {
     /// <summary>★ 非 AI 占用永远是**推算**值 —— WDDM 不暴露逐进程显存,说不出占用者的名字。</summary>
     public const string NonAiNote = "桌面/其它程序的占用是算出来的,说不出是哪个程序(系统不提供)";
+}
+
+/// <summary>
+/// 显存压力态(D87③)。★ <c>Active</c> 与 <c>Notice</c> 是**两件事**,不合并:
+/// Notice 说"刚才让了什么",Active 说"现在还紧不紧" —— 通知过期不等于压力解除。
+/// </summary>
+public sealed record GpuPressure(bool Active, double FloorGiB, PressureNotice? Notice);
+
+/// <summary>
+/// 一次让位通知。★ <c>Components</c> 是**被让掉的组件**,<c>AffectedLeaseIds</c> 是
+/// 被它打断的租约 —— 客户端据后者把自己的任务转成**暂停**(不是失败)。
+/// </summary>
+public sealed record PressureNotice(
+    string UnloadReason,
+    IReadOnlyList<string> Components,
+    IReadOnlyList<string> Kinds,
+    IReadOnlyList<string> AffectedLeaseIds,
+    double? FreeGiBBefore,
+    string Message)
+{
+    /// <summary>
+    /// 给人看的一句话。★ 说清三件事:**是谁让的 · 让了什么 · 任务是暂停不是失败**。
+    /// <para>★★ 「暂停不是失败」是这条裁定的核心 —— 失败是终点,暂停不是。
+    /// 文案把它说反了,用户就会去重做一件本来只要点一下「再开」的事。</para>
+    /// </summary>
+    public string Describe()
+    {
+        var what = Components.Count > 0 ? string.Join("、", Components) : "(未点名组件)";
+        var before = FreeGiBBefore is { } f ? $"(当时可用 {f:0.00} GiB)" : "";
+        return $"别的程序需要显存{before},已让出:{what}。相关任务**已暂停**,不是失败 —— "
+               + "可以在任务进度里再开。";
+    }
 }
 
 /// <summary>目录里的一个组件。peak / display / note 全部由中枢下发,客户端不自己编。</summary>
@@ -305,6 +340,10 @@ public sealed class HubGpu : IDisposable
             LastDataAt = DateTime.UtcNow;    // ★ 只有**带数据**的帧刷新它 —— 裸心跳不算
             HubStreamError = null;           // 又收到好数据了 ⇒ 上一次的中枢报错翻篇
             _sseEvent = "";
+            // ★★ D87③:让位通知随**每一帧**过来(它挂满 TTL),这里只在指纹变化时动手。
+            //   放在这条路径上是有意的:主机与副机走的是同一条 SSE ⇒ 两边都会收到,
+            //   而 D87③ 点名要防的正是「只在主机上弹」。
+            OnPressure(parsed.Pressure);
         }
         LastFrameAt = DateTime.UtcNow;
         if (Link != HubGpuLink.Live) { Link = HubGpuLink.Live; LastError = null; }
@@ -390,9 +429,43 @@ public sealed class HubGpu : IDisposable
                 // ★ P4-S16b:按需驻留那一半。★ 中枢没给(旧版)⇒ 空表,**不是**退回 Committed:
                 //   退回去会让"系统临时装的"显示成"你勾的",正是要防的那种混淆。
                 TransientResident: sets.ValueKind == JsonValueKind.Object
-                                   ? Strs(sets, "transient_resident") : Array.Empty<string>());
+                                   ? Strs(sets, "transient_resident") : Array.Empty<string>(),
+                // ★ D87③:中枢没给(旧版)⇒ null,**不是**造一个 Active=false 的空壳:
+                //   空壳读起来像"中枢说了现在不紧",而真相是"这个中枢根本不报压力"。
+                Pressure: ParsePressure(r));
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// 解析快照里的 <c>pressure</c> 段(D87③)。★ 段不在 ⇒ 返回 null(**不造空壳**)。
+    /// <para>★★ <c>CONTRACT:gpu.snapshot</c> / <c>CONTRACT:gpu.events.frame</c> 的一部分:
+    /// 服务端那半钉住 `pressure` 在顶层键集合里,这一半证明它读得懂。</para>
+    /// </summary>
+    internal static GpuPressure? ParsePressure(JsonElement root)
+    {
+        if (!root.TryGetProperty("pressure", out var p) || p.ValueKind != JsonValueKind.Object)
+            return null;
+        PressureNotice? notice = null;
+        if (p.TryGetProperty("notice", out var n) && n.ValueKind == JsonValueKind.Object)
+        {
+            var ids = new List<string>();
+            if (n.TryGetProperty("affected_leases", out var al) && al.ValueKind == JsonValueKind.Array)
+                foreach (var l in al.EnumerateArray())
+                    if (l.ValueKind == JsonValueKind.Object && Str(l, "lease_id") is { } lid)
+                        ids.Add(lid);
+            notice = new PressureNotice(
+                UnloadReason: Str(n, "unload_reason") ?? "",
+                Components: Strs(n, "components"),
+                Kinds: Strs(n, "kinds"),
+                AffectedLeaseIds: ids,
+                FreeGiBBefore: Num(n, "free_gib_before"),
+                Message: Str(n, "message") ?? "");
+        }
+        return new GpuPressure(
+            Active: p.TryGetProperty("active", out var a) && a.ValueKind == JsonValueKind.True,
+            FloorGiB: Num(p, "floor_gib") ?? 0.0,
+            Notice: notice);
     }
 
     static double? Num(JsonElement e, string name) =>
@@ -407,12 +480,23 @@ public sealed class HubGpu : IDisposable
     }
 
     // ── 组件目录 ────────────────────────────────────────────────────
+    /// <summary>
+    /// 上一次成功取到的组件目录。★ 任务抽屉靠它算「显存够不够」——
+    /// 快照里**没有** peak 与 safety_margin,那两样只在目录里。
+    /// <para>★ 取不到就是 null,调用方必须据此说"读不到",**不许拿旧值冒充**。</para>
+    /// </summary>
+    public GpuCatalog? LastCatalog { get; private set; }
+
     /// <summary>取组件目录。★ 目录由中枢下发 —— 客户端**不得**自己维护一份清单。</summary>
     public async Task<GpuCatalog?> FetchCatalogAsync(CancellationToken ct = default)
     {
         var (status, body) = await _hub.CallAsync("/v1/gpu/components");
         if (status != 200) { LastError = $"取组件目录失败({status})"; return null; }
-        return ParseCatalog(body);
+        var cat = ParseCatalog(body);
+        // ★ 只有解析成功才更新缓存:半份/读不懂的目录**不能**盖掉上一份好的,
+        //   但也不能让它冒充新的 —— ParseCatalog 解析失败返回 null,这里就不动缓存。
+        if (cat is not null) LastCatalog = cat;
+        return cat;
     }
 
     public static GpuCatalog? ParseCatalog(string json)
@@ -509,6 +593,94 @@ public sealed class HubGpu : IDisposable
     /// <summary>最后一次意图的结果 —— 界面据此显示"正在为你启动…"或那句"要先授权"。</summary>
     public IntentOutcome? LastIntent { get; private set; }
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ D87③(2026-08-07 用户裁定):压力让位 → 任务暂停 → 可再开
+    //
+    //  用户裁定原文:「AI,让,任务暂停,并弹提示。然后在任务进度里面可以再开,
+    //  然后启动需要的模型,前提是显存允许的情况,不然开始按钮是不可用的。」
+    //
+    //  ★ 这里是**任务进度**(TaskCenter)与 GPU 面之间的那根线。
+    //    在它之前 TaskCenter 的生产写入点是 0 —— 见 TaskCenter 文件头。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>任务中心。★ 由 App 注入(与 `Vram.Hub = Gpu` 同一手法),可以为 null。</summary>
+    public TaskCenter? Tasks { get; set; }
+
+    /// <summary>
+    /// 把一次成功的意图登记成一条**真实任务**。★ 这是 `TaskCenter` 的第一个生产写入点。
+    /// <para>
+    /// ★★ 只登记**按需装载起来的**那些(<c>plane == "transient"</c>)——
+    /// 它们是唯一会被显存压力让掉的东西(D90:`committed` 一个字节都不许自动改)。
+    /// 常驻组件不会被让,给它建一条"可能被暂停"的任务是**误导**。
+    /// </para>
+    /// <para>★ 同一个别名只留一条:意图每 20 秒可能来一次,而它们是同一件事。</para>
+    /// </summary>
+    void RegisterIntentTask(string alias, IntentOutcome? res)
+    {
+        if (Tasks is null || res is null || !res.Ok) return;
+        if (!string.Equals(res.Plane, "transient", StringComparison.Ordinal)) return;
+        var existing = Tasks.Tasks.FirstOrDefault(t => t.ResumeAlias == alias);
+        if (existing is not null)
+        {
+            // ★ 已经有了:只更新它依赖的组件(中枢可能挑了 any_of 里的另一个)。
+            existing.NeedsComponents = new[] { res.Component };
+            return;
+        }
+        var t = new RunningTask
+        {
+            Title = $"按需模型:{alias}",
+            Detail = $"{res.Component} · 按需装载(空闲会自动卸,显存紧张会让位)",
+            WorkspaceKey = "model",
+            Progress = -1,                       // 不确定进度:它不是一件有终点的活
+            ResumeAlias = alias,
+            NeedsComponents = new[] { res.Component },
+        };
+        Tasks.Tasks.Add(t);
+    }
+
+    /// <summary>收到一条**新的**让位通知。★ 界面据它弹提示(裁定里的「并弹提示」)。</summary>
+    public event Action<PressureNotice>? PressureYielded;
+
+    /// <summary>最近一条让位通知(界面可以随时读,不必等事件)。</summary>
+    public PressureNotice? LastPressure { get; private set; }
+
+    //: 已经处理过的通知指纹。★ 快照每秒推一帧,而通知会**挂满 TTL** ——
+    //  不去重的话同一条通知会被当成新的处理几百次(每次都弹一下提示)。
+    string _lastPressureKey = "";
+
+    /// <summary>
+    /// 快照到手后处理让位通知。★ 只在**指纹变化**时动手。
+    /// <para>★★ 指纹用「组件 + 让位前的可用显存」而不是时间戳:中枢那个时刻是
+    /// **单调钟**,客户端拿它当 id 没问题,但它不在通知里 —— 而这两样已经足够区分两次让位。</para>
+    /// </summary>
+    void OnPressure(GpuPressure? p)
+    {
+        var n = p?.Notice;
+        if (n is null) { _lastPressureKey = ""; return; }
+        var key = string.Join("|", n.Components) + "#" + (n.FreeGiBBefore?.ToString("0.000") ?? "-");
+        if (key == _lastPressureKey) return;       // 同一条通知,已经处理过
+        _lastPressureKey = key;
+        LastPressure = n;
+        // ★ 把受影响的任务转成**暂停**(不是失败)——理由用中枢给的那一句。
+        try { Tasks?.PauseForPressure(n.AffectedLeaseIds, n.Components, n.Describe()); } catch { }
+        try { PressureYielded?.Invoke(n); } catch { }
+    }
+
+    /// <summary>
+    /// 「再开」:重新申请这条任务需要的模型。
+    /// <para>★ 走的是与「意图即起」**同一条**端点 —— 恢复不是一条新语义,
+    /// 它就是"我现在又要用它了"。★★ 成功才把任务转回 Running;
+    /// 失败时**任务留在暂停态**并把中枢给的理由显示出来 —— 不能假装它恢复了。</para>
+    /// </summary>
+    public async Task<IntentOutcome> ResumeTaskAsync(RunningTask task, CancellationToken ct = default)
+    {
+        var res = await RequestIntentAsync(task.ResumeAlias, ct);
+        if (res.Ok) Tasks?.Resume(task.Id);
+        else task.PausedReason = res.Advice is { Length: > 0 } a ? a : res.Message;
+        Notify();
+        return res;
+    }
+
     /// <summary>
     /// 声明一次「我要用这个功能」。★ 即发即忘:**绝不阻塞输入**。
     /// 调用方(输入框)只管说"有人在这里打字",拿不拿得到模型是另一件事。
@@ -526,7 +698,12 @@ public sealed class HubGpu : IDisposable
         //   异常一律吞在里面 —— 一次起不来的模型不该把输入框掀翻。
         _ = Task.Run(async () =>
         {
-            try { LastIntent = await RequestIntentAsync(alias); Notify(); }
+            try
+            {
+                LastIntent = await RequestIntentAsync(alias);
+                RegisterIntentTask(alias, LastIntent);
+                Notify();
+            }
             catch { }
         });
     }

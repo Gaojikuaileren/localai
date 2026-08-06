@@ -7642,7 +7642,14 @@ public static class Selftest
                     "\"loader_present\":true,\"loader_error\":null,\"idle_seconds\":3.0," +
                     "\"lease_count\":1,\"idle_is_meaningful\":true,\"idle_note\":\"…\"," +
                     "\"idle_note_transient\":\"…\",\"transient_idle_s\":{}," +
-                    "\"transient_idle_threshold_s\":600.0,\"transient_note\":\"…\"}";
+                    "\"transient_idle_threshold_s\":600.0,\"transient_note\":\"…\"," +
+                    // ★ V8 · D87③:pressure 段进了契约。**这几行是被服务端那半逼出来的** ——
+                    //   服务端加上 `pressure` 那一刻,test_gpu_broker 里三条断言同时变红
+                    //   (gpu.snapshot 顶层键 · SSE 帧载荷 · 409 里那份完整快照),
+                    //   理由都写着「多 ['pressure']」。⇒ 成对断言第一次挡住了**自己人**的漂移。
+                    "\"pressure\":{\"active\":false,\"floor_gib\":1.5," +
+                    "\"consecutive_samples\":3,\"notice\":null,\"notice_ttl_s\":300.0," +
+                    "\"guarantee\":false,\"note\":\"…\"}}";
                 Assert(LeaseKeeper.TryParseGeneration(snapWire2, out var gen42) && gen42 == 42,
                     "★★★ CONTRACT:gpu.snapshot —— 拿服务端真实形状读得出 generation"
                     + $"(实得 {gen42})");
@@ -7783,6 +7790,119 @@ public static class Selftest
                     "★★ 200 且读不懂 ⇒ 仍按成功算 —— 这**不是**放水,它的正确性来自"
                     + "服务端那一半:gpu_intended 钉死了「事务没成不得回 200」。"
                     + "单看客户端这一侧永远说不清这条对不对,所以两句必须一起写");
+            }
+
+            // ══════════════════════════════════════════════════════════
+            //  V8 · D87③「显存压力即让」的客户端半边(2026-08-07 用户裁定)
+            //
+            //  裁定原文:「AI,让,任务暂停,并弹提示。然后在任务进度里面可以再开,
+            //  然后启动需要的模型,前提是显存允许的情况,不然开始按钮是不可用的。」
+            // ══════════════════════════════════════════════════════════
+            {
+                // ── 让位通知读得懂,而且**主机与副机走同一条 SSE** ──
+                const string pressWire =
+                    "{\"generation\":9,\"committed\":[],\"vram\":{\"total_gib\":15.92," +
+                    "\"vram_budget\":8.52,\"desktop_floor\":6.6}," +
+                    "\"sets\":{\"transient_resident\":[]}," +
+                    "\"pressure\":{\"active\":true,\"floor_gib\":1.5,\"guarantee\":false," +
+                    "\"notice\":{\"unload_reason\":\"vram_pressure\"," +
+                    "\"components\":[\"llm.assistant.8b@16k\"],\"kinds\":[\"llm\"]," +
+                    "\"free_gib_before\":0.42," +
+                    "\"affected_leases\":[{\"lease_id\":\"L-9\",\"kind\":\"agent_task\"}]," +
+                    "\"message\":\"别的程序需要显存,已让出…相关任务已暂停(不是失败)。\"}}}";
+                var sp2 = HubGpu.TryParseSnapshot(pressWire);
+                Assert(sp2?.Pressure is { Active: true } gp
+                       && gp.Notice is { } nt && nt.UnloadReason == "vram_pressure"
+                       && nt.Components.Count == 1 && nt.AffectedLeaseIds.Count == 1
+                       && nt.AffectedLeaseIds[0] == "L-9",
+                    "★★★ CONTRACT:gpu.snapshot / gpu.events.frame —— 让位通知读得懂"
+                    + "(被让掉的组件 + 被打断的租约)。★ 它随 SSE 走 ⇒ **主机与副机都收到**,"
+                    + "而 D87③ 点名要防的正是「只在主机上弹」");
+                Assert(sp2!.Pressure!.Notice!.Describe().Contains("暂停")
+                       && sp2.Pressure.Notice.Describe().Contains("不是失败"),
+                    "★★★ 文案说清【暂停不是失败】—— 失败是终点,暂停不是;"
+                    + "说反了用户就会去重做一件本来只要点一下「再开」的事");
+                Assert(HubGpu.TryParseSnapshot(
+                           "{\"generation\":1,\"committed\":[],\"vram\":{\"total_gib\":1.0," +
+                           "\"vram_budget\":1.0,\"desktop_floor\":1.0}}")?.Pressure is null,
+                    "★★ 反向:中枢没给 pressure 段 ⇒ null,**不造一个 Active=false 的空壳** —— "
+                    + "空壳读起来像【中枢说了现在不紧】,而真相是【这个中枢根本不报压力】");
+
+                // ── 暂停不是失败:TaskCenter 的状态与匹配 ──
+                var tc = new TaskCenter();
+                var pt1 = new RunningTask { Title = "A", ResumeAlias = "assistant.fast",
+                                           NeedsComponents = new[] { "llm.a" }, LeaseId = "L-1" };
+                var pt2 = new RunningTask { Title = "B", ResumeAlias = "assistant.deep",
+                                           NeedsComponents = new[] { "llm.b" }, LeaseId = "L-2" };
+                tc.Tasks.Add(pt1); tc.Tasks.Add(pt2);
+                var paused = tc.PauseForPressure(new[] { "L-1" }, Array.Empty<string>(), "让位了");
+                Assert(paused == 1 && pt1.IsPaused && !pt2.IsPaused,
+                    "★★★ 按**中枢点名的租约**匹配:只暂停被打断的那条,不牵连别的");
+                Assert(pt1.State == TaskState.Paused && pt1.PercentText == "已暂停",
+                    "★★★ 状态是 Paused(**不是** Failed),而且不再显示百分比 —— "
+                    + "一条停着的百分比会让人以为它还在动");
+                Assert(pt1.PausedReason == "让位了",
+                    "★★ 理由用**中枢给的那一句**,不是我们编的 —— 编的理由会指向别处");
+                var paused2 = tc.PauseForPressure(Array.Empty<string>(), new[] { "llm.b" }, "让位了");
+                Assert(paused2 == 1 && pt2.IsPaused,
+                    "★★ 第二条判据:按**被让掉的组件**匹配 —— 兜住【租约刚过期但任务还在跑】那个窗口");
+                Assert(tc.PauseForPressure(new[] { "L-1" }, new[] { "llm.b" }, "又让了") == 0,
+                    "★ 已经暂停的不再重复暂停(返回 0 ⇒ 调用方知道这次没有新的要提示)");
+                tc.Resume(pt1.Id);
+                Assert(!pt1.IsPaused && pt1.PausedReason == "" && pt1.State == TaskState.Running,
+                    "★ 「再开」成功后回到运行态,并把旧理由清掉");
+
+                // ── 「开始」按钮的启用条件:显存允许才可用,而且**要说清差多少** ──
+                GpuCatalog Cat(double free, double margin, double peak) => new(
+                    Generation: 1,
+                    Components: new[] { new GpuComponent("llm.a", "A", "llm", peak, "",
+                                                         false, false, Array.Empty<string>(),
+                                                         false, false) },
+                    VramBudget: 8.52, TotalGiB: 15.92, DesktopFloor: 6.6,
+                    FreeGiB: free, SafetyMargin: margin);
+                var vramNeed = new RunningTask { NeedsComponents = new[] { "llm.a" } };
+                var okCase = Views.TaskDrawerView.CanResume(Cat(free: 8.0, margin: 0.8, peak: 5.92), vramNeed);
+                Assert(okCase.CanStart && okCase.Why.Contains("以中枢"),
+                    "★★★ 显存允许 ⇒ 按钮可用,而且明说这只是预览、以中枢重新求值为准");
+                var noCase = Views.TaskDrawerView.CanResume(Cat(free: 6.0, margin: 0.8, peak: 5.92), vramNeed);
+                Assert(!noCase.CanStart && noCase.Why.Contains("还差"),
+                    "★★★ 裁定原文「不然开始按钮是不可用的」—— 而且必须说清**还差多少**:"
+                    + "置灰但不说原因和骗人是一回事;差 0.2 和差 6 GiB 对用户是两件事"
+                    + $"(实得:{noCase.Why})");
+                Assert(!noCase.CanStart && noCase.Why.Contains("物理墙"),
+                    "★★ 撞的是哪一堵墙也要说 —— 这一堵改桌面预留没用(§8.1 两种撞墙分开说)");
+                Assert(!Views.TaskDrawerView.CanResume(null, vramNeed).CanStart
+                       && Views.TaskDrawerView.CanResume(null, vramNeed).Why.Contains("读不到"),
+                    "★★★ 拿不到目录 ⇒ 按钮不可用并说【读不到】,**不猜一个【应该够】** —— "
+                    + "猜完让用户点下去撞一鼻子灰,比直接说读不到更坏");
+                Assert(!Views.TaskDrawerView.CanResume(Cat(free: double.NaN, margin: 0.8, peak: 1.0)
+                                                 with { FreeGiB = null }, vramNeed).CanStart,
+                    "★★ 中枢这一轮没读到实时可用显存 ⇒ 同样不可用(不拿旧值冒充)");
+
+                // ── TaskCenter 终于有了真实客户,而**示例任务仍然不许回来** ──
+                var appSrcV8 = TryReadSource("App.xaml.cs");
+                if (appSrcV8 is not null)
+                {
+                    Assert(CodeOnly(appSrcV8).Contains("Gpu.Tasks = Tasks;"),
+                        "★★★ 任务中心接给了 GPU 面 —— 这是 TaskCenter 的**第一个真实客户**;"
+                        + "在它之前生产写入点是 0,底部横条永远 Collapsed、抽屉永远进不去");
+                    Assert(!CodeOnly(appSrcV8).Contains("if (!hadStore) SeedDemoTasks()"),
+                        "★★★ 而**示例任务仍然不许回来** —— 那条钉的是播种调用,"
+                        + "与「接真实源」不冲突,两件事别混");
+                }
+                var hgV8 = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (hgV8 is not null)
+                {
+                    var hgCodeV8 = CodeOnly(hgV8);
+                    Assert(hgCodeV8.Contains("RegisterIntentTask"),
+                        "★ 意图成功后登记一条真实任务(横条与抽屉从此有内容)");
+                    Assert(hgCodeV8.Contains("_lastPressureKey"),
+                        "★★ 通知去重:快照每秒推一帧而通知挂满 TTL —— "
+                        + "不去重的话同一条通知会被当成新的处理几百次,每次都弹一下");
+                    Assert(hgCodeV8.Contains("res.Plane") || hgCodeV8.Contains("\"transient\""),
+                        "★★ 只给**按需装载**的登记任务:常驻组件不会被让,"
+                        + "给它建一条【可能被暂停】的任务是误导");
+                }
             }
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }

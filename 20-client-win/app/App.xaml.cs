@@ -114,6 +114,12 @@ public partial class App : Application
         Lease = new LeaseKeeper(Hub);
         Lease.Start();
         Lifecycle.Register("stop-lease-keeper", () => Lease.Stop());
+        // ★★★ V8 · D87③:把任务中心接给 GPU 面(与上面 `Vram.Hub = Gpu` 同一手法)。
+        //   这一行给了 `TaskCenter` **第一个真实客户**:在它之前那个类的生产写入点是 0,
+        //   底部横条永远 Collapsed、任务抽屉永远进不去(见 TaskCenter 文件头)。
+        //   ⇒ 显存压力让位时,受影响的任务在这里变成【暂停】并出现在任务进度里,可以再开。
+        //   ★ 这与「示例任务不许回来」不冲突:那条钉的是 SeedDemoTasks 的播种调用。
+        Gpu.Tasks = Tasks;
 
         // ★ P4-S13(D86):内网同步。这里只【建】不【起】——
         //   Start() 必须等本地存档读完(见下方 LoadStores 之后那一行)。

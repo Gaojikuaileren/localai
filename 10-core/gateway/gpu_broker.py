@@ -232,6 +232,52 @@ ON_DEMAND_LOADER_ABSENT = "LOADER_ABSENT"
 ON_DEMAND_GATE          = "GATE"                # 三道闸之一拦住了
 ON_DEMAND_LOAD_FAILED   = "LOAD_FAILED"
 
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ D87③「显存压力即让」的判据(2026-08-07 用户裁定后落地)
+#
+#  用户裁定原文:「AI,让,任务暂停,并弹提示。然后在任务进度里面可以再开,
+#  然后启动需要的模型,前提是显存允许的情况,不然开始按钮是不可用的。」
+#  ★ 它比 D87③ 原文**完整** —— 原文只写到「仍然卸 + 发提醒」,**没有恢复路径**。
+#
+#  ★★★ 判据是「**NVML free 掉到阈值以下**」,**不去猜别的进程要多少**。
+#    猜不出来是结构性的:WDDM 不暴露逐进程显存(本机实测 --query-compute-apps 全 [N/A])。
+#    ⇒ 我们唯一能观测的事实是"还剩多少",那就只用它。
+#
+#  ★ 阈值取 1.5 GiB,理由逐条:
+#    · **高于** safety_margin(0.8)—— 要在桌面真的撞墙**之前**让,而不是撞上之后;
+#    · **低于**任何一个组件的 peak(最小的 speech.lite 是 2.07)—— 否则一让就是全让,
+#      而且刚让完又会被下一次意图装回来,来回抖;
+#    · 它是**观测阈值**不是预算:改它不改变任何人的配额,只改变"什么时候算别人在要"。
+#  ★★ 必须**连续** N 次采样都在阈值以下才算数。单次低于 = 一个瞬时波动,
+#    而按一次波动去打断用户正在跑的任务,正是这条规则最容易造成的伤害。
+#
+#  ★★★ 与 D90 空闲回收是**两条独立路径**,不许合并(本车道的硬约束):
+#    ┌ 触发源 ┬ 判据 ─────────────────────┬ 对"正在跑的" ┬ 提醒 ─────────┐
+#    │ D90    │ 逐组件 transient 空闲 ≥ 阈值 │ **不动**      │ 可选(不抢)   │
+#    │ D87③  │ **外部** NVML free < 阈值    │ **也让**      │ **必须**弹提示 │
+#    └────────┴──────────────────────────┴──────────────┴──────────────┘
+#    合成一条之后,没人说得清某次卸载是哪条规则干的 ——
+#    而"说不清是哪条规则"正是这个项目最贵的那种状态。
+#    ⇒ 每一次卸载都要在账上留下**是哪条规则**(见 `unload_reason` 字段)。
+# ══════════════════════════════════════════════════════════════════════
+PRESSURE_FREE_FLOOR_GIB = 1.5
+PRESSURE_CONSECUTIVE_SAMPLES = 3          # 1 Hz 采样 ⇒ 连续 3 秒
+
+# 让位的结果码。★ 与租约、按需装载同款:**可区分**的返回值。
+YIELD_NO_PRESSURE   = "NO_PRESSURE"       # 没到阈值,或没连续够
+YIELD_NOTHING_TO    = "NOTHING_TO_YIELD"  # 有压力,但 transient 平面空 —— 我们已经没什么可让的了
+YIELD_DONE          = "YIELDED"
+YIELD_LOADER_ABSENT = "LOADER_ABSENT"
+YIELD_FAILED        = "UNLOAD_FAILED"
+
+#: 卸载理由 —— **每一次自动卸载都必须带上它**。见上方那张对照表。
+UNLOAD_BY_IDLE     = "idle_reclaim"       # D90:我们自己的空闲回收
+UNLOAD_BY_PRESSURE = "vram_pressure"      # D87③:外部显存压力
+
+# 一条让位通知在快照里挂多久(秒)。★ 不是"发一次就算" ——
+#   副机可能正在重连,而 D87③ 的全部要点就是**主机与副机都要收到**。
+PRESSURE_NOTICE_TTL_S = 300.0
+
 
 class IllegalTransition(RuntimeError):
     """非法状态转换。★ 抛异常而不是静默忽略 —— 忽略会让状态机看着有约束、实际没有。"""
@@ -334,6 +380,14 @@ class Snapshot:
     transient_resident: Tuple[str, ...] = ()
     # 每个按需成员**多久没被意图点名过**(秒)。见 sweep_idle_transient。
     transient_idle_s: Tuple[Tuple[str, float], ...] = ()
+    # ★★★ D87③:最近一次「显存压力即让」的通知。**主机与副机都靠它知道发生了什么** ——
+    #   它随快照走 SSE 推给所有客户端(D87③ 原文:只在主机上弹的话,
+    #   副机那边任务凭空失败而人不知道为什么)。
+    #   ★ 它**挂一段时间**而不是发一次就丢:副机可能正在重连。
+    pressure_notice: Optional[Dict] = None
+    #: 当前是否处在压力态(连续采样都在阈值以下)。★ 观测量,与 notice 分开:
+    #  notice 说"刚才让了什么",这个说"现在还紧不紧"。
+    pressure_active: bool = False
     state: str = STATE_STARTING
     power_on: bool = True
     invariants: Tuple[Dict, ...] = ()
@@ -364,6 +418,28 @@ class Snapshot:
             "transient_note": (
                 "按需驻留 = 你在主机上授权过『允许按需装载』的成员,系统按意图自动装、空闲自动卸。"
                 "★ 常驻集合(你勾选并点确定的那些)不在此列,系统一个字节都不会自动改它。"),
+            # ══════════════════════════════════════════════════════════
+            #  ★★★ D87③:压力让位。**主机与副机靠这一段知道刚才发生了什么。**
+            #  它随快照走 SSE 推给所有客户端 —— D87③ 原文点名要防的就是
+            #  「只在主机上弹,副机那边任务凭空失败而人不知道为什么」。
+            #  ★ pressure_notice 为 null 不等于"没事":它也可能是**已经过期**了
+            #    (TTL 之后摘掉)。两者对客户端是同一件事:现在没有要显示的通知。
+            # ══════════════════════════════════════════════════════════
+            "pressure": {
+                "active": self.pressure_active,
+                "floor_gib": PRESSURE_FREE_FLOOR_GIB,
+                "consecutive_samples": PRESSURE_CONSECUTIVE_SAMPLES,
+                "notice": self.pressure_notice,
+                "notice_ttl_s": PRESSURE_NOTICE_TTL_S,
+                # ★ 诚实边界,沿用 §8.1 与 D87③ 原文,**一字不改**地摆在数据旁边:
+                #   这是**策略**,不是保证。WDDM 不按优先级驱逐,已经发生的驱逐
+                #   落在谁头上本项目控制不了。界面不得据此声称"保证桌面不被挤"。
+                "guarantee": False,
+                "note": "显存压力即让:别的程序要显存时,我们让出**按需驻留**的那部分并把任务暂停。"
+                        "★ 常驻集合一个字节都不会被自动改(D90)。"
+                        "★★ 这是策略不是保证 —— WDDM 不按优先级驱逐,"
+                        "已经发生的驱逐落在谁头上我们控制不了。",
+            },
             "state": self.state,
             "power_on": self.power_on,
             # ★ RECONCILE_WATCH 的结果:**只报告不修复**。每条自带 confidence ——
@@ -460,6 +536,12 @@ class Broker:
         self._transient_last_intent: Dict[str, float] = {}
         #: 正在装载中的按需组件 —— 防止两次意图同时把同一个模型起两遍(锁内判、锁内加)。
         self._transient_inflight: List[str] = []
+        # ── D87③ 压力让位(2026-08-07)─────────────────────────────
+        #: 连续多少次采样落在阈值以下。★ 单次不算 —— 见 PRESSURE_FREE_FLOOR_GIB 上方那段。
+        self._pressure_low_streak: int = 0
+        #: 最近一次让位通知 + 它的产生时刻(单调钟)。挂满 TTL 后摘掉。
+        self._pressure_notice: Optional[Dict] = None
+        self._pressure_notice_at: float = 0.0
         self._state: str = STATE_STARTING
         self._power_on: bool = True                # I4 的电源轴,与意图轴分离
         self._last_watch: Tuple[InvariantReport, ...] = ()
@@ -568,6 +650,13 @@ class Broker:
                 #   ⇒ 按需卸载是一次收割,它必须跟采样共用**同一个**写者节奏。
                 #   ★ 它自己会先判三条放行条件;不满足时是一次极便宜的空转。
                 await self.sweep_idle_transient()
+                # ── D87③:显存压力即让 ★ **第二条路径,与上面那条并列而不是嵌套** ──
+                #   两条都搭在这个循环里(仍然只有一个写者),但**判据与允许范围完全不同**:
+                #   上面那条问"我们自己还要不要它",这一条问"别人要不要显存"。
+                #   ★ 先更新连续计数,再判 —— 计数是采样的副产品,判定是动作。
+                self._note_pressure_sample()
+                self._expire_pressure_notice()
+                await self.yield_under_pressure()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -690,6 +779,11 @@ class Broker:
             transient_resident=tuple(_tr),
             transient_idle_s=tuple(
                 (c, max(0.0, _now - self._transient_last_intent.get(c, _now))) for c in _tr),
+            # ★ D87③:通知与压力态**分开下发** —— notice 说"刚才让了什么",
+            #   active 说"现在还紧不紧"。合成一个字段的话,通知过期就等于宣布不紧了。
+            pressure_notice=(dict(self._pressure_notice)
+                             if self._pressure_notice is not None else None),
+            pressure_active=self.under_pressure(),
             state=self._state,
             power_on=self._power_on,
             invariants=tuple(r.to_json() for r in (self._last_watch or self.check_invariants())),
@@ -1237,7 +1331,153 @@ class Broker:
                     self._transient_inflight.remove(v)
             self._generation += 1
             self._notify_locked()
-        return {"unloaded": victims, "reason": "idle", "threshold_s": threshold}
+        # ★★ 每一次自动卸载都带上**是哪条规则**(见 UNLOAD_BY_* 上方那张对照表)——
+        #   不带的话,日志里两条路径的卸载长得一模一样,而它们的允许范围完全不同。
+        return {"unloaded": victims, "reason": "idle", "threshold_s": threshold,
+                "unload_reason": UNLOAD_BY_IDLE}
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★★★ D87③「显存压力即让」—— 与上面那条**完全独立**的第二条路径
+    #
+    #  两条路径的差别不是参数,是**语义**:
+    #    · 上面那条(D90)问的是「我们自己还需不需要它」⇒ 正在跑的**不动**;
+    #    · 这一条问的是「**别人**要不要显存」⇒ 正在跑的**也让**,但必须把
+    #      被打断的事说出来(用户裁定:「AI,让,任务暂停,并弹提示」)。
+    #  ⇒ 两个触发源、两套判据、两条代码路径。**不许合并** ——
+    #    合并之后没人说得清某次卸载是哪条规则干的,而那正是本项目最贵的那种状态。
+    #
+    #  ★ 允许范围仍然受 D90 约束:**只动 transient 平面**,
+    #    `committed`(用户勾选并点过确定的那份)**一个字节都不许自动改**。
+    #    用户裁定里的「让」指的就是这一层。本方法的源码里同样不许出现对 `_committed` 的赋值,
+    #    由与 D90 那两条同一条反向断言扫着。
+    # ══════════════════════════════════════════════════════════════
+
+    def under_pressure(self) -> bool:
+        """现在算不算「别人在要显存」。★ 纯读,不触发任何动作。
+
+        判据只有一条:**NVML free 连续 N 次落在阈值以下**。
+        ★ 不去猜别的进程要多少 —— WDDM 不暴露逐进程显存,那是结构性的做不到,
+          而"猜一个数再据此动手"比不动手更坏。
+        """
+        return self._pressure_low_streak >= PRESSURE_CONSECUTIVE_SAMPLES
+
+    def _note_pressure_sample(self) -> None:
+        """采样后调:更新连续计数。★ 读不到 free 时**不清零也不累加** ——
+
+        清零 = 一次读失败就把压力态抹掉(而压力可能正是读失败的原因);
+        累加 = 拿"不知道"当"很紧",按它去打断用户的任务。
+        ⇒ 两个方向都会说谎,所以保持不变,等下一次真读数。
+        """
+        f = self._free
+        if f is None:
+            return
+        if f < PRESSURE_FREE_FLOOR_GIB:
+            self._pressure_low_streak += 1
+        else:
+            self._pressure_low_streak = 0
+
+    def pressure_victims(self, need_gib: float) -> List[str]:
+        """挑让谁。★ **按 peak 从大到小**,凑够就停 —— 与组件的 `kind` 无关。
+
+        ★★ 为什么**不写死只认 llm**:speech / vlm / comfyui 都是会占显存的组件,
+          而"哪几种能让"如果写成一张 kind 白名单,新增一种组件时它会**默认落在"不让"**
+          那一边 —— 于是压力来了系统让不出东西,而日志里什么都看不出来。
+          ⇒ 判据只问两件事:**它在不在 transient 平面里**(D90 的允许范围)、**它多大**。
+          kind 只用来生成给人看的文案,不参与选择。
+        ★ 从大到小是有意的:同样腾出 N GiB,动的组件数最少 ⇒ 被打断的任务最少。
+        """
+        cfg = self.cfg
+        pool = sorted((c for c in self._transient_resident if c not in self._committed),
+                      key=lambda c: cfg.peak(c) if c in cfg.components else 0.0,
+                      reverse=True)
+        out: List[str] = []
+        freed = 0.0
+        for c in pool:
+            if freed >= need_gib:
+                break
+            out.append(c)
+            freed += cfg.peak(c) if c in cfg.components else 0.0
+        return out
+
+    async def yield_under_pressure(self) -> Dict[str, object]:
+        """外部显存压力 ⇒ 让出按需驻留的那部分,并**把被打断的事记下来**。
+
+        ★ 返回值里 `affected_leases` 是这条裁定的落点:客户端据它把任务转成**暂停**
+          (不是失败)。★★ 但**不撤销任何租约** —— 不变式 I1 只允许拒发新租约,
+          不允许撤销已发的。让位动的是**显存**,不是别人手里的凭据。
+        """
+        if not self.under_pressure():
+            return {"code": YIELD_NO_PRESSURE, "yielded": [],
+                    "streak": self._pressure_low_streak}
+
+        cfg = self.cfg
+        async with self._lock:
+            free_before = self._free
+            # 需要腾出多少:回到阈值之上再留一点余量(否则刚好卡在线上,下一秒又触发)。
+            need = max(0.0, PRESSURE_FREE_FLOOR_GIB - (free_before or 0.0)) \
+                + cfg.budget.safety_margin
+            victims = self.pressure_victims(need)
+            if not victims:
+                # ★ 有压力但我们已经没什么可让的了 —— 这**不是**成功,要说出来。
+                #   按 D24:失败落在 AI 侧(拒新申请),**不得由桌面承担分配失败**;
+                #   而"我们让不出东西"必须看得见,否则界面会显示"一切正常"。
+                return {"code": YIELD_NOTHING_TO, "yielded": [],
+                        "free_gib": free_before, "need_gib": round(need, 2)}
+            if self._loader is None:
+                return {"code": YIELD_LOADER_ABSENT, "yielded": [], "victims": victims}
+            # ★ 谁会被打断:所有**点名了**这些组件的活跃租约。
+            #   空组件的租约声明的是"有人在",不是"有活在跑" —— 不算被打断(审计 A1②)。
+            now = time.monotonic()
+            affected = [l.to_json() for l in self._leases.values()
+                        if l.expires_at > now and set(l.components) & set(victims)]
+            self._transient_inflight.extend(v for v in victims
+                                            if v not in self._transient_inflight)
+
+        try:
+            await self._loader.unload(victims)                # ★ 锁外 I/O
+        except Exception as e:                                # noqa: BLE001
+            async with self._lock:
+                for v in victims:
+                    if v in self._transient_inflight:
+                        self._transient_inflight.remove(v)
+            return {"code": YIELD_FAILED, "yielded": [], "victims": victims,
+                    "message": f"{type(e).__name__}: {e}"}
+
+        async with self._lock:
+            for v in victims:
+                if v in self._transient_resident:
+                    self._transient_resident.remove(v)
+                self._transient_last_intent.pop(v, None)
+                if v in self._transient_inflight:
+                    self._transient_inflight.remove(v)
+            self._pressure_notice = {
+                "unload_reason": UNLOAD_BY_PRESSURE,
+                "components": list(victims),
+                # ★ kind 只进文案,不参与选择 —— 见 pressure_victims 的说明
+                "kinds": sorted({str(cfg.components.get(v, {}).get("kind") or "")
+                                 for v in victims} - {""}),
+                "free_gib_before": free_before,
+                "floor_gib": PRESSURE_FREE_FLOOR_GIB,
+                "affected_leases": affected,
+                "message": "别的程序需要显存,已让出按需装载的模型,相关任务**已暂停**(不是失败)。"
+                           "可以在任务进度里再开 —— 显存允许时「开始」才可用。",
+            }
+            self._pressure_notice_at = time.monotonic()
+            # ★ 让完之后连续计数清零:下一轮要重新连续够 N 次才再让一次,
+            #   否则一次压力会把 transient 平面一口气全掏空。
+            self._pressure_low_streak = 0
+            self._generation += 1
+            self._notify_locked()
+        return {"code": YIELD_DONE, "yielded": victims,
+                "unload_reason": UNLOAD_BY_PRESSURE,
+                "affected_leases": affected, "free_gib_before": free_before}
+
+    def _expire_pressure_notice(self) -> None:
+        """通知挂满 TTL 就摘掉。★ 不摘的话,几小时前的一次让位会一直挂在界面上。"""
+        if self._pressure_notice is None:
+            return
+        if time.monotonic() - self._pressure_notice_at >= PRESSURE_NOTICE_TTL_S:
+            self._pressure_notice = None
 
     # ══════════════════════════════════════════════════════════════
     #  P4-S8 · 「确定 = 一次事务」(方案书 §8.1「确定 = 一次事务」+ §8.1.6)

@@ -54,6 +54,13 @@ public sealed class ComponentPicker : UserControl
     readonly TextBlock _sumLine = new();
     readonly TextBlock _wallStatic = new();
     readonly TextBlock _wallDynamic = new();
+    /// <summary>
+    /// 三段预览的**最后一行**:「还能让桌面再涨 N GiB 才会出问题」。
+    /// <para>★★★ 方案书 §8.1 原文:「**★ 最后那一行是本界面存在的理由。**
+    /// 只显示「装得下」是不够的 —— 桌面占用是**波动**的,用户需要知道自己离墙有多远,
+    /// 而不是知道此刻没撞墙。」而它此前**整行缺席**。</para>
+    /// </summary>
+    readonly TextBlock _headroom = new();
     readonly TextBlock _status = new();
     readonly Button _apply = new() { Content = "确定", Padding = new Thickness(18, 7, 18, 7) };
     readonly Button _reload = new() { Content = "重新取", Padding = new Thickness(12, 7, 12, 7), Margin = new Thickness(0, 0, 8, 0) };
@@ -71,7 +78,7 @@ public sealed class ComponentPicker : UserControl
     public ComponentPicker()
     {
         _sumLine.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-        foreach (var t in new[] { _wallStatic, _wallDynamic, _status })
+        foreach (var t in new[] { _wallStatic, _wallDynamic, _headroom, _status })
         {
             t.TextWrapping = TextWrapping.Wrap;
             t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
@@ -110,6 +117,11 @@ public sealed class ComponentPicker : UserControl
         root.Children.Add(_sumLine);
         root.Children.Add(_wallStatic);
         root.Children.Add(_wallDynamic);
+        // ★ 分隔线 + 最后一行 —— §8.1 的三段预览就是「三段 + 一条横线 + 结论」那个形状。
+        var rule = new Border { Height = 1, Margin = new Thickness(0, 6, 0, 4), Opacity = 0.35 };
+        rule.SetResourceReference(Border.BackgroundProperty, "FgMuted");
+        root.Children.Add(rule);
+        root.Children.Add(_headroom);
         root.Children.Add(_status);
         root.Children.Add(buttons);
         Content = root;
@@ -257,36 +269,60 @@ public sealed class ComponentPicker : UserControl
         if (_catalog is not { } cat) return;
         var unknown = new List<string>();
         var sum = VramBudget.PeakSumGiB(_checked, unknown);
+
+        // ── 第一段:已选组件 ────────────────────────────────────
         // ★ 中枢下发的 id 本地 toml 里找不到 ⇒ 两份配置漂了。**说出来**,不静默按 0 计。
-        var sumText = $"已选 {_checked.Count} 项,合计峰值 {sum:0.00} GiB";
+        var sumText = $"已选组件　　　已选 {_checked.Count} 项,合计峰值 = {sum:0.00} GiB　← 估算";
         if (unknown.Count > 0)
             sumText += $"(★ 有 {unknown.Count} 项本机算不出峰值:{string.Join("、", unknown)} —— "
                        + "本机与中枢的显存配置对不上了,合计值偏低,以中枢判定为准)";
         _sumLine.Text = sumText;
 
-        // ── 墙一:静态。Σpeak vs vram_budget ⇒ 改桌面预留【有用】──
+        // ── 第二段:你的桌面预留 → vram_budget ⇒ 撞它时改预留【有用】──
         var overStatic = sum - cat.VramBudget;
         if (overStatic > 1e-9)
-            Danger(_wallStatic, $"① 超出显存预算 {overStatic:0.00} GiB(预算 {cat.VramBudget:0.00} = "
-                                + $"总量 {cat.TotalGiB:0.00} − 桌面预留 {cat.DesktopFloor:0.00} − 安全余量 {cat.SafetyMargin:0.00})。"
-                                + "→ 这堵墙**可以**靠调小桌面预留让开,或者少选几个。");
+            Danger(_wallStatic, $"你的桌面预留　desktop_floor {cat.DesktopFloor:0.00} → vram_budget {cat.VramBudget:0.00}"
+                                + $"(总量 {cat.TotalGiB:0.00} − 预留 {cat.DesktopFloor:0.00} − 安全余量 {cat.SafetyMargin:0.00})"
+                                + $"　★ 超 {overStatic:0.00} GiB。→ 这堵墙**可以**靠调小桌面预留让开,或者少选几个。");
         else
-            Muted(_wallStatic, $"① 预算内:{sum:0.00} / {cat.VramBudget:0.00} GiB(还余 {cat.VramBudget - sum:0.00})");
+            Muted(_wallStatic, $"你的桌面预留　desktop_floor {cat.DesktopFloor:0.00} → vram_budget {cat.VramBudget:0.00}"
+                               + $"(还余 {cat.VramBudget - sum:0.00})");
 
-        // ── 墙二:动态。free − Σpeak vs safety_margin ⇒ 改预留【没用】──
+        // ── 第三段:此刻实际可用 = NVML free − 安全余量 ⇒ 撞它时改预留【没用】──
         if (cat.FreeGiB is { } free)
         {
-            var after = free - sum;
-            if (after < cat.SafetyMargin)
-                Danger(_wallDynamic, $"② 此刻装不下:可用 {free:0.00} GiB,装完只剩 {after:0.00}(需 ≥ {cat.SafetyMargin:0.00})。"
-                                     + "→ 这堵墙**改桌面预留没有用**,它是物理墙 —— 得去关掉正在占显存的程序。");
+            var usable = free - cat.SafetyMargin;
+            Muted(_wallDynamic, $"此刻实际可用　NVML free {free:0.00} − {cat.SafetyMargin:0.00} = {usable:0.00} GiB");
+
+            // ══════════════════════════════════════════════════════
+            //  ★★★ 最后那一行 —— 方案书 §8.1 原文:
+            //  「**★ 最后那一行是本界面存在的理由。** 只显示「装得下」是不够的 ——
+            //    桌面占用是**波动**的,用户需要知道自己离墙有多远,而不是知道此刻没撞墙。」
+            //
+            //  ★ 它此前**整行缺席**:面板只说「装完还剩 X」,而"还剩"与
+            //    「还能让桌面再涨多少才会出问题」是**两个不同的数**
+            //    (前者没减安全余量),读起来也是两句不同的话。
+            //  ★★ 它算的是 (free − safety_margin) − Σpeak,与 §8.1 的例子逐字对得上:
+            //     14.86 − 0.8 = 14.06;14.06 − 11.4 = 2.66。
+            // ══════════════════════════════════════════════════════
+            var headroom = usable - sum;
+            if (headroom >= 0 && overStatic <= 1e-9)
+                Muted(_headroom, $"可以确定 ✓　　还能让桌面再涨 {headroom:0.00} GiB 才会出问题");
+            else if (overStatic > 1e-9)
+                // 撞的是预算墙 —— 这一行不谈"再涨多少",谈了会把人支去关程序(而那没用)。
+                Danger(_headroom, $"不能确定 ✗　　撞的是**显存预算**(超 {overStatic:0.00} GiB)—— "
+                                  + "改桌面预留有用,关程序没有用。");
             else
-                Muted(_wallDynamic, $"② 此刻可用 {free:0.00} GiB,装完还剩 {after:0.00}");
+                Danger(_headroom, $"不能确定 ✗　　此刻**已经**差 {-headroom:0.00} GiB —— "
+                                  + "撞的是物理墙,**改桌面预留没有用**,得关掉正在占显存的程序。");
         }
         else
         {
-            Danger(_wallDynamic, "② 中枢这一轮没读到实时可用显存 —— 装不装得下**现在算不出来**"
-                                 + "(不拿旧值冒充)。点确定时中枢会重新求值。");
+            Danger(_wallDynamic, "此刻实际可用　中枢这一轮没读到实时可用显存 —— 装不装得下"
+                                 + "**现在算不出来**(不拿旧值冒充)。点确定时中枢会重新求值。");
+            // ★ 读不到 free 就**不显示**那一行 —— 它需要 free 才算得出来,
+            //   编一个"还能再涨 N"比不说更坏(那正是这一行存在要防的事:让人以为自己知道离墙多远)。
+            Muted(_headroom, "还能让桌面再涨多少　—— 读不到实时可用显存,这一行现在算不出来。");
         }
     }
 
