@@ -51,13 +51,48 @@ DIMENSION_IMPL: Dict[str, str] = {
     #   P4-S1 已断言 `gpu.*` 永不进入任何 Agent 工具池(赶在工具池存在之前写的)。
     #   所以这一维是【已答】,答案是"不可能有 agent 拿到 GPU 工具"。
     "agent":  "P4-S1 架构断言:gpu.* 永不进入任何 Agent 工具池 ⇒ 不存在 agent 主体",
-    "tool":   "ROUTE_TIERS 登记路由 + 本表的 action(read/lease/change_resident/unload_all)",
+    "tool":   "ROUTE_TIERS 登记路由 + 本表的 action"
+              "(read/lease/change_resident/unload_all/permit_on_demand)",
     "param":  "本表:lease kind 白名单 · ttl 上限 · 组件数上限 · ★ 空集合单列一维",
-    "quota":  "本表:每分钟变更次数 · 并发租约数上限(进程内计数,与 Broker 同一进程)",
+    "quota":  "本表:变更桶与租约桶**分开**计(QUOTA_BUCKETS)· 并发租约数上限"
+              "(进程内计数,与 Broker 同一进程)",
 }
 
 # 动作维(「工具」维在 GPU 面的粒度)。★ 反向全表:新增动作必须登记进每一档。
-ACTIONS: Tuple[str, ...] = ("read", "lease", "change_resident", "unload_all")
+#
+# ★★★ 2026-08-06 审计 B6 补 `permit_on_demand`:写 `permitted_on_demand_set`
+#   (「哪些模型允许被自动装卸」的那份授权)。方案书 §8.1.7 与本仓多处注释都写着
+#   「**只有主机变更面能写**」,而**代码里一道闸都没有** —— 实测副机可以给自己发这份授权。
+#   ⇒ 它必须是【另一个动作】,而不是 change_resident 的一个字段:
+#     和「空集合 = 卸掉全部」同一条理由(§6.2「参数决定它是安全还是灾难」),
+#     长得一模一样的一次 POST,多带一个数组就变成了"授权系统自己动显存"。
+ACTIONS: Tuple[str, ...] = ("read", "lease", "change_resident", "unload_all",
+                            "permit_on_demand")
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 额度桶归属(2026-08-06 审计 B4)。
+#
+#  **实测的病**:`/v1/gpu/lease/renew` 归 `lease` 档,而 `lease` 与 `change_resident`
+#  **共用同一个桶、同一个上限**(`changes_per_min`)。于是:
+#    lan-device 连续 20 次续租(心跳)之后,用户点一次确定 → `denied_quota`,
+#    实跑第 21 次判红。而钉住"续租不吃变更配额"的那条断言查的是
+#    **源码里有没有 `change_resident` 这个词** —— 恒绿(ASSERTION-PITFALLS 第 9 条:
+#    判据问的是"我是什么身份",不是"我做不做得到")。
+#
+#  ⇒ 桶按**动作类别**分。"不吃变更配额"从此是一句**可以为假**的话:
+#    把续租打满,再来一次 change_resident,它必须还能过 —— 那才是这句话的判据。
+#  ★ 反向全表:ACTIONS 里每一个都必须登记在这里(空串 = 不计额度),漏一个判红。
+# ══════════════════════════════════════════════════════════════════════
+QUOTA_BUCKET_CHANGE = "change"
+QUOTA_BUCKET_LEASE = "lease"
+
+QUOTA_BUCKETS: Dict[str, str] = {
+    "read":              "",                    # 读不限流 —— 限流读会让界面反而看不见发生了什么
+    "lease":             QUOTA_BUCKET_LEASE,    # ★ 心跳节奏,与用户的变更配额**互不相干**
+    "change_resident":   QUOTA_BUCKET_CHANGE,
+    "unload_all":        QUOTA_BUCKET_CHANGE,   # 与变更同桶:它就是变更的极端取值
+    "permit_on_demand":  QUOTA_BUCKET_CHANGE,   # 授权也是一次人的动作,同属变更节奏
+}
 
 
 @dataclass(frozen=True)
@@ -71,8 +106,13 @@ class Caps:
     max_ttl_s: float                  # ttl 上限 —— 不封顶等于"永不过期的租约"
     max_components: int               # 一次请求最多点名几个组件
     # ── 额度维 ★ ──
-    changes_per_min: int              # 变更类请求的每分钟上限
+    changes_per_min: int              # 变更桶(change_resident / unload_all / permit_on_demand)
     max_leases: int                   # 同时持有的租约上限
+    # ★★ 租约桶**单独**一个上限(审计 B4)。它必须远大于变更上限:
+    #   续租是心跳(TTL/3 一次),而变更是人按确定。两者共用一个数,
+    #   就是让"客户端活着"这件事把用户的配额吃光 —— 实跑第 21 次判红。
+    #   ★ 默认给 0 而不是"跟着 changes_per_min":漏填要落在**拒绝**那一边。
+    leases_per_min: int = 0
     why: str = ""                     # 这一档为什么是这样 —— 写给下一个改它的人
 
     def allows(self, action: str) -> bool:
@@ -91,6 +131,7 @@ class Caps:
 DENY_ALL = Caps(
     tier="<unknown>", actions=frozenset(), lease_kinds=frozenset(),
     max_ttl_s=0.0, max_components=0, changes_per_min=0, max_leases=0,
+    leases_per_min=0,
     why="表外档位一律拒绝 —— 加一个新档位,默认落在【什么都不能做】那一边",
 )
 
@@ -106,23 +147,33 @@ TIER_CAPS: Dict[str, Caps] = {
         lease_kinds=_ALL_LEASE_KINDS,
         max_ttl_s=1800.0, max_components=16,
         changes_per_min=60, max_leases=16,
+        # ★ 租约桶按心跳节奏定:TTL/3 一次 ⇒ 一台约 2 次/分。给 120 是**给多台留余量**,
+        #   而不是"随便给个大数":它仍然封顶,一个跑飞的客户端还是会被拦住。
+        leases_per_min=120,
         why="屏幕前就是机主(账户在 caller-accounts.toml 的 allowlist 里)。"
-            "唯一能『卸掉全部』的档位 —— 那是把整台中枢清空,应当由主机侧的人做。",
+            "唯一能『卸掉全部』的档位 —— 那是把整台中枢清空,应当由主机侧的人做。"
+            "★ 也是唯一能写『按需授权槽』的档位(§8.1.7:只有主机变更面能写)——"
+            "那份授权的意思是「允许系统在我没同意的情况下动这些模型的显存」,"
+            "而副机上的人看不到主机屏幕,不该替机主签这个字。",
     ),
     "lan-device": Caps(
         tier="lan-device",
         # ★ 可改驻留集合(否则副机上刚做出来的组件面板会变成只读,是产品回退),
-        #   但**不许『卸掉全部』** —— 见 max/why。
+        #   但**不许『卸掉全部』**、也**不许写按需授权槽** —— 见 max/why。
         actions=frozenset({"read", "lease", "change_resident"}),
         # ★ 参数维:独占型租约不给副机 —— 它会让整台中枢在这期间拒发一切新租约,
         #   而副机上的人看不到主机屏幕,判断不了现在能不能冻。
         lease_kinds=_ALL_LEASE_KINDS - _EXCLUSIVE_KINDS,
         max_ttl_s=900.0, max_components=16,
         changes_per_min=20, max_leases=8,
+        leases_per_min=60,
         why="已配对的局域网设备(证书指纹经成员表反查)。§6.3 的 trusted-lan 一档。"
             "★『空集合 = 卸掉全部』被单独挡住:那是一次能让整台中枢空掉的动作,"
             "而它和一次普通变更**长得一模一样**,只差参数 —— 这正是 §6.2 说"
-            "『参数决定它是安全还是灾难』的字面情形。",
+            "『参数决定它是安全还是灾难』的字面情形。"
+            "★★『写按需授权槽』同款被挡:多带一个 permitted_on_demand 数组的那次 POST,"
+            "与一次普通变更在 HTTP 上也长得一模一样,而它的意思是"
+            "「授权系统在没人点头的情况下自己动这些模型的显存」(D90 裁定①的代价段)。",
     ),
     "unregistered-local": Caps(
         tier="unregistered-local",
@@ -166,21 +217,47 @@ def caps_for(tier: str) -> Caps:
 
 # ── 额度维:进程内令牌桶 ────────────────────────────────────────────
 #   ★ 与 Broker 同进程、同单写者,所以计数是一致的(不需要跨进程协调)。
-#   ★ 桶按 (tier, holder) 分:一个副机刷爆自己的额度,不该把主机也拖下水。
+#   ★ 桶按 (tier, holder, bucket) 分:
+#     · holder 那一维 —— 一个副机刷爆自己的额度,不该把主机也拖下水。
+#       ★★ 而 holder 现在**只来自服务端解析**(审计 B1/B3)。此前它是客户端自报的,
+#         于是"每换一个名字就是一个新桶",额度维形同虚设 ——
+#         实测:同一 holder 打 22 次第 21 次被拒;换成 PC-A-0…24 打 25 次 **25/25 全过**。
+#     · bucket 那一维 —— 见 QUOTA_BUCKETS 上方那段(审计 B4)。
 _WINDOW_S = 60.0
-_hits: Dict[Tuple[str, str], List[float]] = {}
+_hits: Dict[Tuple[str, str, str], List[float]] = {}
 
 
-def _sweep(key: Tuple[str, str], now: float) -> List[float]:
+def _sweep(key: Tuple[str, str, str], now: float) -> List[float]:
     xs = [t for t in _hits.get(key, ()) if now - t < _WINDOW_S]
     _hits[key] = xs
     return xs
 
 
-def quota_state(tier: str, holder: str = "") -> Tuple[int, int]:
-    """(本窗口已用, 上限)。★ 只读,不计数 —— 供响应体如实回报。"""
+def bucket_of(action: str) -> str:
+    """动作 → 额度桶名。★ 表外动作落**变更桶**(最严的那一个),不是"不计额度"。
+
+    ★ 这条是 fail-closed 的方向:加一个新动作却忘了登记,它会被算进最严的桶而被拦住,
+      而不是获得一条免额度的通道。反向全表另有一条断言要求逐个登记。
+    """
+    return QUOTA_BUCKETS.get(action, QUOTA_BUCKET_CHANGE)
+
+
+def bucket_cap(tier: str, bucket: str) -> int:
+    """某个桶在某一档上的每分钟上限。"""
+    caps = caps_for(tier)
+    return caps.leases_per_min if bucket == QUOTA_BUCKET_LEASE else caps.changes_per_min
+
+
+def quota_state(tier: str, holder: str = "",
+                action: str = "change_resident") -> Tuple[int, int]:
+    """(本窗口已用, 上限)。★ 只读,不计数 —— 供响应体如实回报。
+
+    ★ 必须带 action:两个桶的数不一样,不带的话回给用户的"已用 N/上限 M"
+      有一半机会说的是另一个桶的账 —— 那比不说更坏(他会照着一个假数去等)。
+    """
     now = time.monotonic()
-    return len(_sweep((tier, holder), now)), caps_for(tier).changes_per_min
+    b = bucket_of(action)
+    return len(_sweep((tier, holder, b), now)), bucket_cap(tier, b)
 
 
 def reset_quota() -> None:
@@ -253,16 +330,23 @@ def check(tier: str, action: str, *, components: Optional[List[str]] = None,
                         dimension="param", detail={"max_ttl_s": caps.max_ttl_s, "got": ttl_s})
 
     # ── ④ 额度维 ★ ──
-    if action in ("lease", "change_resident", "unload_all"):
+    #   ★★ 桶按动作类别分(审计 B4)。续租(lease)与点确定(change_resident)
+    #     **不在同一个桶里**,所以"续租不吃变更配额"这句话才可以为假、才检得出来。
+    bucket = bucket_of(action)
+    if bucket:
         now = time.monotonic()
-        key = (tier, holder)
+        key = (tier, holder, bucket)
+        cap = bucket_cap(tier, bucket)
         used = _sweep(key, now)
-        if len(used) >= caps.changes_per_min:
+        if len(used) >= cap:
+            _what = "续租/申请租约" if bucket == QUOTA_BUCKET_LEASE else "变更"
             return Decision(False, "denied_quota",
-                            f"每分钟最多 {caps.changes_per_min} 次变更,本窗口已用 {len(used)}。"
+                            f"每分钟最多 {cap} 次{_what},本窗口已用 {len(used)}。"
                             "★ 这不是权限不够,是**太快了** —— 等一分钟即可,不必去申请提权",
                             dimension="quota",
-                            detail={"per_min": caps.changes_per_min, "used": len(used)})
+                            # ★ 桶名如实回带:不带的话,撞了租约桶的人会去看变更上限,
+                            #   两个数对不上,而他没有任何办法知道是两个桶。
+                            detail={"per_min": cap, "used": len(used), "bucket": bucket})
         if count_quota:
             used.append(now)
 

@@ -16,6 +16,7 @@
 import asyncio
 import dataclasses
 import inspect
+import os              # ★ D92 元断言要去客户端源码里找配对标记
 import re
 import sys
 import time            # ★ A1②:排空窗口那条断言要**真的计一次时**,不能只看常量
@@ -32,6 +33,7 @@ except Exception:
 import assert_helpers
 import gateway
 import gpu_broker
+import gpu_policy      # ★ B4/B6:额度桶与动作维的判据在这里,行为断言要真的调它
 
 _pass = _fail = 0
 
@@ -63,6 +65,10 @@ _EXPECTED_GPU_ROUTES = {
     # S16b:续租。★ 它**不是**变更端点 —— 不改驻留集合,只延长一份已有租约的寿命。
     #   归 lease 档;若哪天有人把它算进 change_resident,下面那条"变更端点逐条列名"会红。
     ("POST", "/v1/gpu/lease/renew"),
+    # S16b:★ 「意图即起」(D87①)。它**动显存**,但**动不到 committed** ——
+    #   走 Broker 的 transient 平面(D90 裁定③:结构上够不着 committed 的独立路径)。
+    #   ⇒ 归 lease 档。若哪天有人让它写 committed,下面那条反向断言(扫源码里的赋值)会红。
+    ("POST", "/v1/gpu/intent"),
 }
 _gpu_routes = {(m, p) for (m, p) in gateway.ROUTE_TIERS if p.startswith("/v1/gpu")}
 check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
@@ -72,13 +78,55 @@ check(f"GPU 路由逐条登记(实测 {sorted(_gpu_routes)})",
 #   改成逐条列名 —— 数量断言只拦得住"多了几个",拦不住"换了一个"。改成集合相等更严,不更松。
 check("★ 变更端点逐条列名(每多一个都该是一次有意的决定)",
       {p for m, p in _gpu_routes if m != "GET"}
-      == {"/v1/gpu/lease", "/v1/gpu/intended", "/v1/gpu/lease/renew"},
+      == {"/v1/gpu/lease", "/v1/gpu/intended", "/v1/gpu/lease/renew", "/v1/gpu/intent"},
       f'{sorted(p for m, p in _gpu_routes if m != "GET")}')
-# ★★ S16b:续租**必须**归 lease 档,不许归 change_resident ——
-#   它不改驻留集合,而且会被高频调用(心跳)。算进变更配额的话用着用着就撞 429。
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-06 审计 B4:这条断言**换了判据**,不是换了措辞。
+#
+#  原文是:
+#      _ren = assert_helpers.code_only(gateway.gpu_lease_renew)
+#      check("★★★ 续租归 lease 档(不吃变更配额)",
+#            '"lease"' in _ren and "change_resident" not in _ren)
+#  它问的是「源码里有没有那个词」,而它想守的是「续租**做不做得到**不吃变更配额」。
+#  这正是 ASSERTION-PITFALLS 第 9 条的形状 —— 而且它**当时是绿的、事实是假的**:
+#  `lease` 与 `change_resident` 共用同一个令牌桶、同一个上限,
+#  实测 lan-device 连打 20 次续租之后,用户点一次确定就吃 denied_quota(第 21 次判红)。
+#
+#  ⇒ 新判据:**把续租桶打满,再点一次确定,它必须还能过。**
+#    ★ 归档那条(源码里归 lease 不归 change_resident)**留着**,但降级为辅助 ——
+#      它仍然拦得住"手滑改了档位",只是不再单独承担这句话的真伪。
+# ══════════════════════════════════════════════════════════════════════
 _ren = assert_helpers.code_only(gateway.gpu_lease_renew)
-check("★★★ 续租归 lease 档(不吃变更配额 —— 它是心跳,不是变更)",
+check("(辅助)续租的档位标记仍是 lease,不是 change_resident",
       '"lease"' in _ren and "change_resident" not in _ren)
+gpu_policy.reset_quota()
+_lease_cap = gpu_policy.TIER_CAPS["lan-device"].leases_per_min
+for _i in range(_lease_cap):
+    gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
+_after_renews = gpu_policy.check("lan-device", "change_resident", components=["x"], holder="PC-A")
+check(f"★★★ 续租【真的】不吃变更配额:打满 {_lease_cap} 次续租之后,"
+      "用户点确定仍然过得去(这才是那句话的判据)",
+      _after_renews.ok, _after_renews.to_json())
+gpu_policy.reset_quota()
+# ★ 反向:两个桶各自仍然封顶 —— 拆桶不等于把额度维关掉。
+for _i in range(_lease_cap):
+    gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
+_over = gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
+check("★★ 反向:租约桶自己仍然会满(拆桶 ≠ 给续租开一条免额度通道)",
+      (not _over.ok) and _over.dimension == "quota"
+      and _over.detail.get("bucket") == gpu_policy.QUOTA_BUCKET_LEASE, _over.to_json())
+check("★ 拒绝时回带**桶名** —— 不带的话,撞了租约桶的人会照着变更桶的上限去等",
+      "bucket" in _over.detail, _over.detail)
+gpu_policy.reset_quota()
+# ★★ 反向全表:ACTIONS 里每一个都必须在 QUOTA_BUCKETS 里登记 ——
+#   漏一个就会落进 `bucket_of` 的兜底(变更桶),那是**安全**的方向,
+#   但"安全地错着"仍然是错着:它会把一个本该免额度的动作静默算进用户的配额。
+check("★★ 反向全表:每个动作都登记了额度桶归属",
+      set(gpu_policy.ACTIONS) == set(gpu_policy.QUOTA_BUCKETS),
+      f"漏 {sorted(set(gpu_policy.ACTIONS) - set(gpu_policy.QUOTA_BUCKETS))} "
+      f"多 {sorted(set(gpu_policy.QUOTA_BUCKETS) - set(gpu_policy.ACTIONS))}")
+check("★ 表外动作落【变更桶】(最严的那个),不是【不计额度】—— 加新动作默认落在拒的那边",
+      gpu_policy.bucket_of("brand-new-action") == gpu_policy.QUOTA_BUCKET_CHANGE)
 check("★★ 续租的条件是 fence_token,**不叠 if_generation** —— "
       "世代号是全局的,别人申请一份不相干的租约不该把你的续租打回",
       "fence_token" in _ren and "if_generation" not in _ren)
@@ -682,9 +730,14 @@ class _FakeLoader:
         self.fail_load = set(fail_load)
         self.fail_rollback = fail_rollback
         self.calls = []
+        # ★ S16b:记一份"真的在跑的是哪些" —— 按需驻留的用例要能让 actual_resident
+        #   变成**独立观测**(否则它退回账本,I2 的作用域收窄就测不出来:
+        #   拿账本跟账本比,减不减 transient 都相等,那是个假检测器)。
+        self.loaded = set()
 
     async def unload(self, ids):
         self.calls.append(("unload", list(ids)))
+        self.loaded -= set(ids)
 
     async def load(self, ids):
         self.calls.append(("load", list(ids)))
@@ -692,6 +745,14 @@ class _FakeLoader:
             raise RuntimeError("回滚也装不上")
         if set(ids) & self.fail_load:
             raise RuntimeError("装载失败")
+        self.loaded |= set(ids)
+
+    async def running(self):
+        return sorted(self.loaded)
+
+    async def adopt(self):
+        # ★ 不认领任何东西 —— 认领会让测试去动**真实系统**的状态(见 _NoAdoptLoader 那段的理由)
+        return []
 
 
 def _mkbroker(free, loader=None, state=None):
@@ -1508,6 +1569,509 @@ check("★★★ 端点必须把 permitted 传给 Broker —— 形参在了三�
       "permitted=permitted" in _gi or "permitted = permitted" in _gi)
 check("★★ 省略与空数组必须分开(None vs [])—— 合并的话普通变更会清空授权",
       "is not None" in _gi and "permitted_on_demand" in _gi)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2026-08-06 审计 B5 · lease_count 是全模块唯一**不过滤过期**的租约读数
+#
+#  它正是「idle 可不可信」的开关(`idle_is_meaningful = lease_count > 0`),
+#  而它坏在 fail-open 那一边:把"没人报告过在用"说成"有人在用"。
+#  复现只要三步:发一份 ttl=0.05s 的租约 → 等 0.2 秒 → 取快照。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== 审计 B5:lease_count 必须与 leases 读同一份(已过滤过期)===")
+
+
+async def _t_lease_count():
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    b._free, b._sampled_at = 8.0, 0.0
+    await b.grant("client_session", "PC-A", [], ttl_s=0.05)
+    await asyncio.sleep(0.2)
+    return b.snapshot().to_json()
+
+
+_j5 = asyncio.run(_t_lease_count())
+check("★★★ 过期之后 lease_count 归零(改动前实测:leases=[] 而 lease_count=1)",
+      _j5["lease_count"] == 0, f'lease_count={_j5["lease_count"]}')
+check("★★ 且与 leases 长度**永远**一致 —— 两个数从同一份已过滤列表来",
+      _j5["lease_count"] == len(_j5["leases"]),
+      f'{_j5["lease_count"]} vs {len(_j5["leases"])}')
+check("★★★ 于是 idle_is_meaningful 也跟着变假 —— 它是「能不能据此卸载」的开关,"
+      "坏在 fail-open 那一边比坏在 fail-closed 更危险",
+      _j5["idle_is_meaningful"] is False, _j5["idle_is_meaningful"])
+check("★ 文案也如实说了「未过期」这三个字(不然读的人不知道这个数过不过滤)",
+      "未过期" in _j5["idle_note"], _j5["idle_note"][:50])
+_snap_src = assert_helpers.code_only(gpu_broker.Broker.snapshot)
+check("★★ 反向:snapshot 里不得再出现 len(self._leases) —— 那是这条 bug 的原形",
+      "len(self._leases)" not in _snap_src.replace(" ", ""), _snap_src[:200])
+check("★ 而它确实数了那份已过滤的列表(判据不是空转)",
+      "_live" in _snap_src)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2026-08-06 审计 B1 / B2 / B3 · GPU 面的身份
+#
+#  ★★★ B1 与 B3 **必须同一提交落地**,理由不是洁癖:
+#    今天 GPU 面用客户端自报的 MachineName、同步面用成员表 device_id,
+#    **各自自洽所以不炸**;而 `/v1/session/end` 恰好横跨两者
+#    (拿自报 device 逐条比 GPU 面的 holder)——
+#    只改一边,那条路径当场失配 ⇒ **退出不再释放任何租约**,而它吞异常。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== 审计 B1/B3:设备身份只有一套,且只来自服务端 ===")
+
+_pd = assert_helpers.code_only(gateway.principal_device)
+check("★★★ 唯一解析口 principal_device 存在,且身份来自证书指纹经成员表反查",
+      "resolve_lan_principal" in _pd and "x-localai-cert-sha256" in _pd)
+check("★★ 它**不读** body —— 主体只来自成员表,自报一律忽略",
+      "body" not in _pd and "json()" not in _pd)
+check("★ 解析不出身份落 unknown(fail-closed),不给一个像样的名字冒充别人",
+      "UNKNOWN_DEVICE" in _pd)
+_sd = assert_helpers.code_only(gateway._sync_device)
+check("★★★ B3 合一:同步面**不再有自己的实现**,只转发给 principal_device",
+      "principal_device" in _sd and "resolve_lan_principal" not in _sd, _sd)
+check("★ 而且它真的只剩一行转发(不是又抄了一份逻辑)",
+      _sd.count("return") == 1, _sd)
+
+# ── 反向全表:GPU 面**任何**处理函数都不许再从 body 里取 holder/device 当身份 ──
+#   ★ 这条盯的是**全部** GPU 处理函数,不是我记得的那三处 —— 漏掉的恰恰是最危险的那个。
+_ident_fns = {getattr(r, "endpoint").__name__ for r in gateway.app.routes
+              if getattr(r, "path", "") in ("/v1/gpu/lease", "/v1/gpu/lease/renew",
+                                            "/v1/gpu/intended", "/v1/gpu/intent",
+                                            "/v1/session/end")
+              and hasattr(r, "endpoint")}
+check("★ 元断言:确实数到了五条要查的路由(判据不是空转)",
+      len(_ident_fns) == 5, sorted(_ident_fns))
+for _n in sorted(_ident_fns):
+    _s = assert_helpers.code_only(getattr(gateway, _n))
+    check(f"{_n}:身份走 principal_device", "principal_device" in _s, _s[:150])
+    check(f"★★ {_n}:不再拿 body 里的 holder 当身份"
+          f"(它是限流桶的 key,自报 = 每换个名字一个新桶)",
+          'get("holder")' not in _s.replace(" ", ""), _s[:200])
+
+print("\n=== 审计 B1/B2 端到端:自报的名字既进不了账本,也点不动别人的租约 ===")
+
+_LAN_H = {"x-localai-cert-sha256": "aa"}
+#: 当前这次请求被解析成哪台设备 —— 用可变盒子,便于在同一条连接里换身份。
+_AS = {"device": "PC-A"}
+
+
+class _Isolated:
+    """把网关钉在一个**注入的** Broker + **注入的**装载器上再开 TestClient。
+
+    ★★ 不这么做的话,`@app.on_event("startup")` 会:① 接上一个**真装载器**
+      (把注入的 _FakeLoader 顶掉),② `adopt_running()` **认领正在跑的 llama-server**
+      —— 于是测试会去动真实系统的状态,而断言变红的理由跟它自称在测的东西无关。
+      与本文件 :1160 那段同一条理由,只是那里是另一组用例。
+    """
+
+    def __init__(self, loader=None, free=64.0, tier="lan-device"):
+        self.loader = loader or _FakeLoader()
+        self.free, self.tier = free, tier
+
+    def __enter__(self):
+        self._saved = (gpu_broker.BROKER, _ml.ModelLoader,
+                       gateway.classify_caller, gateway.resolve_lan_principal)
+        self.broker = _mkbroker(free=self.free, loader=self.loader)
+        gpu_broker.BROKER = self.broker
+        _ml.ModelLoader = lambda _l=self.loader: _l      # startup 接的还是这一个
+        if self.tier == "lan-device":
+            gateway.classify_caller = lambda r: "lan-edge"
+            gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device",
+                                                        "device_id": _AS["device"]}
+        else:
+            gateway.classify_caller = lambda r, t=self.tier: t
+            gateway.resolve_lan_principal = lambda fp: None
+        gpu_policy.reset_quota()
+        self._tc = _TC(gateway.app, client=("127.0.0.1", 5555))
+        return self._tc.__enter__()
+
+    def __exit__(self, *a):
+        try:
+            self._tc.__exit__(*a)
+        finally:
+            (gpu_broker.BROKER, _ml.ModelLoader,
+             gateway.classify_caller, gateway.resolve_lan_principal) = self._saved
+            gpu_policy.reset_quota()
+
+
+def _gen(c, h=None):
+    return c.get("/v1/gpu/snapshot", headers=h or _LAN_H).json()["generation"]
+
+
+_AS["device"] = "PC-A"
+with _Isolated() as _c:
+    _r = _c.post("/v1/gpu/lease", headers=_LAN_H,
+                 json={"if_generation": _gen(_c), "kind": "client_session",
+                       "holder": "我是主机(其实不是)", "components": [], "ttl_s": 60})
+    check("租约发得出来", _r.status_code == 200, _r.text[:140])
+    _granted = _r.json().get("lease", {}).get("holder")
+    check("★★★ B1:账本里记的是**服务端解出来的** PC-A,不是自报的那个名字 —— "
+          "它会被印进「正在跑:xxx」对话框,自报等于让占用者的名字由被中断方自己填",
+          _granted == "PC-A", f"实得 {_granted!r}")
+
+    # ── B1 额度维:换名字不再是换桶 ──
+    gpu_policy.reset_quota()
+    _cap = gpu_policy.TIER_CAPS["lan-device"].changes_per_min
+    _codes = []
+    for _i in range(_cap + 5):
+        _codes.append(_c.post("/v1/gpu/intended", headers=_LAN_H,
+                              json={"if_generation": _gen(_c), "components": [_small],
+                                    "holder": f"PC-A-{_i}"}).status_code)
+    check(f"★★★ B1:每次换一个自报名字打 {_cap + 5} 次,仍然会撞额度 —— "
+          f"改动前实测 25/25 全过(桶 key 是自报值,每换个名字就是一个新桶)",
+          429 in _codes, f"实测状态码 {_codes}")
+
+    # ── B2:一台副机点名释放另一台的租约 ──
+    gpu_policy.reset_quota()
+    _AS["device"] = "PC-VICTIM"                       # 受害者自己去申请两份租约
+    for _ in range(2):
+        _c.post("/v1/gpu/lease", headers=_LAN_H,
+                json={"if_generation": _gen(_c), "kind": "client_session",
+                      "components": [], "ttl_s": 60})
+    _victim_n = len([l for l in gpu_broker.BROKER._leases.values() if l.holder == "PC-VICTIM"])
+    check("★ 前提成立:受害者手上确实有租约(判据不是在空集合上测的)", _victim_n == 2, _victim_n)
+    _AS["device"] = "PC-A"                            # 换回攻击者
+    gpu_policy.reset_quota()
+    _own_n = len([l for l in gpu_broker.BROKER._leases.values() if l.holder == "PC-A"])
+    _r2 = _c.post("/v1/session/end", headers=_LAN_H,
+                  json={"device": "PC-VICTIM", "reason": "我是 PC-A,点名释放 PC-VICTIM"})
+    check("★★★ B2:受害者的两份租约**原封不动**(改动前实测:被点名释放,released=2)",
+          len([l for l in gpu_broker.BROKER._leases.values()
+               if l.holder == "PC-VICTIM"]) == 2,
+          f'released={_r2.json().get("released_leases")}')
+    check("★★ 而 released 的数正好是**它自己**那几份 —— 不是【报了个数但放的是别人的】",
+          _r2.status_code == 200 and _r2.json()["released_leases"] == _own_n,
+          f'{_r2.json().get("released_leases")} vs 自己有 {_own_n} 份')
+    check("★ 响应如实说了【你报的那个名字被忽略了】—— 静默丢弃会让旧客户端"
+          "拿着一个 200 以为租约放掉了",
+          _r2.json().get("ignored_device") == "PC-VICTIM", _r2.json())
+    check("★ 而 device 回带的是**服务端认定**的那台", _r2.json()["device"] == "PC-A")
+
+    # ── B2 反面:释放自己的照常有效(修的是冒名,不是把功能关掉)──
+    _c.post("/v1/gpu/lease", headers=_LAN_H,
+            json={"if_generation": _gen(_c), "kind": "client_session",
+                  "components": [], "ttl_s": 60})
+    _r3 = _c.post("/v1/session/end", headers=_LAN_H, json={"reason": "quit"})
+    check("★ 释放**自己**的租约照常有效", _r3.json()["released_leases"] >= 1, _r3.text[:140])
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2026-08-06 审计 B6 + D90 裁定① · 「按需授权只有主机变更面能写」
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== 审计 B6:写按需授权是【另一个动作】,只有主机档有 ===")
+check("★★★ permit_on_demand 已登记为独立动作(不是 change_resident 的一个字段)",
+      "permit_on_demand" in gpu_policy.ACTIONS, gpu_policy.ACTIONS)
+check("★★★ 只有 trusted-local 有它 —— 副机看不到主机屏幕,不该替机主签这个字",
+      {t for t, c in gpu_policy.TIER_CAPS.items() if "permit_on_demand" in c.actions}
+      == {"trusted-local"},
+      sorted(t for t, c in gpu_policy.TIER_CAPS.items() if "permit_on_demand" in c.actions))
+_gi2 = assert_helpers.code_only(gateway.gpu_intended)
+check("★★ 端点真的判了这一维(而不是只在注释里写着「只有主机能写」)",
+      '"permit_on_demand"' in _gi2)
+check("★ 且只在**带了这个字段**时才判 —— 普通变更不该被一道不相干的闸拦住",
+      "is not None" in _gi2)
+
+_AS["device"] = "PC-A"
+with _Isolated() as _c:
+    _r = _c.post("/v1/gpu/intended", headers=_LAN_H,
+                 json={"if_generation": _gen(_c), "components": [_small],
+                       "permitted_on_demand": [_small]})
+    check("★★★ B6:副机写按需授权 → 403(改动前实测:授权当场写进了权威状态)",
+          _r.status_code == 403, f"{_r.status_code} {_r.text[:140]}")
+    check("★ 拦在【工具】维,并点名了动作 —— 用户据此知道这事要去主机上做",
+          _r.json()["error"]["dimension"] == "tool"
+          and _r.json()["error"]["action"] == "permit_on_demand", _r.json()["error"])
+    check("★★ 授权集合**一个字节都没被改**",
+          list(gpu_broker.BROKER.snapshot().permitted_on_demand) == [],
+          list(gpu_broker.BROKER.snapshot().permitted_on_demand))
+    # 反面:普通变更(不带这个字段)照常放行 —— 修的是那一个字段,不是把副机的面板关掉
+    gpu_policy.reset_quota()
+    _r2 = _c.post("/v1/gpu/intended", headers=_LAN_H,
+                  json={"if_generation": _gen(_c), "components": [_small]})
+    check("★ 反面:副机的普通变更照常过权限层(否则副机面板变只读 = 产品回退)",
+          _r2.status_code not in (401, 403), f"{_r2.status_code} {_r2.text[:140]}")
+
+with _Isolated(tier="trusted-local") as _c:
+    _g = _c.get("/v1/gpu/snapshot").json()["generation"]
+    _r = _c.post("/v1/gpu/intended",
+                 json={"if_generation": _g, "components": [_small],
+                       "permitted_on_demand": [_small]})
+    check("★★ 主机侧写按需授权 → 过(闸挡的是副机,不是这件事本身)",
+          _r.status_code == 200, f"{_r.status_code} {_r.text[:140]}")
+    check("★ 且授权真的落进了权威状态",
+          list(gpu_broker.BROKER.snapshot().permitted_on_demand) == [_small],
+          list(gpu_broker.BROKER.snapshot().permitted_on_demand))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  P4-S16b 接动作 · 按需驻留(transient)平面
+#
+#  D90 裁定③(结构性强制):自动路径**不得复用 apply_intended**,必须是一条
+#  **结构上够不着 committed** 的独立路径,并配**反向断言**:
+#  自动路径的源码里不许出现对 `_committed` 的赋值。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== S16b:按需装载 / 空闲卸载 —— 结构上够不着 committed ===")
+
+_AUTO_PATHS = ("request_on_demand", "sweep_idle_transient")
+_WRITE_PAT = re.compile(r"self\._committed\s*(?:=[^=]|\.append|\.remove|\.clear|"
+                        r"\.extend|\.insert|\.pop|\.sort|\.reverse)")
+for _m in _AUTO_PATHS:
+    _s = inspect.getsource(getattr(gpu_broker.Broker, _m))
+    _hit = _WRITE_PAT.search(_s)
+    check(f"★★★ {_m} 的源码里**没有任何**对 _committed 的写 —— D90 裁定③的反向断言",
+          _hit is None, _hit.group(0) if _hit else "")
+    check(f"★ 而它确实**读**得到 _committed —— 判据不是靠【压根没提这个名字】蒙过去的",
+          "self._committed" in _s)
+# ★ 判据自检:同一条正则拿 apply_intended 一试必须命中 —— 否则它只是个永远不响的探测器。
+check("★★ 元断言:这条正则对**真的会写 committed** 的那条路径确实命中"
+      "(不然它是个永远不响的探测器)",
+      _WRITE_PAT.search(inspect.getsource(gpu_broker.Broker.apply_intended)) is not None)
+
+# ── 字段名不复用(D90 裁定③:D24「cap」那个亏)──
+_sn_keys = set(gpu_broker.BROKER.snapshot().to_json()["sets"])
+check("★★ 按需那一半用 transient_ 前缀,**不复用** committed 那一半的任何名字",
+      "transient_resident" in _sn_keys and "committed_resident" in _sn_keys, sorted(_sn_keys))
+check("★ 五个集合齐备(四个老的 + transient)",
+      _sn_keys == {"intended_resident", "committed_resident", "actual_resident",
+                   "permitted_on_demand", "transient_resident"}, sorted(_sn_keys))
+
+
+async def _t_on_demand():
+    ld = _FakeLoader()
+    b = _mkbroker(free=64.0, loader=ld)
+    b._committed = []
+    # ① 没授权过 → 拒,并给出"去主机上勾一次"这条下一步
+    r = await b.request_on_demand(_small)
+    check("★★★ 没被授权过的组件 → 拒(D90 裁定①的代价段:先授权一次才有按需可言)",
+          r["code"] == gpu_broker.ON_DEMAND_NOT_PERMITTED, r)
+    check("★ 而且说清了下一步是【去主机上勾一次】,不是一句【起不来】",
+          "主机" in str(r["message"]) and "授权" in str(r["message"]), r["message"])
+    check("★★ 被拒时 transient 平面是空的(拒绝不留半份账)",
+          list(b._transient_resident) == [])
+
+    # ② 授权之后 → 装得上,且**只进 transient 平面**
+    b._permitted_on_demand = [_small]
+    r2 = await b.request_on_demand(_small)
+    check("★★★ 授权之后按需装载成功", r2["code"] == gpu_broker.ON_DEMAND_OK, r2)
+    check("★★★ committed **一个字节都没动** —— 这是 D90 裁定①的硬边界",
+          list(b._committed) == [], list(b._committed))
+    check("★ 它落在 transient 平面里", list(b._transient_resident) == [_small])
+    check("★ 装载器**真的**被调用了(不是只改了账本)",
+          ("load", [_small]) in ld.calls, ld.calls)
+
+    # ③ 再来一次 → ALREADY,不重复装
+    _n_before = len([c for c in ld.calls if c[0] == "load"])
+    r3 = await b.request_on_demand(_small)
+    check("★ 重复意图 → ALREADY,不重复装载",
+          r3["code"] == gpu_broker.ON_DEMAND_ALREADY
+          and len([c for c in ld.calls if c[0] == "load"]) == _n_before, r3)
+
+    # ④ I2 的作用域:actual 里多出一个按需成员,**不算** I2 违反
+    b._actual_cache = await ld.running()          # ★ 让 actual 变成独立观测
+    _i2 = [i for i in b.check_invariants() if i.invariant == "I2"][0]
+    check("★★★ I2 作用域收窄到常驻面:按需成员在跑 ⇒ I2 仍然成立",
+          _i2.holds, _i2.to_json())
+    check("★ 且 detail 里**说出**了它是被排除的那一个(不是悄悄减掉)",
+          _small in _i2.detail, _i2.detail)
+    _i3 = [i for i in b.check_invariants() if i.invariant == "I3"][0]
+    check("★ I3 照常成立(transient ⊆ permitted)", _i3.holds, _i3.to_json())
+
+    # ⑤ ★★ 反向:一个既不在 committed 也不在 transient 的野组件,I2/I3 必须红 ——
+    #    收窄的是作用域,不是把检测器关小
+    _other = sorted(c for c in b.cfg.components if c != _small)[0]
+    b._actual_cache = [_small, _other]
+    _i2b = [i for i in b.check_invariants() if i.invariant == "I2"][0]
+    _i3b = [i for i in b.check_invariants() if i.invariant == "I3"][0]
+    check("★★★ 反向:野组件仍然让 I2 判红(减的只是 transient 登记过的那些)",
+          not _i2b.holds, _i2b.to_json())
+    check("★★ 反向:I3 也点名了它", (not _i3b.holds) and _other in _i3b.detail, _i3b.to_json())
+    b._actual_cache = await ld.running()
+
+    # ⑥ 提级为常驻之后,不能同时挂在两个平面上
+    b2 = _mkbroker(free=64.0, loader=_FakeLoader())
+    b2._permitted_on_demand = [_small]
+    await b2.request_on_demand(_small)
+    await b2.apply_intended([_small])
+    check("★★ 勾进常驻之后从 transient 平面摘掉(否则 I2 会报『缺了它』而它明明在跑)",
+          list(b2._transient_resident) == [] and list(b2._committed) == [_small],
+          f"transient={b2._transient_resident} committed={b2._committed}")
+    return b, ld
+
+
+_b_od, _ld_od = asyncio.run(_t_on_demand())
+
+print("\n=== S16b:空闲即卸 —— 三条放行条件缺一不可 ===")
+
+
+async def _t_sweep():
+    ld = _FakeLoader()
+    b = _mkbroker(free=64.0, loader=ld)
+    b._permitted_on_demand = [_small]
+    await b.request_on_demand(_small)
+
+    # ① 没空够久 → 不卸
+    r1 = await b.sweep_idle_transient(idle_after_s=600.0)
+    check("★★ 条件①:没空够久 ⇒ 不卸,并**说出**为什么(静默的收割与没跑过一模一样)",
+          r1["unloaded"] == [] and r1["reason"] == "not_idle_enough", r1)
+
+    # ② 空够久了,但有**点名了组件**的租约在跑 → 不卸(D90 裁定②,硬条件)
+    b._transient_last_intent[_small] = time.monotonic() - 10_000
+    await b.grant("agent_task", "PC-A", [_small], ttl_s=60)
+    r2 = await b.sweep_idle_transient(idle_after_s=600.0)
+    check("★★★ 条件②:正在跑的不动(D90 裁定②是**硬条件**,不是【提醒后仍卸】)",
+          r2["unloaded"] == [] and r2["reason"] == "blocking_leases", r2)
+    check("★ 且回带了是谁挡的 —— 拒绝信息要含占用者",
+          r2["blocking"] and r2["blocking"][0]["kind"] == "agent_task", r2.get("blocking"))
+
+    # ③ 租约没了 → 卸
+    b._leases.clear()
+    r3 = await b.sweep_idle_transient(idle_after_s=600.0)
+    check("★★★ 三条都成立 ⇒ 真的卸(而且装载器真的被调用了)",
+          r3["unloaded"] == [_small] and ("unload", [_small]) in ld.calls, (r3, ld.calls))
+    check("★ 卸完 transient 平面清空", list(b._transient_resident) == [])
+
+    # ④ ★★★ 条件③:常驻成员**永远**不是候选 —— 哪怕它同时被授权、且空了一万秒
+    ld2 = _FakeLoader()
+    b2 = _mkbroker(free=64.0, loader=ld2)
+    b2._committed = [_small]
+    b2._permitted_on_demand = [_small]
+    b2._transient_last_intent[_small] = time.monotonic() - 10_000
+    r4 = await b2.sweep_idle_transient(idle_after_s=1.0)
+    check("★★★ 条件③:常驻成员碰不到 —— 候选池只从 transient 平面来",
+          r4["unloaded"] == [] and list(b2._committed) == [_small], (r4, b2._committed))
+    check("★ 而且装载器**一次都没被调** —— 不是【卸了又装回去】",
+          ld2.calls == [], ld2.calls)
+
+    # ⑤ 装载器缺席 → 不动账本(账面上卸了而显存里还在,比不卸更坏)
+    b3 = _mkbroker(free=64.0, loader=_FakeLoader())
+    b3._permitted_on_demand = [_small]
+    await b3.request_on_demand(_small)
+    b3._loader = None
+    b3._transient_last_intent[_small] = time.monotonic() - 10_000
+    r5 = await b3.sweep_idle_transient(idle_after_s=1.0)
+    check("★★ 装载器缺席 ⇒ 不卸也**不清账本**(清了就是账面卸了而显存里还在)",
+          r5["reason"] == "loader_absent" and list(b3._transient_resident) == [_small], r5)
+
+
+asyncio.run(_t_sweep())
+
+# ── 两个钟不可互相替代 ──
+_idle_src = inspect.getsource(gpu_broker.Broker.idle_seconds.fget)
+check("★★★ idle_seconds 明说了它**不是**按需卸载的放行条件(它被心跳刷新 ⇒ 恒假式)",
+      "恒假式" in _idle_src)
+_sw_src = assert_helpers.code_only(gpu_broker.Broker.sweep_idle_transient)
+check("★★ 收割看的是 _transient_last_intent(逐组件),不是 _last_activity_at(全网)",
+      "_transient_last_intent" in _sw_src and "_last_activity_at" not in _sw_src, _sw_src[:200])
+# ── 不设收割线程:S16b 的收割必须搭在采样循环里,不许再起一个 task ──
+_all_src = inspect.getsource(gpu_broker)
+check("★★★ 接了动作之后仍然只有**一个**后台任务(收割线程 = 第二个写者)",
+      _all_src.count("create_task") == 1,
+      "create_task 出现次数 = " + str(_all_src.count("create_task")))
+check("★ 而收割确实被采样循环调用了(判据不是空转)",
+      "sweep_idle_transient()" in assert_helpers.code_only(gpu_broker.Broker._sampler_loop))
+# ── D87③「显存压力即让」**有意留空**,不是没做完 ──
+check("★★ admission_guard 仍然只报告降幅、不触发任何卸载 —— "
+      "D90 明写「压力即让」仍需单独裁,而未决项不许在实现里被默认值悄悄裁掉",
+      "unload" not in assert_helpers.code_only(gpu_broker.Broker.admission_guard))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ D92 硬前置 · 跨语言成对断言
+#
+#  A1 是一条**跨语言缝**:服务端把 lease_id 放在 body["lease"]["lease_id"],
+#  客户端在**顶层**找 —— 服务端测"顶层有哪些键"、客户端测"这个形状能不能解析",
+#  **各测各的,中间那条缝谁也没看**,于是租约一次都没持住过而 5 秒卡顿照样交付。
+#
+#  ⇒ 每一个跨进程响应契约必须有**一条成对断言**:
+#     服务端钉顶层键集合 · 客户端钉「拿这个形状能解析出目标字段」;
+#     并配一条**元断言**枚举所有此类契约、缺配对即判红
+#     —— 照 ROUTE_TIERS 反向全表那个已被验证的形状。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== D92 硬前置:跨进程响应契约,两侧成对 ===")
+
+#: 契约登记表。key = 契约号(客户端那半边必须原样出现这个字符串)。
+#  ★ 新增任何跨进程响应形状 → 必须进这张表 → 元断言会去客户端源码里找同名标记。
+CROSS_PROCESS_CONTRACTS = {
+    "CONTRACT:gpu.lease.grant":  ("POST /v1/gpu/lease 200",
+                                  {"status", "lease", "fence_token", "generation"}),
+    "CONTRACT:gpu.intent":       ("POST /v1/gpu/intent 200",
+                                  {"status", "intent", "lease", "fence_token", "generation"}),
+    "CONTRACT:gpu.lease.renew":  ("POST /v1/gpu/lease/renew 200", {"result", "snapshot"}),
+    "CONTRACT:session.end":      ("POST /v1/session/end 200",
+                                  {"status", "released_leases", "device", "reason"}),
+    "CONTRACT:gpu.intended.blocking": ("POST /v1/gpu/intended 409 的 result.blocking[i]",
+                                       {"lease_id", "kind", "holder", "components",
+                                        "granted_at", "expires_at", "held_s",
+                                        "evictable", "blocking", "exclusive"}),
+}
+
+#: 意图那条契约要一个**真的有别名指向它**的组件 —— `_small`(speech.lite)今天没有别名,
+#  拿它去打 /v1/gpu/intent 会走进 no_gpu_needed 那条分支,契约形状就不是要测的那个。
+#  ★ 这不是"挑一个能过的" —— 是判据要落在**它真正描述的那条路径**上。
+_small_aliased = min((c for c in gpu_broker.BROKER.cfg.components
+                      if gateway.aliases_for_component(c)),
+                     key=lambda c: gpu_broker.BROKER.cfg.peak(c))
+check("★ 前提:至少有一个组件真的被别名指着(否则下面那条契约测的是另一条分支)",
+      bool(gateway.aliases_for_component(_small_aliased)), _small_aliased)
+
+_observed = {}
+_AS["device"] = "PC-A"
+with _Isolated() as _c:
+    gpu_broker.BROKER._permitted_on_demand = [_small_aliased]
+    _rl = _c.post("/v1/gpu/lease", headers=_LAN_H,
+                  json={"if_generation": _gen(_c), "kind": "client_session",
+                        "components": [], "ttl_s": 60})
+    _observed["CONTRACT:gpu.lease.grant"] = (_rl.status_code, set(_rl.json()))
+    _rr = _c.post("/v1/gpu/lease/renew", headers=_LAN_H,
+                  json={"lease_id": _rl.json()["lease"]["lease_id"],
+                        "fence_token": _rl.json()["fence_token"], "ttl_s": 60})
+    _observed["CONTRACT:gpu.lease.renew"] = (_rr.status_code, set(_rr.json()))
+    # 意图:挑一个真的映射到 _small_aliased 的别名
+    _alias = next((a for a in gateway.REGISTRY
+                   if _small_aliased in gateway.components_for_alias(a)), None)
+    if _alias:
+        _ri = _c.post("/v1/gpu/intent", headers=_LAN_H, json={"alias": _alias})
+        _observed["CONTRACT:gpu.intent"] = (_ri.status_code, set(_ri.json()))
+    _re = _c.post("/v1/session/end", headers=_LAN_H, json={"reason": "quit"})
+    _observed["CONTRACT:session.end"] = (_re.status_code, set(_re.json()))
+
+check("★ 元断言:意图那条契约真的被打到了(别名桥没断)",
+      "CONTRACT:gpu.intent" in _observed,
+      f"没有任何别名映射到 {_small} —— 那本身就是一条要查的事")
+for _cid, (_what, _keys) in CROSS_PROCESS_CONTRACTS.items():
+    if _cid == "CONTRACT:gpu.intended.blocking":
+        # blocking 那一条不是顶层响应,是 Lease.to_json() 的形状 —— 直接对着它钉
+        _lease_keys = set(gpu_broker.Lease(
+            "id", "fence", "client_session", "h", [], 0.0, 1.0).to_json())
+        check(f"★★ {_cid}({_what})顶层键集合恰好是登记的那一组",
+              _lease_keys == _keys, f"实得 {sorted(_lease_keys)}")
+        continue
+    if _cid not in _observed:
+        continue
+    _st, _got = _observed[_cid]
+    check(f"★★ {_cid}({_what})状态 200", _st == 200, _st)
+    check(f"★★★ {_cid} 顶层键集合**恰好**是登记的那一组 —— "
+          "「多一个键」和「换了一个键」都要红,数量断言拦不住后者",
+          _got == _keys, f"多 {sorted(_got - _keys)} 少 {sorted(_keys - _got)}")
+
+# ── 元断言:每一条契约在**客户端**那半边都必须有配对 ──
+#   ★ 缺配对即判红。找不到客户端源码也判红 —— 「查不了」不等于「没问题」,
+#     那正是本项目最恨的那种静默。
+_SELFTEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "..", "20-client-win", "app", "Selftest.cs")
+_st_src = None
+try:
+    with open(_SELFTEST, "r", encoding="utf-8") as _f:
+        _st_src = _f.read()
+except Exception as _e:                                       # noqa: BLE001
+    _st_src = None
+check("★★★ 能读到客户端自检源码(读不到 ⇒ 配对无从核对 ⇒ 判红,不当作没问题)",
+      _st_src is not None, f"{_SELFTEST}")
+if _st_src is not None:
+    for _cid in CROSS_PROCESS_CONTRACTS:
+        check(f"★★★ 元断言:{_cid} 在客户端那半边有配对断言(缺配对即判红)",
+              _cid in _st_src,
+              "Selftest.cs 里找不到这个契约号 —— 服务端钉了形状,客户端没人证明它读得懂")
+    check("★ 且元断言本身不是空转(确实读到了内容)", len(_st_src) > 1000)
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

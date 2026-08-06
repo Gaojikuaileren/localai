@@ -230,11 +230,52 @@ check("★★ 名单变了也要推 —— 「对方掉线了」没有任何数�
 # ★★★ 审计 C1:device 一律由服务端解析,客户端自报不作数。
 #   它同时是「谁写的」的归因来源、和额度维令牌桶的 key ——
 #   自报的话每换一个名字就是一个新桶,pushes_per_min 形同虚设。
-_sd = assert_helpers.code_only(gateway._sync_device)
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-06 审计 B3:身份解析**合一**了 —— 这两条断言随之改判据。
+#
+#  原来它们 `code_only(gateway._sync_device)` 去看那个函数的**源码里有没有那两个词**。
+#  合一之后 `_sync_device` 只剩一行转发(唯一实现搬到 `principal_device`),
+#  于是断言当场变红 —— **而同步面的行为一个字节都没变**。
+#  ⇒ 这正是 ASSERTION-PITFALLS 第 9 条的形状:判据问的是"这段代码长什么样",
+#    而它真正关心的是"名字到底从哪儿来"。改成两条:
+#      ① 结构:唯一入口是 principal_device,且同步面确实走它(不是又抄了一份);
+#      ② **行为**:构造一个自报了别人名字的请求,看解析结果是不是那个自报值。
+#    第二条是承重的 —— 实现再搬一次家,它照样成立。
+# ══════════════════════════════════════════════════════════════════════
+_pd = assert_helpers.code_only(gateway.principal_device)
 check("★★★ 名字来自证书指纹反查的成员表,不是 body/query 的自报值",
-      "x-localai-cert-sha256" in _sd and "resolve_lan_principal" in _sd)
+      "x-localai-cert-sha256" in _pd and "resolve_lan_principal" in _pd)
 check("★★ 解析不出身份 ⇒ 给 unknown(fail-closed),**不**退回自报值",
-      "unknown" in _sd)
+      "UNKNOWN_DEVICE" in _pd and gateway.UNKNOWN_DEVICE == "unknown")
+_sd = assert_helpers.code_only(gateway._sync_device)
+check("★★★ B3:同步面**不再有自己的实现**,只转发给唯一入口 —— "
+      "两套身份各自自洽所以谁也不炸,而 /v1/session/end 恰好横跨两者",
+      "principal_device" in _sd and "resolve_lan_principal" not in _sd, _sd)
+
+
+class _FakeReq:
+    """只带 headers 的最小请求。★ 判据要落在**行为**上,不能只看源码里有哪些词。"""
+
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+        self.client = None
+
+
+_saved_lan = gateway.resolve_lan_principal
+try:
+    gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device", "device_id": "PC-REAL"}
+    _r = _FakeReq({"x-localai-cert-sha256": "aa"})
+    check("★★★ 行为:自报名字进不来 —— 解析结果是成员表给的那个,与 body 无关",
+          gateway._sync_device(_r, "lan-device") == "PC-REAL"
+          and gateway.principal_device(_r, "lan-device") == "PC-REAL")
+    gateway.resolve_lan_principal = lambda fp: None
+    check("★★ 行为:指纹解不出成员 ⇒ unknown(fail-closed),不退回任何自报值",
+          gateway._sync_device(_FakeReq({"x-localai-cert-sha256": "zz"}), "lan-device")
+          == gateway.UNKNOWN_DEVICE)
+    check("★ 行为:回环(主机本身)给固定名字 local",
+          gateway._sync_device(_FakeReq(), "trusted-local") == gateway.LOCAL_DEVICE)
+finally:
+    gateway.resolve_lan_principal = _saved_lan
 _push_src = assert_helpers.code_only(gateway.sync_push)
 check("★★★ 推送路径也不再采信 body 里的 device(它是额度桶的 key)",
       "_sync_device(" in _push_src and 'body.get("device")' not in _push_src)

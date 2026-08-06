@@ -49,32 +49,27 @@ public sealed class ModelsView : UserControl
         var modelList = new ComponentPicker();
 
         // ══════════════════════════════════════════════════════════════
-        //  ③ 自动启用规则 —— ★★★ 2026-08-06 审计 B1:这两个控件**能拨却不生效**。
+        //  ③ 自动启用规则
         //
-        //  `AutoStartPreset` / `AutoUnloadIdle` 全仓只有"写"和"声明",**没有任何读取方**:
-        //  不发给中枢、中枢也没有接收它们的端点。用户勾了"空闲自动卸载",显存不会被卸。
-        //  ★ 而它们就长在下面 StrategyPlaceholder() 那段注释的正上方,那段写着:
-        //    「摆一个**能拨却不生效**的开关,用户会以为自己已经配好了策略 ——
-        //     而实际上什么都没发生。这比空着糟得多:空着只是"还没做",**假开关是"骗人"**。」
-        //  ★★ S14 之后更坏:Broker 已经接上了,副标题那句"接入后由它执行"读起来变成
-        //    "已经生效了"。**它比 S14 之前更容易骗人,不是更少。**
+        //  ★★★ 2026-08-06(D90 未决项④的处置):**`AutoStartPreset` 已作废并撤掉。**
         //
-        //  ⇒ 置灰 + 文案明说没生效、在等哪一步。
-        //  ★ 为什么不按审计建议直接撤掉:那段注释点名的罪是「**能拨**却不生效」——
-        //    灰掉之后拨不动,就不是那个罪;而保留它能告诉用户"这件事有人管、在等 D87",
-        //    撤掉则什么都不告诉。★ 两种都不说谎,这一种信息量更大。
-        //    ★★ 若协调层/用户认为该撤,撤掉也对 —— 这一条我按"信息量更大"选的,不是唯一解。
-        //  ★ 字段**留着**:S16-b(D87 触发策略)就是下一件事,它会来读这两个值。
+        //  它的语义是「连上中枢就自动装这一组预设」,而 D87 裁定①的原文是
+        //  「触发点是**意图**,不是开机。**不做开机预热**」。两者正面矛盾。
+        //  ⇒ 不能一边引用 D90(它的全部依据就是 D87)去放行按需装载,
+        //    一边把一个与 D87 裁定①相反的开关留在原地 —— 那是拿新裁定当挡箭牌。
+        //  ★ 而且按 D90 裁定①,「连上就自动装」属于**自动改 committed** 那一类:
+        //    它连一条合法车道都没有(合法的那条只到 permitted_on_demand 为止)。
+        //  ⇒ 撤掉,不是置灰:置灰是"这件事有人管、在等某一步",而它等不到那一步了。
+        //    取代它的是下面「启用的模型」里那一列「允许按需装载」——
+        //    那才是 D87①「意图即起」在界面上的落点。
+        //
+        //  ★★ `AutoUnloadIdle` **留着且仍然置灰**,理由与上面不同,写清楚免得被一起撤掉:
+        //    「空闲即卸」(D87②)已经落地了,但它是**中枢**的策略 ——
+        //    计时器是主机与副机**共享的一个**(D87⑧)。把它做成每台客户端各自的开关,
+        //    正是那条裁定点名要防的事。⇒ 它要么成为主机上的一个中枢设置,要么撤掉;
+        //    在那件事被裁之前,它保持**拨不动 + 文案说清现在的真实行为**。
+        //    ★ 今天的真实行为不再是"什么都没发生":按需装载的成员**确实**会空闲自动卸。
         // ══════════════════════════════════════════════════════════════
-        var preset = new ComboBox { Margin = new Thickness(0, 4, 0, 6), Width = 260, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = false };
-        foreach (var (_, label) in ModelCatalog.Presets) preset.Items.Add(label);
-        var pIdx = Array.FindIndex(ModelCatalog.Presets, p => p.Key == s.AutoStartPreset);
-        preset.SelectedIndex = pIdx < 0 ? 0 : pIdx;
-        preset.SelectionChanged += (_, _) =>
-        {
-            if (preset.SelectedIndex >= 0) { s.AutoStartPreset = ModelCatalog.Presets[preset.SelectedIndex].Key; s.Save(); }
-        };
-
         var idle = new CheckBox { Content = Strings.Get("model.idle_unload"), IsChecked = s.AutoUnloadIdle, Margin = new Thickness(0, 6, 0, 0), IsEnabled = false };
         idle.Checked += (_, _) => { s.AutoUnloadIdle = true; s.Save(); };
         idle.Unchecked += (_, _) => { s.AutoUnloadIdle = false; s.Save(); };
@@ -95,13 +90,18 @@ public sealed class ModelsView : UserControl
                 Ui.Subtitle(Strings.Get("model.enabled")),
                 Ui.Caption("清单与峰值都由中枢下发(唯一权威是主机的 config/vram-budget.toml)。"
                            + "点确定 = 向中枢提交一次驻留集合变更,中枢会在那一刻重新求值。"),
+                // ★ 两列的含义写在这里,而不是只靠两个字的表头 ——
+                //   第二列是一次**授权**,用户必须知道自己在同意什么(D90 裁定①的代价段)。
+                Ui.Caption("「常驻」= 一直装着,系统一个字节都不会自动改它;"
+                           + "「按需」= 授权系统在你用到它时自动装、空闲 10 分钟后自动卸。"
+                           + "★ 不勾「按需」就没有按需 —— 没有这次授权,"
+                           + "系统就是在你没同意的情况下自己动显存。★ 「按需」只能在主机上改。"),
                 new Border { Height = 6 },
                 modelList
             )),
 
             Ui.Card(Ui.Stack(
                 Ui.Subtitle(Strings.Get("model.auto_rules")),
-                Ui.Caption(Strings.Get("model.auto_preset")), preset,
                 idle,
                 new Border { Height = 4 },
                 Ui.Caption(Strings.Get("model.auto_hint"))

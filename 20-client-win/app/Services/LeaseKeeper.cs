@@ -66,6 +66,16 @@ public sealed class LeaseKeeper : IDisposable
     public string? LeaseId { get; private set; }
     string? _fence;
 
+    /// <summary>
+    /// 中枢**认定**这台机器叫什么(租约里的 holder)。★★ 2026-08-06 审计 B1/B3:
+    /// 客户端不再自报名字 —— 那个值此前有两个承重用途(限流桶的 key、以及
+    /// 「正在跑:xxx」对话框里显示的占用者名字),而自报意味着
+    /// **占用者的名字由被中断方自己填**。现在名字由服务端从证书指纹经成员表解析。
+    /// <para>★ 留这个属性是为了让界面能**看见**它:自报值被忽略这件事若不显示出来,
+    /// 一个版本略旧的客户端会以为自己叫另一个名字,而两边谁也不知道对不上。</para>
+    /// </summary>
+    public string? HolderAsGranted { get; private set; }
+
     public event Action? Changed;
 
     public LeaseKeeper(HubClient hub) => _hub = hub;
@@ -146,7 +156,8 @@ public sealed class LeaseKeeper : IDisposable
             {
                 if_generation = gen,
                 kind = "client_session",
-                holder = Environment.MachineName,
+                // ★★ 2026-08-06 审计 B1:**不再自报 holder**。中枢从证书指纹经成员表解析,
+                //   body 里的 holder 它看都不看 —— 继续发只会让人以为那个值还有用。
                 components = Array.Empty<string>(),   // ★ 声明"有人在",不点组件(见文件头)
                 ttl_s = Ttl.TotalSeconds,
             }, ct);
@@ -171,10 +182,36 @@ public sealed class LeaseKeeper : IDisposable
             return false;
         }
         LeaseId = lid; _fence = fence;
+        // ★ 中枢认定的名字 —— 见 HolderAsGranted 的说明。解析不出来就是 null,**不编一个**:
+        //   编 Environment.MachineName 顶上去,正好把这次修掉的那个谎原样搬回客户端。
+        HolderAsGranted = TryParseHolder(body);
         State = LeaseState.Held;
         LastError = null;
         Notify();
         return true;
+    }
+
+    /// <summary>
+    /// 从 grant 响应里读出**中枢认定**的 holder。★ 与 TryParseGrant 同一份形状,
+    /// 同一条成对断言(见 <c>CONTRACT:gpu.lease.grant</c>)。
+    /// </summary>
+    internal static string? TryParseHolder(string json)
+    {
+        try
+        {
+            using var d = System.Text.Json.JsonDocument.Parse(json);
+            var root = d.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+            var r = root.TryGetProperty("result", out var res)
+                    && res.ValueKind == System.Text.Json.JsonValueKind.Object ? res : root;
+            if (r.TryGetProperty("lease", out var lease)
+                && lease.ValueKind == System.Text.Json.JsonValueKind.Object
+                && lease.TryGetProperty("holder", out var h)
+                && h.ValueKind == System.Text.Json.JsonValueKind.String)
+                return h.GetString();
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>
@@ -231,14 +268,22 @@ public sealed class LeaseKeeper : IDisposable
     }
 
     /// <summary>
-    /// 按 holder 放掉租约。★ 用在「拿到了却记不住」这条路上 ——
+    /// 放掉**本机名下**的租约。★ 用在「拿到了却记不住」这条路上 ——
     /// 那时我们手里没有 lease_id/fence_token,而中枢的 <c>release()</c> 两者都要,
-    /// 所以只能走 <c>/v1/session/end</c>(它按 holder 匹配,正是为这种情况准备的;
+    /// 所以只能走 <c>/v1/session/end</c>(它按持有者匹配,正是为这种情况准备的;
     /// 且归 <c>read</c> 档,不吃用户的变更配额)。
     /// <para>
+    /// ★★ 2026-08-06 审计 B2:这里原来发 <c>device = Environment.MachineName</c>,
+    /// 而中枢**拿那个自报值逐条比 holder** —— 于是任何一台已配对的副机都能提交别人的名字,
+    /// 把对方的租约整批释放(fence_token 是中枢从自己的记录里读的,条件写必然成立)。
+    /// 中枢那半边已改成**只释放服务端认定的这台设备自己持有的**租约;
+    /// 这里随之不再发 device。★ 本方法的效果**没有变弱**:那份记不住的幽灵租约,
+    /// 它的 holder 本来就是中枢给这台机器解析出来的那个名字,所以照样被放掉。
+    /// </para>
+    /// <para>
     /// ★ 副作用如实记账:它会放掉**本机名下的全部**租约。今天客户端只持
-    /// <c>client_session</c> 一种,所以这正好把之前积下的幽灵一并扫掉;
-    /// 但同一台机器上开两个客户端实例时,会连带放掉另一个实例那份 ——
+    /// <c>client_session</c> 与按需装载的 <c>model_ref</c>,所以这正好把之前积下的幽灵
+    /// 一并扫掉;但同一台机器上开两个客户端实例时,会连带放掉另一个实例那份 ——
     /// 那一个的续租会拿到 410 并在下一轮重新申请,**不会双持有**。
     /// </para>
     /// </summary>
@@ -247,7 +292,7 @@ public sealed class LeaseKeeper : IDisposable
         try
         {
             await Transport.Send(_hub.Profile!, ep, HttpMethod.Post, "/v1/session/end",
-                                 new { reason, device = Environment.MachineName }, ct);
+                                 new { reason }, ct);
         }
         catch
         {
@@ -260,16 +305,17 @@ public sealed class LeaseKeeper : IDisposable
     {
         var ep = _hub.TryDial();
         if (_hub.Profile is null || ep is null) return;
+        // ★ 同 AcquireAsync:不再自报 holder(审计 B1)。续租的条件是 fence_token,
+        //   而限流桶的 key 由中枢自己解析 —— 自报只会让"每换个名字就是一个新桶"。
         var (st, _) = await Transport.Send(
             _hub.Profile, ep, HttpMethod.Post, "/v1/gpu/lease/renew",
-            new { lease_id = LeaseId, fence_token = _fence, holder = Environment.MachineName,
-                  ttl_s = Ttl.TotalSeconds }, ct);
+            new { lease_id = LeaseId, fence_token = _fence, ttl_s = Ttl.TotalSeconds }, ct);
         if (st == 200) { State = LeaseState.Held; LastError = null; Notify(); return; }
         if (st == 409)
         {
             // ★★★ 条件写不匹配 —— **立刻自隐,绝不重试**。重试就是双持有。
             State = LeaseState.Fenced;
-            LeaseId = null; _fence = null;
+            LeaseId = null; _fence = null; HolderAsGranted = null;
             LastError = "租约凭据对不上 —— 已停止持有(重试会造成双持有)";
             Notify();
             return;

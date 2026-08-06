@@ -16,9 +16,27 @@
 //      所以面板算出来的"能装下"只是预览。确定之后以中枢的回话为准,
 //      而每一种失败给**不同**的下一步(见 ApplyOutcome.Advice),不合并成"失败了"。
 //
-//   ③ **今天点确定必然得到 loader_absent** —— 中枢还没有装载器(那是 P5)。
-//      面板如实说出这件事,**不假装模型装上了**。这不是缺陷提示,是当前的真实行为:
-//      勾选会被记下并通过三道闸,但显存里不会真的多出模型来。
+//   ③ **每种失败给不同的下一步**(见 ApplyOutcome.Advice),不合并成"失败了"。
+//      ★★ 2026-08-06 更正:这条原文写的是「今天点确定**必然**得到 loader_absent ——
+//        中枢还没有装载器(那是 P5)」。**两处都是假话**:装载器 S14 就落地了
+//        (model_loader.py),而 P5 是语音 v1。客户端这半边此前漏改(服务端 S15 已改),
+//        于是用户点完确定看到的是一句假的解释。⇒ 不再自己编,照搬中枢的 message。
+//
+// ══════════════════════════════════════════════════════════════════════
+//  ★★★ P4-S16b:本面板多了**第二列勾选** ——「允许按需装载」(D90 裁定①)。
+//
+//  两列的意思完全不同,界面必须让人一眼分得出来:
+//    · 第一列「常驻」 = 你要它**一直装着**。系统**一个字节都不会自动改它**;
+//    · 第二列「按需」 = 你**授权**系统在需要时自动装、空闲时自动卸。
+//
+//  ★ 第二列存在的理由就是 D90 裁定①的代价段:
+//    「用户要先授权一次,才有按需可言 —— 没有它,系统就是在你没同意的情况下自己动显存。」
+//    ⇒ 这一步**不能省**,也不能默认全勾上:默认全勾 = 把那次同意伪造出来。
+//
+//  ★★ 这一列**只有主机能写**(审计 B6,服务端有闸)。而这里**不预先灰掉它** ——
+//    「我是不是主机」是个**代理指标**,而真正要问的是「这个操作做不做得成」
+//    (ASSERTION-PITFALLS 第 9 条:判据问的是"我是什么身份"而不是"我做不做得到")。
+//    ⇒ 让人点,失败时由中枢给出**它真的验过**的理由(denied_action + 哪一维)。
 
 using System.Windows;
 using System.Windows.Controls;
@@ -42,6 +60,12 @@ public sealed class ComponentPicker : UserControl
 
     GpuCatalog? _catalog;
     readonly HashSet<string> _checked = new(StringComparer.Ordinal);
+    /// <summary>「允许按需装载」那一列的当前勾选(D90 裁定①的那次授权)。</summary>
+    readonly HashSet<string> _permitted = new(StringComparer.Ordinal);
+    /// <summary>中枢下发时的授权原样 —— 用来判断用户**有没有动过**这一列。
+    /// ★ 没动过就**不发** permitted_on_demand:省略 = 不动授权,而空数组 = 撤销全部。
+    ///   分不清这两者的话,副机每次普通变更都会撞上那道只有主机能过的闸。</summary>
+    readonly HashSet<string> _permittedAsFetched = new(StringComparer.Ordinal);
     bool _busy;
 
     public ComponentPicker()
@@ -66,7 +90,21 @@ public sealed class ComponentPicker : UserControl
         buttons.Children.Add(_reload);
         buttons.Children.Add(_apply);
 
+        // ★ 两列的表头。没有它,两个挨着的复选框在界面上**无从分辨**,
+        //   而它们的含义差得很远(一个是"我要它一直在",一个是"我授权系统自己动它")。
+        var head = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 0, 0, 4) };
+        var hCommitted = new TextBlock { Text = "常驻", Margin = new Thickness(0, 0, 0, 0) };
+        var hOnDemand = new TextBlock { Text = "按需", Margin = new Thickness(0, 0, 12, 0) };
+        foreach (var t in new[] { hCommitted, hOnDemand })
+        {
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        }
+        DockPanel.SetDock(hCommitted, Dock.Right); head.Children.Add(hCommitted);
+        DockPanel.SetDock(hOnDemand, Dock.Right); head.Children.Add(hOnDemand);
+
         var root = new StackPanel();
+        root.Children.Add(head);
         root.Children.Add(_list);
         root.Children.Add(new Border { Height = 8 });
         root.Children.Add(_sumLine);
@@ -99,7 +137,12 @@ public sealed class ComponentPicker : UserControl
             }
             _catalog = cat;
             _checked.Clear();
+            _permitted.Clear();
+            _permittedAsFetched.Clear();
             foreach (var c in cat.Components) if (c.Intended) _checked.Add(c.Id);
+            // ★ 授权那一列的初值来自**中枢**,不是本地记忆 —— 它是权威状态的一部分。
+            foreach (var c in cat.Components)
+                if (c.PermittedOnDemand) { _permitted.Add(c.Id); _permittedAsFetched.Add(c.Id); }
             foreach (var c in cat.Components) _list.Children.Add(Row(c));
             _apply.IsEnabled = true;
             SetStatus("");
@@ -135,17 +178,52 @@ public sealed class ComponentPicker : UserControl
         left.Children.Add(name);
         left.Children.Add(peak);
 
-        var check = new CheckBox { IsChecked = _checked.Contains(c.Id), VerticalAlignment = VerticalAlignment.Center };
+        var check = new CheckBox
+        {
+            IsChecked = _checked.Contains(c.Id),
+            VerticalAlignment = VerticalAlignment.Center,
+            // ★ 两列必须能一眼分清是哪一列 —— 只靠位置的话,勾错的那次没人看得出来。
+            ToolTip = "常驻:一直装着。★ 系统**不会**自动改这一列 —— 一个字节都不会。",
+        };
         check.Checked += (_, _) => { _checked.Add(c.Id); Recompute(); };
         check.Unchecked += (_, _) => { _checked.Remove(c.Id); Recompute(); };
+
+        // ── 第二列:允许按需装载(D90 裁定① —— 那次必须存在的授权)──
+        var onDemand = new CheckBox
+        {
+            IsChecked = _permitted.Contains(c.Id),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 18, 0),
+            ToolTip = "按需:授权系统在你用到它的时候自动装、空闲 10 分钟后自动卸。\n"
+                      + "★ 不勾就没有按需 —— 没有这次授权,系统就是在你没同意的情况下自己动显存。\n"
+                      + "★ 这一列只能在**主机**上改。",
+        };
+        onDemand.Checked += (_, _) => { _permitted.Add(c.Id); Recompute(); };
+        onDemand.Unchecked += (_, _) => { _permitted.Remove(c.Id); Recompute(); };
 
         var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0, 5, 0, 0) };
         DockPanel.SetDock(check, Dock.Right);
         row.Children.Add(check);
+        DockPanel.SetDock(onDemand, Dock.Right);
+        row.Children.Add(onDemand);
         row.Children.Add(left);
 
         var stack = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
         stack.Children.Add(row);
+
+        // ★ 此刻是不是**正按需装着** —— 这是事实,不是勾选。分开说,免得读成"我勾过它"。
+        if (c.TransientResident)
+        {
+            var live = new TextBlock
+            {
+                Text = "· 此刻正按需装着(空闲后会自动卸,不是你勾的常驻)",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(27, 1, 0, 0),
+            };
+            live.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            live.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+            stack.Children.Add(live);
+        }
 
         // ★ 勾掉它会停掉哪些功能 —— 别名映射由中枢下发(S2 的桥),客户端不自己猜。
         //   没有任何别名指向它时**明说**,而不是留白:留白读起来像"没查到",
@@ -222,7 +300,8 @@ public sealed class ComponentPicker : UserControl
             //   拿旧号提交会稳定收到 409,而那本可以避免:409 该留给"真的有人同时改了"。
             var gen = TheApp.Gpu.Snapshot?.Generation ?? _catalog.Generation;
             SetStatus("正在提交…");
-            var res = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen, interruptRunning: false);
+            var res = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen, interruptRunning: false,
+                                                  permittedOnDemand: PermittedPayload());
             if (res.Ok)
             {
                 SetStatus("✔ " + res.Advice);
@@ -249,7 +328,8 @@ public sealed class ComponentPicker : UserControl
                 if (ok)
                 {
                     var gen2 = TheApp.Gpu.Snapshot?.Generation ?? gen;
-                    var res2 = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen2, interruptRunning: true);
+                    var res2 = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen2, interruptRunning: true,
+                                                           permittedOnDemand: PermittedPayload());
                     SetStatus((res2.Ok ? "✔ " : "") + res2.Advice, danger: !res2.Ok);
                 }
                 else SetStatus("已取消 —— 没有改动任何东西。");
@@ -264,6 +344,22 @@ public sealed class ComponentPicker : UserControl
         catch (Exception ex) { SetStatus("提交失败:" + ex.Message, danger: true); }
         finally { _busy = false; _apply.IsEnabled = _catalog is not null; }
     }
+
+    /// <summary>
+    /// 这次提交要不要带上「按需授权」。★★ 用户**没动过**那一列就返回 <c>null</c>(= 省略)。
+    /// <para>
+    /// 三条理由缺一不可:
+    /// ① 服务端把「省略」与「空数组」当成两件事(不动授权 / 撤销全部),
+    ///    每次都发等于把"撤销全部"的语义交给一个用户没碰过的控件;
+    /// ② 那一列**只有主机能写**(审计 B6)—— 副机每次普通变更都带上它,
+    ///    会稳定撞 403,而用户明明只是勾了个常驻组件;
+    /// ③ 顺序无关的幂等:发的是集合相等判断,不是"我记得我改过"。
+    /// </para>
+    /// ★ 抽成方法(而不是在两处各写一遍)是因为「优雅中断」那条路会**再提交一次** ——
+    ///   两处若不一致,重试那一次就会带上一个与第一次不同的授权集合。
+    /// </summary>
+    internal IReadOnlyList<string>? PermittedPayload() =>
+        _permitted.SetEquals(_permittedAsFetched) ? null : _permitted.ToList();
 
     void SetStatus(string text, bool danger = false)
     {
