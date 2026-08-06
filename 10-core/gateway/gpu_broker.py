@@ -374,6 +374,14 @@ class Broker:
         self._task: Optional[asyncio.Task] = None
         self._cfg = cfg
         self._leases: Dict[str, Lease] = {}
+        # ★★ 排空窗口做成**实例属性**,默认取模块常量。
+        #   此前门禁是直接改全局 `gpu_broker.DRAIN_WINDOW_S = 0.01` 来跑得快些 ——
+        #   那**把 5 秒代价整个盖住了**:所有用例都在 0.01 秒的世界里跑,
+        #   于是"用户点确定要真的等 5 秒"这件事**从来没有被任何断言碰过**,
+        #   而模块常量那条断言(== 5.0)在改回去之后照样绿 ⇒ 看着钉住了,实际没钉。
+        #   ⇒ 与 `_await_reclaim` 的 timeout 同款手法(见 test_gpu_broker 那条断言的理由):
+        #     **测试改实例,不改常量**;常量本身另有断言钉死,而真实代价另有一条计时断言付一次。
+        self.drain_window_s: float = DRAIN_WINDOW_S
         # P4-S5:变更通知。★ 订阅者【等事件】,不是轮询 —— D37 ② 明写「推送非轮询」。
         #   每个订阅者持一个自己的 Event;状态变更时在锁内一次性全部 set。
         #   set() 是非阻塞的,放在锁里安全(不违反"锁内不得跨 await I/O")。
@@ -982,10 +990,37 @@ class Broker:
 
         ★ 主语已由「降档」改为「变更驻留集合」(D25)—— 档位取消后原文这条会**字面失效**,
           而它保护的正是"一键套用推荐组合"这条最容易静默杀掉运行中任务的路径。
+
+        ★★★ 2026-08-06(审计 A1②):**租约必须点名了组件才算「有活在跑」。**
+
+        本函数回答的是一个很具体的问题:「改动驻留集合,会不会杀掉正在跑的活?」
+        一份 `components` 为空的租约**没有点名任何组件** ⇒ 改动任何组件的驻留状态
+        都不可能打断它 ⇒ 它不是这个问题的答案。
+
+        它声明的是**「有人在」**,不是**「有活在跑」**。这两件事的下一步完全不同:
+          · 「有人在」 → 该刷新空闲计时器(`_last_activity_at`),让「空闲了 N 秒」不再是恒真式;
+          · 「有活在跑」 → 该拦住变更,交还用户裁定。
+        `LeaseKeeper.cs` 文件头自己就是这么写的(:23「本类**不申请任何组件**……
+        它声明的是"有人在",不是"我要用哪个模型"」)。
+
+        ⇒ 不加这个条件的后果是**荒谬**的:客户端一活着就持一份空 `client_session`,
+          于是**用户自己**去改驻留集合会被**用户自己**的会话挡住,还要等满 5 秒排空窗口,
+          最后被问「有任务在跑,请选优雅中断还是等它跑完」—— 而根本没有任何任务在跑。
+          门禁里那条用例此前把这个行为**当成正确的钉死了**(它给 client_session 传了组件,
+          而真实客户端传的是空 ⇒ 它钉的是一个生产里从不发生的形状)。
+
+        ★ 这条是**通则**,不是给 client_session 开的特例 —— `pet_presence` 的 note
+          自己写的也是「在场证明」,同属「有人在」那一类。今天 `grant()` 的唯一生产调用方是
+          `/v1/gpu/lease` 端点,而唯一调它的客户端只发 `client_session` + 空组件
+          ⇒ **本改动今天不改变除 client_session 外任何 kind 的行为**。
+          将来真的实现桌宠/agent 租约时:**要挡变更就必须点名它依赖的组件**,
+          否则它挡不住 —— 这是要求,不是遗漏。已由反向断言逐 kind 钉住。
         """
         now = time.monotonic()
         return [l for l in self._leases.values()
-                if l.expires_at > now and LEASE_KINDS[l.kind].blocking in BLOCKING_SET]
+                if l.expires_at > now
+                and LEASE_KINDS[l.kind].blocking in BLOCKING_SET
+                and l.components]        # ★ 空组件 = 「有人在」,不是「有活在跑」
 
     def failure_landing(self) -> Dict[str, object]:
         """失败落点(方案书行 1615-1621 · D24 排查带出,原文完全没定义过)。
@@ -1102,14 +1137,18 @@ class Broker:
         # ── ② blocking_set:有人在等结果 → 5 秒排空窗口,再交给用户裁定 ──
         blockers = self.blocking_leases()
         if blockers and not interrupt_running:
-            await asyncio.sleep(DRAIN_WINDOW_S)          # ★ 先给排空窗口,再问
+            await asyncio.sleep(self.drain_window_s)     # ★ 先给排空窗口,再问
             blockers = self.blocking_leases()
             if blockers:
                 async with self._lock:
                     await self._transition(STATE_READY, "有任务在跑,交还用户裁定")
                 # ★ 消息本身也点名 —— 对话框可能只显示 message,不去展开 blocking。
-                #   「有任务在跑」和「桌宠(pet_presence)占着,已 12 秒」是两种不同的处境:
+                #   「有任务在跑」和「agent_task(PC-B,已 12 秒・不可驱逐)」是两种不同的处境:
                 #   前者你不知道该等谁,后者你知道该关什么。
+                # ★ 2026-08-06 更正举例:原文这里举的是「桌宠(pet_presence)占着」。
+                #   `blocking_leases()` 现在要求租约**点名了组件**,而 pet_presence 的语义
+                #   是「在场证明」(peak=0.0)—— 它若不点名组件就**不会**出现在这个列表里,
+                #   拿它当例子会让人以为在场证明能挡变更。换成一个真的会点名组件的 kind。
                 _t = time.monotonic()      # ★ 与 granted_at 同一个时钟(单调,不是墙钟)
                 _who = "、".join(
                     f"{l.kind}({l.holder or '未署名'},已 {max(0, int(_t - l.granted_at))} 秒"

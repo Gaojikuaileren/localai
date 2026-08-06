@@ -6960,6 +6960,67 @@ public static class Selftest
                 Assert(new Services.Pet.PetAnimator(m).UsesPlaceholderRootDelta,
                     "帧数据(root_delta/contacts)未交付前,位移用占位常量并如实标注 —— 不伪装成已实现");
             }
+
+            // ============ A1 · 跨语言成对断言(客户端那半边) ============
+            //
+            // 另一半在 `10-core/gateway/test_gpu_broker.py`(搜「A1:租约发放响应的顶层键集合」),
+            // 它对着**真实端点**断言顶层键集合恰好是 {status, lease, fence_token, generation}。
+            //
+            // ★★★ A 级 6 条里有 4 条是同一个形状:**两边各自都绿,断的是中间那根线**。
+            //   服务端那半只证明「我发出去的是这个形状」;这半只证明「这个形状我读得懂」。
+            //   单独任何一条都抓不住它 —— 必须成对。
+            //
+            // ★★ 实际发生的:服务端把 lease_id 放在 `lease` 子对象里,客户端在**顶层**找,
+            //   于是 AcquireAsync 恒返回 false;而**中枢那边 grant 是真成功的**
+            //   ⇒ 每次尝试都留下一份没人认领的 client_session。
+            //   fence_token **恰好**在顶层拿得到,所以只有 lease_id 落空 —— 这就是它没被发现的原因。
+            {
+                // ★ 照服务端真实形状抄:lease_id 在子对象,fence_token 在顶层。**位置不对称。**
+                const string wire =
+                    "{\"status\":\"ok\"," +
+                    "\"lease\":{\"lease_id\":\"L-7\",\"kind\":\"client_session\",\"holder\":\"PC-A\"," +
+                    "\"components\":[],\"granted_at\":1.0,\"expires_at\":91.0,\"held_s\":0.0," +
+                    "\"evictable\":false,\"blocking\":\"USER_BLOCKING\",\"exclusive\":false}," +
+                    "\"fence_token\":\"F-7\",\"generation\":12}";
+
+                Assert(LeaseKeeper.TryParseGrant(wire, out var lid, out var fen)
+                       && lid == "L-7" && fen == "F-7",
+                    "★★★ A1:服务端真实形状能解析出 lease_id(它在 lease 子对象里,顶层没有)"
+                    + $" —— 实得 lease_id={lid ?? "null"} fence={fen ?? "null"}");
+
+                // ★ 反过来钉。没有这几条,一个「永远返回 true」的解析器也能让上面那条绿。
+                Assert(!LeaseKeeper.TryParseGrant(
+                           "{\"status\":\"ok\",\"lease\":{\"kind\":\"client_session\"}," +
+                           "\"fence_token\":\"F-7\",\"generation\":12}", out var lid2, out _)
+                       && lid2 is null,
+                    "★★ 反向:哪儿都没有 lease_id ⇒ 判失败(fence_token 拿得到也不算数)");
+
+                Assert(!LeaseKeeper.TryParseGrant(
+                           "{\"status\":\"ok\",\"lease\":{\"lease_id\":\"L-7\"},\"generation\":12}",
+                           out _, out var fen3) && fen3 is null,
+                    "★★ 反向:没有 fence_token ⇒ 判失败 —— 续不了租的租约会在 TTL 后静默消失,"
+                    + "那时中枢会以为没人在用");
+
+                Assert(!LeaseKeeper.TryParseGrant("not json at all", out _, out _),
+                    "★ 垃圾输入判失败且不抛 —— 一段坏 JSON 不该掀翻整条申请路径");
+
+                var lkSrc = TryReadSource("Services/LeaseKeeper.cs");
+                if (lkSrc is not null)
+                {
+                    var acqRaw = Slice(lkSrc, "async Task<bool> AcquireAsync",
+                                       "internal static bool TryParseGrant");
+                    var acq = acqRaw is null ? null : Body(acqRaw);   // 去注释,只留会执行的代码
+                    Assert(acq is not null && acq.Contains("ReleaseByHolderAsync"),
+                        "★★★ A1:解析失败时必须**先把刚拿到的那份租约放掉**再返回 false —— "
+                        + "中枢那边 grant 是真成功的,不放就是留下一份没人认领的幽灵;"
+                        + "续租每 30 秒试一次 ⇒ 稳态并存约 3 份");
+                    Assert(acq is not null && acq.Contains("TryParseGrant("),
+                        "★ AcquireAsync 走的是抽出来的那个解析器(自检喂的也是它 —— 否则两条断言测的是两份代码)");
+                    Assert(acq is not null && !acq.Contains("TryGetProperty(\"lease_id\""),
+                        "★★ AcquireAsync 里不得再留一份手写的 lease_id 解析 —— "
+                        + "两份解析会漂移,而漂移的那天自检只盯着其中一份");
+                }
+            }
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally

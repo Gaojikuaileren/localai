@@ -18,6 +18,7 @@ import dataclasses
 import inspect
 import re
 import sys
+import time            # ★ A1②:排空窗口那条断言要**真的计一次时**,不能只看常量
 
 # ★★ 编码双保险(与 P4-S0 同源):干净的 cp936 控制台编不出 ⇒ / ✓ / ★ 之类的字符,
 #   而 print 一抛异常会把整套脚本掀翻 —— 于是【一条断言变红】表现成【整套崩溃】,
@@ -747,17 +748,48 @@ async def _tx_tests():
     r7 = await b7.apply_intended([_small])
     o["revalue"] = (pre.ok, r7.ok, r7.code)
 
-    # ⑧ blocking_set:有人在等 → 交还用户裁定,不动 committed
-    gpu_broker.DRAIN_WINDOW_S = 0.01
+    # ⑧ blocking_set:**点名了组件**的租约 → 交还用户裁定,不动 committed
+    #
+    # ★★★ 2026-08-06 修正(审计 A1②)。这一段原来有两处错,而且互相掩护:
+    #   ① 它改的是**全局** `gpu_broker.DRAIN_WINDOW_S = 0.01` ——
+    #      **把 5 秒代价整个盖住了**。所有用例都在 0.01 秒的世界里跑,于是
+    #      「用户点确定要真的等 5 秒」这件事**从来没有被任何断言碰过**;
+    #      而下面那条 `DRAIN_WINDOW_S == 5.0` 在改回去之后照样绿
+    #      ⇒ 常量看着被钉住了,**行为一次都没被验过**。
+    #   ② 它给 `client_session` 传了 `[_small]` —— 而**真实客户端传的是空**
+    #      (`LeaseKeeper.cs`:「本类不申请任何组件……声明的是"有人在"」)
+    #      ⇒ 它钉死的是一个**生产里从不发生**的形状,顺带把
+    #      「用户自己的会话挡住用户自己的变更」当成了正确行为。
+    #   ⇒ 现在:**改实例不改全局**;用真会点名组件的 kind(agent_task);
+    #     并单独钉一条**反向**断言 —— 空组件的 client_session 不得挡住变更。
     b8 = _mkbroker(free=64.0, loader=_FakeLoader())
+    b8.drain_window_s = 0.01                                     # ★ 改实例,不改全局
     b8._committed = [_small]
-    await b8.grant("client_session", "h1", [_small], ttl_s=30.0)
+    await b8.grant("agent_task", "PC-B", [_small], ttl_s=30.0)   # 点名了组件 = 有活在跑
     r8 = await b8.apply_intended([])
     o["blocked"] = (r8.ok, r8.code, len(r8.blocking), list(b8._committed))
     b8._state = gpu_broker.STATE_READY
     r8b = await b8.apply_intended([_small], interrupt_running=True)
     o["interrupt"] = (r8b.ok, r8b.state)
-    gpu_broker.DRAIN_WINDOW_S = 5.0
+
+    # ⑧b ★★★ 反向:**空组件**的 client_session —— 正是真实客户端持的那一份 ——
+    #     不得挡住用户自己的变更。
+    #     ★ 这里**故意用默认的 5.0**:万一它又开始挡了,这条不但会红,
+    #       还会**等满 5 秒才红** —— 那个耗时本身就是证据。
+    b8c = _mkbroker(free=64.0, loader=_FakeLoader())
+    await b8c.grant("client_session", "PC-A", [], ttl_s=30.0)
+    _t0 = time.monotonic()
+    r8c = await b8c.apply_intended([_small])
+    o["idle_session"] = (r8c.ok, r8c.code, len(r8c.blocking), time.monotonic() - _t0)
+
+    # ⑧c ★★ 5 秒排空窗口**真的被付一次**。
+    #     没有这条,「排空窗口存在」就只是一个常量断言 —— 而常量绿不代表代码走过它。
+    b8d = _mkbroker(free=64.0, loader=_FakeLoader())
+    b8d._committed = [_small]
+    await b8d.grant("agent_task", "PC-B", [_small], ttl_s=30.0)
+    _t1 = time.monotonic()
+    r8d = await b8d.apply_intended([])          # ★ 不注入 ⇒ 走默认 5.0
+    o["drain_cost"] = (r8d.code, time.monotonic() - _t1)
 
     # ⑨ 回收超时 → vram_not_reclaimed
     b9 = _mkbroker(free=1.0)
@@ -790,9 +822,20 @@ check("单写者:非 READY 状态拒新事务", _x["busy"][1] == "busy", _x["bus
 check("★★ 点确定时【重新求值】:预览过 → 确定时不过(挑组件几十秒,期间桌面会变)",
       _x["revalue"][0] is True and _x["revalue"][1] is False
       and _x["revalue"][2].startswith("gate_"), _x["revalue"])
-check("★ 有任务在跑 → needs_user_choice,并点名是哪几条租约",
+check("★ 有任务在跑(租约**点名了组件**)→ needs_user_choice,并点名是哪几条租约",
       _x["blocked"][1] == "needs_user_choice" and _x["blocked"][2] == 1, _x["blocked"])
 check("★ 交还用户裁定时 committed 一字未动", _x["blocked"][3] == [_small])
+check("★★★ 反向(A1②):**空组件**的 client_session ——真实客户端持的正是这一份——"
+      "【不挡】用户自己的变更。挡住的话,用户改驻留集合会被自己的会话拦下,"
+      "还要等满 5 秒,最后被问「有任务在跑」,而根本没有任何任务在跑",
+      _x["idle_session"][0] is True and _x["idle_session"][2] == 0, _x["idle_session"])
+check("★★ 而且它**一秒都没等** —— 空组件根本进不了 blocking_leases,自然没有排空窗口。"
+      "(这条同时是上一条的独立佐证:即便 ok 被别的原因弄成 True,耗时也瞒不住)",
+      _x["idle_session"][3] < 1.0, f'{_x["idle_session"][3]:.2f}s')
+check("★★★ 5 秒排空窗口**真的被付了一次** —— 此前门禁把全局改成 0.01,"
+      "这个代价从来没有被任何断言碰过(常量绿 ≠ 代码走过它)",
+      _x["drain_cost"][0] == "needs_user_choice" and _x["drain_cost"][1] >= 5.0,
+      f'{_x["drain_cost"][0]} · 实际等了 {_x["drain_cost"][1]:.2f}s')
 check("用户选『优雅中断』后事务照常走完",
       _x["interrupt"][0] and _x["interrupt"][1] == gpu_broker.STATE_READY, _x["interrupt"])
 check("★ 显存没回收到 ±0.2 GiB → vram_not_reclaimed(不是「大概回收了就算了」)",
@@ -812,6 +855,53 @@ check("★ loader_absent 的检查在进入 APPLYING 【之前】(否则就是�
 check("★★ 预检不过的落点上【没有任何一行写 _committed】(方案书第 2 条的字面落实)",
       "_committed" not in _nodoc(gpu_broker.Broker._back_to_staging))
 check("DRAIN_WINDOW_S = 5 秒排空窗口(方案书 §8.1.6)", gpu_broker.DRAIN_WINDOW_S == 5.0)
+check("★ 新建的 Broker 默认就取模块常量(不是另抄一个数字)",
+      gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg).drain_window_s == gpu_broker.DRAIN_WINDOW_S)
+check("★★ apply_intended 必须睡 **self.drain_window_s** 而不是模块常量 —— "
+      "睡常量的话那个可注入属性就只是装饰品,测试改了它也不起作用",
+      "self.drain_window_s" in _apply_nodoc and "sleep(DRAIN_WINDOW_S)" not in _apply_nodoc)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ A1② · blocking_leases 的**逐 kind 反向全表**
+#
+#  规矩:`blocking_leases()` 回答的是「改动驻留集合会不会杀掉正在跑的活」。
+#  一份 components 为空的租约**没有点名任何组件** ⇒ 改任何组件都打不断它
+#  ⇒ 它声明的是「有人在」,不是「有活在跑」。
+#
+#  ★ 两个方向都钉(只钉一边等于没钉):
+#    · 空组件 ⇒ **不得**出现在 blocking_leases 里(漏了这条,用户会被自己的会话挡住);
+#    · 有组件 ⇒ **必须**出现(漏了这条,一次变更会静默杀掉正在跑的活)。
+#  ★ 逐 kind 走全表 —— 新加一种 kind 时,它落哪边必须是被想过的,而不是继承来的。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== A1②:blocking_leases 逐 kind 反向全表(空组件 = 有人在,不是有活在跑) ===")
+
+
+async def _t_blocking_by_kind():
+    out = {}
+    for _k in gpu_broker.LEASE_KINDS:
+        b_empty = _mkbroker(free=64.0)
+        st_e, _ = await b_empty.grant(_k, "H", [], ttl_s=30.0)
+        b_named = _mkbroker(free=64.0)
+        st_n, _ = await b_named.grant(_k, "H", [_small], ttl_s=30.0)
+        out[_k] = (st_e, len(b_empty.blocking_leases()),
+                   st_n, len(b_named.blocking_leases()))
+    return out
+
+
+_bk = asyncio.run(_t_blocking_by_kind())
+for _k, _v in _bk.items():
+    check(f"★ [{_k}] 两次 grant 都成功(前提成立,否则下面两条是空跑)",
+          _v[0] == gpu_broker.LEASE_OK and _v[2] == gpu_broker.LEASE_OK, _v)
+    check(f"★★ [{_k}] **空组件 ⇒ 不阻塞**(「有人在」不是「有活在跑」)", _v[1] == 0, _v)
+    check(f"★★ [{_k}] **点名了组件 ⇒ 阻塞**(反过来钉:漏了它,变更会静默杀掉正在跑的活)",
+          _v[3] == 1, _v)
+check("★ 全表覆盖:LEASE_KINDS 里每一个 kind 都被上面两个方向各钉过一次",
+      set(_bk) == set(gpu_broker.LEASE_KINDS), sorted(set(gpu_broker.LEASE_KINDS) - set(_bk)))
+check("★★★ blocking_leases 的源码里确实有 components 这个条件 —— "
+      "行为断言 + 结构断言各一条:行为那条证明它今天是对的,"
+      "结构这条让「顺手把条件删掉」当场可见",
+      "l.components" in _nodoc(gpu_broker.Broker.blocking_leases))
 check("回收容差 / 超时与方案书行 1507 一致(±0.2 GiB / 10 s)",
       gpu_broker.RECLAIM_TOLERANCE_GIB == 0.2 and gpu_broker.RECLAIM_TIMEOUT_S == 10.0)
 check("★ _await_reclaim 的 timeout 走 None 而非默认参数绑常量(否则测试改不动,断言只能抄数字)",
@@ -1114,6 +1204,44 @@ with _TC(gateway.app, client=("127.0.0.1", 5555)) as _c:
     check("★ 事务没成时状态没被写坏:committed 仍为空",
           _r_ok_path.json()["snapshot"]["committed"] == [],
           _r_ok_path.json()["snapshot"]["committed"])
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 审计 A1 · 跨语言成对断言的【服务端那半边】
+    #
+    #  另一半在 `20-client-win/app/Selftest.cs`(搜 "A1 · 跨语言成对断言"),
+    #  它拿**下面这张表的形状**去喂 `LeaseKeeper.TryParseGrant`,断言解析得出 lease_id。
+    #
+    #  ★ 为什么必须成对:A1 这一族 bug 的特征是**两边各自都绿,断的是中间那根线**。
+    #    服务端这半只证明「我发的是这个形状」,客户端那半只证明「这个形状我读得懂」——
+    #    任何一条单独存在都抓不住它。A 级 6 条里有 4 条是这个形状。
+    #
+    #  ★★ 实际发生的:服务端把 lease_id 放在 `lease` 子对象里,客户端在**顶层**找 ——
+    #    于是 `AcquireAsync` 恒返回 false,而**中枢那边 grant 是真成功的**
+    #    ⇒ 每次尝试都留下一份没人认领的 client_session。
+    #    fence_token **恰好**在顶层拿得到,所以只有 lease_id 落空 —— 这就是它没被发现的原因。
+    # ══════════════════════════════════════════════════════════════════
+    print("\n=== A1:租约发放响应的顶层键集合(与客户端 TryParseGrant 成对) ===")
+    _lz = _c.post("/v1/gpu/lease", json={
+        "if_generation": _c.get("/v1/gpu/snapshot").json()["generation"],
+        "kind": "client_session", "holder": "PC-A",
+        "components": [], "ttl_s": 30.0})
+    check("租约发放 200", _lz.status_code == 200, f"{_lz.status_code} {_lz.text[:160]}")
+    _lzj = _lz.json()
+    check("★★★ 顶层键集合**逐字钉死** —— 客户端就是照这张表解析的",
+          set(_lzj.keys()) == {"status", "lease", "fence_token", "generation"},
+          sorted(_lzj.keys()))
+    check("★★★ lease_id 在 **lease 子对象**里(A1 病灶:客户端此前在顶层找它)",
+          isinstance(_lzj.get("lease"), dict) and bool(_lzj["lease"].get("lease_id")),
+          _lzj.get("lease"))
+    check("★★★ **反向**:顶层【没有】lease_id —— 顶层要是也有一份,"
+          "客户端那条 bug 就永远不会暴露,而它已经静默存在了整整一轮",
+          "lease_id" not in _lzj, sorted(_lzj.keys()))
+    check("★ fence_token **在顶层**(Lease.to_json() 里没有它)—— "
+          "两个字段位置**不对称**,而这正是 A1 只伤到一个字段的原因",
+          isinstance(_lzj.get("fence_token"), str) and bool(_lzj["fence_token"]))
+    check("★ **反向**:lease 子对象里【没有】fence_token(不对称本身必须被钉住,"
+          "否则哪天有人补齐了它,客户端的顶层兜底会掩盖真正的形状漂移)",
+          "fence_token" not in _lzj["lease"], sorted(_lzj["lease"].keys()))
 
 gateway.classify_caller = _cc_saved
 # ★ 还回去 —— 这段用的是模块级单例,不还的话后面的断言(以及同进程里的任何东西)

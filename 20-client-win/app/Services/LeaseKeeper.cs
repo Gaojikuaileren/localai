@@ -4,11 +4,18 @@
 //  ★★★ 这个文件存在的唯一理由:让「全网有没有人在用」成为一个**可以为假**的判据。
 //
 //  在它之前,客户端**一份租约都不持**(全仓搜 /v1/gpu/lease 的客户端调用 = 0)。
-//  于是中枢那边:
-//    · blocking_leases() 恒为空  ⇒ 「没人在跑」恒真
-//    · _last_activity_at 几乎不刷新 ⇒ 「空闲了 N 秒」只会一直涨
-//  ⇒ 按需装载的三条放行条件里有两条是**恒真式**,拿它们去卸载,
-//    会把**正在打字的人**卸掉。
+//  于是中枢那边 `_last_activity_at` 几乎不刷新 ⇒ 「空闲了 N 秒」只会一直涨,
+//  拿它去卸载会把**正在打字的人**卸掉。
+//
+//  ★★ 2026-08-06 留痕更正(审计 A1②):这段原文还写着
+//     「· blocking_leases() 恒为空 ⇒ 「没人在跑」恒真」,并把补上它算作本类的功劳之一。
+//     **那是错的,而且方向反了。** 本类持的是 components 为空的租约(见下文 :23),
+//     它声明「有人在」而不是「有活在跑」—— 按同日的裁定,
+//     `blocking_leases()` 已明确要求租约**点名了组件**,所以本类的租约
+//     **本来就不该、今天也确实不会**出现在 blocking_leases() 里。
+//     真让它非空,后果是荒谬的:**用户自己**改驻留集合会被**用户自己**的会话挡住。
+//  ⇒ 本类修的是**空闲计时器**那一半恒真式,不是 blocking 那一半。
+//    blocking 那一半要靠**点名了组件**的租约(agent_task / model_ref),那是另一条线。
 //  ★ 那正是用户 2026-08-05 特别补的那条裁定(「回退计时器是主机和副机共享的一个」)
 //    所要防的事:主机看副机像空闲,副机看主机也像空闲,于是谁都可以把对方的模型卸了。
 //
@@ -149,27 +156,104 @@ public sealed class LeaseKeeper : IDisposable
             Notify();
             return false;
         }
-        try
+        if (!TryParseGrant(body, out var lid, out var fence))
         {
-            using var d = System.Text.Json.JsonDocument.Parse(body);
-            var r = d.RootElement.TryGetProperty("result", out var res) ? res : d.RootElement;
-            LeaseId = r.TryGetProperty("lease_id", out var li) ? li.GetString() : null;
-            _fence = r.TryGetProperty("fence_token", out var ft) ? ft.GetString() : null;
-        }
-        catch { LeaseId = null; _fence = null; }
-        if (LeaseId is null || _fence is null)
-        {
-            // ★ 拿不到 fence_token 就**不算拿到租约** —— 没有它续不了租,
-            //   而一份续不了的租约会在 TTL 之后静默消失,那时中枢会以为没人在用。
+            // ★★★ 审计 A1:解析失败 **≠ 没拿到**。
+            //   走到这一行时,中枢那边 grant 是**真成功**的 —— 它已经记下了一份
+            //   `client_session`(evictable=false + BLOCKING_USER),而我们记不住它的 id,
+            //   于是**没有任何人能续它、也没有任何人会释放它**,它要在中枢挂满整个 TTL。
+            //   续租每 30 秒试一次 ⇒ 稳态并存约 3 份**没人认领的幽灵租约**。
+            //   ⇒ 拿到了却记不住,就必须当场还回去。
+            await ReleaseByHolderAsync(ep, "lease-parse-failed", ct);
             LeaseId = null; _fence = null;
-            LastError = "中枢没给 lease_id / fence_token";
+            LastError = "中枢给的租约解析不出 lease_id / fence_token —— 已把刚拿到的那份放掉";
             Notify();
             return false;
         }
+        LeaseId = lid; _fence = fence;
         State = LeaseState.Held;
         LastError = null;
         Notify();
         return true;
+    }
+
+    /// <summary>
+    /// 从 <c>POST /v1/gpu/lease</c> 的 200 响应里解析出 lease_id 与 fence_token。
+    /// <para>
+    /// ★★★ 审计 A1 的病灶就在这里。服务端 (<c>gateway.py</c> 的 <c>grant_lease</c>) 回的是
+    /// <c>{"status","lease":{…},"fence_token","generation"}</c> ——
+    /// <b>lease_id 在 lease 子对象里,顶层没有它</b>;而 fence_token <b>恰好</b>在顶层。
+    /// 此前这里两个都只在顶层找 ⇒ LeaseId 恒 null ⇒ AcquireAsync <b>恒返回 false</b>。
+    /// </para>
+    /// <para>
+    /// ★ 只有 lease_id 落空、fence_token 拿得到 —— 这正是它一直没被发现的原因:
+    /// 两边各自都绿(服务端发得出租约,客户端解析不抛异常),断的是**中间那根线**。
+    /// </para>
+    /// <para>
+    /// ★★ 抽成 <c>static</c> 是为了让自检能拿**服务端真实形状的字面量**直接喂它 ——
+    /// 那半条断言与 <c>test_gpu_broker.py</c> 里钉顶层键集合的那半条**成对**存在。
+    /// 单独任何一条都抓不住这一族 bug:服务端那条只证明"我发的是这个形状",
+    /// 客户端这条只证明"这个形状我读得懂",**合起来**才证明这根线是通的。
+    /// </para>
+    /// </summary>
+    internal static bool TryParseGrant(string json, out string? leaseId, out string? fence)
+    {
+        leaseId = null; fence = null;
+        try
+        {
+            using var d = System.Text.Json.JsonDocument.Parse(json);
+            var root = d.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+            // 兼容一层 result 包装(别的端点有这个形状)。
+            var r = root.TryGetProperty("result", out var res)
+                    && res.ValueKind == System.Text.Json.JsonValueKind.Object ? res : root;
+
+            var hasLease = r.TryGetProperty("lease", out var lease)
+                           && lease.ValueKind == System.Text.Json.JsonValueKind.Object;
+
+            // ★ 契约的那条路:lease 子对象。
+            if (hasLease && lease.TryGetProperty("lease_id", out var li))
+                leaseId = li.GetString();
+            // ★ 顶层兜底**不是契约的一部分** —— 契约由 test_gpu_broker 的顶层键集合断言钉死。
+            //   留它只是为了万一形状再变时不至于当场瞎;它绿不代表线是通的。
+            if (leaseId is null && r.TryGetProperty("lease_id", out var li2))
+                leaseId = li2.GetString();
+
+            // fence_token 走顶层(服务端单独挂出来的,Lease.to_json() 里【没有】它)。
+            if (r.TryGetProperty("fence_token", out var ft)) fence = ft.GetString();
+            if (fence is null && hasLease && lease.TryGetProperty("fence_token", out var ft2))
+                fence = ft2.GetString();
+        }
+        catch { leaseId = null; fence = null; }
+        // ★ 拿不到 fence_token 就**不算拿到租约** —— 没有它续不了租,
+        //   而一份续不了的租约会在 TTL 之后静默消失,那时中枢会以为没人在用。
+        return !string.IsNullOrEmpty(leaseId) && !string.IsNullOrEmpty(fence);
+    }
+
+    /// <summary>
+    /// 按 holder 放掉租约。★ 用在「拿到了却记不住」这条路上 ——
+    /// 那时我们手里没有 lease_id/fence_token,而中枢的 <c>release()</c> 两者都要,
+    /// 所以只能走 <c>/v1/session/end</c>(它按 holder 匹配,正是为这种情况准备的;
+    /// 且归 <c>read</c> 档,不吃用户的变更配额)。
+    /// <para>
+    /// ★ 副作用如实记账:它会放掉**本机名下的全部**租约。今天客户端只持
+    /// <c>client_session</c> 一种,所以这正好把之前积下的幽灵一并扫掉;
+    /// 但同一台机器上开两个客户端实例时,会连带放掉另一个实例那份 ——
+    /// 那一个的续租会拿到 410 并在下一轮重新申请,**不会双持有**。
+    /// </para>
+    /// </summary>
+    async Task ReleaseByHolderAsync(System.Net.IPEndPoint ep, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await Transport.Send(_hub.Profile!, ep, HttpMethod.Post, "/v1/session/end",
+                                 new { reason, device = Environment.MachineName }, ct);
+        }
+        catch
+        {
+            // 尽力而为:放不掉也只能等 TTL 到期。但**绝不能**因此掀翻申请路径 ——
+            // 那会把"少还一份租约"升级成"客户端连租约都申请不了"。
+        }
     }
 
     async Task RenewAsync(CancellationToken ct)
