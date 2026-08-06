@@ -38,13 +38,15 @@ r"""跨进程响应契约的【成对断言】元规则 —— D92 硬前置。
 ════════════════════════════════════════════════════════════════════════════
  ★★ 本文件**不覆盖**什么 —— 明写,不许静默少盖
 
- ① 客户端那半边**没有通用形状可数**(服务端半边有:`set(...keys()) ==`)。
-    ⇒ 第 ④ 组的"债只许变短"棘轮**只覆盖服务端半边**。客户端半边靠 `CONTRACTS`
-      里的锚点逐条钉,新增的客户端解析断言不会自动被发现。
- ② 只认锚点**在不在、唯不唯一**;锚点选的是**断言本身那一行**(不是它旁边的注释),
-    所以"锚点在"就等于"那条断言在"。但它不判断那条断言**判得对不对** ——
-    那是那条断言自己的事。
+ ① 本文件只认「两半**在不在**」,**不看键集合对不对** —— 那是 GPU 车道那张
+    `CROSS_PROCESS_CONTRACTS` 的职责(它逐条钉具体键集合)。**广度归这儿,深度归那儿**,
+    第 ④ 组把两张表双向咬住,谁也漂不动。
+ ② 判据是**契约号在不在**,不是"恰好出现一次" —— 契约号会同时出现在分节注释与
+    断言消息里。⇒ 有人把断言体删空、只留下那行注释,本文件**看不出来**。
+    防这一手的是对方那条元断言(它真的去打那个端点、比键集合)。
  ③ 请求体(客户端发、服务端收)方向**不在本文件范围内**。D92 的措辞是"响应契约"。
+ ④ SSE 那几条(`/v1/gpu/events` · `/v1/sync/events` · `/v1/chat/completions`)的契约是
+    **每一帧**的顶层键集合,不是整个响应体。本文件只登记它们欠着,**不定义帧该怎么钉**。
 """
 from __future__ import annotations
 
@@ -78,29 +80,34 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 #  登记表 —— **期望值**,不是遍历源。
 #
 #  key   : (服务, METHOD, path)
-#  state : paired      两半都在(必须同时给 server 与 client 锚点)
+#  state : paired      两半都在(**必须给 cid**)
 #          server-only 只有服务端钉了顶层键集合
 #          client-only 只有客户端钉了解析
 #          none        两半都没有
-#  anchor: (相对仓库根的文件, **断言本身那一行**里的一段 ASCII 子串)
-#          ★ 锚点故意选断言那一行而不是旁边的注释 —— 注释可以留着而断言被删掉,
-#            那正是本项目最恨的形状(写着有防护、实际没有)。
-#          ★ 锚点必须是 ASCII:它要在 cp936 的钩子环境里被同一份代码读,
+#  cid   : 契约号,形如 `CONTRACT:gpu.intent`。**两半共用同一个锚点** ——
+#          它同时是 GPU 车道 `CROSS_PROCESS_CONTRACTS` 的键、和客户端
+#          `Selftest.cs` 里那条元断言的检索目标。
+#          ★ 用同一个锚点,就不会出现"我以为钉的是这处、他钉的是那处"。
+#          ★ 契约号是 ASCII:它要在 cp936 的钩子环境里被同一份代码读,
 #            而中文子串在那里的行为取决于读文件时的编码猜测(ASSERTION-PITFALLS 8)。
 #  lane  : 这条契约归哪条垂直切片(D92)。★ 这是**建议**,以第 0 条车道的裁定为准。
 #  note  : 为什么它现在是这个状态 / 修它要动哪一行。
 #
-#  ★★★ 这张表**只许变短**(欠债那一栏)。第 ④ 组的棘轮盯着服务端半边:
-#     有人新钉了一条顶层键集合断言却没把对应契约挪进 paired ⇒ 判红。
+#  ★★★ 这张表**只许变短**(欠债那一栏)。第 ④ 组双向对拍盯着它:
+#     对方新登记一条契约号而本表没跟上 ⇒ 红;本表标 paired 而对方那儿没有 ⇒ 红。
 # ══════════════════════════════════════════════════════════════════════════
 CONTRACTS: dict[tuple[str, str, str], dict] = {
     # ── 网关(Python / FastAPI)⇒ 客户端(C#) ─────────────────────────────
     ("gateway", "POST", "/v1/gpu/lease"): {
-        "state": "paired",
-        "server": ("10-core/gateway/test_gpu_broker.py", "set(_lzj.keys()) =="),
-        "client": ("20-client-win/app/Selftest.cs", "TryParseGrant(wire"),
+        "state": "paired", "cid": "CONTRACT:gpu.lease.grant",
         "lane": "GPU/租约切片",
-        "note": "A1 的病灶本身,已成对。本表的样板。",
+        "note": "A1 的病灶本身。最早成对的一条,现已收进 GPU 车道的契约号登记表。",
+    },
+    ("gateway", "POST", "/v1/gpu/intent"): {
+        "state": "paired", "cid": "CONTRACT:gpu.intent",
+        "lane": "GPU/租约切片",
+        "note": "D87① 「意图即起」。★ **本表落地后第一条被门禁当场抓住的新契约** —— "
+                "它随 GPU 车道那次提交出现,合并当天 `未登记` 判红,登记时才发现两半都已写好。",
     },
     ("gateway", "GET", "/v1/gpu/snapshot"): {
         "state": "none", "lane": "GPU/租约切片",
@@ -108,9 +115,9 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
                 "generation 读错 = 每次 if_generation 都冲突,而那看起来像'中枢忙'",
     },
     ("gateway", "POST", "/v1/gpu/lease/renew"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "消费者 Services/LeaseKeeper.cs:264 —— 续不上租约会在 TTL 后静默消失,"
-                "那时中枢以为没人在用。★ 与 /v1/gpu/lease 同族,漏的正是 A1 那种缝",
+        "state": "paired", "cid": "CONTRACT:gpu.lease.renew",
+        "lane": "GPU/租约切片",
+        "note": "顶层键集合 {result, snapshot};客户端半边钉 409(条件写不匹配)⇒ 立刻自隐",
     },
     ("gateway", "GET", "/v1/gpu/events"): {
         "state": "none", "lane": "GPU/租约切片",
@@ -128,8 +135,9 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
                 "失败要回带 snapshot,客户端读不出 snapshot 就无从重试",
     },
     ("gateway", "POST", "/v1/session/end"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "消费者 Services/HubClient.cs:241 与 LeaseKeeper.cs:249。"
+        "state": "paired", "cid": "CONTRACT:session.end",
+        "lane": "GPU/租约切片",
+        "note": "顶层键集合 {status, released_leases, device, reason}。"
                 "★ 这条路由曾经**根本不存在**而客户端每次退出都在调它、失败还被吞掉",
     },
     ("gateway", "GET", "/v1/models"): {
@@ -225,21 +233,53 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
 # ── 客户端源码根:算"这条契约有没有消费者"用的。零命中判红(见第 ⑤ 组)──────
 CLIENT_ROOTS = ["20-client-win/app", "20-client-win/transport"]
 
-# ── 服务端顶层键集合断言的**唯一**通用形状。第 ④ 组的棘轮数它。─────────────
-#  ★ 针**拼出来**,不写成字面量 —— 否则本文件自己就成了它要找的东西
-#    (ASSERTION-PITFALLS 第 1 条,已踩 9 次;第 8 次带出的正是这个写法)。
-#    拼出来之后,这个正则可以**连本文件一起**扫而不必开"跳过自己"那个 fail-open 后门。
-_KEYSET_RE = re.compile(r"set\(" + r"[^)]*\.keys\(\)\)\s*==")
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 与 GPU 车道那张契约号登记表的**双向**反向全表
+#
+#  `10-core/gateway/test_gpu_broker.py` 里有一张 `CROSS_PROCESS_CONTRACTS`,
+#  逐条钉**顶层键集合的具体内容**,并去 `Selftest.cs` 找同名 `CONTRACT:` 标记。
+#  那是**深度**;本文件是**广度**。两者不重复,但**必须互相咬住**:
+#
+#   · 他们那张表是**手写的遍历源** —— 27 条契约里它只覆盖 5 条,
+#     而剩下 22 条的存在**它自己说不出来**(ASSERTION-PITFALLS 3b:
+#     判词说"每一个",判据是一份手写名单)。补上这一半正是本文件的职责。
+#   · 反过来,本文件只认"两半在不在",**不看键集合对不对** —— 那是他们的职责。
+#
+#  ⇒ 双向对拍:他们新登记一条而本表没跟上 ⇒ 红;本表标了 paired 而他们那儿没有 ⇒ 红。
+#
+#  ★ 这条**取代了**第一版那个按语法数 `set(...keys()) ==` 的棘轮。
+#    那个棘轮当天就被证伪:GPU 车道的新断言写成 `set(_rl.json())`(没有 `.keys()`),
+#    正则一条都没数到 —— **一个按语法形状计数的护栏,换个等价写法就瞎了**,
+#    而它瞎掉的方向是"少数了" ⇒ 静默放过。改成对拍**声明出来的契约号**,
+#    形状怎么写都不影响。
+# ══════════════════════════════════════════════════════════════════════════
+_PEER_FILE = "10-core/gateway/test_gpu_broker.py"
+_CLIENT_PIN_FILE = "20-client-win/app/Selftest.cs"
+#  ★ 针拼出来,理由同上(本文件也可能被别的扫描器扫)。
+#  ★★ **两个正则,不是一个** —— 它们问的不是同一件事:
+#    · `_CID_KEY` 带引号 ⇒ 只认**登记表的键**。用它去数对方那张表,
+#      就不会把散落在注释/断言消息里的偶然提及也算成"登记了一条契约"。
+#    · `_CID_BARE` 不带引号 ⇒ 认**任何出现**。客户端那半边的契约号写在
+#      `// ── CONTRACT:gpu.intent ──` 与断言消息里,引号并不紧贴着它
+#      —— 第一版两边共用带引号那个,于是客户端**零命中**、判红。
+#      ★ 那次红是对的:一个"零命中"的判据本来就该红。错的是判据,不是被判的东西。
+_CID_KEY = re.compile(r'"(CONTRACT' + r':[a-z0-9_.]+)"')
+_CID_BARE = re.compile(r"CONTRACT" + r":[a-z0-9_.]+")
 
-#  反向全表:哪些文件里**允许**出现服务端顶层键集合断言,各几条。
-#  新增一条而不更新这张表 ⇒ 判红(说明有人还了债却没改登记表)。
-_KEYSET_PINS_EXPECTED = {
-    "10-core/gateway/test_gpu_broker.py": 1,          # POST /v1/gpu/lease(A1)
+#  他们表里**不是顶层响应契约**的条目:登记在这里并写明**为什么它不抵消那条路由的欠债**。
+#  ★ 没有这一栏,`gpu.intended.blocking` 看起来就像"/v1/gpu/intended 已经成对了" ——
+#    而它钉的是 409 响应里 `result.blocking[i]` 那个**子对象**的形状,
+#    该路由 200 的**顶层键集合仍然没人钉**。把"钉了一部分"读成"钉完了",
+#    正是本项目反复吃亏的那种四舍五入。
+_SUBSHAPE_CIDS = {
+    "CONTRACT:gpu.intended.blocking":
+        "钉的是 POST /v1/gpu/intended **409** 响应里 result.blocking[i] 的子对象形状"
+        "(即 Lease.to_json()),**不是**该路由 200 的顶层键集合 ⇒ 不抵消它的欠债",
 }
 
 #  欠债总数钉死 —— 印在覆盖账上的那个数字必须和实际对得上。
 #  ★ 它不是重复登记表:它让"又欠了一条"变成 diff 里的**一行**,而不是表里多一项没人数。
-_EXPECTED_DEBT = 25
+_EXPECTED_DEBT = 23
 
 
 #  ── lan-edge 端点提取器 ────────────────────────────────────────────────
@@ -339,53 +379,69 @@ for key, meta in sorted(CONTRACTS.items()):
     check(f"[{tag}] state 是四种之一", st in _VALID_STATES, f"实得 {st!r}")
     check(f"[{tag}] 有 lane 与 note(修它的人要知道找谁、改哪一行)",
           bool(meta.get("lane")) and bool(meta.get("note")))
-    for side in ("server", "client"):
-        want = st == "paired" or st == f"{side}-only"
-        has = side in meta
-        check(f"[{tag}] state={st} 与 {side} 锚点在不在一致",
-              want == has, f"want={want} has={has}")
-        if not has:
-            continue
-        rel, needle = meta[side]
-        n = _anchor_count(rel, needle)
-        check(f"[{tag}] {side} 锚点所在文件存在", n is not None, rel)
+    cid = meta.get("cid")
+    check(f"[{tag}] state={st} 与契约号在不在一致(paired 必须给契约号)",
+          (st == "paired") == bool(cid), f"state={st} cid={cid!r}")
+    if not cid:
+        continue
+    # ★ 两半都靠**契约号**定位 —— 那正是 GPU 车道那条元断言用的检索目标,
+    #   两边用同一个锚点,就不会出现"我以为钉的是这处、他钉的是那处"。
+    for side, rel in (("server", _PEER_FILE), ("client", _CLIENT_PIN_FILE)):
+        n = _anchor_count(rel, cid)
+        check(f"[{tag}] {side} 半边的文件存在", n is not None, rel)
         if n is None:
             continue
-        # 0 ⇒ 这一半被删了(而 state 还写着 paired,那就是"写着有防护、实际没有")
-        # >1 ⇒ 说不清验的是哪一处;两处会各自漂移,而漂的那天只盯着其中一份
-        check(f"[{tag}] {side} 锚点恰好出现 1 次 —— "
-              f"0 次 = 这一半被删了而登记表还说它在;>1 次 = 说不清钉的是哪一处",
-              n == 1, f"{rel} 里 {needle!r} 出现 {n} 次")
+        # ★ 判据是**在不在**,不是"恰好一次":契约号会同时出现在分节注释与断言消息里,
+        #   那是正常的(实测 gpu.lease.grant 在 Selftest.cs 里出现 2 次)。
+        #   要"恰好一次"会造出一条**必然误红**的判据 —— 而误红的护栏很快就没人看。
+        #   真正防漂移的是下面第 ④ 组那条双向对拍。
+        check(f"[{tag}] {side} 半边有 {cid} —— 0 次 = 这一半被删了而登记表还说它在",
+              n >= 1, f"{rel} 里找不到 {cid}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ④ 棘轮:债只许变短(★ 只覆盖服务端半边,明写)
 # ══════════════════════════════════════════════════════════════════════════
-print("\n=== 4. 棘轮:还了债必须改登记表(★ 只覆盖服务端半边) ===")
+print("\n=== 4. ★★★ 与 GPU 车道那张契约号登记表【双向】对拍 ===")
 
-_py_tests = sorted(p for p in (REPO / "10-core").rglob("test_*.py")
-                   if "__pycache__" not in str(p))
-check("★★ 服务端测试**零命中判红**(扫不到测试文件时,下面整组会静默变成零断言)",
-      len(_py_tests) > 0, f"实测 {len(_py_tests)} 个")
+_peer_src = None
+_pf = REPO / _PEER_FILE
+if _pf.exists():
+    _peer_src = _pf.read_text(encoding="utf-8", errors="replace")
+check(f"★★★ 能读到 {_PEER_FILE}(读不到 ⇒ 对拍无从做起 ⇒ 判红,不当作没问题)",
+      _peer_src is not None, _PEER_FILE)
 
-_keyset_actual: dict[str, int] = {}
-for f in _py_tests:
-    n = len(_KEYSET_RE.findall(f.read_text(encoding="utf-8", errors="replace")))
-    if n:
-        _keyset_actual[f.relative_to(REPO).as_posix()] = n
+if _peer_src is not None:
+    _peer_cids = set(_CID_KEY.findall(_peer_src))
+    # ★ 零命中判红:他们那张表今天明明有 5 条;解析出 0 条只可能是正则或写法变了,
+    #   而"0 条"与"两边完全一致"在下面那条集合相等里长得一模一样(空集 == 空集)。
+    check(f"★★ 对方契约号**零命中判红**(实测 {len(_peer_cids)} 条)", len(_peer_cids) > 0,
+          f"{sorted(_peer_cids)}")
 
-check("★★★ 服务端顶层键集合断言的分布**逐条对得上** —— "
-      "多出一条 = 有人还了债却没把契约挪进 paired;少一条 = 有人把钉子拔了",
-      _keyset_actual == _KEYSET_PINS_EXPECTED,
-      f"实测 {_keyset_actual} 期望 {_KEYSET_PINS_EXPECTED}")
+    _mine_cids = {m["cid"] for m in CONTRACTS.values() if m.get("cid")}
+    _theirs_only = sorted(_peer_cids - _mine_cids - set(_SUBSHAPE_CIDS))
+    _mine_only = sorted(_mine_cids - _peer_cids)
 
-# ★ 期望表与登记表必须自洽:paired/server-only 的条数 == 期望的钉子总数。
-#   没有这条,两张表可以各自"正确"而互相矛盾。
-_server_halves = sum(1 for m in CONTRACTS.values()
-                     if m.get("state") in ("paired", "server-only"))
-check("★★ 期望表与登记表自洽(钉子总数 == 声明有服务端半边的契约数)",
-      sum(_KEYSET_PINS_EXPECTED.values()) == _server_halves,
-      f"钉子 {sum(_KEYSET_PINS_EXPECTED.values())} 契约 {_server_halves}")
+    check("★★★ 他们新登记的契约号,本表**都跟上了** —— "
+          "跟不上说明有人还了债而广度表还把它算在欠债里(账虚高)",
+          not _theirs_only, f"他们有而本表没有:{_theirs_only}")
+    check("★★★ 本表标 paired 的契约号,他们那儿**都还在** —— "
+          "不在说明那半钉子被拔了,而本表还在说它成对(写着有防护、实际没有)",
+          not _mine_only, f"本表有而他们没有:{_mine_only}")
+
+    # ★ 子形状条目必须**逐条写明理由**,并且确实还在他们表里(否则是过期登记)。
+    for _sc, _why in _SUBSHAPE_CIDS.items():
+        check(f"★★ 子形状条目 {_sc} 仍在对方表里(不在 = 过期登记)",
+              _sc in _peer_cids, f"{_sc} 已从 {_PEER_FILE} 消失")
+        check(f"★★ 子形状条目 {_sc} 写明了**为什么不抵消欠债**", bool(_why))
+
+    # ★ 客户端那半边也零命中判红 —— 他们的元断言靠 `cid in Selftest.cs`,
+    #   而"读到的是一个空串"和"每条都找得到"在那种判据下同样绿。
+    _cf = REPO / _CLIENT_PIN_FILE
+    _client_cids = set(_CID_BARE.findall(_cf.read_text(encoding="utf-8", errors="replace"))) \
+        if _cf.exists() else set()
+    check(f"★★ 客户端半边的契约号**零命中判红**(实测 {len(_client_cids)} 条)",
+          len(_client_cids) > 0, f"{sorted(_client_cids)}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -442,8 +498,16 @@ check(f"★★ 欠债总数与登记表对得上(实测 {len(_debt)},期望 {_EX
       "对不上说明有人动了表却没动这个数字,而覆盖账印的正是这个数字",
       len(_debt) == _EXPECTED_DEBT, f"实测 {len(_debt)} 期望 {_EXPECTED_DEBT}")
 
-print(f"\n  ★ 契约总数 {len(actual)} · 已成对 {len(actual) - len(_debt)} · "
-      f"欠配对 {len(_debt)}")
+# ★★ 成对数从**登记表**数出来,**不用 `总数 - 欠债` 去减**。
+#   第一版是减出来的,而 `总数` 来自实测枚举、`欠债` 来自登记表 ——
+#   两者一分家(也就是**恰好在有未登记契约、本工具正在报问题的那一刻**),
+#   减出来的数字就是错的。实测撞见过:27 条契约、登记表只有 1 条 paired,
+#   而它印出 `PAIRED=2`。**一个只在出问题时才出错的计数器**,
+#   偏偏在最需要它准的那一刻说谎 —— 那正是这个工具存在的理由。
+_paired = sum(1 for m in CONTRACTS.values() if m.get("state") == "paired")
+print(f"\n  ★ 契约总数 {len(actual)} · 已成对 {_paired} · 欠配对 {len(_debt)}"
+      + ("" if len(actual) == len(CONTRACTS)
+         else f"  ★ 注意:实测 {len(actual)} 条 ≠ 登记 {len(CONTRACTS)} 条,上面已判红"))
 print("  ★ 「欠配对」不是「已裁定没问题」—— 它是一张**只许变短**的欠债表。"
       "新增契约不登记会判红,还了债不改表也会判红。")
 if _QUIET:
@@ -453,7 +517,7 @@ if _QUIET:
 #    run-tests.ps1 要把 DEBT 抬进覆盖账,而钩子是从 git bash 起的、控制台码页 cp936
 #    ⇒ 中文与 `·` 全成乱码,正则匹配不上。`===` / 数字 / 大写字母乱码之后依然完好。
 print(f"  === contract-pairs: TOTAL={len(actual)} "
-      f"PAIRED={len(actual) - len(_debt)} DEBT={len(_debt)} ===")
+      f"PAIRED={_paired} DEBT={len(_debt)} ===")
 
 
 # ══════════════════════════════════════════════════════════════════════════
