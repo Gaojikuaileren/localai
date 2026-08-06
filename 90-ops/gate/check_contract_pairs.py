@@ -155,26 +155,41 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
         "note": "顶层键集合 {status, released_leases, device, reason}。"
                 "★ 这条路由曾经**根本不存在**而客户端每次退出都在调它、失败还被吞掉",
     },
+    # ── 同步 + 对话切片(V6)· 2026-08-06 收盘登记 ─────────────────────────
+    #  ★★ 这 5 条的两半**在 V6 那次提交里就写好了**,而本表直到收盘才登记上 ——
+    #    中间那段时间门禁照报全绿。抓到它的是第 ⑦ 组(全仓契约号反向全表),
+    #    而第 ⑦ 组本身是**当天补的**:在它之前,这个方向是空的。
     ("gateway", "GET", "/v1/models"): {
-        "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
-        "note": "消费者 Services/HubClient.cs:290 与 transport/Program.cs:93",
+        "state": "paired", "cid": "CONTRACT:models.list",
+        "lane": "同步/对话切片", "server_file": "10-core/gateway/test_sync.py",
+        "note": "消费者 Services/HubClient.cs 与 transport/Program.cs。",
     },
     ("gateway", "POST", "/v1/chat/completions"): {
-        "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
-        "note": "SSE。消费者 Services/ChatClient.cs:87 —— 全项目最热的一条路径",
+        "state": "paired", "cid": "CONTRACT:chat.stream.frame",
+        "lane": "同步/对话切片", "server_file": "10-core/gateway/test_sync.py",
+        "note": "SSE,**全项目最热的一条路径**。契约是**每一帧**的顶层键集合,不是响应体 —— "
+                "那条流永不结束。消费者 Services/ChatClient.cs。",
     },
     ("gateway", "POST", "/v1/sync/push"): {
-        "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
-        "note": "消费者 Services/SyncClient.cs:249",
+        "state": "paired", "cid": "CONTRACT:sync.push",
+        "lane": "同步/对话切片", "server_file": "10-core/gateway/test_sync.py",
+        "note": "消费者 Services/SyncClient.cs。",
     },
     ("gateway", "GET", "/v1/sync/events"): {
-        "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
-        "note": "SSE。消费者 Services/SyncClient.cs:327",
+        "state": "paired", "cid": "CONTRACT:sync.events.frame",
+        "lane": "同步/对话切片", "server_file": "10-core/gateway/test_sync.py",
+        "note": "SSE,契约是每一帧的顶层键集合。与 sync.snapshot **共用同一个 Absorb** —— "
+                "全量就是 since_rev=0 的那一帧,所以两条钉在一起。消费者 Services/SyncClient.cs。",
     },
     ("gateway", "GET", "/v1/sync/snapshot"): {
-        "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
-        "note": "★★ **客户端一个字都没读它**(全仓 grep 零命中)。"
-                "推/订阅都在,唯独没有拉全量 ⇒ 重连后拿什么对齐?这条要么接上要么撤掉",
+        "state": "paired", "cid": "CONTRACT:sync.snapshot",
+        "lane": "同步/对话切片", "server_file": "10-core/gateway/test_sync.py",
+        "note": "★★ 上一版这条写着「**客户端一个字都没读它**(全仓 grep 零命中)」并要求"
+                "「要么接上要么撤掉」。**V6 接上了**:`SyncClient.PullFullAsync` 是它在客户端的唯一落点"
+                "(`Services/SyncClient.cs`),用途**不是**重连对齐(重连那条路本来就没洞 —— "
+                "`/v1/sync/events` 首帧就是全量),而是**丢一帧之后的补全量**。"
+                "★ 处置理由见 `decision-packets/sync-snapshot-disposition-2026-08-06.md`"
+                "(那份是**待用户裁定**的处置建议,**不取号**)。",
     },
     ("gateway", "GET", "/health"): {
         "state": "none", "lane": "未分配 —— 请第 0 条车道指派",
@@ -327,10 +342,36 @@ _CID_BARE = re.compile(r"CONTRACT" + r":[a-z0-9_.]+")
 #    而它钉的是 409 响应里 `result.blocking[i]` 那个**子对象**的形状,
 #    该路由 200 的**顶层键集合仍然没人钉**。把"钉了一部分"读成"钉完了",
 #    正是本项目反复吃亏的那种四舍五入。
+#  ★★ 值从「一句理由」改成 {why, home}(2026-08-06 收盘,第 0 条车道):
+#    原来的校验写死「必须还在 `test_gpu_broker.py` 里」,而证书/配对那族的子形状
+#    住在 **C#**(`WireContracts.cs`)—— 写死会把它们**误红**,
+#    而"为了让护栏别误红就不登记"正是这条护栏要防的事。
+#    ⇒ 逐条说明它住哪(与 V4 给路由条目加的 `server_file` 同款手法)。
 _SUBSHAPE_CIDS = {
-    "CONTRACT:gpu.intended.blocking":
-        "钉的是 POST /v1/gpu/intended **409** 响应里 result.blocking[i] 的子对象形状"
-        "(即 Lease.to_json()),**不是**该路由 200 的顶层键集合 ⇒ 不抵消它的欠债",
+    "CONTRACT:gpu.intended.blocking": {
+        "home": "10-core/gateway/test_gpu_broker.py",
+        "why": "钉的是 POST /v1/gpu/intended **409** 响应里 result.blocking[i] 的子对象形状"
+               "(即 Lease.to_json()),**不是**该路由 200 的顶层键集合 ⇒ 不抵消它的欠债",
+    },
+    # ── 证书/配对切片(V4)带进来的四个子形状 ──────────────────────────────
+    #  ★ 它们此前**一条都没登记**,而门禁照报全绿 —— 那正是第 ⑦ 组补上的那个方向抓到的。
+    "CONTRACT:cert.admin.ping.servercert": {
+        "home": "10-core/identity/WireContracts.cs",
+        "why": "钉的是 GET /admin/ping 响应里 **.serverCert 子对象**的形状,"
+               "不是该路由的顶层键集合 ⇒ 不抵消 cert.admin.ping 那条",
+    },
+    "CONTRACT:cert.admin.devices.item": {
+        "home": "10-core/identity/WireContracts.cs",
+        "why": "钉的是 GET /admin/devices 响应里 **.devices[i] 数组元素**的形状 ⇒ 不抵消路由本身",
+    },
+    "CONTRACT:cert.admin.pending.item": {
+        "home": "10-core/identity/WireContracts.cs",
+        "why": "钉的是 GET /admin/pairing/pending 响应里 **.pending[i] 数组元素**的形状 ⇒ 不抵消路由本身",
+    },
+    "CONTRACT:cert.admin.approvedeny.409": {
+        "home": "10-core/identity/WireContracts.cs",
+        "why": "钉的是批准/拒绝两条路由的 **409** 响应形状,不是它们 200 的顶层键集合 ⇒ 不抵消路由本身",
+    },
 }
 
 #  欠债总数钉死 —— 印在覆盖账上的那个数字必须和实际对得上。
@@ -341,7 +382,12 @@ _SUBSHAPE_CIDS = {
 #    ⇒ 必然冲突。V5 写 19(23−4),V4 写 10(23−13);合起来是 **23−4−13 = 6**。
 #    ★ 没有靠这句算术定案 —— 下面那条断言拿**实测**的 DEBT 与本值对拍,
 #      算错了它当场红。**这一行是期望值,不是事实来源。**
-_EXPECTED_DEBT = 6
+#  ★★★ 2026-08-06 收盘:6 → **1**,[同步/对话切片] 那 5 条登记上(V6 早就写好了两半,
+#    只是本表没跟上 —— 见第 ⑦ 组)。**只剩 `GET /health` 一条**,
+#    而它今天的响应体确实没有任何消费者(`start-stack.ps1` 只看 curl 退出码)。
+#    ⇒ 那一条**不要为了把数字清零而随手配一条断言** —— 给一条没人走的路配断言,
+#      断言是绿的,而它什么都没守。它该被裁定为"接上"或"撤掉",不是被凑掉。
+_EXPECTED_DEBT = 1
 
 
 #  ── lan-edge 端点提取器 ────────────────────────────────────────────────
@@ -516,10 +562,15 @@ if _peer_src is not None:
           not _mine_only, f"本表有而他们没有:{_mine_only}")
 
     # ★ 子形状条目必须**逐条写明理由**,并且确实还在他们表里(否则是过期登记)。
-    for _sc, _why in _SUBSHAPE_CIDS.items():
-        check(f"★★ 子形状条目 {_sc} 仍在对方表里(不在 = 过期登记)",
-              _sc in _peer_cids, f"{_sc} 已从 {_PEER_FILE} 消失")
-        check(f"★★ 子形状条目 {_sc} 写明了**为什么不抵消欠债**", bool(_why))
+    # ★ 逐条按它**自己声明的 home** 去找,而不是一律去 GPU 那个 peer 文件里找。
+    #   收窄的是"去哪儿找",不是"要不要找" —— 找不到照样红。
+    for _sc, _meta in _SUBSHAPE_CIDS.items():
+        _home = _meta["home"]
+        _n = _anchor_count(_home, _sc)
+        check(f"★★ 子形状条目 {_sc} 的 home 文件存在({_home})", _n is not None, _home)
+        check(f"★★ 子形状条目 {_sc} 仍在 {_home} 里(不在 = 过期登记)",
+              _n is not None and _n >= 1, f"{_sc} 已从 {_home} 消失")
+        check(f"★★ 子形状条目 {_sc} 写明了**为什么不抵消欠债**", bool(_meta.get("why")))
 
     # ★ 客户端那半边也零命中判红 —— 他们的元断言靠 `cid in Selftest.cs`,
     #   而"读到的是一个空串"和"每条都找得到"在那种判据下同样绿。
@@ -640,6 +691,114 @@ for _src, _want, _why in _EXTRACTOR_CASES:
 #     判红方向是"多要一条配对",不是"少盖一条"。**少盖才是不能忍的那个方向。**
 check("★ 上面那处不足的**代价方向**是安全的(多算 ⇒ 多要一条登记;不会少盖)",
       lan_edge_endpoints('// app.MapGet("/x", y)') == {("GET", "/x")})
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑦ ★★★ 全仓契约号反向全表 —— 补上第 ④ 组**空着的那个方向**
+#
+#  本文件顶部(以及 ④ 组的抬头)白纸黑字写着两个方向:
+#      「对方新登记一条契约号而本表没跟上 ⇒ 红;本表标 paired 而对方那儿没有 ⇒ 红。」
+#  ★★★ **第一个方向此前只对着一个文件**(`test_gpu_broker.py`)。
+#     于是在**别处**声明的契约号 —— `WireContracts.cs`、`test_sync.py`、`Selftest.cs` ——
+#     它一个都看不见:代码里躺着 10 个本表不认识的契约号,门禁照报 189 PASS · 0 FAIL。
+#
+#  ⇒ 一张**专门用来抓「看着有防护、实际没有」的表,自己有一个方向是空的**。
+#    与 2026-08-05 抓到的「一条为了修谎言而写的断言,自己是恒真的」同形状,
+#    而这次它长在 **D95** 上 —— 当天刚立的那条决议。
+#    ★★ 更要紧的是它**怎么被发现的**:靠人工核对,**不是它自己报的**。
+#
+#  修法:扫**全仓代码**(不是某一个 peer 文件),任何 `CONTRACT:<id>` 只要本表不认识
+#  ⇒ 判红,并说清是哪个 id、在哪些文件里。
+#
+#  ★ 反问过一遍:**新增一个契约号而不登记,默认落哪边?** —— 落**判红**侧。
+#    这与本文件顶部那条「加了路由不登记 ⇒ 红」是同一条纪律的另一半:
+#    那条管**路由**,这条管**契约号**。少了这一半,一条契约可以有断言、有契约号,
+#    却**从来不进欠债账** —— 账面上它不存在,而它确实在被人依赖。
+#
+#  ★ 只扫 `.py` / `.cs`(代码与测试),**不扫 `.md`**:决议包会在散文里提到契约号,
+#    包括**建议中的、尚未存在的**那种。把散文纳入判据会逼人去登记一个还没有的东西。
+#    ⇒ 判据是「**代码里出现的**契约号必须被登记」,这一条边界明写在此。
+# ══════════════════════════════════════════════════════════════════════════
+print("\n=== 7. ★★★ 全仓契约号反向全表(补上 ④ 组空着的那个方向) ===")
+
+_SCAN_SUFFIXES = (".py", ".cs")
+_SCAN_ROOTS = ["10-core", "20-client-win", "90-ops"]
+_SELF_REL = "90-ops/gate/check_contract_pairs.py"
+
+#  已登记 = 路由条目的 cid ∪ 子形状条目
+_known_cids = {m["cid"] for m in CONTRACTS.values() if m.get("cid")} | set(_SUBSHAPE_CIDS)
+
+#  ★ 带尾点的是**前缀表达式**(例如 Selftest.cs 里的 StartsWith("CONTRACT:cert.admin.")),
+#    不是一个契约号。判据相应不同:必须**至少有一个已登记的 id 以它开头** ——
+#    否则那句 StartsWith 会静默匹配到零条,而"筛出零条"和"筛出全部"在断言里长得一样。
+_seen: dict[str, set[str]] = {}
+for _root in _SCAN_ROOTS:
+    _rd = REPO / _root
+    if not _rd.exists():
+        continue
+    for _fp in _rd.rglob("*"):
+        if _fp.suffix.lower() not in _SCAN_SUFFIXES or not _fp.is_file():
+            continue
+        _rel = _fp.relative_to(REPO).as_posix()
+        if _rel == _SELF_REL or "/bin/" in _rel or "/obj/" in _rel or "__pycache__" in _rel:
+            continue
+        try:
+            _txt = _fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for _hit in set(_CID_BARE.findall(_txt)):
+            _seen.setdefault(_hit, set()).add(_rel)
+
+#  ★★ 零命中判红:今天代码里明明有几十处;解析出 0 只可能是正则/扫描根坏了,
+#     而"0 个未登记"与"全部已登记"在下面那条判据里长得一模一样(空集 ⊆ 任何集合)。
+check(f"★★ 全仓契约号**零命中判红**(实测扫到 {len(_seen)} 个不同契约号)",
+      len(_seen) > 0, f"扫描根={_SCAN_ROOTS}")
+
+_unregistered: list[str] = []
+_dangling_prefix: list[str] = []
+for _cid, _files in sorted(_seen.items()):
+    if _cid.endswith("."):
+        # 前缀表达式:必须真的能匹配到已登记的 id
+        if not any(k.startswith(_cid) for k in _known_cids):
+            _dangling_prefix.append(f"{_cid} ({', '.join(sorted(_files))})")
+        continue
+    if _cid not in _known_cids:
+        _unregistered.append(f"{_cid} ({', '.join(sorted(_files))})")
+
+check("★★★ 代码里出现的契约号,本表**全都认识** —— "
+      "不认识的说明有人写了成对断言却没进欠债账:账面上它不存在,而它确实在被依赖",
+      not _unregistered,
+      "未登记 %d 个:\n      %s" % (len(_unregistered), "\n      ".join(_unregistered)))
+
+check("★★ 前缀表达式(以 `.` 结尾)必须真能匹配到已登记的 id —— "
+      "匹配到零条的 StartsWith 会静默筛出空集,而空集在断言里长得像'全过了'",
+      not _dangling_prefix,
+      "悬空前缀:\n      %s" % "\n      ".join(_dangling_prefix))
+
+#  ★ 反过来钉(能报 + 不误报,只钉一边等于没钉 —— selfcheck.py 已踩出这条经验):
+#    喂一段**确定该报**的、和一段**确定不该报**的,各问一次。
+def _unknown_in(text: str) -> list[str]:
+    """把上面那套判据抽成纯函数,用真实的 _known_cids 问一遍合成输入。"""
+    out = []
+    for c in set(_CID_BARE.findall(text)):
+        if c.endswith("."):
+            continue
+        if c not in _known_cids:
+            out.append(c)
+    return out
+
+
+#  ★ 探针字符串**运行期拼接**:本文件自己被扫描时会跳过(_SELF_REL),
+#    但别的扫描器不一定跳 —— 拼接后 `CONTRACT:` 在**值**里是连续的,而在**源码文本**里不是。
+#    ★★ 第一版把它写成 `"CONTRACT" ":zzz…"`(字面量里夹了引号和空格),
+#      于是值里 `CONTRACT:` 也不连续 ⇒ 正则匹配不到 ⇒ 这条反向断言**当场红**。
+#      它红得对:一个"该报却报不出来"的判据本来就该红。错的是探针,不是被判的东西。
+_probe_bad = 'Assert(x, "' + "CONTRACT" + ":zzz.definitely.not.registered" + '");'
+_probe_good = '// ── ' + "CONTRACT" + ":gpu.lease.grant ──"
+check("★★ 反向:喂一个表里没有的契约号 ⇒ **报得出来**(判据不是恒真的)",
+      _unknown_in(_probe_bad) == ["CONTRACT" ":zzz.definitely.not.registered"],
+      f"{_unknown_in(_probe_bad)}")
+check("★★ 反向:喂一个已登记的契约号 ⇒ **不误报**(判据不是恒假的)",
+      _unknown_in(_probe_good) == [], f"{_unknown_in(_probe_good)}")
 
 print("-" * 78)
 print(f"  === 契约配对元规则:{_p} PASS · {_f} FAIL ===")
