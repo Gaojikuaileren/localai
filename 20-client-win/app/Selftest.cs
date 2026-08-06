@@ -7031,7 +7031,29 @@ public static class Selftest
             try { Directory.Delete(tmp, true); } catch { }
         }
 
+        // ★★★ 源码可读性的反向钉(2026-08-06):**源码读得到的时候,一次都不许读不到**。
+        //   判据分两种处境,它们的下一步完全相反:
+        //     · _srcHit == 0 ⇒ 这是**发布产物**,旁边本来就没有源码 —— 全部落空是设计如此,不判红;
+        //     · _srcHit > 0  ⇒ 源码就在旁边,而某一次仍然读不到 ⇒ **那是路径写错了**,
+        //       后果是那几条断言【静默不跑】而不是报错 —— 必须当场红。
+        //   ★ 没有这条,把一个源文件改名/挪走就会让一批断言无声消失,而 PASS 只是小了一点。
+        Assert(_srcHit == 0 || _srcMiss == 0,
+            $"★★★ 源码可读时不得有读不到的:命中 {_srcHit} 次 · 落空 {_srcMiss} 次"
+            + (_srcMiss > 0 && _srcHit > 0 ? " —— 有路径写错了,那几条断言正在【静默不跑】" : ""));
+
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
+        // ★★ 口径必须跟着数字走。发布产物里源码不可读 ⇒ 一批结构/接线断言整段跳过,
+        //   而它们既不计 PASS 也不计 FAIL、更不计 SKIP。不写出来的话,
+        //   852 会被拿去和开发树的 1900 对账,而那两个数根本不在同一个量程上。
+        if (_srcMiss > 0)
+        {
+            Console.WriteLine(
+                $"  ★ 口径:本次有 {_srcMiss} 处源码读不到(命中 {_srcHit} 处)⇒ "
+                + "那些【结构/接线】断言整段没跑,既不计 PASS 也不计 FAIL。");
+            Console.WriteLine(
+                "    发布产物旁边没有源码,这是设计如此 —— 但它意味着 "
+                + "**这个 PASS 数不能和开发树的基线直接比**。");
+        }
         WriteSentinel(pass, fail);
         return fail > 0 ? 1 : 0;
     }
@@ -7062,7 +7084,10 @@ public static class Selftest
         if (string.IsNullOrWhiteSpace(path)) return;
         try
         {
-            File.WriteAllText(path, $"PASS={pass} FAIL={fail}\n");
+            // ★ 追加 SRCMISS/SRCHIT:出包门禁靠它把「这个数在量什么」印出来。
+            //   ★★ 追加在 FAIL 之后,既有的 `PASS=(\d+)\s+FAIL=(\d+)` 正则照常匹配 ——
+            //     改哨兵格式时**必须**保证这一点,否则门禁会当场判「哨兵内容不认得」。
+            File.WriteAllText(path, $"PASS={pass} FAIL={fail} SRCHIT={_srcHit} SRCMISS={_srcMiss}\n");
         }
         catch (Exception ex)
         {
@@ -7255,9 +7280,32 @@ public static class Selftest
         return Array.Empty<(string, string)>();
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★ 源码可读性的账(2026-08-06 · 审计 C3 复查时量出来的)
+    //
+    //  `TryReadSource` 读不到时返回 null,而**所有**调用方的形状都是
+    //  `if (src is not null) { Assert… }` ⇒ **整段跳过**:
+    //  不计 PASS、不计 FAIL、**也不计 SKIP** —— 一个字都不说。
+    //
+    //  实测(同一份源码,同一个全量 --selftest,同一个哨兵):
+    //      开发树产物   PASS=1900
+    //      发布产物     PASS=852
+    //  ⇒ **1048 条断言在发布产物里静默消失**,而输出读起来像是「这个产物通过了自检」。
+    //  ★ 这正是本项目第一戒律要防的形状 —— 而它长在**自检自己**身上。
+    //
+    //  ⇒ 数出来、印出来、写进哨兵。**不改变结论**(不把它算成 FAIL:
+    //    发布产物旁边没有源码是设计如此,不是缺陷),但让「这个数字在量什么」变成看得见的。
+    //    一个和基线对不上、又没说自己在量什么的数字,比不打印更坏。
+    // ══════════════════════════════════════════════════════════════════════════
+    static int _srcHit, _srcMiss;
+
+    /// <summary>本次自检里源码读取的命中/落空次数(见上方那段)。</summary>
+    internal static (int Hit, int Miss) SourceReadTally => (_srcHit, _srcMiss);
+
     /// <summary>
     /// 读源码文件(开发/CI 环境)。发布环境没有源码 -> 返回 null,调用方跳过接线自检。
     /// 用途:对"接线点"做结构断言 —— 有些缺陷是"函数还在、调用点没了",编译与行为断言都抓不到。
+    /// ★ 命中与落空都要记账 —— 见上方。
     /// </summary>
     static string? TryReadSource(string relative)
     {
@@ -7265,9 +7313,10 @@ public static class Selftest
         for (int i = 0; i < 8 && dir is not null; i++)
         {
             var p = Path.Combine(dir, relative);
-            if (File.Exists(p)) return File.ReadAllText(p);
+            if (File.Exists(p)) { _srcHit++; return File.ReadAllText(p); }
             dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
         }
+        _srcMiss++;
         return null;
     }
 

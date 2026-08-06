@@ -173,7 +173,38 @@ function Invoke-GateSelftest {
             return $null
         }
         Remove-Item $stdout -Force -ErrorAction SilentlyContinue
+
+        # ══════════════════════════════════════════════════════════════════
+        #  ★★★ 把【口径】印出来(2026-08-06,审计 C3 复查带出来的)
+        #
+        #  发布产物旁边**没有源码** ⇒ Selftest 里所有 `TryReadSource` 落空,
+        #  而调用方一律是 `if (src is not null) { Assert… }` ⇒ **整段跳过**:
+        #  不计 PASS、不计 FAIL、**也不计 SKIP**。
+        #  实测:同一份源码,开发树产物 1901、发布产物 852 —— **1049 条静默消失**,
+        #  而这一行读起来像是「这个产物通过了自检」。
+        #  ⇒ 一个和基线对不上、又没说自己在量什么的数字,**比不打印更坏**。
+        #
+        #  ★ 不在这里写死那个基线数 —— 写死了它就会过期,而过期的数字正是本条要治的病。
+        #    要对账去看 STATE 的基线行。
+        #  ★★ 取值顺序:$Matches 是**整个换掉**的,不是累加 ——
+        #    $p/$f 必须在上面先取走(已经是),这里再逐个匹配。
+        # ══════════════════════════════════════════════════════════════════
+        $srcHit = -1; $srcMiss = -1
+        if ($text -match 'SRCHIT=(\d+)')  { $srcHit  = [int]$Matches[1] }
+        if ($text -match 'SRCMISS=(\d+)') { $srcMiss = [int]$Matches[1] }
+
         Write-Host "    $Label：PASS=$p FAIL=0"
+        if ($srcMiss -lt 0) {
+            Write-Host "      ! 哨兵里没有 SRCMISS —— 这份 exe 比本脚本旧(自检还没带口径)。" -ForegroundColor Yellow
+            Write-Host "        ★ 不判红,但这个 PASS 数【口径不明】,不要拿它和基线比。" -ForegroundColor Yellow
+        } elseif ($srcMiss -gt 0) {
+            Write-Host "      ★ 口径：$srcMiss 处源码读不到（命中 $srcHit 处）⇒ 那些【结构/接线】断言整段没跑，" -ForegroundColor Yellow
+            Write-Host "        既不计 PASS、也不计 FAIL、更不计 SKIP。发布产物旁边没有源码，这是设计如此；" -ForegroundColor Yellow
+            Write-Host "        但它意味着 **这个数不能和开发树的基线直接比**（基线见 00-docs\STATE.md）。" -ForegroundColor Yellow
+        } else {
+            Write-Host "      ★ 口径：源码全部读得到（命中 $srcHit 处，落空 0）—— 与开发树同量程。" -ForegroundColor DarkGray
+        }
+        $script:LastSrcHit = $srcHit; $script:LastSrcMiss = $srcMiss
         return $p
     }
 }
@@ -198,7 +229,22 @@ if ($null -eq $pass2) {
     exit 1
 }
 $last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS=$pass2,FAIL=0）"
-Write-Host "    $last"
+# ★★★ 口径跟着数字进 VERSION.txt(2026-08-06)。
+#   在此之前 VERSION.txt 只写「PASS=852 / PASS=848」,而 STATE 的基线是四位数 ——
+#   读的人只能自己猜这两个数在量什么,而**猜错的方向是"以为覆盖变少了"**。
+#   ⇒ 把「少的那些是什么、为什么少」写在数字旁边,和数字一起被读到。
+if ($script:LastSrcMiss -gt 0) {
+    $last += "`n        ★ 口径：发布产物旁边没有源码 ⇒ $($script:LastSrcMiss) 处源码读不到" +
+             "（命中 $($script:LastSrcHit) 处），那些【结构/接线】断言整段没跑，" +
+             "既不计 PASS、也不计 FAIL、更不计 SKIP。" +
+             "`n        ⇒ **这个数不能和开发树的基线直接比**（基线见 00-docs\STATE.md）。" +
+             "少的不是覆盖变差了，是那批断言在这个形态下【测不了】。"
+} elseif ($script:LastSrcMiss -eq 0) {
+    $last += "`n        ★ 口径：源码全部读得到（命中 $($script:LastSrcHit) 处，落空 0）—— 与开发树同量程。"
+} else {
+    $last += "`n        ! 口径不明：这份 exe 的自检还没带 SRCMISS，不要拿这个数与基线比。"
+}
+Write-Host "    $($last -split "`n" | Select-Object -First 1)"
 
 Write-Host "[3] 校验和与版本戳…"
 $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash
