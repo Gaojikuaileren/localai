@@ -210,6 +210,7 @@ function Invoke-GateSelftest {
 }
 
 $pass1 = Invoke-GateSelftest -ExePath $exe -Label '发布产物原位'
+$hit1 = $script:LastSrcHit; $miss1 = $script:LastSrcMiss
 if ($null -eq $pass1) { exit 1 }
 
 # ★ 再跑一遍【第二种目录形状】—— 客户端真正装的位置是 dist\client,那儿 dist\host 就在旁边,
@@ -222,6 +223,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $shape 'host')   | Out-Null
 Copy-Item $exe (Join-Path $shape 'client\localai-client.exe') -Force
 Set-Content -Path (Join-Path $shape 'host\localai-lan-edge.exe') -Value 'stub' -Encoding utf8
 $pass2 = Invoke-GateSelftest -ExePath (Join-Path $shape 'client\localai-client.exe') -Label '换个安装位置'
+$hit2 = $script:LastSrcHit; $miss2 = $script:LastSrcMiss
 Remove-Item $shape -Recurse -Force -ErrorAction SilentlyContinue
 if ($null -eq $pass2) {
     Write-Host "  ★ 若是断言红:说明有断言在断言【它自己跑在哪个目录下】,而不是断言代码的行为。" -ForegroundColor Red
@@ -233,16 +235,22 @@ $last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS
 #   在此之前 VERSION.txt 只写「PASS=852 / PASS=848」,而 STATE 的基线是四位数 ——
 #   读的人只能自己猜这两个数在量什么,而**猜错的方向是"以为覆盖变少了"**。
 #   ⇒ 把「少的那些是什么、为什么少」写在数字旁边,和数字一起被读到。
-if ($script:LastSrcMiss -gt 0) {
-    $last += "`n        ★ 口径：发布产物旁边没有源码 ⇒ $($script:LastSrcMiss) 处源码读不到" +
-             "（命中 $($script:LastSrcHit) 处），那些【结构/接线】断言整段没跑，" +
-             "既不计 PASS、也不计 FAIL、更不计 SKIP。" +
-             "`n        ⇒ **这个数不能和开发树的基线直接比**（基线见 00-docs\STATE.md）。" +
-             "少的不是覆盖变差了，是那批断言在这个形态下【测不了】。"
-} elseif ($script:LastSrcMiss -eq 0) {
-    $last += "`n        ★ 口径：源码全部读得到（命中 $($script:LastSrcHit) 处，落空 0）—— 与开发树同量程。"
+# ★★ 口径要**逐个数字**给,不能只给最后一个。
+#   上一版这里只写了 $script:LastSrcMiss(= 第二次那个),而上面印的是【两个】数
+#   (PASS=853 / PASS=849)—— 于是第一个数仍然没有自己的口径。
+#   这正是本条要治的病本身:**一个没说自己在量什么的数字**。给两个,就写两行。
+if ($miss1 -lt 0 -or $miss2 -lt 0) {
+    $last += "`n        ! 口径不明：这份 exe 的自检还没带 SRCMISS，不要拿这两个数与基线比。"
 } else {
-    $last += "`n        ! 口径不明：这份 exe 的自检还没带 SRCMISS，不要拿这个数与基线比。"
+    $last += "`n        ★ 口径（逐个给，两个数不是同一个量程）：" +
+             "`n          · 原位（$Out）：读不到 $miss1 处 / 读得到 $hit1 处" +
+             "`n          · 换个位置（仓库外）：读不到 $miss2 处 / 读得到 $hit2 处" +
+             "`n          发布产物旁边没有源码 ⇒ 那些【结构/接线】断言整段没跑，" +
+             "既不计 PASS、也不计 FAIL、更不计 SKIP。" +
+             "`n        ★ 两个数不一样是**正常的**：exe 待在仓库里时往上翻能多摸到几个仓库级文件，" +
+             "比放在仓库外多跑几条。数字对不上时先看这一行，别去找一个并不存在的回归。" +
+             "`n        ⇒ **两个都不能和开发树的基线直接比**（基线见 00-docs\STATE.md）。" +
+             "少的不是覆盖变差了，是那批断言在这个形态下【测不了】。"
 }
 Write-Host "    $($last -split "`n" | Select-Object -First 1)"
 
