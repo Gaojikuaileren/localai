@@ -246,6 +246,111 @@ if ($Full) {
         Pop-Location
     }
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  ★★★ A2(2026-08-06 审计)· 客户端工程要**编译得过**,而扫描根不能写死
+    #
+    #  两件事同一个根因:客户端工程的源码**不止** `20-client-win\app` 一处。
+    #  csproj 用 `<Compile Include="..\..\10-core\identity\*.cs" />` 直接链源码
+    #  (D47 理由 1:不把 mTLS/CNG 那套逻辑重写一遍)。于是:
+    #    · 别的车道改了 `10-core\identity` 里一个文件 ⇒ 客户端**编译不过**,
+    #      而门禁跑的是**已有产物** ⇒ 照样全绿,编译错误一路飘到出包那一刻;
+    #    · 时间戳只比 `20-client-win\app` ⇒ 那些文件改了**不算"产物过期"**,
+    #      于是「跑了旧产物」这条守卫**恰恰在它最该响的那种情况下不响**。
+    #      ★ 这就是那条守卫自己的盲区 —— 它守住了一半,而看起来守住了全部。
+    # ══════════════════════════════════════════════════════════════════════
+    Write-Host ""
+    Write-Host "[客户端工程编译 + 扫描根核对]" -ForegroundColor Cyan
+    $clientCsproj = Join-Path $repo '20-client-win\app\localai-client.csproj'
+
+    # ★ 扫描根【登记表】—— 与网关 ROUTE_TIERS 同款手法:表是人写的,
+    #   而下面那条**反向**断言保证没有漏网的。新链一个别处的源文件却不登记
+    #   ⇒ 当场判红,而不是静默少扫一个目录(少扫是看不见的,判红是看得见的)。
+    $CLIENT_SCAN_ROOTS = @(
+        '20-client-win\app'          # 工程自己(SDK 隐式 glob)
+        '20-client-win\transport'    # ClientTransport / TlsFailure
+        '10-core\identity'           # Ca / Store / Sas / Pairing / CertLifecycle …
+    )
+
+    if (-not (Test-Path $clientCsproj)) {
+        $broken += [pscustomobject]@{ File = 'client csproj'; Why = "找不到 $clientCsproj" }
+        Write-Host "  X 找不到客户端 csproj" -ForegroundColor Red
+    } else {
+        $csprojDir = Split-Path -Parent $clientCsproj
+        $xml = $null
+        try { $xml = [xml](Get-Content $clientCsproj -Raw -Encoding UTF8) } catch { $xml = $null }
+        if ($null -eq $xml) {
+            $broken += [pscustomobject]@{ File = 'client csproj'
+                                          Why = 'csproj 解析不了 —— 扫描根无从核对,不能当作"没问题"' }
+            Write-Host "  X 客户端 csproj 解析不了" -ForegroundColor Red
+        } else {
+            $includes = @($xml.SelectNodes('//*[local-name()="Compile"]/@Include') |
+                          ForEach-Object { $_.Value })
+            # ★★ 零命中判红。"解析出 0 条"与"确实没链任何外部源码"在输出上长得一模一样,
+            #    而今天它明明链着十几个 ⇒ 0 条只可能是解析坏了。
+            #    (同族教训:scan_fake.py 的盘符正则写死 D: 而项目在 E: ⇒ 零命中报"未发现问题"。)
+            if ($includes.Count -eq 0) {
+                $broken += [pscustomobject]@{ File = 'client 扫描根核对'
+                                              Why = 'csproj 里一条 <Compile Include> 都没解析出来 —— 多半是解析坏了,不是真的没有' }
+                Write-Host "  X csproj 解析出 0 条 Compile Include" -ForegroundColor Red
+            }
+            $rootsAbs = @($CLIENT_SCAN_ROOTS | ForEach-Object {
+                [IO.Path]::GetFullPath((Join-Path $repo $_)) })
+            $unregistered = @()
+            foreach ($inc in $includes) {
+                $abs = [IO.Path]::GetFullPath((Join-Path $csprojDir $inc))
+                $covered = $false
+                foreach ($rf in $rootsAbs) {
+                    if ($abs.StartsWith($rf + [IO.Path]::DirectorySeparatorChar,
+                                        [StringComparison]::OrdinalIgnoreCase)) { $covered = $true; break }
+                }
+                if (-not $covered) { $unregistered += $inc }
+            }
+            if ($unregistered.Count -gt 0) {
+                $broken += [pscustomobject]@{ File = 'client 扫描根核对'
+                                              Why = ("csproj 链了这些源文件,但它们不在任何一个登记的扫描根下:" +
+                                                     ($unregistered -join '、') +
+                                                     "。改它们【不会】让「产物比源码旧」那条守卫响 ⇒ 会静默跑旧产物。" +
+                                                     "请在 run-tests.ps1 的 CLIENT_SCAN_ROOTS 里登记。") }
+                Write-Host "  X 扫描根漏登记:$($unregistered -join '、')" -ForegroundColor Red
+            } elseif ($includes.Count -gt 0) {
+                Write-Host ("  √ 扫描根覆盖 csproj 的全部 {0} 条 Compile Include" -f $includes.Count) -ForegroundColor DarkGray
+            }
+        }
+
+        # ── 编译一次:**只 build 不 publish**(十几秒) ──────────────────
+        #  ★★★ 绝不能加 `-r win-x64`:那会把下面自检要跑的**那个**产物覆盖掉,
+        #     于是「产物比源码旧」这条守卫**永远不会响** —— 门禁自己把自己的守卫拆了,
+        #     而且拆得悄无声息(数字照出、颜色照绿)。
+        #     默认 build 落在 `bin\Release\<tfm>\`(没有 RID 子目录),与被测产物是两条路。
+        #     ⇒ 下面那条前后时间戳断言就是钉这件事的,别把它删了。
+        $exeForStale = Join-Path $repo '20-client-win\app\bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-client.exe'
+        $exeBefore = if (Test-Path $exeForStale) { (Get-Item $exeForStale).LastWriteTimeUtc } else { $null }
+
+        $bout = & dotnet build $clientCsproj -c Release --nologo -v quiet 2>&1 | Out-String
+        $bcode = $LASTEXITCODE
+        if ($bcode -ne 0) {
+            $errLines = @($bout -split "`r?`n" | Where-Object { $_ -match ':\s*error\s' } | Select-Object -First 12)
+            if ($errLines.Count -eq 0) { $errLines = @($bout -split "`r?`n" | Select-Object -Last 8) }
+            $broken += [pscustomobject]@{ File = 'client build'
+                                          Why = ("客户端工程编译不过(exit $bcode)。" +
+                                                 "★ 这条此前根本不存在 —— 门禁跑的是已有产物," +
+                                                 "编译错误会一路飘到出包那一刻才被发现。首条:" +
+                                                 ($errLines | Select-Object -First 1)) }
+            Write-Host "  X 客户端工程编译不过(exit $bcode):" -ForegroundColor Red
+            foreach ($l in $errLines) { Write-Host "      $l" -ForegroundColor Red }
+        } else {
+            Write-Host "  √ 客户端工程编译通过(只 build,未 publish)" -ForegroundColor DarkGray
+        }
+        if ($null -ne $exeBefore -and (Test-Path $exeForStale) -and
+            (Get-Item $exeForStale).LastWriteTimeUtc -ne $exeBefore) {
+            $broken += [pscustomobject]@{ File = 'client build'
+                                          Why = ('★★ 这次 build 动了自检要跑的那个产物 —— ' +
+                                                 '「产物比源码旧」那条守卫会因此【永远不响】。' +
+                                                 'build 必须落在与被测产物不同的输出路径(不要加 -r win-x64)。') }
+            Write-Host "  X 客户端 build 覆盖了被测产物 —— 陈旧守卫已被架空" -ForegroundColor Red
+        }
+    }
+
     Write-Host ""
     Write-Host "[客户端自检]" -ForegroundColor Cyan
     $exe = Join-Path $repo '20-client-win\app\bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-client.exe'
@@ -261,8 +366,14 @@ if ($Full) {
     #    改成**比时间戳**:产物比源码旧就当"没跑起来"报出来。
     #    失败必须长得和成功不一样 —— 而"跑了旧产物"就是一种失败。
     # ══════════════════════════════════════════════════════════════════
-    $srcDir = Join-Path $repo '20-client-win\app'
-    $newestSrc = Get-ChildItem $srcDir -Recurse -Include *.cs, *.xaml -File -ErrorAction SilentlyContinue |
+    # ★★ A2:扫描根**不再写死** —— 用上面那张登记表(且已由 csproj 反向核对过没漏)。
+    #   此前只扫 `20-client-win\app`:改 `10-core\identity` 或 `20-client-win\transport`
+    #   里的文件**不算"产物过期"**,而那两处恰恰是别的车道会动的地方
+    #   ⇒ 这条守卫在它最该响的场景里静默失灵。
+    $newestSrc = @($CLIENT_SCAN_ROOTS |
+                   ForEach-Object { Join-Path $repo $_ } |
+                   Where-Object { Test-Path $_ } |
+                   ForEach-Object { Get-ChildItem $_ -Recurse -Include *.cs, *.xaml -File -ErrorAction SilentlyContinue }) |
                  Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
                  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     $stale = $false
