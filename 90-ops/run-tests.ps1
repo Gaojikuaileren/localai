@@ -402,6 +402,73 @@ if (Test-Path $dbgSelf) {
     }
 }
 
+# ══════════════════════════════════════════════════════════════════════════
+#  跨进程响应契约的成对断言 · 元规则(2026-08-06 · D? · D92 硬前置)
+#
+#  ★★★ 它在这里跑,是因为它守的是**门禁自己的诚实性**:
+#    审计 A1 那一族(A 级 6 条里 4 条)的形状是「两边各自都绿,断的是中间那根线」。
+#    服务端测「顶层有哪些键」、客户端测「拿这形状能不能解析」—— 各测各的,
+#    而这两条**都是绿的**。⇒ 门禁报全绿,同时一条契约是断的。
+#
+#  ★★ 与上面那段调试工具箱自检**有一处关键不同**:那一段是 `Test-Path` 条件执行
+#    (`git rm -r 90-ops\debug` 之后自动变空操作,门禁照常绿)——
+#    因为它守的东西本身就是可移除的。
+#    **这一条不是。** 它是 D92 垂直车道的硬前置,文件不在 = 元规则没了
+#    ⇒ **判红,不是跳过**。跑不了和跑过了必须长得不一样。
+#
+#  ★ 用 $SysPy 而不是 `py -3`:它要 `import gateway`,而**跑网关套件的就是 $SysPy**。
+#    换一个解释器就可能出现"套件导得进、元规则导不进"这种指不到根因的红。
+# ══════════════════════════════════════════════════════════════════════════
+$contractDebt = $null
+$cpScript = Join-Path $repo '90-ops\gate\check_contract_pairs.py'
+if (-not (Test-Path $cpScript)) {
+    $broken += [pscustomobject]@{ File = '90-ops\gate\check_contract_pairs.py'
+                                  Why = '契约配对元规则的脚本不在了 —— 这是 D92 垂直车道的硬前置,不是可选件。缺了它,新增一条跨进程契约而不写成对断言【不会有任何东西变红】' }
+    Write-Host "  X 契约配对元规则:脚本不见了(这不是可选件)" -ForegroundColor Red
+} elseif (-not $SysPy) {
+    $broken += [pscustomobject]@{ File = '90-ops\gate\check_contract_pairs.py'
+                                  Why = 'PATH 上找不到 python —— 元规则跑不了。★ 不当作通过' }
+    Write-Host "  X 契约配对元规则:找不到 python" -ForegroundColor Red
+} else {
+    $cpOut = & $SysPy $cpScript '--quiet' 2>&1 | Out-String
+    # ★ 判据只认 ASCII 且锚定到汇总行 —— 理由同上面那段(cp936 钩子里中文会成乱码)。
+    $cpLine = ($cpOut -split "`r?`n" |
+               Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } |
+               Select-Object -Last 1)
+    if ($cpLine -match '(\d+)\s*PASS.*?(\d+)\s*FAIL') {
+        $cp = [int]$Matches[1]; $cf = [int]$Matches[2]
+        $totalPass += $cp; $totalFail += $cf
+        $ran += '90-ops\gate\check_contract_pairs.py'
+        $c = if ($cf -gt 0) { 'Red' } else { 'DarkGray' }
+        Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}" -f '90-ops\gate\check_contract_pairs.py', $cp, $cf) -ForegroundColor $c
+        if ($cf -gt 0) { ($cpOut -split "`r?`n" | Where-Object { $_ -match '^\s*X\s' } | Select-Object -First 8) | ForEach-Object { Write-Host "        $_" -ForegroundColor Red } }
+        # ★★★ 欠债数抬进【覆盖账】,不是只留在子脚本的 stdout 里。
+        #   这条脚本 exit 0 的时候,门禁会打印「√ 门禁通过」—— 而此刻可能有 25 条
+        #   跨进程契约没有成对断言。**一个打印全绿却不说这件事的运行器,正是本脚本开篇
+        #   要防的那个形状。** ⇒ 数字必须出现在覆盖账里。
+        # ★ 必须**先按行切开再匹配**:PowerShell 的 `-match` 走 .NET 默认选项,
+        #   `^` 只锚到【整个字符串】的开头,不是每一行的开头(没有 Multiline)。
+        #   ⇒ 直接 `$cpOut -match '^\s*==='` 恒不成立。**这条是写下来当场被下面那个
+        #   fail-closed 分支抓到的** —— 门禁报「读不到欠债行」并拒绝通过,
+        #   而不是把 25 条债静默当成 0。护栏抓到的第一个东西是它自己的接线。
+        $cpDebtLine = ($cpOut -split "`r?`n" |
+                       Where-Object { $_ -match '^\s*===\s*contract-pairs:' } |
+                       Select-Object -Last 1)
+        if ($cpDebtLine -match 'TOTAL=(\d+)\s+PAIRED=(\d+)\s+DEBT=(\d+)') {
+            $contractDebt = [pscustomobject]@{ Total = [int]$Matches[1]; Paired = [int]$Matches[2]; Debt = [int]$Matches[3] }
+        } else {
+            # ★ 汇总行在、机器行不在 ⇒ 脚本被改过而这里没跟上。**不许静默当作 0 条债** ——
+            #   "读不到" 和 "没有债" 在覆盖账上长得一模一样,而它们的下一步完全相反。
+            $broken += [pscustomobject]@{ File = '90-ops\gate\check_contract_pairs.py'
+                                          Why = '读不到 `=== contract-pairs: TOTAL= … DEBT= ===` 那一行 —— 欠债数抬不进覆盖账。★ 不当作「没有债」' }
+            Write-Host "  X 契约配对元规则:读不到欠债行" -ForegroundColor Red
+        }
+    } else {
+        $broken += [pscustomobject]@{ File = '90-ops\gate\check_contract_pairs.py'; Why = '没有汇总行 —— 多半没跑起来' }
+        Write-Host "  X 契约配对元规则没跑起来" -ForegroundColor Red
+    }
+}
+
 # --- dotnet 与客户端(只在 -Full 时)---------------------------------------
 $dotnetResults = @()
 if ($Full) {
@@ -627,6 +694,23 @@ if ($totalSkip -gt 0) {
     #   混进 PASS 里就等于把没验过的东西算成验过了。
     Write-Host "  ★ SKIP    : $totalSkip 条 —— **SKIP 不是 PASS**,是套件自报「这段没验」,逐条看上面哪个套件报的" -ForegroundColor Yellow
 }
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 契约欠配对 —— 它**不是 FAIL,但它也不是「没事」**,所以必须单列。
+#
+#  这个位置是有讲究的:上面刚打印「合计 PASS=… FAIL=0」,而此刻可能有 25 条
+#  跨进程响应契约没有成对断言。**PASS 数越大,这一行越要在。**
+#  ★ 本脚本开篇写着:最重要的性质不是覆盖率,是【诚实】——
+#    「一个悄悄跳过某套件却打印全绿的运行器,比没有运行器更危险」。
+#    一条断了的跨语言缝在覆盖账上不留痕,是同一种危险的另一个形态:
+#    两边的断言**都跑了、都绿了**,而中间那根线没人看。
+# ══════════════════════════════════════════════════════════════════════════
+if ($null -ne $contractDebt -and $contractDebt.Debt -gt 0) {
+    Write-Host ("  ★ 契约欠配对: {0} / {1} 条跨进程响应契约【没有成对断言】(已成对 {2})" -f `
+                $contractDebt.Debt, $contractDebt.Total, $contractDebt.Paired) -ForegroundColor Yellow
+    Write-Host "      这不是 FAIL,也不是「已裁定没问题」—— 是一张【只许变短】的欠债表。" -ForegroundColor DarkYellow
+    Write-Host "      审计 A 级 6 条里有 4 条是这个形状:两边各自都绿,断的是中间那根线。" -ForegroundColor DarkYellow
+    Write-Host "      逐条(含消费者与后果):python 90-ops\gate\check_contract_pairs.py" -ForegroundColor DarkYellow
+}
 if ($skipped.Count -gt 0) {
     Write-Host "  ★ 没跑的(不是忽略,是已裁定 + 写明理由):" -ForegroundColor Yellow
     # 按理由归并 —— 同一条理由重复十几遍会把覆盖账淹掉,而覆盖账正是本脚本的重点。
@@ -647,5 +731,13 @@ if ($totalFail -gt 0 -or $broken.Count -gt 0) {
     Write-Host "X 门禁未过(FAIL=$totalFail,没跑起来 $($broken.Count) 个)" -ForegroundColor Red
     exit 1
 }
-Write-Host "√ 门禁通过:PASS=$totalPass FAIL=0" -ForegroundColor Green
+# ★ 最后这一行是**人一眼扫过去只看这一行**的那一行,所以欠债数必须挂在它上面。
+#   「门禁通过」四个字后面跟着「25 条契约没有成对断言」并不矛盾 ——
+#   前者说的是"跑过的都绿了",后者说的是"有些缝根本没人跑"。**两句都是真的,缺一句就不是。**
+#   ★ `PASS=… FAIL=0` 的形状原样保留:.githooks\pre-commit 用 `grep -oE 'PASS=[0-9]+ FAIL=0'`
+#     抓这一行,追加在**后面**不会打断它(改成前置或换分隔符会当场废掉钩子那行提示)。
+$debtNote = if ($null -ne $contractDebt -and $contractDebt.Debt -gt 0) {
+    "(★ 另有 $($contractDebt.Debt)/$($contractDebt.Total) 条跨进程契约无成对断言 —— 见上方覆盖账)"
+} else { '' }
+Write-Host "√ 门禁通过:PASS=$totalPass FAIL=0 $debtNote" -ForegroundColor Green
 exit 0
