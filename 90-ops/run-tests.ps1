@@ -25,13 +25,24 @@
 #          而被掐掉的门禁等于没有门禁。数字不准也是一种假绿。
 #    pwsh -File 90-ops\run-tests.ps1 -Full        连 dotnet 与客户端自检一起跑(数分钟)
 #    pwsh -File 90-ops\run-tests.ps1 -ListOnly    只列清单与分类,不跑
+#    pwsh -File 90-ops\run-tests.ps1 -VerifyEnv   跑 verify-*.ps1(**验本机环境**,不进自动门禁)
 #
 #  退出码:0 = 全绿且无未分类文件;1 = 有 FAIL 或有未分类文件。
+#    ★ `-VerifyEnv` 的结果**不影响退出码**:它验的是这台机器,不是这次改动。
+#      它们的账单列一段,红了要查机器 —— 但**跑没跑都会出现在覆盖账里**。
+#
+#  ★★ 反向全表现在盖住四处(此前只有第一处):
+#      ① Python 测试文件 → $RULES        ② dotnet 入口 → $DOTNET_SUITES
+#      ③ verify-*.ps1   → $ENV_VERIFIERS ④ 跨进程契约 → 90-ops\gate\check_contract_pairs.py
+#    ②③④ 都在 **fast 层**跑:新加一个入口/脚本/契约却不登记,提交那一刻就该红。
 # =============================================================================
 [CmdletBinding()]
 param(
     [switch]$Full,
-    [switch]$ListOnly
+    [switch]$ListOnly,
+    # ★ 环境验证脚本(verify-*.ps1)。**不进自动门禁**,理由见下方 $ENV_VERIFIERS 那段:
+    #   它们验的是本机环境而不是源码,塞进提交门禁会训练人用 --no-verify。
+    [switch]$VerifyEnv
 )
 
 $ErrorActionPreference = 'Continue'
@@ -264,6 +275,164 @@ if ($unclassified.Count -gt 0) {
     exit 1
 }
 
+# ══════════════════════════════════════════════════════════════════════════
+#  dotnet 半边的**登记表** —— 2026-08-06(D?)从「手写清单」改成「反向全表」
+#
+#  ★★★ 本脚本开篇声明的第一性质是:
+#     「套件清单**靠扫描得出**,不手写死;**反向全表**:扫到的每个测试文件都必须
+#       能落到某条已登记规则上,落不上就判红」。
+#     **这句话在 dotnet 这一半上此前不成立** —— 这里原本是一份纯手写的 `Args` 清单,
+#     背后没有任何东西核对它是否盖全。后果是实测出来的:
+#
+#       `10-core\lan-edge` 有**三个**测试入口(selftest 20 · client-e2e 9 · admin-e2e 15),
+#       而清单里只写了第一个 ⇒ **24 条断言从写下那天起没有任何东西跑过它们,
+#       而且它们连"没跑"都没被记在覆盖账里** —— 覆盖账读起来像是 lan-edge 全跑了。
+#
+#     这正是 ASSERTION-PITFALLS 3b:「判词说的是每一个,判据是一份手写名单」。
+#     漏掉的永远是新加的那个,也就是最没被审视过的那个。
+#
+#  ⇒ 现在:入口清单**从每个工程的 `args[0]` 分派表里解析出来**(遍历源),
+#    下面这张表只当**期望值**(反向全表)。新增一个入口而不登记 ⇒ 当场判红。
+#
+#  ★ Tests    = 会打印 `PASS=… FAIL=…` 的测试入口,门禁**逐个跑**。
+#    NotTests = 不是测试的入口(起服务 / 运维子命令),**必须逐条写明理由** ——
+#               「不是测试」是一句需要负责的话,它是把一个入口挡在门禁外的唯一借口。
+#  ★ 这张表同时是**跑什么**的来源:跑的和被核对的是**同一张表**,不会各自漂移。
+# ══════════════════════════════════════════════════════════════════════════
+$DOTNET_SUITES = @(
+    @{ Name = 'identity';  Dir = '10-core\identity';        Program = '10-core\identity\Program.cs'
+       Tests = @('selftest','selftest2','selftest3','selftest4','selftest5')
+       NotTests = @{
+           'init'              = '运维子命令:铸中枢身份(会写盘、会造 CNG 密钥)'
+           'status'            = '运维子命令:打印当前身份状态'
+           'list-devices'      = '运维子命令:列设备'
+           'revoke-device'     = '运维子命令:吊销设备(**改状态**,绝不能进门禁)'
+           'renew-server'      = '运维子命令:换服务端证书(**改状态**)'
+           'list-members'      = '运维子命令:列成员'
+           'add-member'        = '运维子命令:加成员(**改状态**)'
+           'set-device-member' = '运维子命令:改设备归属(**改状态**)'
+       } }
+    @{ Name = 'lan-edge';  Dir = '10-core\lan-edge';        Program = '10-core\lan-edge\Program.cs'
+       # ★★ client-e2e 与 admin-e2e 是 2026-08-06 补进来的 —— 它们一直存在、一直能跑、
+       #   一直没人跑。实测(补进来那天):client-e2e 9 PASS·0 FAIL,admin-e2e 15 PASS·0 FAIL。
+       #   ⇒ 不是"跑不了",是**清单里没有它们**。这两条正是上面那段说的 24 条。
+       Tests = @('selftest','client-e2e','admin-e2e')
+       NotTests = @{
+           'run'     = '起服务(前台常驻,会占端口)—— 门禁跑它会挂住不返回'
+           'run-lan' = '起服务并绑局域网口 —— 同上,且会对外开监听'
+       } }
+    @{ Name = 'transport'; Dir = '20-client-win\transport'; Program = '20-client-win\transport\Program.cs'
+       Tests = @('selftest')
+       NotTests = @{
+           'pair' = '运维子命令:对着一台真中枢走一次配对(**改状态**,需要真中枢在跑)'
+           'call' = '运维子命令:对着一台真中枢发一次请求(需要真中枢在跑)'
+       } }
+)
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ dotnet 入口的反向全表 —— **在 fast 层跑**,不等 -Full
+#
+#  纯静态解析,毫秒级。放 fast 层是有意的:
+#  新增一个 `selftest6` 却不登记,**提交那一刻**就该红;
+#  等到有人想起来跑 -Full 才红,中间那段时间它和没有护栏没区别。
+#  (同款理由见本脚本上方 `$RULES` 的反向全表 —— 那条也在扫盘之后立刻跑。)
+# ══════════════════════════════════════════════════════════════════════════
+foreach ($s in $DOTNET_SUITES) {
+    $progPath = Join-Path $repo $s.Program
+    if (-not (Test-Path $progPath)) {
+        Write-Host ""
+        Write-Host "X dotnet 入口反向全表:找不到 $($s.Program) —— 入口清单无从核对。" -ForegroundColor Red
+        Write-Host "  ★ 这【不算通过】:读不到和没问题必须长得不一样。" -ForegroundColor Red
+        exit 1
+    }
+    $progSrc = Get-Content $progPath -Raw -Encoding UTF8
+    # 分派表长这样:`return (args.Length == 0 ? "" : args[0]) switch { "name" => …, }`
+    # ★ 只在 args[0] 那个 switch **块内**取,不在整份源码里乱找 ——
+    #   Program.cs 里还有别的 switch(lan-edge 的交互式管理台就有一个 `case "list":`),
+    #   在整份源码里找 `"x" =>` 会把无关的 lambda 也算成入口。
+    $i = $progSrc.IndexOf('args[0]')
+    $j = if ($i -ge 0) { $progSrc.IndexOf('};', $i) } else { -1 }
+    if ($i -lt 0 -or $j -lt 0) {
+        Write-Host ""
+        Write-Host "X dotnet 入口反向全表:$($s.Program) 里找不到 args[0] 的分派块。" -ForegroundColor Red
+        Write-Host "  ★ 解析不出来 ⇒ 判红。**零命中不许当成'没有入口'** —— 它今天明明有好几个。" -ForegroundColor Red
+        exit 1
+    }
+    $arms = @([regex]::Matches($progSrc.Substring($i, $j - $i), '"([^"]+)"\s*=>') |
+              ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    # ★ 零命中判红(同族教训:scan_fake 盘符写死 D: 而项目在 E: ⇒ 零命中报"未发现问题")
+    if ($arms.Count -eq 0) {
+        Write-Host ""
+        Write-Host "X dotnet 入口反向全表:$($s.Name) 一个入口都没解析出来 —— 多半是分派写法变了。" -ForegroundColor Red
+        exit 1
+    }
+    $registered = @($s.Tests) + @($s.NotTests.Keys)
+    $unreg = @($arms | Where-Object { $registered -notcontains $_ })
+    $gone  = @($registered | Where-Object { $arms -notcontains $_ })
+    if ($unreg.Count -gt 0) {
+        Write-Host ""
+        Write-Host "X dotnet 入口反向全表:$($s.Name) 有**未登记**的入口:$($unreg -join '、')" -ForegroundColor Red
+        Write-Host "  ★ 这就是 lan-edge 的 client-e2e / admin-e2e 躺了很久的那个洞:" -ForegroundColor Red
+        Write-Host "    入口存在、能跑、断言是真的,而手写清单里没有它 ⇒ 静默少跑,覆盖账还显示全跑了。" -ForegroundColor Red
+        Write-Host "  修法:在 run-tests.ps1 的 `$DOTNET_SUITES 里,把它登进 Tests(会跑)" -ForegroundColor Yellow
+        Write-Host "        或 NotTests(不跑,**必须写明理由**)。" -ForegroundColor Yellow
+        exit 1
+    }
+    if ($gone.Count -gt 0) {
+        Write-Host ""
+        Write-Host "X dotnet 入口反向全表:$($s.Name) 登记了**已经不存在**的入口:$($gone -join '、')" -ForegroundColor Red
+        Write-Host "  ★ 门禁会去跑一个不存在的子命令,报「没跑起来」却指不出真因。" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ══════════════════════════════════════════════════════════════════════════
+#  环境验证脚本(`verify-*.ps1`)的登记表 —— 2026-08-06(D?)
+#
+#  ★★★ 落地那天的实况:全仓 **795 行** `verify-*.ps1`,**没有任何东西跑它们**,
+#     而且它们连"没跑"都不在覆盖账里。全仓引用只出现在 README 与彼此的注释中。
+#     ⇒ 按本项目自己的第一戒律:**没人跑的断言就是假断言。**
+#
+#  ★★ 为什么它们**不进**自动门禁(这不是偷懒,是判据不同):
+#     它们验的是**本机环境**(真实 ACL / pg_hba / pg_ident / 本地账户),
+#     不是源码。把它们塞进提交门禁,门禁就会因为"换了台机器"而红 ——
+#     而 ASSERTION-PITFALLS 第 5 条已经量过这个代价:**它训练人去用 `--no-verify`**,
+#     D24 里 `-Force` 一路跳过三道闸、显存闸整整一天没生效过,就是这么来的。
+#  ⇒ 处置:给一个显式开关 `-VerifyEnv` 一次跑全部;**并且无论跑没跑,
+#    都在覆盖账里逐条列出来**。让"没跑"这件事看得见,是本脚本存在的理由本身。
+#
+#  ★ 清单**扫盘得出**,登记表只当期望值(与 `$RULES` / `$DOTNET_SUITES` 同款):
+#    新写一个 `verify-*.ps1` 却不登记 ⇒ 判红,而不是又躺一个没人跑的。
+# ══════════════════════════════════════════════════════════════════════════
+$ENV_VERIFIERS = @{
+    '90-ops\verify-isolation.ps1'           = '只读。验 PG 隔离:pg_hba / pg_ident / 角色 REVOKE / 目录 ACL。实测 17 PASS · 3 SKIP'
+    '90-ops\state-acl\verify-state-acl.ps1' = '只读。验 {state} 的 ACL 断继承与 Deny。实测 35 PASS · 0 FAIL'
+    '90-ops\ai-op-account\verify-ai-op.ps1' = '只读。★★ **本机注定在第 ① 节 exit 1** —— 它验的 ai-op 账户在本机不存在(见 D? 决议包)。' +
+                                              '这不是脚本坏了,是它所验的东西没建起来'
+}
+$foundVerifiers = @(Get-ChildItem -Path (Join-Path $repo '90-ops') -Recurse -Filter 'verify-*.ps1' -File -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.FullName.Replace($repo + '\', '') } | Sort-Object)
+if ($foundVerifiers.Count -eq 0) {
+    Write-Host ""
+    Write-Host "X 环境验证脚本反向全表:一个 verify-*.ps1 都没扫到 —— 多半是扫描根写错了。" -ForegroundColor Red
+    Write-Host "  ★ 零命中不许当成'确实没有':今天它明明有 3 个。" -ForegroundColor Red
+    exit 1
+}
+$vUnreg = @($foundVerifiers | Where-Object { -not $ENV_VERIFIERS.ContainsKey($_) })
+$vGone  = @($ENV_VERIFIERS.Keys | Where-Object { $foundVerifiers -notcontains $_ })
+if ($vUnreg.Count -gt 0 -or $vGone.Count -gt 0) {
+    Write-Host ""
+    if ($vUnreg.Count -gt 0) {
+        Write-Host "X 环境验证脚本反向全表:有**未登记**的 verify-*.ps1:$($vUnreg -join '、')" -ForegroundColor Red
+        Write-Host "  ★ 不登记的下场已经见过一次:795 行躺着没人跑,覆盖账里连提都没提。" -ForegroundColor Red
+    }
+    if ($vGone.Count -gt 0) {
+        Write-Host "X 环境验证脚本反向全表:登记了**已不存在**的:$($vGone -join '、')" -ForegroundColor Red
+    }
+    Write-Host "  修法:在 run-tests.ps1 的 `$ENV_VERIFIERS 里登记(键=相对路径,值=它验什么 + 实测数)。" -ForegroundColor Yellow
+    exit 1
+}
+
 # --- 列出分类 -------------------------------------------------------------
 $byTier = $found | Group-Object { (Get-Rule $_.FullName).Tier }
 foreach ($g in $byTier | Sort-Object Name) {
@@ -474,11 +643,9 @@ $dotnetResults = @()
 if ($Full) {
     Write-Host ""
     Write-Host "[dotnet 自检]" -ForegroundColor Cyan
-    $dotnetSuites = @(
-        @{ Name = 'identity';  Dir = '10-core\identity';        Args = @('selftest','selftest2','selftest3','selftest4','selftest5') }
-        @{ Name = 'lan-edge';  Dir = '10-core\lan-edge';        Args = @('selftest') }
-        @{ Name = 'transport'; Dir = '20-client-win\transport'; Args = @('selftest') }
-    )
+    # ★ 跑的就是上面那张被反向全表核对过的表的 Tests 一栏 —— 一张表,不是两张。
+    $dotnetSuites = @($DOTNET_SUITES | ForEach-Object {
+        @{ Name = $_.Name; Dir = $_.Dir; Args = $_.Tests } })
     foreach ($s in $dotnetSuites) {
         $d = Join-Path $repo $s.Dir
         if (-not (Test-Path $d)) { $broken += [pscustomobject]@{ File = $s.Dir; Why = '目录不存在' }; continue }
@@ -652,14 +819,37 @@ if ($Full) {
         #   判据用 .git 是文件(worktree 的 .git 是一个指向主库的文件,不是目录)。
         $dotGit = Join-Path $repo '.git'
         $inWorktree = (Test-Path $dotGit -PathType Leaf)
-        $why = if ($inWorktree) {
-            "没有构建产物 —— 这是一个 git worktree,bin/ 不进 git,**本来就不会有**。" +
-            "别为消这条红去出包;如实记成「本车道没跑客户端自检」即可"
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ 2026-08-06(D?):**代码此前和它自己的注释是矛盾的。**
+        #
+        #  上面那段注释写着「本来就不会有 …… 别为消这条红去出包;如实记成
+        #  『本车道没跑客户端自检』即可」—— 那是**意图**。
+        #  而代码把它塞进 `$broken`,`$broken.Count > 0` 直接 exit 1
+        #  ⇒ **每一个 worktree 里的 `-Full` 都恒红**,红的理由还是一件不该修的事。
+        #
+        #  D92 之后并行车道全在 worktree 里 ⇒ 这条恒红打到每一条车道身上。
+        #  一个结构上永远红的门禁**携带零信息**,而且正是 ASSERTION-PITFALLS 第 5 条
+        #  量过的那个代价:**它训练人去用 `--no-verify`**(D24 里 `-Force` 一路跳过
+        #  三道闸、显存闸整整一天没生效过,就是这么来的)。
+        #
+        #  ⇒ 让代码服从注释:worktree 里记进**覆盖账的「没跑」栏**(有名有姓有理由),
+        #    主树里仍然判红(那里没有产物就是真的该去出包)。
+        #  ★ 这**不是**放松:两种情形的下一步完全相反 ——
+        #    主树 = 去出包;worktree = 什么都不用做。把它们判成同一种红,
+        #    等于让门禁说一句它自己都不信的话。
+        # ══════════════════════════════════════════════════════════════
+        if ($inWorktree) {
+            $skipped += [pscustomobject]@{ File = 'client --selftest'
+                                           Reason = '★ 这是一个 git worktree,`bin/` 不进 git ⇒ **本来就不会有**构建产物。' +
+                                                    '别为消它去出包。★★ 但也别把它读成「客户端没问题」——' +
+                                                    '本次运行【没有跑过任何一条客户端断言】(主树里是 1901 条)。' +
+                                                    '要跑:回主树 `-Full`,或在本 worktree 里先 90-ops\build-client.ps1' }
+            Write-Host "  ! 客户端自检:worktree 里没有产物,已记进覆盖账的「没跑」栏(不判红)" -ForegroundColor Yellow
         } else {
-            "没有构建产物($exe)—— 先跑 90-ops\build-client.ps1"
+            $broken += [pscustomobject]@{ File = 'client --selftest'
+                                          Why = "没有构建产物($exe)—— 先跑 90-ops\build-client.ps1" }
+            Write-Host "  X 客户端自检:没有构建产物,先出一次包" -ForegroundColor Red
         }
-        $broken += [pscustomobject]@{ File = 'client --selftest'; Why = $why }
-        Write-Host ("  X 客户端自检:没有构建产物" + $(if ($inWorktree) { "(worktree 本来就没有,别出包)" } else { ",先出一次包" })) -ForegroundColor Red
     } elseif ($stale) {
         # 已在上面报过;这里**不跑** —— 跑出来的绿数字比不跑更有害
     } else {
@@ -681,6 +871,43 @@ if ($Full) {
 } else {
     $skipped += [pscustomobject]@{ File = 'dotnet 自检(identity / lan-edge / transport)+ 客户端 --selftest'
                                    Reason = '慢(数分钟)。加 -Full 一起跑。' }
+}
+
+# --- 环境验证脚本(只在 -VerifyEnv 时跑)-----------------------------------
+#  ★ 它们的汇总行**各写各的**(`=== 隔离验证:17 PASS · 0 FAIL · 3 SKIP ===` /
+#    `=== {state} ACL 复核:35 PASS · 0 FAIL ===` / `=== N PASS · M FAIL · K SKIP ===`),
+#    共同点只有 ASCII 的 `===` + 数字 + PASS/FAIL —— 所以判据只认这几个,
+#    和本脚本别处一样锚定到汇总行(ASSERTION-PITFALLS 第 8 条)。
+$envResults = @()
+if ($VerifyEnv) {
+    Write-Host ""
+    Write-Host "[环境验证脚本(-VerifyEnv)]" -ForegroundColor Cyan
+    foreach ($vp in ($ENV_VERIFIERS.Keys | Sort-Object)) {
+        $vFull = Join-Path $repo $vp
+        $vOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $vFull 2>&1 | Out-String
+        $vCode = $LASTEXITCODE
+        $vLine = ($vOut -split "`r?`n" |
+                  Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } |
+                  Select-Object -Last 1)
+        if ($vLine -match '(\d+)\s*PASS[^0-9]+(\d+)\s*FAIL') {
+            $vp2 = [int]$Matches[1]; $vf2 = [int]$Matches[2]
+            $vs2 = 0
+            # ★ 先取 PASS/FAIL 再匹配 SKIP —— $Matches 是整个换掉的,不是累加(D91 裁定⑤踩过)
+            if ($vLine -match '(\d+)\s*SKIP') { $vs2 = [int]$Matches[1] }
+            $envResults += [pscustomobject]@{ Path = $vp; Pass = $vp2; Fail = $vf2; Skip = $vs2; Code = $vCode }
+            $c = if ($vf2 -gt 0 -or $vCode -ne 0) { 'Red' } else { 'DarkGray' }
+            $sk = if ($vs2 -gt 0) { "  SKIP=$vs2" } else { '' }
+            Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}{3}" -f $vp, $vp2, $vf2, $sk) -ForegroundColor $c
+        } else {
+            $envResults += [pscustomobject]@{ Path = $vp; Pass = 0; Fail = 0; Skip = 0; Code = $vCode }
+            Write-Host ("  X {0,-46} 没有汇总行(退出码 {1})" -f $vp, $vCode) -ForegroundColor Red
+        }
+    }
+    # ★★ **不并进 $totalPass / $totalFail,也不进 $broken。**
+    #   理由:它们验的是本机环境,不是这次改动。把它们的红并进门禁的红,
+    #   会让「我改了一行 Python」和「这台机器的 ACL 没配」长得一模一样 ——
+    #   而那两件事的下一步完全相反。⇒ 单列一段账,退出码不受它们影响。
+    #   ★ 这条**不是**给它们开后门:上面那张反向全表保证它们跑不掉、也躲不进沉默里。
 }
 
 # --- ★ 覆盖账:必须把没跑的也说清楚 ---------------------------------------
@@ -710,6 +937,34 @@ if ($null -ne $contractDebt -and $contractDebt.Debt -gt 0) {
     Write-Host "      这不是 FAIL,也不是「已裁定没问题」—— 是一张【只许变短】的欠债表。" -ForegroundColor DarkYellow
     Write-Host "      审计 A 级 6 条里有 4 条是这个形状:两边各自都绿,断的是中间那根线。" -ForegroundColor DarkYellow
     Write-Host "      逐条(含消费者与后果):python 90-ops\gate\check_contract_pairs.py" -ForegroundColor DarkYellow
+}
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 环境验证脚本 —— **跑没跑都要出现在这里**
+#
+#  它们此前是覆盖账里一个**彻底的空白**:795 行断言,既没跑,也没被记成"没跑"。
+#  一个只报"跑了什么"的覆盖账,和一个悄悄跳过却打印全绿的运行器是同一种东西。
+# ══════════════════════════════════════════════════════════════════════════
+if ($VerifyEnv) {
+    Write-Host "  ★ 环境验证(-VerifyEnv,**不并进上面的合计**,也不影响退出码):" -ForegroundColor Yellow
+    foreach ($er in $envResults) {
+        $verdict = if ($er.Fail -gt 0 -or $er.Code -ne 0) { "FAIL=$($er.Fail) 退出码=$($er.Code)" } else { "PASS=$($er.Pass)" }
+        Write-Host ("      {0}  {1}" -f $er.Path, $verdict) -ForegroundColor DarkYellow
+    }
+    Write-Host "      ★ 它们验的是【本机环境】不是源码 —— 红了要查这台机器,不是查这次改动。" -ForegroundColor DarkYellow
+} else {
+    # ★ 行数用 `@(Get-Content).Count`,**不用 `Measure-Object -Line`** ——
+    #   后者不数空行:实测同样三个文件,它报 714,真实是 795(差 81 行)。
+    #   ★ 危害方向要看清:它错在**往少的方向**。这一行的整个用途就是说清"有多少断言
+    #     躺着没人跑",报小了正好把问题说轻 —— 而这份脚本存在的理由就是不许把问题说轻。
+    Write-Host ("  ★ 环境验证脚本({0} 个,{1} 行)**本次没跑**:" -f $foundVerifiers.Count, `
+                (@($foundVerifiers | ForEach-Object { @(Get-Content (Join-Path $repo $_)).Count }) | Measure-Object -Sum).Sum) -ForegroundColor Yellow
+    foreach ($vp in ($ENV_VERIFIERS.Keys | Sort-Object)) {
+        Write-Host ("      {0}" -f $vp) -ForegroundColor DarkYellow
+        Write-Host ("        {0}" -f $ENV_VERIFIERS[$vp]) -ForegroundColor DarkYellow
+    }
+    Write-Host "      跑法:powershell -File 90-ops\run-tests.ps1 -VerifyEnv" -ForegroundColor DarkYellow
+    Write-Host "      ★ 不进自动门禁是**有意的**:它们验本机环境,进门禁会因'换台机器'而红," -ForegroundColor DarkYellow
+    Write-Host "        而那种红会训练人用 --no-verify(ASSERTION-PITFALLS 第 5 条已量过这个代价)。" -ForegroundColor DarkYellow
 }
 if ($skipped.Count -gt 0) {
     Write-Host "  ★ 没跑的(不是忽略,是已裁定 + 写明理由):" -ForegroundColor Yellow

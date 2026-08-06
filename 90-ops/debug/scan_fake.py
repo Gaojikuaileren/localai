@@ -31,8 +31,20 @@ except Exception:                                            # noqa: BLE001
     pass
 
 REPO = Path(__file__).resolve().parents[2]
-CODE_DIRS = ["10-core", "20-client-win", "90-ops"]
-SKIP = {"bin", "obj", "node_modules", ".git", "dist", "debug"}
+# ★ 2026-08-06 加 `config`:没有它,「让扫描器看见 .toml」就是一句空话 ——
+#   全仓 6 个 .toml 里有 5 个在 `config/`(只有 registry.toml 在 10-core 下)。
+#   ⇒ 只把 `.toml` 加进后缀表而不加这个目录,是一次**看起来修好了的假修复**,
+#     而假修复正是本工具存在的理由。
+CODE_DIRS = ["10-core", "20-client-win", "90-ops", "config"]
+# ★★★ 2026-08-06 拿掉 `debug`:那是一个 **fail-open 后门**。
+#   它的字面意思像是"跳过构建产物目录",但 .NET 的产物目录叫 `bin\Debug`(大写 D),
+#   `bin` 已经在表里挡住了;这个小写的 `debug` 实际只挡住了一样东西 ——
+#   **`90-ops\debug` 整个调试工具箱,包括本文件自己**。
+#   ⇒ 假防护扫描器从来没有扫过自己,也没扫过 doctor.py / probe_*.py。
+#     而 D88 明写「工具自己也要被测」。ASSERTION-PITFALLS 第 1 条也点过名:
+#     靠"跳过本文件"来避免撞上自己的针,是 fail-open —— 守卫从此不查自己。
+#   ⇒ 正确做法是**把针拼出来**(见下方 _STALE_WORDS),而不是把自己排除在外。
+SKIP = {"bin", "obj", "node_modules", ".git", "dist"}
 
 Finding = Tuple[str, str, str]        # (类别, 位置, 说明)
 found: List[Finding] = []
@@ -162,7 +174,79 @@ def scan_zero_assert_loops():
 
 
 # ── ③ 已过期的「尚未 / 未接入」文案 ─────────────────────────────────
-_STALE_WORDS = ["尚未接入", "未接入", "还没有做", "还没做", "尚未实现", "待接入", "暂未"]
+#  ★★★ 针**拼出来**,不写成字面量(ASSERTION-PITFALLS 第 1 条第 8 次带出的写法)。
+#    上面刚把 `debug` 从 SKIP 里拿掉 ⇒ 本文件从今天起**会被自己扫到**。
+#    如果这里写成字面量,这一行会被自己报 8 次(实测:拿掉后门后当场 8 条),
+#    而那正是这条坑最经典的形状 —— 守卫撞在**描述它所守之物**的那段文本上。
+#    ⇒ 拼出来之后,守卫可以连自己所在的文件一起扫,不必开"跳过本文件"那个 fail-open 后门。
+_STALE_WORDS = ["尚未" + "接入", "未" + "接入", "还没有" + "做", "还没" + "做",
+                "尚未" + "实现", "待" + "接入", "暂" + "未"]
+
+# ── ★ PowerShell 的两种「不是代码的文本」,方向**相反**,必须分开 ────────
+#   · `<# … #>` 块注释 —— 是说明,**要排除**;
+#   · `@" … "@` / `@' … '@` here-string —— 是**会被写进出厂包的正文**,
+#     绝不能排除。第二个实例就藏在这里:`build-client.ps1` 的安装说明。
+_PS1_BLOCK_COMMENT = re.compile(r"<#(?:.|\n)*?#>")
+_PS1_HERESTRING = re.compile(r"@(\"|')(?:.|\n)*?\1@")
+
+
+STALE_EXTS = (".cs", ".py", ".ps1", ".json", ".toml")
+
+
+def _spans(rx, s):
+    return [(m.start(), m.end()) for m in rx.finditer(s)]
+
+
+def _in(spans, pos: int) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
+def stale_hits(suffix: str, s: str):
+    """一份源码里所有「过期文案」的嫌疑点 —— 返回 (词, 行号, 归类, 整行)。
+
+    ★ 抽成纯函数是为了**能被合成输入两个方向各问一遍**(selfcheck.py 第 ⑧ 组)。
+      D91 裁定③3 的判据:**测效果,不测配置** —— 钉「`.ps1` 在后缀表里」只能证明
+      配置写对了,钉「喂它一段 here-string 会报出来」才证明它真的会报。
+
+    ★★ selfcheck 里那几条断言**一律喂合成字符串,绝不断言真文件里的某一条**。
+      理由是 ASSERTION-PITFALLS 第 5 条:一条会因为「那句话终于被改对了」而变红的
+      断言,测的就不是它自称在测的东西 —— 而这个扫描器的**目的**正是促成那次修改。
+      钉真文件,等于让"修好了"和"坏了"长得一样红。
+    """
+    out = []
+    # ★ 只有 .ps1 需要算区间:.py 的三引号块由行首判据兜住,.json 没有注释,
+    #   .toml 只有 `#` 行注释。**多算等于多写一份解析器**,而"没有测试文件自己再写
+    #   一份去注释器"是本仓已有的一条反向全表断言。
+    blocks = _spans(_PS1_BLOCK_COMMENT, s) if suffix == ".ps1" else []
+    heres = _spans(_PS1_HERESTRING, s) if suffix == ".ps1" else []
+    for w in _STALE_WORDS:
+        for m in re.finditer(re.escape(w), s):
+            if _in(blocks, m.start()):
+                continue                                      # <# … #> 是说明
+            line_start = s.rfind("\n", 0, m.start()) + 1
+            nl = s.find("\n", m.start())
+            line = s[line_start:(nl if nl >= 0 else len(s))]
+            in_here = _in(heres, m.start())
+            # ★ here-string **内部**不认行注释:`#` 开头在正文里就是一个井号,
+            #   而那正文是要发给用户的。在这里"认注释"会把出厂文本挡在门外。
+            if not in_here and line.lstrip().startswith(("//", "#", "*", "///")):
+                continue                                      # 注释里的说明不算文案
+            # ★★★ 判据按格式分:
+            #   · .py/.cs/.json/.toml —— 文案只可能在**引号里**,所以要求行上有引号;
+            #   · .ps1 的 here-string —— 正文**整段都没有引号**(`@"` 与 `"@` 在别的行上)。
+            #     ⇒ 沿用"行上要有引号"会让这一整类**静默漏掉**,而它恰恰是最要紧的一类:
+            #       here-string 里的字,是直接写进出厂包给用户读的。
+            if not in_here and '"' not in line and "'" not in line:
+                continue
+            # ★★ 排除【断言消息】:`Assert(!x.Contains("尚未接入"), "…必须删掉…")`
+            #   那是在**守护**这句话已经不在了,不是它本身。
+            #   不排的话 72 条里大半是自己人 —— 而**噪声太大的扫描器没人看,等于没有**。
+            if re.search(r"\b(Assert|check)\s*\(", line) or ".Contains(" in line:
+                continue
+            out.append((w, s[:m.start()].count("\n") + 1,
+                        "出厂文本(here-string)" if in_here else "字符串",
+                        line.strip()))
+    return out
 
 
 def scan_stale_claims():
@@ -170,24 +254,18 @@ def scan_stale_claims():
 
     ★ 2026-08-05 一晚之内这类问题出现**五次**,其中一次过期的是**断言本身**。
       工具报的是嫌疑:每条都要人对照现状看一眼。
+
+    ★★ 2026-08-06 扩到 .ps1 / .json / .toml。**这不是顺手加个后缀** ——
+      第二个实例已经出厂了:`90-ops\\build-client.ps1` 的【已知边界(如实说)】里
+      写着「AI 模型尚未接入(P4):聊天会记录但不会有回答」,而模型早已接入。
+      那段话进了**每一份出厂包的安装说明**,是用户唯一会读的那份文本。
+      ⇒ 扫描器看不见 .ps1,所以它躺了下来;而客户端 .cs 里同一句话被断言钉着。
+        **同一句谎话,在被守着的那一侧被抓住,在没人看的那一侧发了出去。**
     """
-    for p, s in sources((".cs", ".py")):
-        for w in _STALE_WORDS:
-            for m in re.finditer(re.escape(w), s):
-                line_start = s.rfind("\n", 0, m.start()) + 1
-                line = s[line_start:s.find("\n", m.start())]
-                if line.lstrip().startswith(("//", "#", "*", "///")):
-                    continue                                  # 注释里的说明不算文案
-                if '"' not in line:
-                    continue                                  # 只看**字符串字面量**里的
-                # ★★ 排除【断言消息】:`Assert(!x.Contains("尚未接入"), "…必须删掉…")`
-                #   那是在**守护**这句话已经不在了,不是它本身。
-                #   不排的话 72 条里大半是自己人 —— 而**噪声太大的扫描器没人看,等于没有**。
-                if re.search(r"\b(Assert|check)\s*\(", line) or ".Contains(" in line:
-                    continue
-                ln = s[:m.start()].count("\n") + 1
-                add("可能过期的文案", f"{rel(p)}:{ln}",
-                    f"「{w}」出现在字符串里:{line.strip()[:88]}")
+    for p, s in sources(STALE_EXTS):
+        for w, ln, where, line in stale_hits(p.suffix.lower(), s):
+            add("可能过期的文案", f"{rel(p)}:{ln}",
+                f"「{w}」出现在{where}里:{line[:88]}")
 
 
 # ── ④ 定义了却没有调用点的函数 ──────────────────────────────────────
