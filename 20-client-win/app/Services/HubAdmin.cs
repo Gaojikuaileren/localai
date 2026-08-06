@@ -166,8 +166,11 @@ public sealed class HubAdmin
                 return false;
             }
             var j = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
-            HubId = j.TryGetProperty("hubId", out var h) ? h.GetString() : null;
-            PairingWindowOpen = j.TryGetProperty("pairingWindowOpen", out var w) && w.GetBoolean();
+            // ★ 顶层解析走 ParsePing 那一处(与断言喂的是同一个函数),不在这里另写一遍。
+            var (pok, pid, pwin, pwhy) = ParsePing(j);
+            if (!pok) { LastProbe = AdminProbeResult.HttpError; LastError = pwhy; return false; }
+            HubId = pid;
+            PairingWindowOpen = pwin;
             ServerCert = ParseServerCert(j);
             if (!string.IsNullOrWhiteSpace(expectHubId) && !string.Equals(HubId, expectHubId, StringComparison.Ordinal))
             {
@@ -243,6 +246,76 @@ public sealed class HubAdmin
         catch { return null; }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  D?(V4)· /admin/devices 与 /admin/devices/revoke 的**唯一**解析处
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★ 这两条在欠债表里被单独点了名,而且点的**不是**"欠一条断言",是一个缺陷:
+    //    · /admin/devices 有**两个**解析器 —— `HubAdmin.DevicesAsync` 与
+    //      `HubClient.ParseDevices`,分别被 DevicesView 的两条路径调用(:912 与 :1366)。
+    //      两份代码解析同一个形状 ⇒ **服务端改一个键名,只会有一处被发现**,
+    //      而另一处会安静地退化成"设备名全空 / 列表全空",看起来像"主机上没有别的设备"。
+    //    · /admin/devices/revoke 有**两个调用方**(:1327 与 :1381),而**两个都不看应答体** ——
+    //      于是一次失败的吊销与一次成功的吊销在界面上长得一模一样。
+    //      对"解除设备"这种动作,静默失败的代价是:人以为那台机器已经被踢掉了,其实它还连得上。
+    //  ⇒ 解析收拢到这里一处,两边都调它;形状核对走 WireContracts,与服务端同一份登记表。
+
+    /// <summary>
+    /// 解析 <c>GET /admin/devices</c>。**全客户端唯一的一处** —— <c>HubClient.ParseDevices</c> 也走它。
+    /// ★ 顶层与**元素**两层都核对:客户端真正要用的字段(deviceId/displayName/status/certSha256Short)
+    ///   全在元素那一层,而 A1 的病灶正是"字段藏在下一层"。只钉顶层等于没钉。
+    /// </summary>
+    internal static (bool ok, List<AdminDevice> list, string? why) ParseDevices(JsonElement j)
+    {
+        var list = new List<AdminDevice>();
+        if (!LocalAI.Identity.WireContracts.KeysMatch(
+                j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminDevices))
+            return (false, list, "设备表的顶层键与登记的契约对不上("
+                    + LocalAI.Identity.WireContracts.Describe(
+                        j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminDevices) + ")");
+        if (!j.TryGetProperty("devices", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return (false, list, "设备表里没有 devices 数组");
+        foreach (var d in arr.EnumerateArray())
+        {
+            if (!LocalAI.Identity.WireContracts.KeysMatch(
+                    d.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminDevicesItem))
+                // ★ 认不出的元素**整条判失败**,不挑着能读的字段拼一个出来 ——
+                //   拼出来的那一条会显示成一台"名字是空的设备",而人分不清它是漂移还是真的没名字。
+                return (false, list, "设备条目的键与登记的契约对不上("
+                        + LocalAI.Identity.WireContracts.Describe(
+                            d.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminDevicesItem) + ")");
+            list.Add(new AdminDevice(
+                d.GetProperty("deviceId").GetString() ?? "",
+                d.GetProperty("displayName").GetString() ?? "",
+                d.GetProperty("status").GetString() ?? "",
+                d.GetProperty("certSha256Short").ValueKind == JsonValueKind.String
+                    ? d.GetProperty("certSha256Short").GetString() : null));
+        }
+        return (true, list, null);
+    }
+
+    /// <summary>
+    /// 解析 <c>POST /admin/devices/revoke</c> 的 200 应答。**两个调用方共用这一处**。
+    /// ★ <c>generation</c> 是"这次吊销真的落盘了"的凭据 —— 只看 HTTP 200 是不够的:
+    ///   200 只说明路由跑到了,而 <c>Store.Mutate</c> 的结果就在这个数字里。
+    /// </summary>
+    internal static (bool ok, int generation, string? why) ParseRevoke(JsonElement j)
+    {
+        if (!LocalAI.Identity.WireContracts.KeysMatch(
+                j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminRevoke))
+            return (false, 0, "吊销应答的顶层键与登记的契约对不上("
+                    + LocalAI.Identity.WireContracts.Describe(
+                        j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminRevoke) + ")");
+        if (!j.GetProperty("ok").GetBoolean()) return (false, 0, "中枢说这次吊销没成功(ok=false)");
+        return (true, j.GetProperty("generation").GetInt32(), null);
+    }
+
+    /// <summary>把一段应答正文喂给 <see cref="ParseRevoke"/>;正文不是 JSON 时如实报,不当成功。</summary>
+    internal static (bool ok, int generation, string? why) ParseRevokeBody(string body)
+    {
+        try { return ParseRevoke(JsonDocument.Parse(body).RootElement); }
+        catch (Exception ex) { return (false, 0, "吊销应答读不懂:" + ex.Message); }
+    }
+
     async Task<(int status, string body)> Call(HttpMethod m, string path, object? body = null)
     {
         using var req = new HttpRequestMessage(m, Base + path);
@@ -272,34 +345,129 @@ public sealed class HubAdmin
         JsonElement j;
         try { j = JsonDocument.Parse(body).RootElement; }
         catch (Exception ex) { LastError = "待批准列表读不懂:" + ex.Message; return (false, list); }
-        PairingWindowOpen = j.TryGetProperty("pairingWindowOpen", out var w) && w.GetBoolean();
-        if (!j.TryGetProperty("pending", out var arr) || arr.ValueKind != JsonValueKind.Array) return (true, list);
-        foreach (var p in arr.EnumerateArray())
-        {
-            var sas = new List<string>();
-            if (p.TryGetProperty("sas", out var s) && s.ValueKind == JsonValueKind.Array)
-                foreach (var x in s.EnumerateArray()) if (x.GetString() is { } t) sas.Add(t);
-            list.Add(new PendingPair(
-                p.GetProperty("requestId").GetString() ?? "",
-                p.TryGetProperty("displayName", out var d) ? d.GetString() ?? "" : "",
-                sas.ToArray(),
-                p.TryGetProperty("secondsLeft", out var sl) ? sl.GetInt32() : 0));
-        }
-        return (true, list);
+        var (pok, plist, pwhy, pwin) = ParsePending(j);
+        if (!pok) { LastError = pwhy; return (false, list); }
+        PairingWindowOpen = pwin;
+        return (true, plist);
     }
 
-    public Task<(int status, string body)> ApproveAsync(string requestId)
-        => Call(HttpMethod.Post, "/admin/pairing/approve", new { requestId });
+    /// <summary>
+    /// 解析 <c>GET /admin/pairing/pending</c>。顶层与**元素**两层都核对 ——
+    /// ★ 六个词就在元素那一层,而它们是整套配对安全的根基:
+    ///   `sas` 一旦漂成别的键名,界面会显示**空的六个词**,而人会以为"还没生成",
+    ///   于是去点重来 —— 那会在主机侧留下幽灵条目。
+    /// </summary>
+    internal static (bool ok, List<PendingPair> list, string? why, bool windowOpen) ParsePending(JsonElement j)
+    {
+        var list = new List<PendingPair>();
+        if (!LocalAI.Identity.WireContracts.KeysMatch(
+                j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPending))
+            return (false, list, "待批准列表的顶层键与登记的契约对不上("
+                    + LocalAI.Identity.WireContracts.Describe(
+                        j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPending) + ")", false);
+        var win = j.GetProperty("pairingWindowOpen").GetBoolean();
+        if (!j.TryGetProperty("pending", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return (false, list, "待批准列表里没有 pending 数组", win);
+        foreach (var p in arr.EnumerateArray())
+        {
+            if (!LocalAI.Identity.WireContracts.KeysMatch(
+                    p.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPendingItem))
+                return (false, list, "待批准条目的键与登记的契约对不上("
+                        + LocalAI.Identity.WireContracts.Describe(
+                            p.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPendingItem) + ")", win);
+            var sas = new List<string>();
+            if (p.GetProperty("sas").ValueKind == JsonValueKind.Array)
+                foreach (var x in p.GetProperty("sas").EnumerateArray()) if (x.GetString() is { } t) sas.Add(t);
+            list.Add(new PendingPair(
+                p.GetProperty("requestId").GetString() ?? "",
+                p.GetProperty("displayName").GetString() ?? "",
+                sas.ToArray(),
+                p.GetProperty("secondsLeft").GetInt32()));
+        }
+        return (true, list, null, win);
+    }
 
-    public Task<(int status, string body)> DenyAsync(string requestId)
-        => Call(HttpMethod.Post, "/admin/pairing/deny", new { requestId });
+    /// <summary>
+    /// 解析 <c>/admin/ping</c> 的顶层。★ <c>pairingWindowOpen</c> 从这里来 ——
+    /// 读不出来就只能退回"拿本地布尔替中枢记配对窗口开没开",而那是 Selftest.cs 明令禁止的
+    /// (本地布尔与中枢的真实状态一旦分家,界面会显示一个敞开着、实际已经关掉的窗口,反之亦然)。
+    /// </summary>
+    internal static (bool ok, string? hubId, bool windowOpen, string? why) ParsePing(JsonElement j)
+    {
+        if (!LocalAI.Identity.WireContracts.KeysMatch(
+                j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPing))
+            return (false, null, false, "/admin/ping 的顶层键与登记的契约对不上("
+                    + LocalAI.Identity.WireContracts.Describe(
+                        j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminPing) + ")");
+        return (true, j.GetProperty("hubId").GetString(), j.GetProperty("pairingWindowOpen").GetBoolean(), null);
+    }
+
+    /// <summary>
+    /// 解析批准/拒绝的应答 —— **200 与 409 都走这一处**。
+    /// ★ 409 才是常见分支(请求过期了、已经批过了),而它的 <c>error</c> 是界面唯一能说的原因。
+    ///   只看状态码的话,界面只能写"中枢拒绝了",人会以为中枢坏了、去重启一个没病的中枢。
+    /// </summary>
+    internal static (bool ok, string? error, string? why) ParseAck(JsonElement j)
+    {
+        var keys = j.EnumerateObject().Select(x => x.Name).ToArray();
+        var ok200 = LocalAI.Identity.WireContracts.KeysMatch(keys, LocalAI.Identity.WireContracts.AdminApprove);
+        var ok409 = LocalAI.Identity.WireContracts.KeysMatch(keys, LocalAI.Identity.WireContracts.AdminApproveDeny409);
+        if (!ok200 && !ok409)
+            return (false, null, "批准/拒绝应答的顶层键既不是 200 那组也不是 409 那组("
+                    + LocalAI.Identity.WireContracts.Describe(keys, LocalAI.Identity.WireContracts.AdminApproveDeny409) + ")");
+        var okFlag = j.GetProperty("ok").GetBoolean();
+        return (okFlag, ok409 ? j.GetProperty("error").GetString() : null, null);
+    }
+
+    /// <summary>解析 <c>POST /admin/pairing/window</c> 的应答,并回带**中枢自报的**窗口状态。</summary>
+    internal static (bool ok, bool windowOpen, string? why) ParseWindow(JsonElement j)
+    {
+        if (!LocalAI.Identity.WireContracts.KeysMatch(
+                j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminWindow))
+            return (false, false, "开关窗应答的顶层键与登记的契约对不上("
+                    + LocalAI.Identity.WireContracts.Describe(
+                        j.EnumerateObject().Select(x => x.Name), LocalAI.Identity.WireContracts.AdminWindow) + ")");
+        return (j.GetProperty("ok").GetBoolean(), j.GetProperty("pairingWindowOpen").GetBoolean(), null);
+    }
+
+    /// <summary>批准一条配对请求。★ 应答体走 <see cref="ParseAck"/>,409 的原因记进 LastError。</summary>
+    public async Task<(int status, string body)> ApproveAsync(string requestId)
+        => await AckCall("/admin/pairing/approve", requestId);
+
+    /// <summary>拒绝一条配对请求。同上。</summary>
+    public async Task<(int status, string body)> DenyAsync(string requestId)
+        => await AckCall("/admin/pairing/deny", requestId);
+
+    async Task<(int status, string body)> AckCall(string path, string requestId)
+    {
+        var r = await Call(HttpMethod.Post, path, new { requestId });
+        try
+        {
+            var (ok, err, why) = ParseAck(JsonDocument.Parse(r.body).RootElement);
+            LastError = why ?? (ok ? null : (err ?? "中枢没说原因"));
+        }
+        catch (Exception ex) { LastError = "应答读不懂:" + ex.Message; }
+        return r;
+    }
 
     /// <summary>
     /// 开/关配对窗口。★ 窗口【不随启动自动打开】(主机侧审查结论:开机自启 + 无条件开窗
     /// = 每次开机在局域网上敞开一个无人值守的准入窗口)。所以这里是显式动作,且有分钟数上限。
+    /// ★★ 应答里带**中枢自报的**当前窗口状态,这里立刻把它记下 ——
+    ///   否则只能拿本地布尔猜,而那正是 Selftest.cs 明令禁止的那件事。
     /// </summary>
-    public Task<(int status, string body)> WindowAsync(bool open, int minutes = 10)
-        => Call(HttpMethod.Post, "/admin/pairing/window", new { open, minutes });
+    public async Task<(int status, string body)> WindowAsync(bool open, int minutes = 10)
+    {
+        var r = await Call(HttpMethod.Post, "/admin/pairing/window", new { open, minutes });
+        if (r.status == 200)
+            try
+            {
+                var (ok, win, why) = ParseWindow(JsonDocument.Parse(r.body).RootElement);
+                if (why is not null) LastError = why; else if (ok) PairingWindowOpen = win;
+            }
+            catch (Exception ex) { LastError = "开关窗应答读不懂:" + ex.Message; }
+        return r;
+    }
 
     // ---------------------------------------------------------------- 设备
     /// <summary>已在册的设备。★ 同 PendingAsync:返回 (ok, list),不让"取不到"伪装成"一台都没有"。</summary>
@@ -313,18 +481,29 @@ public sealed class HubAdmin
         JsonElement j;
         try { j = JsonDocument.Parse(body).RootElement; }
         catch (Exception ex) { LastError = "设备列表读不懂:" + ex.Message; return (false, list); }
-        if (!j.TryGetProperty("devices", out var arr) || arr.ValueKind != JsonValueKind.Array) return (true, list);
-        foreach (var d in arr.EnumerateArray())
-            list.Add(new AdminDevice(
-                d.GetProperty("deviceId").GetString() ?? "",
-                d.TryGetProperty("displayName", out var n) ? n.GetString() ?? "" : "",
-                d.TryGetProperty("status", out var s) ? s.GetString() ?? "" : "",
-                d.TryGetProperty("certSha256Short", out var f) ? f.GetString() : null));
-        return (true, list);
+        // ★ 解析走**唯一**那一处(见 ParseDevices 上面那段):此前这里和 HubClient.ParseDevices
+        //   各写了一份,服务端改一个键名只会有一处被发现。
+        var (ok, parsed, why) = ParseDevices(j);
+        if (!ok) { LastError = why; return (false, list); }
+        return (true, parsed);
     }
 
-    public Task<(int status, string body)> RevokeAsync(string deviceId)
-        => Call(HttpMethod.Post, "/admin/devices/revoke", new { deviceId });
+    /// <summary>
+    /// 吊销一台设备。★ 返回值保持 (status, body) 不变(界面那两处按它写的),
+    /// 但**应答体现在真的被核对了** —— 形状不对或 ok=false 时记进 <see cref="LastError"/>。
+    /// 此前两个调用方都不看应答体,一次失败的吊销与一次成功的吊销在界面上长得一模一样。
+    /// </summary>
+    public async Task<(int status, string body)> RevokeAsync(string deviceId)
+    {
+        var r = await Call(HttpMethod.Post, "/admin/devices/revoke", new { deviceId });
+        if (r.status == 200)
+        {
+            var (ok, gen, why) = ParseRevokeBody(r.body);
+            LastError = ok ? null : why;
+            if (ok && gen <= 0) LastError = "吊销应答里的 generation 不是正数 —— 这次写盘可能没生效";
+        }
+        return r;
+    }
 
     // ---------------------------------------------------------------- 本机的中枢在哪个地址上听
     /// <summary>业务口(LAN Edge)的端口。★ 与 lan-edge `run-lan` 里的 `8443` 一致。</summary>

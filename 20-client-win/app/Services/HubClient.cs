@@ -374,26 +374,43 @@ public sealed class HubClient
     public void CacheDevices(IEnumerable<HubDevice> devices)
         => KnownDevices = devices.Where(d => d.Status != "revoked").ToList();
 
+    /// <summary>
+    /// 吊销一台设备(走局域网口 —— 按 D37/D48 这条**结构上**永远 404,见本类顶部那段说明)。
+    /// ★ 返回值形状不变(界面按它写的),但应答体现在**真的被核对了** ——
+    ///   与 <c>HubAdmin.RevokeAsync</c> 共用同一处解析。此前两个调用方都不看应答体,
+    ///   一次失败的吊销与一次成功的吊销在界面上长得一模一样。
+    /// </summary>
     public async Task<(int status, string body)> RevokeDeviceAsync(string deviceId, CancellationToken ct = default)
     {
         if (Profile is null) throw new InvalidOperationException("尚未配对");
-        return await Transport.Send(Profile, Dial(), HttpMethod.Post,
-                                    "/admin/devices/revoke", new { deviceId }, ct);
+        var r = await Transport.Send(Profile, Dial(), HttpMethod.Post,
+                                     "/admin/devices/revoke", new { deviceId }, ct);
+        if (r.status == 200)
+        {
+            var (ok, gen, why) = HubAdmin.ParseRevokeBody(r.body);
+            LastError = ok ? null : why;
+            if (ok && gen <= 0) LastError = "吊销应答里的 generation 不是正数 —— 这次写盘可能没生效";
+        }
+        return r;
     }
 
+    /// <summary>
+    /// 把 <c>/admin/devices</c> 的正文解析成显示用的设备表。
+    ///
+    /// ★★ 2026-08-06(V4):这里**曾经是第二份解析器** —— 与 <c>HubAdmin.DevicesAsync</c>
+    ///   各自解析同一个形状,而 DevicesView 的两条路径分别调它们(:912 与 :1366)。
+    ///   两份代码解析同一个形状 ⇒ 服务端改一个键名**只会有一处被发现**,
+    ///   另一处安静地退化成"设备名全空",看起来像"主机上没有别的设备"。
+    ///   ⇒ 现在它**委派**给唯一那一处,自己只做投影(AdminDevice → HubDevice)。
+    /// ★ 形状不认识时**抛**,不返回空表:空表在界面上会被写成「没有别的设备」,
+    ///   而那是一句**看起来很有信息量的假答案**(与 PendingAsync 的 ok 位同一条纪律)。
+    /// </summary>
     public static List<HubDevice> ParseDevices(string json)
     {
-        var list = new List<HubDevice>();
         using var doc = JsonDocument.Parse(json);
-        var arr = doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement
-                : doc.RootElement.TryGetProperty("devices", out var d) ? d
-                : throw new FormatException("响应里没有设备数组");
-        foreach (var e in arr.EnumerateArray())
-            list.Add(new HubDevice(
-                e.TryGetProperty("deviceId", out var i) ? i.GetString() ?? "" : "",
-                e.TryGetProperty("displayName", out var n) ? n.GetString() ?? "" : "",
-                e.TryGetProperty("status", out var s) ? s.GetString() ?? "" : ""));
-        return list;
+        var (ok, list, why) = HubAdmin.ParseDevices(doc.RootElement);
+        if (!ok) throw new FormatException(why ?? "设备表的形状与登记的契约对不上");
+        return list.Select(d => new HubDevice(d.DeviceId, d.DisplayName, d.Status)).ToList();
     }
 
     /// <summary>

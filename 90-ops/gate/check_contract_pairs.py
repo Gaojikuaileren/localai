@@ -186,64 +186,103 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     #  ★ 同语言不等于同进程。D92 的措辞是「跨**进程**响应契约」,
     #    而 A1 那条缝的成因是"两边各自都绿",与语言无关。
     ("lan-edge", "POST", "/pair/enroll"): {
-        "state": "none", "lane": "证书/配对切片",
+        "state": "paired", "cid": "CONTRACT:cert.pair.enroll",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
         "note": "消费者 transport/ClientTransport.cs:164。"
                 "★ 应答里带主机 SAS 词表版本 —— transport/Program.cs:163 钉了**那一个字段**,"
-                "不是顶层键集合(单字段断言挡不住别的键漂移)",
+                "不是顶层键集合(单字段断言挡不住别的键漂移)"
+                " **已还(V4)**:顶层键集合钉死,单字段那条保留但不再是唯一依据。",
     },
     ("lan-edge", "POST", "/pair/status"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 transport/ClientTransport.cs:224 —— 握手失败会让设备**永远停在 provisioning**",
+        "state": "paired", "cid": "CONTRACT:cert.pair.status",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
+        "note": "消费者 transport/ClientTransport.cs:224 —— 握手失败会让设备**永远停在 provisioning**"
+                " **已还(V4)**:两侧都覆盖【失败分支】—— 三个键在每种状态下都在,但批准前后两个的**值是 null**;客户端在 pending 时跳出就会对 null 调 GetString()!,而主机侧那条记录会永远停在 provisioning。",
     },
     ("lan-edge", "POST", "/pair/claim"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 transport/ClientTransport.cs:235",
+        "state": "paired", "cid": "CONTRACT:cert.pair.claim",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
+        "note": "消费者 transport/ClientTransport.cs:235"
+                " **已还(V4)**。",
     },
     ("lan-edge", "POST", "/pair/complete"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 transport/ClientTransport.cs:241",
+        "state": "paired", "cid": "CONTRACT:cert.pair.complete",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
+        "note": "消费者 transport/ClientTransport.cs:241"
+                " **已还(V4)**:它的应答是**文本** `active`,如实按文本契约钉 —— 编一个空键集合会让判据恒真。",
     },
     ("lan-edge", "POST", "/identity/renew/enroll"): {
-        "state": "none", "lane": "证书/配对切片",
+        "state": "paired", "cid": "CONTRACT:cert.renew.enroll",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
         "note": "消费者 transport/ClientTransport.cs:389 —— ★ 审计 A5 曾在这一族:"
                 "服务端写了 CertLifecycle/RenewDeviceCertIfDue 而客户端零调用点。"
                 "**A5 已于 2026-08-06 随 V1(D93)闭环**(HubClient.cs 实测 4 处调用),"
-                "但**这条契约的欠债没还** —— 接上了调用点 ≠ 有了成对断言,两件事别混。",
+                "但**这条契约的欠债没还** —— 接上了调用点 ≠ 有了成对断言,两件事别混。"
+                " **已还(V4)**。",
     },
     ("lan-edge", "POST", "/identity/renew/complete"): {
-        "state": "none", "lane": "证书/配对切片",
+        "state": "paired", "cid": "CONTRACT:cert.renew.complete",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/transport/Program.cs",
         "note": "消费者 transport/ClientTransport.cs:426。"
-                "lan-edge/Program.cs:807 钉了 `changed` 一个字段,不是顶层键集合",
+                "lan-edge/Program.cs:807 钉了 `changed` 一个字段,不是顶层键集合"
+                " **已还(V4)**:从只钉 `changed` 一个字段升级成顶层键集合。",
     },
     ("lan-edge", "GET", "/admin/ping"): {
-        "state": "none", "lane": "证书/配对切片",
+        "state": "paired", "cid": "CONTRACT:cert.admin.ping",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
         "note": "消费者 Services/HubAdmin.cs:125 —— pairingWindowOpen 从这里来;"
-                "读错就退回'本地布尔替中枢记配对窗口开没开'(Selftest.cs:5923 明令禁止的那件事)",
+                "读错就退回'本地布尔替中枢记配对窗口开没开'(Selftest.cs:5923 明令禁止的那件事)"
+                " **已还(V4)**。",
     },
     ("lan-edge", "GET", "/admin/pairing/pending"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 Services/HubAdmin.cs:197",
+        "state": "paired", "cid": "CONTRACT:cert.admin.pending",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "note": "消费者 Services/HubAdmin.cs:197"
+                " **已还(V4)**:顶层 + 元素两层都钉(六个词在元素那一层)。",
     },
     ("lan-edge", "POST", "/admin/pairing/approve"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 Services/HubAdmin.cs:220",
+        "state": "paired", "cid": "CONTRACT:cert.admin.approve",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "note": "消费者 Services/HubAdmin.cs:220"
+                " **已还(V4)**:200 与 **409 失败分支**都钉。",
     },
     ("lan-edge", "POST", "/admin/pairing/deny"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 Services/HubAdmin.cs:223",
+        "state": "paired", "cid": "CONTRACT:cert.admin.deny",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "note": "消费者 Services/HubAdmin.cs:223"
+                " **已还(V4)**。",
     },
     ("lan-edge", "POST", "/admin/pairing/window"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 Services/HubAdmin.cs:230",
+        "state": "paired", "cid": "CONTRACT:cert.admin.window",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "note": "消费者 Services/HubAdmin.cs:230"
+                " **已还(V4)**:应答里中枢自报的窗口状态现在真的被读了(此前只能拿本地布尔猜)。",
     },
     ("lan-edge", "GET", "/admin/devices"): {
-        "state": "none", "lane": "证书/配对切片",
+        "state": "paired", "cid": "CONTRACT:cert.admin.devices",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
         "note": "**两个**消费者:Services/HubAdmin.cs:238 与 Services/HubClient.cs:310 —— "
-                "★ 两处各自解析同一个形状,漂移时只会有一处被发现",
+                "★ 两处各自解析同一个形状,漂移时只会有一处被发现"
+                " **已还(V4)**,并且那个**双解析器缺陷已收**:HubClient.ParseDevices 现在委派给 HubAdmin.ParseDevices,全客户端只剩一处解析;顶层 + 元素两层都钉。",
     },
     ("lan-edge", "POST", "/admin/devices/revoke"): {
-        "state": "none", "lane": "证书/配对切片",
-        "note": "**两个**消费者:Services/HubAdmin.cs:255 与 Services/HubClient.cs:328(同上)",
+        "state": "paired", "cid": "CONTRACT:cert.admin.revoke",
+        "lane": "证书/配对切片",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "note": "**两个**消费者:Services/HubAdmin.cs:255 与 Services/HubClient.cs:328(同上)"
+                " **已还(V4)**,并且那个**两个调用方都不看应答体的缺陷已收**:两处共用 HubAdmin.ParseRevokeBody,ok=false 或 generation 不是正数都会记进 LastError(此前失败的吊销与成功的长得一模一样)。",
     },
 }
 
@@ -298,7 +337,11 @@ _SUBSHAPE_CIDS = {
 #  ★ 它不是重复登记表:它让"又欠了一条"变成 diff 里的**一行**,而不是表里多一项没人数。
 #  ★ 2026-08-06 夜(V5):23 → 19,[GPU/租约切片] 那 4 条还清。
 #    棘轮只许往下走 —— 这个数字变大必须是一次**有名字的决定**,而不是表里多了一项没人数。
-_EXPECTED_DEBT = 19
+#  ★★ 2026-08-06 收盘(V4 并入时解冲突):两条车道各自减自己那批,而**这一行是共用的**
+#    ⇒ 必然冲突。V5 写 19(23−4),V4 写 10(23−13);合起来是 **23−4−13 = 6**。
+#    ★ 没有靠这句算术定案 —— 下面那条断言拿**实测**的 DEBT 与本值对拍,
+#      算错了它当场红。**这一行是期望值,不是事实来源。**
+_EXPECTED_DEBT = 6
 
 
 #  ── lan-edge 端点提取器 ────────────────────────────────────────────────
@@ -405,7 +448,10 @@ for key, meta in sorted(CONTRACTS.items()):
         continue
     # ★ 两半都靠**契约号**定位 —— 那正是 GPU 车道那条元断言用的检索目标,
     #   两边用同一个锚点,就不会出现"我以为钉的是这处、他钉的是那处"。
-    for side, rel in (("server", _PEER_FILE), ("client", _CLIENT_PIN_FILE)):
+    # ★★ 两半各自住在哪个文件,可以逐条覆盖(V4 加)。默认仍是 GPU 车道那两个 ——
+    #   不写 server_file/client_file 的条目行为**一个字节都没变**。
+    for side, rel in (("server", meta.get("server_file", _PEER_FILE)),
+                      ("client", meta.get("client_file", _CLIENT_PIN_FILE))):
         n = _anchor_count(rel, cid)
         check(f"[{tag}] {side} 半边的文件存在", n is not None, rel)
         if n is None:
@@ -437,9 +483,30 @@ if _peer_src is not None:
     check(f"★★ 对方契约号**零命中判红**(实测 {len(_peer_cids)} 条)", len(_peer_cids) > 0,
           f"{sorted(_peer_cids)}")
 
-    _mine_cids = {m["cid"] for m in CONTRACTS.values() if m.get("cid")}
+    # ★★★ 双向对拍**只覆盖服务端半边落在 GPU 那个 peer 文件里的契约**(V4 加)。
+    #   为什么必须收窄:证书/配对那一族的服务端半边是 **C#(lan-edge 自检)**,
+    #   而 test_gpu_broker.py 是 Python、打的是 FastAPI 网关 —— 它**结构上**测不了 lan-edge。
+    #   不收窄的话,那些契约会被要求"契约号也出现在 GPU 那个文件里",
+    #   而唯一能满足它的做法是往那张表里塞一个**没有断言体的字符串** ——
+    #   那正是 D95 明写要防的「写着有防护、实际没有」。
+    #   ⇒ 收窄的是**范围**,不是**判据**:GPU 那一族的双向对拍一个字节没松;
+    #     别的车道由它们自己的 server_file 那一半去钉(第 ③ 组已按条目取文件)。
+    _peer_scoped = {k: m for k, m in CONTRACTS.items()
+                    if m.get("cid") and m.get("server_file", _PEER_FILE) == _PEER_FILE}
+    _mine_cids = {m["cid"] for m in _peer_scoped.values()}
     _theirs_only = sorted(_peer_cids - _mine_cids - set(_SUBSHAPE_CIDS))
     _mine_only = sorted(_mine_cids - _peer_cids)
+
+    # ★ 收窄本身也要被钉住,否则它可能悄悄把**所有**条目都排除掉,
+    #   而"空集 == 空集"在下面两条集合判据里长得和"完全一致"一模一样(零命中判红的同款教训)。
+    check("★★ 对拍范围**非空**:仍有契约的服务端半边落在 GPU peer 文件里(收窄不等于清空)",
+          len(_mine_cids) > 0, f"scoped={len(_mine_cids)}")
+    _elsewhere = sorted({m["cid"] for m in CONTRACTS.values()
+                         if m.get("cid") and m.get("server_file", _PEER_FILE) != _PEER_FILE})
+    check("★★ 被收窄排除掉的那些**逐个交代得出去处**(server_file 指向哪个文件由第 ③ 组逐条验)",
+          all(CONTRACTS[k].get("server_file") for k in CONTRACTS
+              if CONTRACTS[k].get("cid") in _elsewhere),
+          f"另有 {len(_elsewhere)} 条在别的服务端文件里")
 
     check("★★★ 他们新登记的契约号,本表**都跟上了** —— "
           "跟不上说明有人还了债而广度表还把它算在欠债里(账虚高)",

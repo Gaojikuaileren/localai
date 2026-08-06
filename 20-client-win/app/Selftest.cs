@@ -6628,6 +6628,153 @@ public static class Selftest
                            $"★★ 元断言:登记表里归本处核对的契约有 {clientSide.Length} 条(表里新增 /admin/ping 相关的键组就得在这儿补断言)");
                 }
 
+                // ══════════════════════════════════════════════════════════════
+                //  ▼▼▼ V4(契约欠债 · 证书/配对切片)—— 本段【只追加】,上面一律没动 ▼▼▼
+                //  客户端半边:/admin/* 那 7 条(含 2 条元素子形状 + 1 条 409 失败分支)。
+                //  服务端半边在 10-core/lan-edge/Program.cs 的「D? 丁」节(真 HTTP)。
+                //  pair/* 与 identity/renew/* 的客户端半边在 20-client-win/transport/Program.cs
+                //  —— 那边有真的测试 Edge,能把 Transport.Pair 端到端跑完;放这儿只能测仿造品。
+                // ══════════════════════════════════════════════════════════════
+                //  ★★ 形状**由登记表生成**,不是手抄的 JSON。手抄的话服务端把字段搬了家,
+                //    这一半照样绿 —— 那正是 A1 的形状(两边各测各的,中间那条缝谁也没看)。
+                {
+                    // 按键名给一个类型对得上的值 —— 解析器会 GetString/GetBoolean/GetInt32,
+                    // 类型给错的话红的是"类型"而不是"键集合",判据就说不清话了。
+                    string V(string k) => k switch
+                    {
+                        "ok" => "true",
+                        "generation" => "7",
+                        "pairingWindowOpen" => "true",
+                        "secondsLeft" => "180",
+                        "sas" => "[\"alpha\",\"bravo\",\"charlie\",\"delta\",\"echo\",\"foxtrot\"]",
+                        "devices" => "[]",
+                        "members" => "[]",
+                        "pending" => "[]",
+                        "serverCert" => "null",
+                        "certSha256Short" => "\"ab12cd34\"",
+                        _ => "\"x\"",
+                    };
+                    string Obj(string[] keys, params (string k, string v)[] over)
+                    {
+                        var map = keys.ToDictionary(k => k, V);
+                        foreach (var (k, v) in over) map[k] = v;
+                        return "{" + string.Join(",", keys.Select(k => $"\"{k}\":{map[k]}")) + "}";
+                    }
+                    JsonElement E(string json) => JsonDocument.Parse(json).RootElement;
+                    var pinnedV4 = new List<string>();
+
+                    // ── CONTRACT:cert.admin.ping ──────────────────────────────
+                    var pingJson2 = Obj(LocalAI.Identity.WireContracts.AdminPing, ("hubId", "\"hub-1\""));
+                    var pg = Services.HubAdmin.ParsePing(E(pingJson2));
+                    Assert(pg.ok && pg.hubId == "hub-1" && pg.windowOpen,
+                           "★★★ CONTRACT:cert.admin.ping 客户端半边:拿登记表生成的形状,真解析器解得出 hubId 与 pairingWindowOpen");
+                    pinnedV4.Add("CONTRACT:cert.admin.ping");
+                    foreach (var drop in LocalAI.Identity.WireContracts.AdminPing)
+                        Assert(!Services.HubAdmin.ParsePing(E(Obj(
+                                   LocalAI.Identity.WireContracts.AdminPing.Where(x => x != drop).ToArray()))).ok,
+                               $"★★ 反向 cert.admin.ping:少了 `{drop}` ⇒ 判失败,不拼半份出来");
+
+                    // ── CONTRACT:cert.admin.ping.servercert(V1 已钉解析,这里补契约号)──
+                    Assert(Services.HubAdmin.ParseServerCert(E(
+                               "{\"serverCert\":" + Obj(LocalAI.Identity.WireContracts.AdminPingServerCert,
+                                   ("daysLeft", "3.5"), ("consecutiveFailures", "2"), ("needsAttention", "true")) + "}")) is not null,
+                           "★★★ CONTRACT:cert.admin.ping.servercert 客户端半边:登记表生成的子对象解得出");
+                    pinnedV4.Add("CONTRACT:cert.admin.ping.servercert");
+
+                    // ── CONTRACT:cert.admin.devices(+ .item)──────────────────
+                    var devJson = Obj(LocalAI.Identity.WireContracts.AdminDevices,
+                        ("devices", "[" + Obj(LocalAI.Identity.WireContracts.AdminDevicesItem,
+                                              ("deviceId", "\"dev-1\""), ("displayName", "\"PC-A\""), ("status", "\"active\"")) + "]"));
+                    var dvV4 = Services.HubAdmin.ParseDevices(E(devJson));
+                    Assert(dvV4.ok && dvV4.list.Count == 1 && dvV4.list[0].DeviceId == "dev-1"
+                           && dvV4.list[0].DisplayName == "PC-A" && dvV4.list[0].CertShort == "ab12cd34",
+                           "★★★ CONTRACT:cert.admin.devices 客户端半边:顶层 + 元素两层都解得出目标字段(" + (dvV4.why ?? "ok") + ")");
+                    pinnedV4.Add("CONTRACT:cert.admin.devices");
+                    // ★★ 元素那一层才是承重的 —— A1 的病灶就是"字段藏在下一层"
+                    foreach (var drop in LocalAI.Identity.WireContracts.AdminDevicesItem)
+                        Assert(!Services.HubAdmin.ParseDevices(E(Obj(LocalAI.Identity.WireContracts.AdminDevices,
+                                   ("devices", "[" + Obj(LocalAI.Identity.WireContracts.AdminDevicesItem
+                                                         .Where(x => x != drop).ToArray()) + "]")))).ok,
+                               $"★★ 反向 cert.admin.devices.item:元素少了 `{drop}` ⇒ 整条判失败,不拼一台没名字的设备出来");
+                    pinnedV4.Add("CONTRACT:cert.admin.devices.item");
+                    // ★★★ 缺陷验收:HubClient.ParseDevices 现在**委派**给同一处 ——
+                    //   形状不认识时它必须**抛**,而不是返回空表(空表会被界面写成「没有别的设备」)
+                    var threwV4 = false;
+                    try { Services.HubClient.ParseDevices("{\"devices\":[{\"deviceId\":\"x\"}]}"); }
+                    catch (FormatException) { threwV4 = true; }
+                    Assert(threwV4,
+                           "★★★ 缺陷已收:HubClient.ParseDevices 与 HubAdmin 共用同一处解析 —— "
+                           + "认不出的形状**抛**,不返回空表(空表 = 一句看起来很有信息量的假答案)");
+                    Assert(Services.HubClient.ParseDevices(devJson) is { Count: 1 } hdV4 && hdV4[0].DeviceId == "dev-1",
+                           "★★ 而合法形状照常解得出(反向:上面那条不是恒抛)");
+
+                    // ── CONTRACT:cert.admin.pending(+ .item)──────────────────
+                    var pendJson = Obj(LocalAI.Identity.WireContracts.AdminPending,
+                        ("pending", "[" + Obj(LocalAI.Identity.WireContracts.AdminPendingItem,
+                                              ("requestId", "\"req-1\"")) + "]"));
+                    var pd = Services.HubAdmin.ParsePending(E(pendJson));
+                    Assert(pd.ok && pd.list.Count == 1 && pd.list[0].RequestId == "req-1"
+                           && pd.list[0].Sas.Length == 6 && pd.list[0].SecondsLeft == 180 && pd.windowOpen,
+                           "★★★ CONTRACT:cert.admin.pending 客户端半边:六个词与倒计时都解得出(" + (pd.why ?? "ok") + ")");
+                    pinnedV4.Add("CONTRACT:cert.admin.pending");
+                    foreach (var drop in LocalAI.Identity.WireContracts.AdminPendingItem)
+                        Assert(!Services.HubAdmin.ParsePending(E(Obj(LocalAI.Identity.WireContracts.AdminPending,
+                                   ("pending", "[" + Obj(LocalAI.Identity.WireContracts.AdminPendingItem
+                                                         .Where(x => x != drop).ToArray()) + "]")))).ok,
+                               $"★★ 反向 cert.admin.pending.item:元素少了 `{drop}` ⇒ 判失败 —— "
+                               + "`sas` 漂掉会让界面显示**空的六个词**,而人会以为还没生成");
+                    pinnedV4.Add("CONTRACT:cert.admin.pending.item");
+
+                    // ── CONTRACT:cert.admin.revoke ────────────────────────────
+                    var rvV4 = Services.HubAdmin.ParseRevoke(E(Obj(LocalAI.Identity.WireContracts.AdminRevoke)));
+                    Assert(rvV4.ok && rvV4.generation == 7,
+                           "★★★ CONTRACT:cert.admin.revoke 客户端半边:generation 解得出(它是吊销真落盘的凭据)");
+                    pinnedV4.Add("CONTRACT:cert.admin.revoke");
+                    Assert(!Services.HubAdmin.ParseRevoke(E("{\"ok\":false,\"generation\":7}")).ok,
+                           "★★ 反向:ok=false ⇒ 判失败(一次失败的吊销不许和成功的长得一样)");
+                    Assert(!Services.HubAdmin.ParseRevokeBody("not json").ok,
+                           "★★ 反向:正文不是 JSON ⇒ 判失败,不当成功");
+
+                    // ── CONTRACT:cert.admin.approve / deny / 409 ──────────────
+                    Assert(Services.HubAdmin.ParseAck(E(Obj(LocalAI.Identity.WireContracts.AdminApprove))).ok,
+                           "★★★ CONTRACT:cert.admin.approve 客户端半边:200 形状解得出");
+                    pinnedV4.Add("CONTRACT:cert.admin.approve");
+                    Assert(Services.HubAdmin.ParseAck(E(Obj(LocalAI.Identity.WireContracts.AdminDeny))).ok,
+                           "★★★ CONTRACT:cert.admin.deny 客户端半边:200 形状解得出");
+                    pinnedV4.Add("CONTRACT:cert.admin.deny");
+                    var ack409 = Services.HubAdmin.ParseAck(E(Obj(LocalAI.Identity.WireContracts.AdminApproveDeny409,
+                                                                 ("ok", "false"), ("error", "\"这条请求已经不是 pending 了\""))));
+                    Assert(!ack409.ok && ack409.error is { Length: > 0 } && ack409.why is null,
+                           "★★★ CONTRACT:cert.admin.approvedeny.409 客户端半边:**失败分支**的原因解得出 —— "
+                           + "只看状态码的话界面只能写「中枢拒绝了」,人会去重启一个没病的中枢");
+                    pinnedV4.Add("CONTRACT:cert.admin.approvedeny.409");
+                    Assert(Services.HubAdmin.ParseAck(E("{\"okay\":true}")).why is not null,
+                           "★★ 反向:两组键都不是 ⇒ 如实报读不懂,不猜");
+
+                    // ── CONTRACT:cert.admin.window ────────────────────────────
+                    var wnV4 = Services.HubAdmin.ParseWindow(E(Obj(LocalAI.Identity.WireContracts.AdminWindow)));
+                    Assert(wnV4.ok && wnV4.windowOpen,
+                           "★★★ CONTRACT:cert.admin.window 客户端半边:中枢自报的窗口状态解得出 —— "
+                           + "读不出就只能拿本地布尔替中枢记,而那是本文件明令禁止的");
+                    pinnedV4.Add("CONTRACT:cert.admin.window");
+                    Assert(!Services.HubAdmin.ParseWindow(E("{\"ok\":true}")).ok,
+                           "★★ 反向:少了 pairingWindowOpen ⇒ 判失败(否则会静默退回本地布尔)");
+
+                    // ── 元断言:登记表里**归本处**的那些,一条都不许漏 ──────────
+                    //   遍历源是登记表本身,不是手写名单 —— 表里新增一条 cert.admin.* 契约
+                    //   而这儿没补断言,下面这条当场红(ASSERTION-PITFALLS 第 3b 条)。
+                    var adminCids = LocalAI.Identity.WireContracts.All
+                        .Where(c => c.Cid.StartsWith("CONTRACT:cert.admin.", StringComparison.Ordinal))
+                        .Select(c => c.Cid).ToArray();
+                    var missV4 = adminCids.Except(pinnedV4).ToArray();
+                    Assert(missV4.Length == 0,
+                           "★★★ 元断言:登记表里每一条 cert.admin.* 契约都要有客户端半边 —— 缺:["
+                           + string.Join(", ", missV4) + "]");
+                    Assert(pinnedV4.Count == adminCids.Length && adminCids.Length > 0,
+                           $"★★ 元断言两个方向:钉了 {pinnedV4.Count} 条 / 登记 {adminCids.Length} 条(零命中也判红)");
+                }
+                // ▲▲▲ V4 追加段到此为止 ▲▲▲
+
                 // ---- Open WebUI 退役(判据项)----
                 var stack = TryReadSource(Path.Combine("..", "..", "90-ops", "start-stack.ps1"));
                 if (stack is not null)

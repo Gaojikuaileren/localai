@@ -869,7 +869,7 @@ static async Task<int> Selftest()
                 //   而那两种正是字段搬家的实际形状(A1 就是搬了家)。
                 var enrollKeys = d.EnumerateObject().Select(x => x.Name).ToArray();
                 Assert(WireContracts.KeysMatch(enrollKeys, WireContracts.RenewEnroll),
-                       "★★ 成对断言/服务端:/identity/renew/enroll 顶层键 == 登记表("
+                       "★★ 成对断言/服务端 CONTRACT:cert.renew.enroll:顶层键 == 登记表("
                        + WireContracts.Describe(enrollKeys, WireContracts.RenewEnroll) + ")");
                 renewalId = d.GetProperty("renewalId").GetString()!;
                 candB64 = d.GetProperty("candidateCert").GetString()!;
@@ -894,7 +894,7 @@ static async Task<int> Selftest()
                 var cKeys = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement
                             .EnumerateObject().Select(x => x.Name).ToArray();
                 Assert(WireContracts.KeysMatch(cKeys, WireContracts.RenewComplete),
-                       "★★ 成对断言/服务端:/identity/renew/complete 顶层键 == 登记表("
+                       "★★ 成对断言/服务端 CONTRACT:cert.renew.complete:顶层键 == 登记表("
                        + WireContracts.Describe(cKeys, WireContracts.RenewComplete) + ")");
                 // 幂等:成功响应丢了、客户端重试
                 using var r2 = await c.PostAsync(baseUrl + "/identity/renew/complete?renewalId=" + renewalId, new StringContent(""));
@@ -947,7 +947,7 @@ static async Task<int> Selftest()
 
             var topKeys = pj.EnumerateObject().Select(x => x.Name).ToArray();
             Assert(WireContracts.KeysMatch(topKeys, WireContracts.AdminPing),
-                   "★★ 成对断言/服务端:/admin/ping 顶层键 == 登记表("
+                   "★★ 成对断言/服务端 CONTRACT:cert.admin.ping:/admin/ping 顶层键 == 登记表("
                    + WireContracts.Describe(topKeys, WireContracts.AdminPing) + ")");
             coveredContracts.Add("GET /admin/ping");
 
@@ -971,6 +971,184 @@ static async Task<int> Selftest()
                 Assert(sc.GetProperty("daysLeft").GetDouble() > 0,
                        "★ 反向:刚 init 的身份 daysLeft > 0(判据不是恒红的)");
             }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  D? 丁 · V4:欠债表里那 13 条的**服务端半边**(真 HTTP,不是在进程里调对象)
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★ 为什么必须走真 HTTP:欠债表登记的是**跨进程响应契约**。
+        //    在进程里调 `pairing.Enroll(...)` 拿到的是 C# 对象,它证明不了
+        //    「序列化出去之后那个 JSON 长什么样」—— 而缝恰恰在序列化那一层。
+        //  ★★ 顺带:配对四条路由的 HTTP 全流程**在此之前从没被端到端跑过**。
+        //    2026-08-04 实测过一次「图形界面这条配对路径从来没走完过」
+        //    (ClientTransport.Pair 里那段注释),而当时没有任何断言拦得住它。
+        {
+            using var admin2 = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{AdminPort}") };
+            async Task<(int st, JsonElement j)> Adm(HttpMethod m, string p, object? b = null)
+            {
+                using var q = new HttpRequestMessage(m, p);
+                if (b is not null) q.Content = new StringContent(JsonSerializer.Serialize(b), Encoding.UTF8, "application/json");
+                using var r = await admin2.SendAsync(q);
+                var t = await r.Content.ReadAsStringAsync();
+                return ((int)r.StatusCode, t.Length > 0 && t[0] is '{' or '[' ? JsonDocument.Parse(t).RootElement : default);
+            }
+            // 一条契约钉一次:顶层键集合 == 登记表,并把契约号写进消息(欠债表按契约号找这一半)
+            void PinKeys(string cid, JsonElement obj, string[] want)
+            {
+                var got = obj.EnumerateObject().Select(x => x.Name).ToArray();
+                Assert(WireContracts.KeysMatch(got, want),
+                       $"★★ 成对断言/服务端 {cid}:顶层键 == 登记表(" + WireContracts.Describe(got, want) + ")");
+                coveredContracts.Add(WireContracts.All.First(c => c.Cid == cid).Name);
+            }
+
+            // ── ① 配对窗口:开窗要回**当前**状态,不是只回 ok ──────────────
+            var (ws, wj) = await Adm(HttpMethod.Post, "/admin/pairing/window", new { open = true, minutes = 5 });
+            Assert(ws == 200, "/admin/pairing/window -> 200 (" + ws + ")");
+            PinKeys("CONTRACT:cert.admin.window", wj, WireContracts.AdminWindow);
+            Assert(wj.GetProperty("pairingWindowOpen").GetBoolean(),
+                   "★ 反向:开窗之后它如实回 true(只回 ok 的话,界面只能拿本地布尔替中枢记 —— Selftest.cs:5923 明令禁止)");
+
+            // ── ② /pair/enroll:六个词与 CA 都在这一条里 ───────────────────
+            string v4KeyName = "localai-edge-v4pair-" + Convert.ToHexString(R(4)).ToLowerInvariant();
+            using var v4Ec = new ECDsaCng(CngKey.Create(CngAlgorithm.ECDsaP256, v4KeyName,
+                new CngKeyCreationParameters { Provider = swProv, ExportPolicy = CngExportPolicies.None, KeyUsage = CngKeyUsages.Signing }));
+            try
+            {
+                var v4Csr = new CertificateRequest("CN=client", v4Ec, HashAlgorithmName.SHA256).CreateSigningRequest();
+                var v4Secret = R(32);
+                string EnrollBody(string who) => JsonSerializer.Serialize(new
+                {
+                    csr = Convert.ToBase64String(v4Csr),
+                    clientNonce = Convert.ToBase64String(R(32)),
+                    claimSecretHash = Convert.ToBase64String(SHA256.HashData(v4Secret)),
+                    protocolVersion = 1,
+                    displayName = who,
+                });
+
+                JsonElement en2;
+                using (var c = MkClient(null))
+                using (var r = await c.PostAsync(baseUrl + "/pair/enroll", new StringContent(EnrollBody("v4-pair"), Encoding.UTF8, "application/json")))
+                {
+                    Assert((int)r.StatusCode == 200, "/pair/enroll -> 200 (" + (int)r.StatusCode + ")");
+                    en2 = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+                }
+                PinKeys("CONTRACT:cert.pair.enroll", en2, WireContracts.PairEnroll);
+                var reqId2 = en2.GetProperty("requestId").GetString()!;
+
+                // ── ③ ★★★ /pair/status 的【失败分支】—— 欠债表点名的那一条 ──────
+                //  批准**之前**:三个键都在,但后两个的**值是 null**。
+                //  客户端此刻绝不能跳出轮询 —— 跳出去就会对 null 调 GetString()!,
+                //  要么 NRE 要么拿 null 去算 challenge,两种都表现为「配对走不完」,
+                //  而主机侧那条设备记录**永远停在 provisioning**。
+                async Task<JsonElement> Status()
+                {
+                    using var c = MkClient(null);
+                    using var r = await c.PostAsync(baseUrl + "/pair/status",
+                        new StringContent(JsonSerializer.Serialize(new { requestId = reqId2, claimSecret = Convert.ToBase64String(v4Secret) }),
+                                          Encoding.UTF8, "application/json"));
+                    Assert((int)r.StatusCode == 200, "/pair/status -> 200 (" + (int)r.StatusCode + ")");
+                    return JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+                }
+                var stPending = await Status();
+                PinKeys("CONTRACT:cert.pair.status", stPending, WireContracts.PairStatus);
+                Assert(stPending.GetProperty("status").GetString() == "pending",
+                       "★ 批准之前 status == pending");
+                Assert(!WireContracts.PairStatusProceed.Contains(stPending.GetProperty("status").GetString()),
+                       "★★★ 失败分支:pending **不在**客户端的跳出集合里 —— 跳出去就会对 null 调 GetString()!");
+                Assert(stPending.GetProperty("claimNonce").ValueKind == JsonValueKind.Null
+                       && stPending.GetProperty("candidateSha256").ValueKind == JsonValueKind.Null,
+                       "★★★ 失败分支:pending 时那两个字段的**值是 null**(键在、值空)—— "
+                       + "这正是「只钉顶层键集合」挡不住的那一层,所以两侧都要覆盖它");
+
+                // ── ④ 批准 ⇒ 状态推进,两个字段这才有值 ────────────────────
+                var (asx, aj) = await Adm(HttpMethod.Post, "/admin/pairing/approve", new { requestId = reqId2 });
+                Assert(asx == 200, "/admin/pairing/approve -> 200 (" + asx + ")");
+                PinKeys("CONTRACT:cert.admin.approve", aj, WireContracts.AdminApprove);
+
+                var stOk = await Status();
+                Assert(WireContracts.PairStatusProceed.Contains(stOk.GetProperty("status").GetString()),
+                       "★★ 批准之后 status 落在客户端的**跳出集合**里(" + stOk.GetProperty("status").GetString() + ")");
+                Assert(stOk.GetProperty("claimNonce").ValueKind == JsonValueKind.String
+                       && stOk.GetProperty("candidateSha256").ValueKind == JsonValueKind.String,
+                       "★★ 跳出的那一刻,claimNonce 与 candidateSha256 **必须**都已经是字符串");
+
+                // ── ⑤ /pair/claim ⇒ 候选证书 ─────────────────────────────
+                var claimNonce2 = Convert.FromBase64String(stOk.GetProperty("claimNonce").GetString()!);
+                var candSha2 = stOk.GetProperty("candidateSha256").GetString()!;
+                var chal = Pairing.BuildChallenge(Convert.FromHexString(reqId2), claimNonce2, Convert.FromHexString(candSha2));
+                JsonElement cl2;
+                using (var c = MkClient(null))
+                using (var r = await c.PostAsync(baseUrl + "/pair/claim",
+                    new StringContent(JsonSerializer.Serialize(new { requestId = reqId2, claimSecret = Convert.ToBase64String(v4Secret),
+                                                                     challengeSig = Convert.ToBase64String(v4Ec.SignData(chal, HashAlgorithmName.SHA256)) }),
+                                      Encoding.UTF8, "application/json")))
+                {
+                    Assert((int)r.StatusCode == 200, "/pair/claim -> 200 (" + (int)r.StatusCode + ")");
+                    cl2 = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
+                }
+                PinKeys("CONTRACT:cert.pair.claim", cl2, WireContracts.PairClaim);
+
+                // ── ⑥ /pair/complete ⇒ **文本**契约,不是 JSON ───────────────
+                using var cand2 = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(cl2.GetProperty("candidateCert").GetString()!));
+                using var cand2Key = cand2.CopyWithPrivateKey(v4Ec);
+                using (var c = MkClient(cand2Key))
+                using (var r = await c.PostAsync(baseUrl + "/pair/complete?requestId=" + reqId2, new StringContent("")))
+                {
+                    var body = (await r.Content.ReadAsStringAsync()).Trim();
+                    Assert((int)r.StatusCode == 200, "/pair/complete -> 200 (" + (int)r.StatusCode + ")");
+                    Assert(body == WireContracts.PairCompleteBody,
+                           $"★★ 成对断言/服务端 CONTRACT:cert.pair.complete:应答是**文本** `{WireContracts.PairCompleteBody}`(实得 `{body}`)"
+                           + " —— 如实按文本契约钉;给它编一个空键集合会让判据恒真");
+                    coveredContracts.Add(WireContracts.All.First(c2 => c2.Cid == "CONTRACT:cert.pair.complete").Name);
+                }
+
+                // ── ⑦ 待批列表 + 拒绝 + 409(失败分支) ──────────────────────
+                //  再发一条请求,拿它来验 pending 列表、deny、以及"对已终结的请求再批准" ⇒ 409。
+                string reqId3;
+                using (var c = MkClient(null))
+                using (var r = await c.PostAsync(baseUrl + "/pair/enroll", new StringContent(EnrollBody("v4-deny"), Encoding.UTF8, "application/json")))
+                    reqId3 = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("requestId").GetString()!;
+
+                var (ls2, lj2) = await Adm(HttpMethod.Get, "/admin/pairing/pending");
+                Assert(ls2 == 200, "/admin/pairing/pending -> 200 (" + ls2 + ")");
+                PinKeys("CONTRACT:cert.admin.pending", lj2, WireContracts.AdminPending);
+                var pendArr = lj2.GetProperty("pending").EnumerateArray().ToList();
+                Assert(pendArr.Count > 0, "★ 反向:待批列表真的有一条(零条时下面那条元素断言会静默跳过 = 假绿)");
+                if (pendArr.Count > 0)
+                    PinKeys("CONTRACT:cert.admin.pending.item", pendArr[0], WireContracts.AdminPendingItem);
+
+                var (ds2, dj2) = await Adm(HttpMethod.Post, "/admin/pairing/deny", new { requestId = reqId3 });
+                Assert(ds2 == 200, "/admin/pairing/deny -> 200 (" + ds2 + ")");
+                PinKeys("CONTRACT:cert.admin.deny", dj2, WireContracts.AdminDeny);
+
+                // ★★ 失败分支:对一条**已经被拒**的请求再批准 ⇒ 409 且必须说清为什么。
+                //   只回一个光秃秃的 409,界面就只能说"中枢拒绝了",人会以为中枢坏了。
+                var (a409, j409) = await Adm(HttpMethod.Post, "/admin/pairing/approve", new { requestId = reqId3 });
+                Assert(a409 == 409, "★ 对已终结的请求再批准 -> 409 (" + a409 + ")");
+                PinKeys("CONTRACT:cert.admin.approvedeny.409", j409, WireContracts.AdminApproveDeny409);
+                Assert(j409.GetProperty("ok").GetBoolean() == false && j409.GetProperty("error").GetString()!.Length > 0,
+                       "★★ 409 里 ok=false 且 error 非空 —— 失败分支也要说得出原因");
+            }
+            finally { Ca.DeleteKey(v4KeyName); }
+
+            // ── ⑧ /admin/devices(顶层 + 元素)与 /admin/devices/revoke ──────
+            var (dvs, dvj) = await Adm(HttpMethod.Get, "/admin/devices");
+            Assert(dvs == 200, "/admin/devices -> 200 (" + dvs + ")");
+            PinKeys("CONTRACT:cert.admin.devices", dvj, WireContracts.AdminDevices);
+            var devArr = dvj.GetProperty("devices").EnumerateArray().ToList();
+            Assert(devArr.Count > 0, "★ 反向:设备表真的有条目(零条 ⇒ 下面那条元素断言静默跳过 = 假绿)");
+            if (devArr.Count > 0)
+                PinKeys("CONTRACT:cert.admin.devices.item", devArr[0], WireContracts.AdminDevicesItem);
+
+            // 拿刚配好的那台去吊销 —— 不动 deviceId(第 4 节还要用它验"吊销即时生效")
+            var victim = devArr.Select(d => d.GetProperty("deviceId").GetString()!)
+                               .FirstOrDefault(id => id != deviceId);
+            Assert(victim is not null, "★ 前提:表里有第二台设备可供吊销(否则下面那条会去动第 4 节要用的那台)");
+            var (rvs, rvj) = await Adm(HttpMethod.Post, "/admin/devices/revoke", new { deviceId = victim ?? "none" });
+            Assert(rvs == 200, "/admin/devices/revoke -> 200 (" + rvs + ")");
+            PinKeys("CONTRACT:cert.admin.revoke", rvj, WireContracts.AdminRevoke);
+            Assert(rvj.GetProperty("generation").GetInt32() > 0,
+                   "★ generation 是吊销真的落盘的凭据(只回 ok 的话,客户端没法判断这次写成没成)");
         }
 
         // ★★ 元断言:登记表里的**每一条**都要在上面被核对过。
