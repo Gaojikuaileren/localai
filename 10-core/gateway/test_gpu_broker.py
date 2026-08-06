@@ -1990,6 +1990,17 @@ print("\n=== D92 硬前置:跨进程响应契约,两侧成对 ===")
 
 #: 契约登记表。key = 契约号(客户端那半边必须原样出现这个字符串)。
 #  ★ 新增任何跨进程响应形状 → 必须进这张表 → 元断言会去客户端源码里找同名标记。
+#  ★★ 键集合一律**手写字面量**,不从 `to_json()` 反推。
+#     从被测函数自己推期望值 = 拿账本跟账本比:改个键名两边一起变,
+#     而"改个键名"正是这条契约存在的**全部理由**。
+_SNAPSHOT_TOP_KEYS = {
+    "generation", "committed", "reserved", "leases", "sets", "state", "power_on",
+    "invariants", "vram", "sampled_at", "age_s", "stale", "sampler_error",
+    "loader_present", "loader_error", "idle_seconds", "lease_count",
+    "idle_is_meaningful", "idle_note", "idle_note_transient",
+    "transient_idle_s", "transient_idle_threshold_s", "transient_note",
+}
+
 CROSS_PROCESS_CONTRACTS = {
     "CONTRACT:gpu.lease.grant":  ("POST /v1/gpu/lease 200",
                                   {"status", "lease", "fence_token", "generation"}),
@@ -2002,6 +2013,19 @@ CROSS_PROCESS_CONTRACTS = {
                                        {"lease_id", "kind", "holder", "components",
                                         "granted_at", "expires_at", "held_s",
                                         "evictable", "blocking", "exclusive"}),
+    # ── 2026-08-06 夜 · V5:还清 [GPU/租约切片] 那 4 条欠债 ──────────────
+    "CONTRACT:gpu.snapshot":     ("GET /v1/gpu/snapshot 200", set(_SNAPSHOT_TOP_KEYS)),
+    # ★★ SSE 的契约是**每一帧**的顶层键集合,不是整个响应体 ——
+    #    响应体是一条**永不结束**的流,它根本没有"顶层键集合"这种东西。
+    #    钉成响应体的话,判据要么恒真、要么根本写不出来。见下方那一组逐帧断言。
+    "CONTRACT:gpu.events.frame": ("GET /v1/gpu/events 的**每一帧** data 载荷",
+                                  set(_SNAPSHOT_TOP_KEYS)),
+    "CONTRACT:gpu.components":   ("GET /v1/gpu/components 200",
+                                  {"generation", "components", "aliases_by_component",
+                                   "budget", "state", "stale", "sampler_error"}),
+    # ★ 成功与失败**两个形状**都要钉:失败那个多一个 error,而 snapshot 必须还在 ——
+    #   客户端读不出 snapshot 就无从重试(见下方 409 那一组)。
+    "CONTRACT:gpu.intended":     ("POST /v1/gpu/intended 200", {"result", "snapshot"}),
 }
 
 #: 意图那条契约要一个**真的有别名指向它**的组件 —— `_small`(speech.lite)今天没有别名,
@@ -2034,9 +2058,42 @@ with _Isolated() as _c:
     _re = _c.post("/v1/session/end", headers=_LAN_H, json={"reason": "quit"})
     _observed["CONTRACT:session.end"] = (_re.status_code, set(_re.json()))
 
+    # ── V5 · CONTRACT:gpu.snapshot ──────────────────────────────────
+    _rs = _c.get("/v1/gpu/snapshot", headers=_LAN_H)
+    _observed["CONTRACT:gpu.snapshot"] = (_rs.status_code, set(_rs.json()))
+    _snap_body = _rs.json()
+
+    # ── V5 · CONTRACT:gpu.components ────────────────────────────────
+    _rc = _c.get("/v1/gpu/components", headers=_LAN_H)
+    _observed["CONTRACT:gpu.components"] = (_rc.status_code, set(_rc.json()))
+    _cat_body = _rc.json()
+
+    # ── V5 · CONTRACT:gpu.intended(200 与 409 两个形状都要)────────
+    _ri2 = _c.post("/v1/gpu/intended", headers=_LAN_H,
+                   json={"if_generation": _gen(_c), "components": [_small]})
+    _observed["CONTRACT:gpu.intended"] = (_ri2.status_code, set(_ri2.json()))
+    # ★ 故意用一个**过期**的世代号 —— 这是客户端最常撞上的那条失败路径
+    _rconf = _c.post("/v1/gpu/intended", headers=_LAN_H,
+                     json={"if_generation": -1, "components": [_small]})
+    _intended_conflict = (_rconf.status_code, _rconf.json())
+
+
 check("★ 元断言:意图那条契约真的被打到了(别名桥没断)",
       "CONTRACT:gpu.intent" in _observed,
       f"没有任何别名映射到 {_small} —— 那本身就是一条要查的事")
+#: 不走「打一次端点、读顶层键集合」那条通用路的契约 —— 各自在下面单独钉。
+#  ★ 有了这个集合,下面那条元断言才能把「没被观测到」与「有意另行处理」分开。
+_SPECIAL_CIDS = {"CONTRACT:gpu.intended.blocking", "CONTRACT:gpu.events.frame"}
+
+# ★★★ 元断言:每条契约要么被真的打过一次,要么显式登记为特例。
+#   此前这个循环写的是 `if _cid not in _observed: continue` —— **静默跳过**:
+#   请求万一失败(状态机、额度、权限任一处),那条契约的检查就凭空消失,
+#   而覆盖账照样全绿。那正是这张表本身要防的形状,只不过长在检查器自己身上。
+check("★★★ 元断言:每条契约要么被实打过、要么在特例表里(不许静默跳过)",
+      set(CROSS_PROCESS_CONTRACTS) == set(_observed) | _SPECIAL_CIDS,
+      f"没打到也不在特例表:{sorted(set(CROSS_PROCESS_CONTRACTS) - set(_observed) - _SPECIAL_CIDS)}"
+      f" · 打到了却不在登记表:{sorted(set(_observed) - set(CROSS_PROCESS_CONTRACTS))}")
+
 for _cid, (_what, _keys) in CROSS_PROCESS_CONTRACTS.items():
     if _cid == "CONTRACT:gpu.intended.blocking":
         # blocking 那一条不是顶层响应,是 Lease.to_json() 的形状 —— 直接对着它钉
@@ -2045,13 +2102,139 @@ for _cid, (_what, _keys) in CROSS_PROCESS_CONTRACTS.items():
         check(f"★★ {_cid}({_what})顶层键集合恰好是登记的那一组",
               _lease_keys == _keys, f"实得 {sorted(_lease_keys)}")
         continue
-    if _cid not in _observed:
+    if _cid in _SPECIAL_CIDS or _cid not in _observed:
         continue
     _st, _got = _observed[_cid]
     check(f"★★ {_cid}({_what})状态 200", _st == 200, _st)
     check(f"★★★ {_cid} 顶层键集合**恰好**是登记的那一组 —— "
           "「多一个键」和「换了一个键」都要红,数量断言拦不住后者",
           _got == _keys, f"多 {sorted(_got - _keys)} 少 {sorted(_keys - _got)}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  V5 · 四条欠债的服务端半边,逐条把「这条契约到底要防什么」写成判据
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== V5 · CONTRACT:gpu.snapshot —— generation 读错会伪装成「中枢忙」 ===")
+check("★★★ generation 在**顶层**,而且是整数 —— "
+      "客户端 LeaseKeeper 拿它去发租约,它读错的表现是**每次 if_generation 都 409**,"
+      "而 409 的字面意思是「别处刚改过」⇒ 一次解析缺陷会稳定伪装成中枢并发",
+      isinstance(_snap_body.get("generation"), int)
+      and not isinstance(_snap_body.get("generation"), bool),
+      f'{type(_snap_body.get("generation")).__name__} = {_snap_body.get("generation")!r}')
+check("★ 且它非负(世代号是单调计数器,负数只可能是形状对不上)",
+      _snap_body["generation"] >= 0, _snap_body["generation"])
+check("★★ 五个集合都在 sets 里(界面要能分清「你勾的」与「系统临时装的」)",
+      set(_snap_body["sets"]) == {"intended_resident", "committed_resident",
+                                  "actual_resident", "permitted_on_demand",
+                                  "transient_resident"}, sorted(_snap_body["sets"]))
+check("★★ vram 段的键集合也钉住 —— 面板靠它区分两种撞墙,少一个就算不出第二种",
+      set(_snap_body["vram"]) == {"free_gib", "total_gib", "vram_budget", "desktop_floor",
+                                  "non_ai_used_gib_inferred", "non_ai_is_inferred",
+                                  "non_ai_note"}, sorted(_snap_body["vram"]))
+
+print("\n=== V5 · CONTRACT:gpu.events.frame —— SSE 的契约是【每一帧】,不是响应体 ===")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 为什么这一条**不用 TestClient**(实测踩过,不是预防性洁癖)
+#
+#  第一版写的是 `with _c.stream("GET", "/v1/gpu/events") …` 读第一帧就 break ——
+#  **整个套件挂住,120 秒后被超时杀掉**。根因是那条流**永不结束**:
+#  退出 with 时要关连接,而服务端那个生成器正 await 在 `wait_for_change` 上,
+#  TestClient 的 portal 等它收尾,两边互相等。
+#  ★ 与 ASSERTION-PITFALLS 第 6 条同源但不是同一条:那条说的是**跨连接**推送
+#    (两个 TestClient 各起一个事件循环),这条是**单连接的无限流**。
+#
+#  ⇒ 改成直接驱动端点那个**真的**异步生成器,只 __anext__ 一次。
+#    ★ 它仍然是在测真实现(`gateway.gpu_events` 本体),不是抄一份形状来测自己:
+#      第一帧在 `is_disconnected()` 之前就 yield 出来了,所以不需要任何连接语义。
+# ══════════════════════════════════════════════════════════════════════
+class _FakeReqSSE:
+    """给 `gpu_events` 用的最小 Request:它只读 headers,再把 gen() 交出来。"""
+
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+        self.client = None
+
+    async def is_disconnected(self):
+        return True          # ★ 第二帧起就断开 —— 生成器不会无限跑下去
+
+
+async def _first_gpu_frame():
+    resp = await gateway.gpu_events(_FakeReqSSE(_LAN_H))
+    it = resp.body_iterator
+    raw = await it.__anext__()
+    try:
+        await it.aclose()
+    except Exception:                                         # noqa: BLE001
+        pass
+    return raw
+
+
+_cc_s, _lp_s = gateway.classify_caller, gateway.resolve_lan_principal
+try:
+    gateway.classify_caller = lambda r: "lan-edge"
+    gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device", "device_id": "PC-A"}
+    _raw_frame = asyncio.run(_first_gpu_frame())
+except Exception as _e:                                       # noqa: BLE001
+    _raw_frame = None
+    check("★ 取第一帧不该抛", False, f"{type(_e).__name__}: {_e}")
+finally:
+    gateway.classify_caller, gateway.resolve_lan_principal = _cc_s, _lp_s
+
+check("★ 至少收到一帧(收不到就什么都没测到,那比测错更该红)",
+      isinstance(_raw_frame, str) and _raw_frame.startswith("event: "), repr(_raw_frame)[:120])
+if isinstance(_raw_frame, str) and _raw_frame.startswith("event: "):
+    # 一帧 = "event: <名字>\ndata: <json>\n\n"
+    _ev0 = _raw_frame.split("\n", 1)[0][len("event: "):].strip()
+    _data0 = _raw_frame.split("data: ", 1)[1].rstrip("\n")
+    check("★★ 连上先给的是 event: snapshot(重连即对齐,不必先问一次)",
+          _ev0 == "snapshot", _ev0)
+    _fr = _json.loads(_data0)
+    check("★★★ **帧的 data 载荷**顶层键集合 == 快照的那一组 —— "
+          "钉响应体是钉不出来的:那条流永不结束,它根本没有顶层键集合",
+          set(_fr) == _SNAPSHOT_TOP_KEYS,
+          f"多 {sorted(set(_fr) - _SNAPSHOT_TOP_KEYS)} 少 {sorted(_SNAPSHOT_TOP_KEYS - set(_fr))}")
+# ★★ 三种带数据的事件名是**闭集**:客户端按事件名分派,多一种它认不出、少一种它收不到。
+#   判据取源码 —— 心跳与错误帧要等 15 秒/等崩溃才发得出来,不能在门禁里真等。
+_ge_src = inspect.getsource(gateway.gpu_events)
+for _evname in ("snapshot", "update", "keepalive", "error"):
+    check(f"★ 推送流会发 event: {_evname}", f"event: {_evname}" in _ge_src)
+check("★★★ error 帧的形状是 {type, message} —— 中枢自报出错时必须**说得出原因**,"
+      "客户端才不会把它翻译成一句『帧读不懂』(那是指向别处的假理由)",
+      '"type": type(e).__name__' in _ge_src and '"message": str(e)' in _ge_src, _ge_src[-400:])
+check("★★ keepalive 帧**带完整快照**(裸心跳会去喂客户端的『数据新鲜』判断)",
+      "event: keepalive" in _ge_src and "snap.to_json()" in _ge_src)
+
+print("\n=== V5 · CONTRACT:gpu.components —— 取不到就【什么都不列】,不是兜底 ===")
+check("★★ 目录逐条列出准入白名单全体,一个不漏(漏一个 = 用户看不见但闸仍然会算它)",
+      {c["id"] for c in _cat_body["components"]} == set(gpu_broker.BROKER.cfg.components),
+      f'实得 {sorted(c["id"] for c in _cat_body["components"])}')
+check("★★★ 每个组件的键集合恰好是这一组 —— 客户端 ParseCatalog 逐个 GetProperty,"
+      "少一个键它会整份返回 null(**这是设计**:不保留半份目录)",
+      all(set(c) == {"id", "display", "kind", "peak_gib", "note",
+                     "intended", "committed", "permitted_on_demand", "transient_resident"}
+          for c in _cat_body["components"]),
+      f'实得 {sorted(_cat_body["components"][0])}')
+check("★★ budget 段的键集合(客户端拿它算两堵墙,safety_margin 缺了第二堵墙算不出来)",
+      set(_cat_body["budget"]) == {"vram_budget", "total_gib", "desktop_floor",
+                                   "free_gib", "safety_margin"},
+      sorted(_cat_body["budget"]))
+check("★ aliases_by_component 覆盖全部组件(界面要说清『勾掉它,哪些功能会停』)",
+      set(_cat_body["aliases_by_component"]) == set(gpu_broker.BROKER.cfg.components))
+
+print("\n=== V5 · CONTRACT:gpu.intended —— 失败必须回带 snapshot,否则客户端无从重试 ===")
+_cst, _cbody = _intended_conflict
+check("★ 世代号对不上回 409(不是 200 里塞一个 ok=false)", _cst == 409, _cst)
+check("★★★ 409 的顶层键集合含 snapshot —— 客户端要拿它里面的新 generation 重试;"
+      "只回一个裸 409 会让它必须再发一次请求才知道现在是什么样,那就又变成轮询了",
+      "snapshot" in _cbody and "error" in _cbody, sorted(_cbody))
+check("★★ 而且那个 snapshot 是**完整快照**(键集合与 gpu.snapshot 那条一致)——"
+      "半份快照客户端读不出 generation,重试照样撞 409",
+      set(_cbody["snapshot"]) == _SNAPSHOT_TOP_KEYS,
+      f'少 {sorted(_SNAPSHOT_TOP_KEYS - set(_cbody["snapshot"]))}')
+check("★ 失败码点名(generation_conflict),不是一句『失败了』",
+      _cbody["error"]["type"] == "generation_conflict", _cbody["error"])
 
 # ── 元断言:每一条契约在**客户端**那半边都必须有配对 ──
 #   ★ 缺配对即判红。找不到客户端源码也判红 —— 「查不了」不等于「没问题」,
@@ -2067,11 +2250,33 @@ except Exception as _e:                                       # noqa: BLE001
 check("★★★ 能读到客户端自检源码(读不到 ⇒ 配对无从核对 ⇒ 判红,不当作没问题)",
       _st_src is not None, f"{_SELFTEST}")
 if _st_src is not None:
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 2026-08-06 夜(V5)修:判据从裸 `in` 换成**带边界**的匹配。
+    #
+    #  实测撞到:新登记 `CONTRACT:gpu.intended` 那一刻,这条元断言**当场就绿了** ——
+    #  而客户端那半边一个字都还没写。原因是它是 `CONTRACT:gpu.intended.blocking`
+    #  的**前缀**,裸 `in` 在后者身上命中。
+    #  ⇒ 一条"缺配对即判红"的护栏,在**恰好最容易缺配对**的那种命名下静默失效。
+    #  ★ 这与本仓已记的那条同形(`/v1/gpu/lease` 是 `/v1/gpu/lease/renew` 的前缀,
+    #    裸 `in` 会把后者算成前者的消费者)—— 同一个坑,换了个位置。
+    #  ⇒ 契约号只由 [a-z0-9_.] 组成,所以边界判据是「后面不许再跟这些字符」。
+    # ══════════════════════════════════════════════════════════════════
+    def _has_anchor(src: str, cid: str) -> bool:
+        return re.search(re.escape(cid) + r"(?![a-z0-9_.])", src) is not None
+
     for _cid in CROSS_PROCESS_CONTRACTS:
         check(f"★★★ 元断言:{_cid} 在客户端那半边有配对断言(缺配对即判红)",
-              _cid in _st_src,
+              _has_anchor(_st_src, _cid),
               "Selftest.cs 里找不到这个契约号 —— 服务端钉了形状,客户端没人证明它读得懂")
     check("★ 且元断言本身不是空转(确实读到了内容)", len(_st_src) > 1000)
+    # ★★ 判据自检:拿一个**只以已登记契约号为前缀**的假契约号问一遍,必须判**不在**。
+    #   没有这一条,上面那条边界修复本身也只是"看着修好了"。
+    check("★★★ 元断言的边界判据自己被钉住:前缀不算命中(gpu.intended 不许靠 "
+          "gpu.intended.blocking 蒙混过关)",
+          not _has_anchor("CONTRACT" + ":gpu.intended.blocking 只有这一个",
+                          "CONTRACT" + ":gpu.intended"))
+    check("★ 反向:真的写了那个契约号时,边界判据认得出来",
+          _has_anchor("… CONTRACT" + ":gpu.intended —— 说明 …", "CONTRACT" + ":gpu.intended"))
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

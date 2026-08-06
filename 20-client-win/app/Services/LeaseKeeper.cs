@@ -142,13 +142,21 @@ public sealed class LeaseKeeper : IDisposable
         // ★ if_generation 必填(与 lease 端点的既有规矩一致)—— 先取一次快照。
         var (gs, gb) = await Transport.Send(_hub.Profile, ep, HttpMethod.Get, "/v1/gpu/snapshot", null, ct);
         if (gs != 200) { LastError = $"取快照失败({gs})"; Notify(); return false; }
-        long gen;
-        try
+        if (!TryParseGeneration(gb, out var gen))
         {
-            using var d = System.Text.Json.JsonDocument.Parse(gb);
-            gen = d.RootElement.TryGetProperty("generation", out var g) ? g.GetInt64() : 0;
+            // ★★★ 2026-08-06(契约欠债 `CONTRACT:gpu.snapshot`):这里原来是
+            //   `TryGetProperty("generation", out var g) ? g.GetInt64() : 0` ——
+            //   **读不到就悄悄用 0**。而 0 几乎必然与中枢的世代号对不上 ⇒ 每次申请租约
+            //   都回 409 `generation_conflict`,客户端把它记成「申请租约被拒(409)」。
+            //   ⇒ 一次**解析缺陷**会稳定伪装成「中枢忙 / 别处刚改过」,
+            //     而看日志的人会去查中枢的并发,查不到任何东西。
+            //   ★ 两件事的下一步完全相反:读不出 generation 要去对**契约**,
+            //     409 要去**重取快照再试**。所以它们必须是两条不同的消息。
+            LastError = "快照里读不出 generation —— 这是**客户端与中枢的契约对不上**,"
+                        + "不是中枢忙。别去重试:重试每次都会得到同一个 409。";
+            Notify();
+            return false;
         }
-        catch { LastError = "快照读不懂"; Notify(); return false; }
 
         var (st, body) = await Transport.Send(
             _hub.Profile, ep, HttpMethod.Post, "/v1/gpu/lease",
@@ -189,6 +197,39 @@ public sealed class LeaseKeeper : IDisposable
         LastError = null;
         Notify();
         return true;
+    }
+
+    /// <summary>
+    /// 从 <c>GET /v1/gpu/snapshot</c> 的响应里读出世代号。
+    /// <para>
+    /// ★★★ <c>CONTRACT:gpu.snapshot</c> 的客户端那半边。抽成 <c>static</c> 是为了让自检
+    /// 能拿**服务端真实形状的字面量**直接喂它 —— 另一半在 <c>test_gpu_broker.py</c> 里
+    /// 钉住该端点 200 响应的顶层键集合。
+    /// </para>
+    /// <para>
+    /// ★★ 返回 <c>bool</c> 而不是 <c>long</c>:**读不出来不能有默认值**。
+    /// 任何默认值(尤其 0)都会让一次解析失败变成一串 409,而 409 的字面意思是
+    /// 「你看到的状态已经不是最新的了」—— 一个**指向别处**的假理由。
+    /// 这与 <c>TryParseGrant</c> 拿不到 fence_token 就判失败是同一条纪律。
+    /// </para>
+    /// </summary>
+    internal static bool TryParseGeneration(string json, out long generation)
+    {
+        generation = -1;
+        try
+        {
+            using var d = System.Text.Json.JsonDocument.Parse(json);
+            var r = d.RootElement;
+            if (r.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+            if (!r.TryGetProperty("generation", out var g)) return false;
+            // ★ 类型也要对:JSON 里 "12"(字符串)与 12(数字)是两回事,
+            //   而 GetInt64() 对字符串会抛 —— 抛在这里被 catch 掉就又变成一句"读不懂"。
+            if (g.ValueKind != System.Text.Json.JsonValueKind.Number) return false;
+            if (!g.TryGetInt64(out generation)) return false;
+            // ★ 世代号是单调计数器,负数只可能是形状对不上(而不是"很旧的世代")。
+            return generation >= 0;
+        }
+        catch { generation = -1; return false; }
     }
 
     /// <summary>

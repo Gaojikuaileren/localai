@@ -110,9 +110,13 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
                 "它随 GPU 车道那次提交出现,合并当天 `未登记` 判红,登记时才发现两半都已写好。",
     },
     ("gateway", "GET", "/v1/gpu/snapshot"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "消费者 Services/LeaseKeeper.cs:133 —— 它拿 generation 去发租约;"
-                "generation 读错 = 每次 if_generation 都冲突,而那看起来像'中枢忙'",
+        "state": "paired", "cid": "CONTRACT:gpu.snapshot",
+        "lane": "GPU/租约切片",
+        "note": "★ 2026-08-06 夜(V5)还清。消费者 Services/LeaseKeeper.cs —— 它拿 generation "
+                "去发租约;generation 读错 = 每次 if_generation 都冲突,而那看起来像'中枢忙'。"
+                "★★ 还债时**当场抓到那条缺陷**:客户端原来写 `? g.GetInt64() : 0` —— "
+                "读不到就悄悄用 0 ⇒ 稳定 409 ⇒ 伪装成中枢并发。"
+                "已改成无默认值的 TryParseGeneration + 两条**理由不同**的失败消息",
     },
     ("gateway", "POST", "/v1/gpu/lease/renew"): {
         "state": "paired", "cid": "CONTRACT:gpu.lease.renew",
@@ -120,19 +124,30 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
         "note": "顶层键集合 {result, snapshot};客户端半边钉 409(条件写不匹配)⇒ 立刻自隐",
     },
     ("gateway", "GET", "/v1/gpu/events"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "SSE。消费者 Services/HubGpu.cs:181。★ SSE 的契约是**每一帧**的顶层键集合,"
-                "不是整个响应体 —— 服务端那半要钉帧的形状",
+        "state": "paired", "cid": "CONTRACT:gpu.events.frame",
+        "lane": "GPU/租约切片",
+        "note": "★ 2026-08-06 夜(V5)还清。SSE:契约是**每一帧**的顶层键集合,不是响应体 —— "
+                "那条流永不结束,它根本没有响应体。服务端半边直接驱动 gpu_events 的异步生成器"
+                "取第一帧(用 TestClient 会挂死:退出 with 要关连接,而生成器正 await 在 "
+                "wait_for_change 上,两边互相等);客户端半边钉「记住 event: 那一行」。"
+                "★★ 还债时抓到:error 帧此前被当成快照去解析,失败后记成『帧读不懂』—— "
+                "中枢把原因说了,客户端把它翻译成了一句指向别处的猜测",
     },
     ("gateway", "GET", "/v1/gpu/components"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "消费者 Services/HubGpu.cs:309 —— 挑选面板的数据源。"
-                "解析漂了就退回客户端自己编一份清单,而客户端**已经编过一份**(第三套词汇)",
+        "state": "paired", "cid": "CONTRACT:gpu.components",
+        "lane": "GPU/租约切片",
+        "note": "★ 2026-08-06 夜(V5)还清。消费者 Services/HubGpu.cs —— 挑选面板的数据源。"
+                "解析漂了就退回客户端自己编一份清单,而客户端**已经编过一份**(第三套词汇)。"
+                "⇒ 断言钉的是「取不到就**什么都不列**」(_catalog=null + 清空列表 + "
+                "ModelCatalog.All 不许长回来),不是兜底;并钉「少一个键整份返回 null,不保留半份目录」",
     },
     ("gateway", "POST", "/v1/gpu/intended"): {
-        "state": "none", "lane": "GPU/租约切片",
-        "note": "消费者 Services/HubGpu.cs:367 —— 「点确定」那一次事务。"
-                "失败要回带 snapshot,客户端读不出 snapshot 就无从重试",
+        "state": "paired", "cid": "CONTRACT:gpu.intended",
+        "lane": "GPU/租约切片",
+        "note": "★ 2026-08-06 夜(V5)还清。消费者 Services/HubGpu.cs —— 「点确定」那一次事务。"
+                "失败要回带**完整** snapshot,客户端读不出就无从重试(只回裸 409 = 又变成轮询)。"
+                "★★ 注意它与子形状条目 CONTRACT:gpu.intended.blocking 是**前缀关系** —— "
+                "见 _SUBSHAPE_CIDS 与 _anchor_count 上方那段",
     },
     ("gateway", "POST", "/v1/session/end"): {
         "state": "paired", "cid": "CONTRACT:session.end",
@@ -281,7 +296,9 @@ _SUBSHAPE_CIDS = {
 
 #  欠债总数钉死 —— 印在覆盖账上的那个数字必须和实际对得上。
 #  ★ 它不是重复登记表:它让"又欠了一条"变成 diff 里的**一行**,而不是表里多一项没人数。
-_EXPECTED_DEBT = 23
+#  ★ 2026-08-06 夜(V5):23 → 19,[GPU/租约切片] 那 4 条还清。
+#    棘轮只许往下走 —— 这个数字变大必须是一次**有名字的决定**,而不是表里多了一项没人数。
+_EXPECTED_DEBT = 19
 
 
 #  ── lan-edge 端点提取器 ────────────────────────────────────────────────

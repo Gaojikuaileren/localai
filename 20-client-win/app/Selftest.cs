@@ -7470,6 +7470,173 @@ public static class Selftest
                     "★★★ 意图冷却窗口必须**显著小于**租约 TTL —— 否则会出现"
                     + "「还在打字但租约已经过期」的窗口,而那正好让空闲收割把它卸掉");
             }
+
+            // ══════════════════════════════════════════════════════════
+            //  V5 · 还清 [GPU/租约切片] 那 4 条契约欠债(D95 的欠债表只许变短)
+            //
+            //  服务端那半在 `test_gpu_broker.py` 的 `CROSS_PROCESS_CONTRACTS`,
+            //  它对着**真实端点**钉顶层键集合;这一半证明「这个形状我读得懂」。
+            //  ★ 单独任何一条都抓不住 A1 那族缺陷 —— 必须成对。
+            // ══════════════════════════════════════════════════════════
+            {
+                // ── CONTRACT:gpu.snapshot ──
+                //   ★★ 这一条的要害不是"能不能解析",是 **generation 读错会伪装成「中枢忙」**:
+                //   LeaseKeeper 拿它去发租约,读错 ⇒ 每次 if_generation 都 409,
+                //   而 409 的字面意思是「别处刚改过」—— 一个指向别处的假理由。
+                const string snapWire2 =
+                    "{\"generation\":42,\"committed\":[\"a\"],\"reserved\":[],\"leases\":[]," +
+                    "\"sets\":{\"intended_resident\":[\"a\"],\"committed_resident\":[\"a\"]," +
+                    "\"actual_resident\":[\"a\"],\"permitted_on_demand\":[],\"transient_resident\":[]}," +
+                    "\"state\":\"READY\",\"power_on\":true,\"invariants\":[]," +
+                    "\"vram\":{\"free_gib\":3.0,\"total_gib\":15.92,\"vram_budget\":8.52," +
+                    "\"desktop_floor\":6.6,\"non_ai_used_gib_inferred\":1.0," +
+                    "\"non_ai_is_inferred\":true,\"non_ai_note\":\"…\"}," +
+                    "\"sampled_at\":1.0,\"age_s\":0.5,\"stale\":false,\"sampler_error\":null," +
+                    "\"loader_present\":true,\"loader_error\":null,\"idle_seconds\":3.0," +
+                    "\"lease_count\":1,\"idle_is_meaningful\":true,\"idle_note\":\"…\"," +
+                    "\"idle_note_transient\":\"…\",\"transient_idle_s\":{}," +
+                    "\"transient_idle_threshold_s\":600.0,\"transient_note\":\"…\"}";
+                Assert(LeaseKeeper.TryParseGeneration(snapWire2, out var gen42) && gen42 == 42,
+                    "★★★ CONTRACT:gpu.snapshot —— 拿服务端真实形状读得出 generation"
+                    + $"(实得 {gen42})");
+                Assert(HubGpu.TryParseSnapshot(snapWire2) is not null,
+                    "★ 同一份形状,显存条那半边也解析得出来(两个消费者读的是同一个响应)");
+
+                // ★★★ 反向三条 —— 没有它们,一个「永远返回 true」的解析器也能让上面那条绿。
+                //   而且这三条正是"读错会伪装成中枢忙"的那三种形态。
+                Assert(!LeaseKeeper.TryParseGeneration(
+                           "{\"committed\":[],\"state\":\"READY\"}", out var genMissing)
+                       && genMissing < 0,
+                    "★★★ 没有 generation ⇒ 判失败,**不给默认值** —— "
+                    + "给 0 的话每次申请租约都撞 409,而那看起来像【中枢忙】,"
+                    + "看日志的人会去查中枢的并发,查不到任何东西");
+                Assert(!LeaseKeeper.TryParseGeneration("{\"generation\":\"42\"}", out _),
+                    "★★ 类型也要对:JSON 里 \"42\"(字符串)与 42(数字)是两回事");
+                Assert(!LeaseKeeper.TryParseGeneration("not json", out _),
+                    "★ 垃圾输入判失败且不抛");
+                // ★★ 那两条失败路径给出的**理由必须不同** —— 这就是「把两者分开」的落点。
+                var lkSrc4 = TryReadSource("Services/LeaseKeeper.cs");
+                if (lkSrc4 is not null)
+                {
+                    var acq4 = Slice(lkSrc4, "async Task<bool> AcquireAsync",
+                                     "internal static bool TryParseGeneration");
+                    Assert(acq4 is not null && acq4.Contains("TryParseGeneration("),
+                        "★ AcquireAsync 走抽出来的那个解析器(自检喂的也是它)");
+                    Assert(acq4 is not null && !acq4.Contains(": 0;"),
+                        "★★★ AcquireAsync 里不得再留 `? … : 0` 那种默认值回落");
+                    Assert(lkSrc4.Contains("不是中枢忙"),
+                        "★★★ 读不出 generation 与「申请租约被拒(409)」必须是**两条不同的消息** —— "
+                        + "两者的下一步完全相反:一个要去对契约,一个要重取快照再试");
+                }
+
+                // ── CONTRACT:gpu.events.frame ──
+                //   ★★ SSE 的契约是**每一帧**,不是响应体 —— 那条流永不结束,它没有响应体。
+                var hgSrc4 = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (hgSrc4 is not null)
+                {
+                    // ★ 查的是一个**字符串字面量**(`"event: "`),所以只能用原始源码 ——
+                    //   CodeOnly 会把字符串整个剥掉,拿它查这个的方向是恒【假】。
+                    //   (与 ASSERTION-PITFALLS 第 3c 条同一个坑的**反面**:那次是恒真。)
+                    Assert(hgSrc4.Contains("StartsWith(\"event: \""),
+                        "★★★ CONTRACT:gpu.events.frame —— 客户端**记住 event: 那一行**;"
+                        + "SSE 是逐行协议,不记住就不知道这一行的 data 是哪一种帧");
+                    Assert(CodeOnly(hgSrc4).Contains("_sseEvent"),
+                        "★ 帧类型是解析的一部分,不是可选装饰(这条查的是标识符,去注释才对)");
+                }
+                Assert(HubGpu.SnapshotEvents.Length == 3
+                       && HubGpu.SnapshotEvents.Contains("snapshot")
+                       && HubGpu.SnapshotEvents.Contains("update")
+                       && HubGpu.SnapshotEvents.Contains("keepalive"),
+                    "★★ 带快照的事件名是**闭集**(snapshot/update/keepalive)—— "
+                    + "多一种客户端认不出、少一种它收不到");
+                Assert(HubGpu.ParseStreamError(
+                           "{\"type\":\"RuntimeError\",\"message\":\"采样器炸了\"}")
+                       is { } se1 && se1.Contains("RuntimeError") && se1.Contains("采样器炸了"),
+                    "★★★ error 帧读得出中枢**自己说的**原因 —— "
+                    + "此前它被当成快照去解析、失败后记成「帧读不懂(版本可能对不上)」,"
+                    + "中枢明明把原因说了,客户端把它翻译成了一句指向别处的猜测");
+                Assert(HubGpu.ParseStreamError("{}") is null
+                       && HubGpu.ParseStreamError("not json") is null,
+                    "★★ 反向:中枢没说原因时返回 null —— **不编一句**;"
+                    + "说【它没说原因】比替它编一个诚实");
+
+                // ── CONTRACT:gpu.components ──
+                //   ★★★ 这一条的要害是**取不到就什么都不列**,不是兜底:
+                //   兜底会退回"客户端自己编一份清单",而客户端**已经编过一份**
+                //   (第三套词汇 chat.8b/speech/image,D84 才删掉的那个)。
+                const string catWire =
+                    "{\"generation\":7,\"components\":[{\"id\":\"llm.a\",\"display\":\"A\"," +
+                    "\"kind\":\"llm\",\"peak_gib\":5.92,\"note\":\"实测\",\"intended\":true," +
+                    "\"committed\":true,\"permitted_on_demand\":false,\"transient_resident\":false}]," +
+                    "\"aliases_by_component\":{\"llm.a\":[\"assistant.fast\"]}," +
+                    "\"budget\":{\"vram_budget\":8.52,\"total_gib\":15.92,\"desktop_floor\":6.6," +
+                    "\"free_gib\":3.0,\"safety_margin\":0.8},\"state\":\"READY\"," +
+                    "\"stale\":false,\"sampler_error\":null}";
+                var cat1 = HubGpu.ParseCatalog(catWire);
+                Assert(cat1 is not null && cat1.Components.Count == 1
+                       && cat1.Components[0].Id == "llm.a"
+                       && Math.Abs(cat1.Components[0].PeakGiB - 5.92) < 1e-9
+                       && cat1.Components[0].Aliases.Count == 1
+                       && Math.Abs(cat1.SafetyMargin - 0.8) < 1e-9,
+                    "★★★ CONTRACT:gpu.components —— 服务端真实形状能解析出"
+                    + "组件/峰值/别名/safety_margin(少 safety_margin 就算不出第二堵墙)");
+                Assert(HubGpu.ParseCatalog(
+                           "{\"generation\":7,\"components\":[{\"id\":\"llm.a\"}]," +
+                           "\"budget\":{\"vram_budget\":1.0,\"total_gib\":1.0," +
+                           "\"desktop_floor\":1.0,\"safety_margin\":1.0}}") is null,
+                    "★★★ 反向:组件少了 peak_gib ⇒ **整份返回 null**,不保留半份目录。"
+                    + "半份目录会让面板显示一个算错的合计值,而用户无从对上账");
+                Assert(HubGpu.ParseCatalog("{\"generation\":7}") is null
+                       && HubGpu.ParseCatalog("not json") is null,
+                    "★ 反向:缺 components / 垃圾输入都判 null");
+                var cpSrc4 = TryReadSource(Path.Combine("Views", "ComponentPicker.cs"));
+                if (cpSrc4 is not null)
+                {
+                    var cpCode4 = CodeOnly(cpSrc4);
+                    Assert(cpCode4.Contains("_catalog = null") && cpCode4.Contains("_list.Children.Clear()"),
+                        "★★★ 取不到清单就**什么都不列**(_catalog=null + 列表清空)—— "
+                        + "列一份本地兜底 = 回到第三套词汇,而用户会以为那就是中枢的真实清单");
+                    Assert(!cpCode4.Contains("ModelCatalog.All"),
+                        "★★ 而且那份自造清单**不在了** —— 兜底路径不许从这里长回来");
+                }
+
+                // ── CONTRACT:gpu.intended ──
+                //   ★ 失败要回带 snapshot,客户端读不出 snapshot 就**无从重试**。
+                const string conflictWire =
+                    "{\"result\":{\"ok\":false,\"code\":\"generation_conflict\",\"state\":\"READY\"," +
+                    "\"message\":\"世代号对不上\",\"blocking\":[]}," +
+                    "\"error\":{\"message\":\"世代号对不上:你基于 3,当前 9\"," +
+                    "\"type\":\"generation_conflict\"},\"snapshot\":{\"generation\":9}}";
+                var conflictOutcome = HubGpu.ParseOutcome(409, conflictWire);
+                Assert(!conflictOutcome.Ok && conflictOutcome.Code == "generation_conflict"
+                       && conflictOutcome.Generation == 9,
+                    "★★★ CONTRACT:gpu.intended —— 409 里那份 snapshot 的 generation 读得出来"
+                    + $"(实得 {conflictOutcome.Generation});读不出就只能再发一次请求才知道现在是什么样,"
+                    + "那就又变成轮询了");
+                Assert(conflictOutcome.Advice.Contains("最新"),
+                    "★ 而且它给的下一步是【已经帮你取回最新状态,请复核】,不是一句「失败了」");
+                Assert(HubGpu.ParseOutcome(200,
+                           "{\"result\":{\"ok\":true,\"code\":\"\",\"state\":\"READY\"," +
+                           "\"message\":\"已应用\"},\"snapshot\":{\"generation\":10}}") is { Ok: true },
+                    "★ 成功那个形状({result, snapshot})也读得懂");
+                Assert(HubGpu.ParseOutcome(409, "{\"error\":{\"type\":\"busy\"}}").Generation == 0,
+                    "★★ 反向:没回带 snapshot ⇒ Generation 落 0,**而调用方据此拿不到可重试的号** —— "
+                    + "钉住这一点是为了让「服务端哪天忘了回带 snapshot」在这里就现形");
+                // ★★★ 读不懂时的回落规则是**两句**,而第二句的正确性在【服务端那一侧】:
+                //   ① 响应体读不懂 ⇒ 只能信 HTTP 状态;
+                //   ② 而信它之所以安全,是因为服务端钉死了「事务没成不得回 200」。
+                //   ⇒ 这条断言写下来的时候,把 HubGpu 里那段**说反了的注释**照出来了
+                //     (它写着"读不出来不能当成成功",而代码在 200 时正是当成了成功)。
+                //     代码是对的,注释错了 —— 已更正并写明它为什么依赖另一侧。
+                Assert(!HubGpu.ParseOutcome(422, "not json").Ok
+                       && HubGpu.ParseOutcome(422, "not json").Code == "unreadable_response",
+                    "★★★ 非 200 且读不懂 ⇒ **不 Ok**,且给一个可分辨的码(不编一个具体失败码:"
+                    + "我们并不知道它是哪一种失败,编了会让人去做一件与真相无关的事)");
+                Assert(HubGpu.ParseOutcome(200, "not json").Ok,
+                    "★★ 200 且读不懂 ⇒ 仍按成功算 —— 这**不是**放水,它的正确性来自"
+                    + "服务端那一半:gpu_intended 钉死了「事务没成不得回 200」。"
+                    + "单看客户端这一侧永远说不清这条对不对,所以两句必须一起写");
+            }
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally

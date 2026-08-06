@@ -234,8 +234,50 @@ public sealed class HubGpu : IDisposable
         }
     }
 
+    /// <summary>
+    /// 上一行 <c>event:</c> 报的帧类型。★ SSE 是**逐行**协议:`event:` 和 `data:` 是两行,
+    /// 不记住上一行就没法知道这一行的 data 是哪一种帧。
+    /// </summary>
+    string _sseEvent = "";
+
+    /// <summary>
+    /// 中枢在推送流里**显式报错**的那一帧(<c>event: error</c>)带来的消息。
+    /// ★ 与「帧读不懂」分开:前者是中枢说"我这边出事了",后者是我们读不懂它说什么。
+    /// </summary>
+    public string? HubStreamError { get; private set; }
+
+    /// <summary>data 帧里承载快照的三种事件名。★ 闭集 —— 新增一种必须显式加进来。</summary>
+    internal static readonly string[] SnapshotEvents = { "snapshot", "update", "keepalive" };
+
     Task OnLine(string line)
     {
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ 2026-08-06(契约欠债 `CONTRACT:gpu.events.frame`):记住 `event:` 那一行。
+        //
+        //  服务端的推送流有**四种**帧:snapshot / update / keepalive(都带完整快照)
+        //  与 **error**(`{"type","message"}` —— 中枢那边显式写着
+        //  「推送流崩了要**说出来**,不能静默断开」)。
+        //  而此前客户端**只看 `data:`**:error 帧的 data 拿去 TryParseSnapshot 必然失败
+        //  ⇒ 被记成「中枢发来的帧读不懂(版本可能对不上)」。
+        //  ★ 中枢把原因说了出来,客户端把它翻译成了一句**指向别处**的猜测 ——
+        //    这正是这条契约要防的形状:不是没收到,是收到了却读错了它的种类。
+        // ══════════════════════════════════════════════════════════════
+        if (line.StartsWith("event: ", StringComparison.Ordinal))
+        {
+            _sseEvent = line[7..].Trim();
+            return Task.CompletedTask;      // event: 行本身不带数据,不刷新任何时间戳
+        }
+        if (line.StartsWith("data: ", StringComparison.Ordinal)
+            && string.Equals(_sseEvent, "error", StringComparison.Ordinal))
+        {
+            HubStreamError = ParseStreamError(line[6..]);
+            // ★ 中枢自报出错 ⇒ **不是** Live。但理由要用它给的那一句,不是我们编的。
+            Link = HubGpuLink.Reconnecting;
+            LastError = "中枢的推送流报错:" + (HubStreamError ?? "(它没说原因)");
+            _sseEvent = "";
+            Notify();
+            return Task.CompletedTask;
+        }
         // ══════════════════════════════════════════════════════════════
         //  ★★★ 2026-08-05 修:LastFrameAt 原来在**解析之前**无条件刷新,
         //  而 Snapshot 只在解析成功时更新。于是中枢发来读不懂的帧时(双方版本对不上、
@@ -261,6 +303,8 @@ public sealed class HubGpu : IDisposable
             }
             Snapshot = parsed;
             LastDataAt = DateTime.UtcNow;    // ★ 只有**带数据**的帧刷新它 —— 裸心跳不算
+            HubStreamError = null;           // 又收到好数据了 ⇒ 上一次的中枢报错翻篇
+            _sseEvent = "";
         }
         LastFrameAt = DateTime.UtcNow;
         if (Link != HubGpuLink.Live) { Link = HubGpuLink.Live; LastError = null; }
@@ -300,6 +344,25 @@ public sealed class HubGpu : IDisposable
             : (DateTime.UtcNow - LastDataAt).TotalSeconds;
 
     void Notify() { try { Changed?.Invoke(); } catch { } }
+
+    /// <summary>
+    /// 解析 <c>event: error</c> 那一帧的 data(<c>{"type","message"}</c>)。
+    /// ★ 读不出就返回 null —— **不编一句**。中枢没说清楚时,说"它没说原因"比替它编一个诚实。
+    /// </summary>
+    internal static string? ParseStreamError(string json)
+    {
+        try
+        {
+            using var d = JsonDocument.Parse(json);
+            var r = d.RootElement;
+            if (r.ValueKind != JsonValueKind.Object) return null;
+            var type = Str(r, "type");
+            var msg = Str(r, "message");
+            if (string.IsNullOrEmpty(type) && string.IsNullOrEmpty(msg)) return null;
+            return string.IsNullOrEmpty(type) ? msg : $"{type}: {msg}";
+        }
+        catch { return null; }
+    }
 
     /// <summary>解析一帧快照。★ 解析失败返回 null 而不是抛 —— 但也**不保留半份**:
     /// 半份解析出来的快照比没有更危险(几个字段是新的、几个是旧的,而界面分不出来)。</summary>
@@ -559,7 +622,20 @@ public sealed class HubGpu : IDisposable
         }
         catch
         {
-            // ★ 解析不出来**不能**当成成功。HTTP 状态是唯一还可信的东西。
+            // ══════════════════════════════════════════════════════════
+            //  ★★★ 2026-08-06 夜(契约欠债 `CONTRACT:gpu.intended`)更正这段注释:
+            //  它原来写的是「解析不出来**不能**当成成功」,而下面这行在 200 时
+            //  **恰恰把它当成了成功**。写断言的时候照着注释写,当场变红。
+            //
+            //  ⇒ 代码是对的,注释说错了。真正的规则是两句,而且第二句依赖服务端那一半:
+            //    ① 响应体读不懂 ⇒ **HTTP 状态是唯一还可信的东西**,只能信它;
+            //    ② 而信它之所以安全,是因为服务端钉死了「事务没成 **不得回 200**」——
+            //       那条断言在 `gateway.py` 的 gpu_intended 里,并由 test_gpu_broker 钉着。
+            //  ★ 这正是成对断言的意义:客户端这条回落的**正确性来自另一侧的约束**,
+            //    单看这一侧永远说不清它对不对。所以两句必须一起写。
+            //  ★ 非 200 时给 `unreadable_response` 而不是照抄失败码:我们并不知道
+            //    它是哪一种失败,编一个具体的码会让人去做一件与真相无关的事。
+            // ══════════════════════════════════════════════════════════
             return new ApplyOutcome(status == 200, status == 200 ? "" : "unreadable_response",
                                     $"中枢回了 {status},但响应读不懂", "", Array.Empty<BlockingLease>(), 0);
         }
