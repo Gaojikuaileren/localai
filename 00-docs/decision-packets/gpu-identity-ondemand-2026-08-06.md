@@ -1,4 +1,4 @@
-# `D?` · GPU 面身份合一 · 按需驻留(transient)平面 —— 兼 D90 未决项 ②④ 的处置
+# `D94` · GPU 面身份合一 · 按需驻留(transient)平面 —— 兼 D90 未决项 ②④ 的处置
 
 > 提交人:V2 车道(GPU 面身份与租约收口)· 2026-08-06
 > 车道工作树:`.claude/worktrees/localai-v2-gpu-identity-lease-d9c20e`(分支 `claude/localai-v2-gpu-identity-lease-d9c20e`)

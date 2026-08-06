@@ -190,8 +190,10 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     },
     ("lan-edge", "POST", "/identity/renew/enroll"): {
         "state": "none", "lane": "证书/配对切片",
-        "note": "消费者 transport/ClientTransport.cs:389 —— ★ D92 点名的 A5 就在这一族:"
-                "服务端写了 CertLifecycle/RenewDeviceCertIfDue,客户端 HubClient.cs 那一行至今没人改",
+        "note": "消费者 transport/ClientTransport.cs:389 —— ★ 审计 A5 曾在这一族:"
+                "服务端写了 CertLifecycle/RenewDeviceCertIfDue 而客户端零调用点。"
+                "**A5 已于 2026-08-06 随 V1(D93)闭环**(HubClient.cs 实测 4 处调用),"
+                "但**这条契约的欠债没还** —— 接上了调用点 ≠ 有了成对断言,两件事别混。",
     },
     ("lan-edge", "POST", "/identity/renew/complete"): {
         "state": "none", "lane": "证书/配对切片",
