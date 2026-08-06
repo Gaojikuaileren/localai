@@ -6631,7 +6631,7 @@ public static class Selftest
                 // ══════════════════════════════════════════════════════════════
                 //  ▼▼▼ V4(契约欠债 · 证书/配对切片)—— 本段【只追加】,上面一律没动 ▼▼▼
                 //  客户端半边:/admin/* 那 7 条(含 2 条元素子形状 + 1 条 409 失败分支)。
-                //  服务端半边在 10-core/lan-edge/Program.cs 的「D? 丁」节(真 HTTP)。
+                //  服务端半边在 10-core/lan-edge/Program.cs 的「D96 丁」节(真 HTTP)。
                 //  pair/* 与 identity/renew/* 的客户端半边在 20-client-win/transport/Program.cs
                 //  —— 那边有真的测试 Edge,能把 Transport.Pair 端到端跑完;放这儿只能测仿造品。
                 // ══════════════════════════════════════════════════════════════
