@@ -304,17 +304,26 @@ URL 的**主机名**决定 TLS 主机名校验,而服务器证书的 SAN 是 `lo
 ### 2.1 `20-client-win/app/localai-client.csproj` —— **先加这一条,否则下面全都编不过**
 
 第 28–36 行是**显式** `Compile Include` 名单(不是通配),新文件不会自动进来。
-在第 36 行 `<Compile Include="..\transport\ClientTransport.cs" />` **之后**追加四行:
+在第 36 行 `<Compile Include="..\transport\ClientTransport.cs" />` **之后**追加**两行**:
 
 ```xml
 <Compile Include="..\transport\TlsFailure.cs" />
 <Compile Include="..\..\10-core\identity\CertLifecycle.cs" />
-<Compile Include="..\..\10-core\identity\Renewal.cs" />
-<Compile Include="..\..\10-core\identity\ServerCertRotator.cs" />
 ```
 
 *为什么*:`TlsFailure`/`CertLifecycle` 是下面所有改动的依赖。
 (lan-edge 与 transport 两个 csproj 已由本车道同步加好。)
+
+> ### ⚠ 2026-08-06 更正:本节初稿写的是**四行**,多写了两行
+>
+> 初稿还列了 `Renewal.cs` 与 `ServerCertRotator.cs`。**客户端不需要它们** ——
+> 这两个类是**主机侧专用**:`Renewal` 由 lan-edge 的续签路由用,`ServerCertRotator` 由
+> `run-lan` 的轮换循环用。客户端走的是 `Transport.RenewDeviceCertIfDue`,它用 HTTP
+> 跟主机的路由讲话,**不引用 `Renewal` 类**(`ClientTransport.cs` 里只有注释提到它)。
+> 真正 `new Renewal(...)` 的是 `transport/Program.cs`(transport 自检的测试 Edge),
+> 而客户端 csproj 只链 `ClientTransport.cs`,不链那个文件。
+> ⇒ 多加那两行只会把主机侧代码拖进客户端构建,没有任何收益。
+> ★ **client 车道已经自己看出来了,只加了对的那两行** —— 是本节初稿写错,不是他们漏做。
 
 ### 2.2 `Services/HubClient.cs:26` —— 枚举补第四态
 
