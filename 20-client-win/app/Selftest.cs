@@ -7340,6 +7340,89 @@ public static class Selftest
                        .Blocking.Count == 0,
                     "★ 反向:空列表就是空列表 —— 不是【解析器永远返回一条】");
 
+                // ════════════════════════════════════════════════════════
+                //  V6 · sync / chat 切片的跨进程契约(客户端那半边)
+                //
+                //  另一半在 `10-core/gateway/test_sync.py`(搜 CROSS_PROCESS_CONTRACTS),
+                //  它对着**真实端点**钉顶层键集合;下面每条喂的都是**服务端的真实形状**。
+                //  ★ 每个 `CONTRACT:` 标记都不是注释,它是那条元断言的检索目标。
+                // ════════════════════════════════════════════════════════
+
+                // ── CONTRACT:sync.push ──
+                const string pushWire =
+                    "{\"accepted\":1,\"total\":2,\"results\":[" +
+                    "{\"kind\":\"todos\",\"id\":\"t1\",\"ok\":true,\"rev\":7,\"superseded\":true," +
+                    "\"superseded_from\":\"PC-A\"}," +
+                    "{\"kind\":\"todos\",\"id\":\"t2\",\"ok\":false,\"code\":\"out_of_scope\"," +
+                    "\"message\":\"个人待办不同步(D52)\"}]," +
+                    "\"generation\":42}";
+                var pr = SyncClient.ParsePush(pushWire);
+                Assert(pr.Accepted == 1 && pr.Total == 2 && pr.Items.Count == 2,
+                    "★★★ CONTRACT:sync.push —— 服务端真实形状能解析出逐条结果");
+                Assert(pr.Items[1].ok == false && pr.Items[1].why.Contains("个人待办"),
+                    "★★ 被拒的那条**读得出理由** —— 读不出就只能要么永远重推、要么静默丢");
+                Assert(pr.Superseded,
+                    "★★ superseded 读得到 —— D86 裁定③:覆盖也是一种失败,得看得见");
+                Assert(SyncClient.ParsePush("{\"accepted\":1,\"total\":1}").Items.Count == 0,
+                    "★ 反向:没有 results 就是没有 —— 不是【解析器凭空造一条】");
+                Assert(SyncClient.ParsePush("not json").Total == 0,
+                    "★ 垃圾输入不抛且不假装成功");
+
+                // ── CONTRACT:sync.events.frame + CONTRACT:sync.snapshot ──
+                //  ★★★ 两条**共用同一个 Absorb**,所以放在一起钉:
+                //    全量就是 since_rev=0 的那一帧,补全量走的也是这个解析器 ——
+                //    两份解析会漂移,而漂的那天只盯着其中一份。
+                Assert(SyncClient.FrameContinues(0, 0) && SyncClient.FrameContinues(99, 0),
+                    "★★ CONTRACT:sync.snapshot —— 全量帧(since_rev=0)任何时候都能接");
+                Assert(SyncClient.FrameContinues(5, 5),
+                    "★★★ CONTRACT:sync.events.frame —— 增量帧接在我手上这份之后 ⇒ 正常");
+                Assert(!SyncClient.FrameContinues(5, 9),
+                    "★★★ **断层要认出来**:这一帧从 rev 9 起而本机停在 5 ⇒ 中间那批"
+                    + "永远不会重发(首帧之后服务端发的都是增量)—— 必须补一次全量");
+                Assert(SyncClient.FrameContinues(9, 5),
+                    "★ 反向:比我旧的帧不算断层(重复/乱序不该触发补全量,那会打转)");
+
+                // ── CONTRACT:chat.stream.frame ──
+                //  ★★ 全项目最热的一条路径。形状漂了 = 对话**一个字都不出**且不报错,
+                //     与"模型没在跑"长得一模一样 —— 人会去查后端、查显存,唯独不会想到是解析。
+                const string chatWire =
+                    "{\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\"," +
+                    "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}";
+                Assert(ChatClient.ParseDeltaPayload(chatWire) == "你好",
+                    "★★★ CONTRACT:chat.stream.frame —— 服务端真实帧能解析出 choices[0].delta.content");
+                Assert(ChatClient.ParseDeltaPayload("[DONE]") is null
+                       && ChatClient.ParseDeltaPayload("") is null,
+                    "★ 结束标记与空行不当成内容");
+                Assert(ChatClient.ParseDeltaPayload("{\"choices\":[]}") is null,
+                    "★★ 反向:空 choices ⇒ null。没有这条,一个『永远返回点什么』的解析器也能让上面那条绿");
+                Assert(ChatClient.ParseDeltaPayload("{\"choices\":[{\"delta\":{}}]}") is null,
+                    "★★ 反向:只有 delta 没有 content ⇒ null(那是首帧 role 帧,不是文字)");
+                Assert(ChatClient.ParseDeltaPayload("{ 坏 json") is null,
+                    "★★ 解析不了的帧**跳过而不是当成内容** —— 把一行 JSON 原文塞进回答里,"
+                    + "用户会以为模型在胡言乱语,而实际是我们没解析");
+
+                // ── CONTRACT:models.list ──
+                //  ★★★ 这一条**故意不喂给我们自己的解析器** —— 因为**没有**:
+                //    `HubClient.ProbeAsync` 只拿 /v1/models 当探活,结果直接丢掉;
+                //    模型清单走的是 /v1/gpu/components。真实消费者在**仓外**
+                //    (`90-ops/install-openwebui.ps1:81` 把 OPENAI_API_BASE_URL 指到本网关)。
+                //  ⇒ 这里钉的是**协议一致性**:任何 OpenAI 客户端按 id/object 读得出东西。
+                //    ★ 假装我们解析了它,才是给一条没人走的路配一条恒绿的断言。
+                {
+                    const string modelsWire =
+                        "{\"object\":\"list\",\"data\":[{\"id\":\"assistant.fast\",\"object\":\"model\"," +
+                        "\"owned_by\":\"localai-hub\",\"kind\":\"chat\",\"contract\":\"\"}]}";
+                    using var md = System.Text.Json.JsonDocument.Parse(modelsWire);
+                    var root = md.RootElement;
+                    Assert(root.GetProperty("object").GetString() == "list"
+                           && root.GetProperty("data").GetArrayLength() == 1,
+                        "★★★ CONTRACT:models.list —— OpenAI 的 list 形状(消费者是仓外的 Open WebUI)");
+                    var m0 = root.GetProperty("data")[0];
+                    Assert(m0.GetProperty("id").GetString() == "assistant.fast"
+                           && m0.GetProperty("object").GetString() == "model",
+                        "★★ 每一项按 OpenAI 协议带 id/object —— 少一个,Open WebUI 整条列不出模型");
+                }
+
                 // ── 按需驻留:客户端必须能把「你勾的常驻」与「系统临时装的」分开 ──
                 const string snapWire =
                     "{\"generation\":5,\"committed\":[\"a\"],\"state\":\"READY\"," +

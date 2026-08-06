@@ -113,30 +113,57 @@ public static class ChatClient
         return new ChatOutcome(true, "", "", sb.ToString());
     }
 
-    static async Task OnLine(string line, StringBuilder sb, Func<string, Task> onDelta)
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ CONTRACT:chat.stream.frame —— 跨进程响应契约的**客户端那半边**(D92)
+    //
+    //  另一半在 `10-core/gateway/test_sync.py`(搜 `CONTRACT:chat.stream.frame`),
+    //  它对着**真实端点**钉每一帧的形状。
+    //
+    //  ★★ 为什么这条特别要紧:它是**全项目最热的一条路径**,而且契约是
+    //    「**每一帧**的形状」而不是一个响应体。帧的形状漂了 = 对话整条坏掉,
+    //    而表现是**一个字都不出**、不是报错 —— 与"模型没在跑"长得一模一样,
+    //    人会去查后端、查显存、查网络,唯独不会想到是解析。
+    //
+    //  ★ 抽成静态纯函数是为了让自检能**直接喂服务端的真实帧形状**。
+    //    此前这段解析长在 `OnLine` 里、和 StringBuilder 与回调缠在一起,喂不进去 ——
+    //    于是最热的这条路径反而是最没法被成对钉住的那条。
+    // ══════════════════════════════════════════════════════════════════
+    /// <summary>
+    /// 从一帧 SSE 的 <c>data:</c> 载荷里取出增量文本。
+    /// <para>返回 null = 这一帧没有可显示的内容(<c>[DONE]</c> / 空 / 解析不了 / 没有 delta)。</para>
+    /// </summary>
+    internal static string? ParseDeltaPayload(string payload)
     {
-        if (!line.StartsWith("data:", StringComparison.Ordinal)) return;
-        var payload = line[5..].Trim();
-        if (payload.Length == 0 || payload == "[DONE]") return;
-        string? delta = null;
+        payload = payload.Trim();
+        if (payload.Length == 0 || payload == "[DONE]") return null;
         try
         {
             using var d = JsonDocument.Parse(payload);
-            if (d.RootElement.TryGetProperty("choices", out var ch) && ch.GetArrayLength() > 0)
+            if (d.RootElement.TryGetProperty("choices", out var ch)
+                && ch.ValueKind == JsonValueKind.Array && ch.GetArrayLength() > 0)
             {
                 var c0 = ch[0];
                 if (c0.TryGetProperty("delta", out var dl)
                     && dl.TryGetProperty("content", out var cv)
                     && cv.ValueKind == JsonValueKind.String)
-                    delta = cv.GetString();
+                    return cv.GetString();
             }
         }
         catch
         {
             // ★ 解析不出来的帧**跳过而不是当成内容** —— 把一行 JSON 原文塞进回答里,
             //   用户会以为模型在胡言乱语,而实际是我们没解析。
-            return;
+            return null;
         }
+        return null;
+    }
+
+    static async Task OnLine(string line, StringBuilder sb, Func<string, Task> onDelta)
+    {
+        if (!line.StartsWith("data:", StringComparison.Ordinal)) return;
+        // ★ 走抽出来的那个解析器 —— 自检喂的也是它。
+        //   两份解析会漂移,而漂的那天自检只盯着其中一份。
+        var delta = ParseDeltaPayload(line[5..]);
         if (string.IsNullOrEmpty(delta)) return;
         sb.Append(delta);
         await onDelta(delta);

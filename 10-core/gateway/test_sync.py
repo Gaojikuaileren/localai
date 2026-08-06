@@ -9,6 +9,7 @@
     静默丢 = 用户在副机上写的备注凭空消失,而他永远不会知道。
 """
 import inspect
+import json
 import pathlib
 import re
 import sys
@@ -343,6 +344,260 @@ if _client.exists():
     check("★★ 客户端连上要【对齐】而不只是补队列 —— "
           "队列是纯内存的,关一次 App 那些数据就永远上不去(实机实测:中枢存档里两台真机 0 条记录)",
           "ReconcileAsync" in _cs and "FullSet" in _cs)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ D92 硬前置:跨进程响应契约,两侧成对(sync + chat 切片 · V6)
+#
+#  D92:每一个跨进程响应契约必须有一条成对断言 —— 服务端钉顶层键集合、
+#  客户端钉「拿这个形状能解析出目标字段」;缺配对即判红。
+#
+#  ★★ A1 那族缺陷的形状是**两边各自都绿,断的是中间那根线**:
+#    服务端只证明"我发的是这个形状",客户端只证明"这个形状我读得懂" ——
+#    任何一条单独存在都抓不住它。
+#
+#  ★ 表的形状照抄 `test_gpu_broker.py` 的 `CROSS_PROCESS_CONTRACTS`,
+#    **故意同名同结构**:90-ops 那条广度元规则要能用同一个正则读两边
+#    (今天它只读 test_gpu_broker.py —— 见本轮决议包里点名的那条)。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== D92 硬前置:sync / chat 切片的跨进程契约,两侧成对 ===")
+
+#: 契约登记表。key = 契约号(客户端那半边必须原样出现这个字符串)。
+CROSS_PROCESS_CONTRACTS = {
+    "CONTRACT:sync.snapshot":     ("GET /v1/sync/snapshot 200",
+                                   {"generation", "since_rev", "data", "counts"}),
+    "CONTRACT:sync.push":         ("POST /v1/sync/push 200",
+                                   {"accepted", "total", "results", "generation"}),
+    "CONTRACT:sync.events.frame": ("GET /v1/sync/events 的每一帧 data:",
+                                   {"generation", "since_rev", "data", "counts", "online"}),
+    "CONTRACT:chat.stream.frame": ("POST /v1/chat/completions 的每一帧 data:",
+                                   {"choices"}),
+    "CONTRACT:models.list":       ("GET /v1/models 200",
+                                   {"object", "data"}),
+}
+
+#  ★ 与本文件第 6 节同款:把 classify_caller 换成桩再打。
+#    ★★ 不这么做的话每条都是 401,而 401 的响应体是 {error, detail} ——
+#      键集合断言会拿"错误体"当"契约体"去比,红是红了,**红的理由却是假的**
+#      (ASSERTION-PITFALLS 第 9 条:判据失败时给出的理由必须是它真的验过的那件事)。
+#    ★ 用完必还(下面 finally)—— 不还的话后面每一条断言都在对着一个测试用的桩说话。
+_observed = {}
+_cc_saved2, _lan_saved2 = gateway.classify_caller, gateway.resolve_lan_principal
+gateway.classify_caller = lambda r: "lan-edge"
+gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device", "device_id": "DEV-" + fp[:6]}
+_H = {"x-localai-cert-sha256": "aa"}
+sync_policy.reset_quota()
+with TestClient(gateway.app, client=("127.0.0.1", 5555)) as _cc:
+    _r_snap = _cc.get("/v1/sync/snapshot", headers=_H)
+    check("★ GET /v1/sync/snapshot 200", _r_snap.status_code == 200, _r_snap.status_code)
+    _observed["CONTRACT:sync.snapshot"] = set(_r_snap.json())
+
+    _r_push = _cc.post("/v1/sync/push", headers=_H, json={"items": [
+        {"kind": "todos", "record": {"id": "c1", "scope": "家庭", "title": "契约用"}}]})
+    check("★ POST /v1/sync/push 200", _r_push.status_code == 200, _r_push.status_code)
+    _observed["CONTRACT:sync.push"] = set(_r_push.json())
+
+    _r_models = _cc.get("/v1/models", headers=_H)
+    check("★ GET /v1/models 200", _r_models.status_code == 200, _r_models.status_code)
+    _observed["CONTRACT:models.list"] = set(_r_models.json())
+
+    pass
+
+#  ★ 这两条**在下面单独打**,不能进这个循环:
+#    · chat 那条要注入上游(不打真模型);
+#    · SSE 那条要驱动真生成器,而那段在本循环**之后** ——
+#      放进来的话它会因为"还没观测到"而红,**而红的理由是假的**(顺序问题,不是缺配对)。
+#      ★ 一条理由是假的红,比不红更费人:人会照着假理由去改一个没坏的东西
+#        (ASSERTION-PITFALLS 第 9 条)。
+_LATER = {"CONTRACT:chat.stream.frame", "CONTRACT:sync.events.frame"}
+for _cid, (_what, _keys) in CROSS_PROCESS_CONTRACTS.items():
+    if _cid in _LATER:
+        continue
+    if _cid not in _observed:
+        check(f"★★ {_cid} 被观测到了(没观测到 ⇒ 下面那条键集合断言是零断言)", False, _what)
+        continue
+    _got = _observed[_cid]
+    check(f"★★★ {_cid}({_what})顶层键集合**恰好**是登记的那一组 —— "
+          "「多一个键」和「换了一个键」都要红,数量断言拦不住后者",
+          _got == _keys, f"多 {sorted(_got - _keys)} 少 {sorted(_keys - _got)}")
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★ SSE 那一帧:**直接驱动真的那个异步生成器**,不用 TestClient。
+#
+#  ★ 为什么不用 TestClient(本文件第 7 节已经为别的理由躲开过它一次):
+#    进程内传输**永远不会让 `request.is_disconnected()` 变真**,而 `gen()` 的
+#    退出条件正是它 ⇒ 生成器无限循环下去、每 15 秒吐一个心跳,
+#    `with` 退出时等它收尾 ⇒ **整套测试永久挂住**(实测:120 秒没有任何输出)。
+#    ★ 挂住比判红更坏:运行器只看到"没有汇总行",看不出是哪条没守住。
+#
+#  ⇒ 造一个「第一次问说还连着、第二次问说断了」的请求:
+#    生成器吐完首帧、走 `break`、进 `finally` 把自己从在线名单摘掉 —— 全程走**真代码**。
+#    ★ 这不是"另建一份模型来验":`gen()` 是 gateway 里那个真的,一行没换。
+# ══════════════════════════════════════════════════════════════════════
+import asyncio as _aio
+
+
+class _OneFrameReq:
+    """问第一次:还连着。问第二次:断了。★ 让真生成器**自然收尾**,而不是被掐死。"""
+
+    def __init__(self):
+        self.headers = {"x-localai-cert-sha256": "aa"}
+        self.query_params = {}
+        self.client = None
+        self._asked = 0
+
+    async def is_disconnected(self):
+        self._asked += 1
+        return self._asked > 1
+
+
+async def _first_sse_frame():
+    resp = await gateway.sync_events(_OneFrameReq())
+    async for chunk in resp.body_iterator:
+        if "data: " in chunk:
+            return json.loads(chunk.split("data: ", 1)[1].strip())
+    return None
+
+
+_frame = _aio.run(_first_sse_frame())
+check("★★ /v1/sync/events **真的取到了一帧**(取不到 ⇒ 下面整段是零断言)",
+      _frame is not None)
+if _frame is not None:
+    _observed["CONTRACT:sync.events.frame"] = set(_frame)
+    _got = _observed["CONTRACT:sync.events.frame"]
+    _want = CROSS_PROCESS_CONTRACTS["CONTRACT:sync.events.frame"][1]
+    check("★★★ CONTRACT:sync.events.frame 顶层键集合**恰好**是登记的那一组",
+          _got == _want, f"多 {sorted(_got - _want)} 少 {sorted(_want - _got)}")
+    # ★★★ 首帧必须是**全量**:客户端的重连对齐**完全靠它**
+    #   (SyncClient 的 _pullFirst 等的就是这一帧,里面带着删除的墓碑;
+    #    先推后拉会让另一台删掉的东西在这边复活)。
+    check("★★★ 首帧是**全量**(since_rev=0)—— 客户端的重连对齐完全建立在这条上;"
+          "它一旦变成增量,重连后就再也对不齐,而**没有任何东西会红**",
+          _frame.get("since_rev") == 0, _frame.get("since_rev"))
+    # ★★ 而**首帧之后是增量** —— 这一条是 V6 那条 bug 的判据来源:
+    #   客户端原本写着「整帧丢掉,下一帧会带全量」,那是错的。
+    _ev_src = assert_helpers.code_only(gateway.sync_events)
+    check("★★★ 首帧之后发的是**增量**(`snapshot(since_rev=…)`)—— "
+          "客户端据此必须有断层检测与补全量的路径;"
+          "「丢一帧下一帧会补回来」是**一句错话**,而它此前就写在客户端注释里",
+          "since_rev=last" in _ev_src.replace(" ", ""), _ev_src[:0])
+
+gateway.classify_caller, gateway.resolve_lan_principal = _cc_saved2, _lan_saved2
+check("★★ 全局 classify_caller 已还回去 —— 不还的话后面每条断言都在对着桩说话",
+      gateway.classify_caller is _cc_saved2)
+
+# ── /v1/models:OpenAI 兼容面,逐项形状也要钉 ──────────────────────────
+#  ★★ 这条契约的**真实消费者在仓外**:`90-ops/install-openwebui.ps1:81` 把
+#    `OPENAI_API_BASE_URL` 指到 `http://127.0.0.1:8080/v1`,于是 Open WebUI 会读它。
+#    我们自己的客户端**不解析它的响应体**(`HubClient.ProbeAsync` 只拿它当探活,
+#    结果直接丢掉;模型清单走的是 `/v1/gpu/components`)。
+#  ⇒ 所以这条的"客户端半边"钉的是**协议一致性**,不是"我们能解析" ——
+#    见本轮决议包里对它的处置说明。**不假装我们解析了它。**
+_md = _r_models.json()
+check("★★ /v1/models 是 OpenAI 的 list 形状(object=='list')",
+      _md.get("object") == "list", _md.get("object"))
+check("★★ data 是数组", isinstance(_md.get("data"), list))
+if isinstance(_md.get("data"), list) and _md["data"]:
+    _item = set(_md["data"][0])
+    check("★★★ 每一项的键集合**逐字钉死** —— Open WebUI 按 OpenAI 协议读 id/object,"
+          "少一个它就整条列不出模型",
+          _item == {"id", "object", "owned_by", "kind", "contract"}, sorted(_item))
+    check("★ 每一项 object=='model'(OpenAI 协议)",
+          all(x.get("object") == "model" for x in _md["data"]))
+else:
+    # ★ 零命中判红:空列表时上面那条会**静默不跑**,而"没有模型"与"形状对了"
+    #   在输出上长得一模一样(ASSERTION-PITFALLS 第 4 条推论)。
+    check("★★ /v1/models 至少列出一个模型(空列表会让上面那条逐项断言静默消失)",
+          False, _md.get("data"))
+
+# ── chat 的每一帧 ────────────────────────────────────────────────────
+#  ★★★ 注入上游,**不打真模型**:一条会因为"模型今天没起"而红的断言,
+#    测的就不是它自称在测的东西(ASSERTION-PITFALLS 第 5 条,已踩 2 次)。
+print("\n=== CONTRACT:chat.stream.frame —— 全项目最热的一条路径 ===")
+
+
+class _FakeStream:
+    """只在测试里存在;生产的 _client 一个字没改。"""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def aiter_lines(self):
+        for c in self._chunks:
+            yield c
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+_FRAME = ('{"id":"x","object":"chat.completion.chunk","created":1,"model":"m",'
+          '"choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}')
+_frame_obj = json.loads(_FRAME)
+check("★★★ CONTRACT:chat.stream.frame 顶层键集合含 choices(客户端只认它)",
+      set(_frame_obj) >= CROSS_PROCESS_CONTRACTS["CONTRACT:chat.stream.frame"][1],
+      sorted(_frame_obj))
+check("★★★ 增量文本在 **choices[0].delta.content** —— "
+      "客户端 ChatClient.ParseDeltaPayload 就是照这个位置取的;"
+      "它一旦挪位置,对话**一个字都不出**而且不报错(与'模型没在跑'长得一模一样)",
+      _frame_obj["choices"][0]["delta"]["content"] == "你好")
+check("★★ **反向**:顶层【没有】content —— 顶层要是也有一份,"
+      "客户端就算写错位置也能碰巧读到,而真正的形状漂移会被这份兜底掩盖",
+      "content" not in _frame_obj)
+
+# ★ 网关**确实**把上游的帧原样透传(不是我们自己拼的形状)——
+#   这条钉住"帧形状由上游 OpenAI 协议决定",所以上面那份样本是有代表性的。
+_cc_src = _nodoc(gateway.chat_completions) if "_nodoc" in dir() else \
+    inspect.getsource(gateway.chat_completions)
+check("★★ chat 路径是**透传**上游的 SSE 行(帧形状由 OpenAI 协议定,不是我们重拼的)",
+      "aiter_lines" in _cc_src or "aiter_raw" in _cc_src or "iter_lines" in _cc_src)
+
+# ── 元断言:每一条契约在**客户端**那半边都必须有配对 ──────────────────
+#   ★ 缺配对即判红。找不到客户端源码也判红 —— 「查不了」不等于「没问题」。
+_CLIENT_FILES = {
+    "CONTRACT:sync.snapshot":     "Services/SyncClient.cs",
+    "CONTRACT:sync.push":         "Services/SyncClient.cs",
+    "CONTRACT:sync.events.frame": "Services/SyncClient.cs",
+    "CONTRACT:chat.stream.frame": "Services/ChatClient.cs",
+    "CONTRACT:models.list":       None,     # ★ 消费者在仓外,见上方说明
+}
+_APP = pathlib.Path(__file__).resolve().parents[2] / "20-client-win" / "app"
+_selftest = _APP / "Selftest.cs"
+_st_src = _selftest.read_text(encoding="utf-8") if _selftest.exists() else None
+check("★★★ 能读到客户端自检源码(读不到 ⇒ 配对无从核对 ⇒ 判红,不当作没问题)",
+      _st_src is not None, str(_selftest))
+if _st_src is not None:
+    check("★ 且元断言本身不是空转(确实读到了内容)", len(_st_src) > 1000)
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 判据要落在**断言消息**里,不是"文件里出现过这个字符串"。
+    #
+    #  红测 V2 当场证伪了宽松版:把契约号从**断言消息**里删掉、只留下分节注释
+    #  `// ── CONTRACT:chat.stream.frame ──`,`_cid in _st_src` **照样为真** ——
+    #  一条断言的内容被换掉了,而元断言一声不吭。
+    #  ⇒ 先去掉 `//` 行注释再判:注释是**标签**,字符串字面量才是**会被打印出来的那条断言**。
+    #  ★ 这正是 ASSERTION-PITFALLS 第 1 条那套"去注释再判"的**反向**用法 ——
+    #    那边是怕注释把反向断言弄红,这边是怕注释把正向断言**弄绿**。
+    # ══════════════════════════════════════════════════════════════════
+    _st_code = "\n".join(l for l in _st_src.split("\n") if not l.lstrip().startswith("//"))
+    check("★★ 去注释器没有把整份文件吃掉(否则下面整组静默变成零断言)",
+          len(_st_code) > len(_st_src) * 0.5, f"{len(_st_code)}/{len(_st_src)}")
+    for _cid in CROSS_PROCESS_CONTRACTS:
+        check(f"★★★ 元断言:{_cid} 在客户端**断言消息**里有配对(缺配对即判红)",
+              _cid in _st_code,
+              "Selftest.cs 的断言消息里找不到这个契约号 —— "
+              "只写在注释里不算:注释可以留着而断言被换掉,那正是「写着有防护、实际没有」")
+    # ★★ 光有契约号不够:**解析器本身**得在那儿。
+    #   有人把断言体删空、只留下那行标记,上面那条照样绿。
+    for _cid, _rel in _CLIENT_FILES.items():
+        if _rel is None:
+            continue
+        _f = _APP / _rel
+        _src = _f.read_text(encoding="utf-8") if _f.exists() else ""
+        check(f"★★ {_cid} 的客户端解析器所在文件读得到({_rel})", bool(_src), str(_f))
+        check(f"★★ {_cid} 的契约号确实钉在**解析器那一侧**({_rel}),不只在自检里",
+              _cid in _src, f"{_rel} 里找不到 {_cid}")
 
 print(f"\n=== 内网同步:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

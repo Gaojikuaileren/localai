@@ -276,6 +276,15 @@ public sealed class SyncClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// 解析 <c>POST /v1/sync/push</c> 的 200 响应。
+    /// <para>★★★ <c>CONTRACT:sync.push</c> —— 这半条与 <c>test_sync.py</c> 里钉顶层键集合
+    /// <c>{accepted,total,results,generation}</c> 的那半条**成对**存在(D92)。
+    /// 单独任何一条都抓不住 A1 那族缺陷:服务端那条只证明"我发的是这个形状",
+    /// 这条只证明"这个形状我读得懂",**合起来**才证明这根线是通的。</para>
+    /// <para>★ <c>results</c> 逐条读 —— 一批里有的收有的拒;读丢了会让被拒的那些
+    /// 要么永远重推、要么静默消失。</para>
+    /// </summary>
     public static SyncPushResult ParsePush(string json)
     {
         var items = new List<(string, string, bool, string)>();
@@ -375,6 +384,11 @@ public sealed class SyncClient : IDisposable
                 _pullFirst = false;
                 _ = Task.Run(() => ReconcileAsync());
             }
+            // ★★ 断层/解析失败之后补一次全量(见 PullFullAsync)。
+            //   ★ 放在 `_pullFirst` **之后**:首帧本来就是全量,不该在它身上再拉一次;
+            //     而真出断层时这一步会在下一帧到达时立刻跑。
+            //   ★ 只在**帧到达**时触发,不起定时器 —— D37 ② 推送非轮询。
+            if (_needFullPull) _ = Task.Run(() => PullFullAsync());
         }
         Notify();
         return Task.CompletedTask;
@@ -383,12 +397,52 @@ public sealed class SyncClient : IDisposable
     /// <summary>连上之后还欠一次对齐 —— 但要等**第一帧全量吃完**才做。见 OnLine。</summary>
     volatile bool _pullFirst;
 
+    /// <summary>
+    /// 这一帧是不是**接在我手上这份之后**的?不是就说明中间漏了。
+    ///
+    /// <para>★★★ 判据用帧自带的 <c>since_rev</c>:服务端首帧发 <c>snapshot()</c>(全量,
+    /// <c>since_rev=0</c>),之后每帧发 <c>snapshot(since_rev=它上次发到哪)</c> —— **增量**。
+    /// 所以正常情况下,下一帧的 <c>since_rev</c> 恰好等于我手上的 <c>Generation</c>。
+    /// 大于它,就说明中间有一帧我没吃到,而那批更新**再也不会重发**。</para>
+    ///
+    /// <para>★ 抽成静态纯函数是为了能被自检直接喂形状(<c>CONTRACT:sync.events.frame</c>)。</para>
+    /// </summary>
+    internal static bool FrameContinues(long haveGeneration, long frameSinceRev) =>
+        frameSinceRev == 0                      // 全量帧:任何时候都能接
+        || frameSinceRev <= haveGeneration;     // 增量帧:必须接在我手上这份之后
+
+    /// <summary>★ 检测到断层、需要补一次全量。见 <see cref="PullFullAsync"/>。</summary>
+    volatile bool _needFullPull;
+
+    /// <summary>
+    /// 吃下一帧 <c>GET /v1/sync/events</c> 的 <c>data:</c>(也用于补全量)。
+    /// <para>★★★ <c>CONTRACT:sync.events.frame</c> —— 与 <c>test_sync.py</c> 里钉
+    /// <c>{generation,since_rev,data,counts,online}</c> 的那半条**成对**存在(D92)。</para>
+    /// </summary>
     void Absorb(string json)
     {
         try
         {
             using var d = JsonDocument.Parse(json);
             var r = d.RootElement;
+            // ══════════════════════════════════════════════════════════
+            //  ★★★ 断层检测(2026-08-06 · V6)。
+            //
+            //  此前这里什么都不查,而下面那个 catch 的注释写着
+            //  「整帧丢掉,**下一帧会带全量**」—— **那句话是错的**:
+            //  只有**首帧**是全量,之后每一帧都是 `snapshot(since_rev=…)` 增量。
+            //  ⇒ 丢一帧 = 那批更新**永远补不回来**,而且没有任何东西会红:
+            //    订阅还活着、generation 还在涨、界面显示"已同步"。
+            //  ★ 这正是「重连能对齐」掩盖掉的那个洞 —— 重连走的是首帧全量,
+            //    而**流没断、只是丢了一帧**的这条路径,此前没有任何恢复手段。
+            // ══════════════════════════════════════════════════════════
+            long since = r.TryGetProperty("since_rev", out var sr)
+                         && sr.ValueKind == JsonValueKind.Number ? sr.GetInt64() : 0;
+            if (!FrameContinues(Generation, since))
+            {
+                _needFullPull = true;
+                LastError = $"同步流有断层(这一帧从 rev {since} 起,而本机停在 {Generation})——正在补一次全量";
+            }
             if (r.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number)
                 Generation = g.GetInt64();
             // ★★ 在线名单(2026-08-05):中枢按"有没有活着的订阅"判,断线当场就摘。
@@ -438,7 +492,63 @@ public sealed class SyncClient : IDisposable
                 Remote?.Invoke(kind, list);
             }
         }
-        catch { /* 半份解析出来的比没有更危险 —— 整帧丢掉,下一帧会带全量 */ }
+        catch
+        {
+            // ★★★ 半份解析出来的比没有更危险 ⇒ 整帧丢掉。
+            //   但**丢掉之后必须补** —— 这里原本写的是「下一帧会带全量」,
+            //   而那是**一句错话**:只有首帧是全量,之后都是增量(见上方断层检测)。
+            //   ⇒ 标记要补一次全量,由 `PullFullAsync` 走 GET /v1/sync/snapshot 拉回来。
+            _needFullPull = true;
+            LastError = "有一帧同步数据解析失败,正在补一次全量";
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ 丢帧恢复 —— `GET /v1/sync/snapshot` 在客户端的**唯一**落点(2026-08-06 · V6)
+    //
+    //  这条路由此前**客户端一个字都没读它**(全仓 grep 零命中),于是它看起来像一条死路由。
+    //  勘察结论(见 decision-packets/sync-snapshot-disposition-2026-08-06.md):
+    //    · **重连**对齐不需要它 —— `/v1/sync/events` 首帧就是全量,而且客户端明确等着
+    //      那一帧吃完才推(`_pullFirst`,防止删除被复活);
+    //    · **但流内丢帧需要它** —— 首帧之后全是增量,丢一帧就永远补不回来。
+    //  ⇒ 处置选「接上」而不是「撤掉」,并且**只接在这一处** ——
+    //    接成"重连也走它"就是把首帧全量那条路重复一遍,那种断言恒绿。
+    //
+    //  ★ 拉回来的是 since_rev=0 的**全量**:断层的时候我们并不知道漏了哪几条,
+    //    "从我以为的位置续拉"会把漏掉的那段永远跳过去。
+    // ══════════════════════════════════════════════════════════════════
+    /// <summary>补一次全量(<c>CONTRACT:sync.snapshot</c>)。
+    /// ★ 只在检测到断层/解析失败后调用,不做定时轮询(D37 ② 推送非轮询)。</summary>
+    public async Task<bool> PullFullAsync(CancellationToken ct = default)
+    {
+        if (_hub.Profile is null) return false;
+        var ep = _hub.TryDial();
+        if (ep is null) return false;
+        try
+        {
+            var (status, text) = await Transport.Send(_hub.Profile, ep, HttpMethod.Get,
+                                                     "/v1/sync/snapshot", null, ct);
+            if (status != 200)
+            {
+                // ★ 补不回来要**留着标记**下次再试 —— 清掉标记等于假装补上了。
+                LastError = $"补全量失败({status})";
+                Notify();
+                return false;
+            }
+            // ★ 走的是**同一个** Absorb —— 两份解析会漂移,而漂的那天只盯着其中一份。
+            //   全量帧的 since_rev=0,断层判据天然放行,不会自己触发自己。
+            _needFullPull = false;
+            Absorb(text);
+            LastError = null;
+            Notify();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastError = "补全量失败:" + ex.Message;
+            Notify();
+            return false;
+        }
     }
 
     /// <summary>用过就清 —— 提示是"这次有变化",不是永久状态。</summary>
