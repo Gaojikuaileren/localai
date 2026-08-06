@@ -6460,48 +6460,88 @@ public static class Selftest
                 //  client 半边要改 HubClient.cs 哪一行 —— 而那一行至今没人改。
                 //  同一轮里 TlsFailure.cs 却被链进了客户端构建 ⇒ **随包发布的死代码**。
                 //  ⇒ 判据不是"库写好了",是"用户在过期之前看得见,而且给的建议他能执行"。
+                //
+                //  ★★★ 本段分成【运行时】与【读源码】两半,这个划分是被出包**当场教出来**的:
+                //    初稿把每一条都写成 `Assert(src is not null && src.Contains(...))`,
+                //    结果发布产物旁边没有源码 ⇒ `TryReadSource` 全部返回 null ⇒ **10 条当场红**,
+                //    build-client.ps1 拒绝出包(它做对了)。
+                //  ⇒ 但"照抄本仓惯例改成 `src is null || ...`"是**fail-open**:它在唯一
+                //    检查不了的那个形态下无声放行。所以先问一句:**这条真的非读源码不可吗?**
+                //    答案里有一半是"不是" —— 枚举成员、界面词、告警措辞都能在运行时问出来,
+                //    而且**运行时问比查源码文本更强**(它测的是行为,不是那串字写在哪个文件里)。
+                //  ⇒ 能运行时问的一律搬到 ① 段(发布产物里照样跑);
+                //    只有【接线位置/顺序】这类真的只在源码里的,才落进 ② 段并按惯例跳过,
+                //    由 build-client.ps1 的 SRCMISS 口径把这笔账打出来。
                 {
-                    var hc = TryReadSource(Path.Combine("Services", "HubClient.cs"));
-
-                    // ---- ① 三样东西真的有调用点 ----
-                    Assert(hc is not null && CodeOnly(hc).Contains("TlsFailure.Classify("),
-                           "★★★ ClassifyTlsFailure 走 transport 的 TlsFailure.Classify —— "
-                           + "不在客户端里另写一份判据(两份必然漂开,而漂开那天两边都不会红)");
-                    Assert(hc is not null && CodeOnly(hc).Contains("Transport.RenewDeviceCertIfDue("),
-                           "★★★ RenewDeviceCertIfDue 在客户端里**有调用点** —— "
-                           + "没有它,那套续签代码就是随包发布的死代码,设备证书 90 天一到只能重新配对");
-                    Assert(hc is not null && CodeOnly(hc).Contains("TlsFailure.WarnLocalCert("),
-                           "★★★ 证书相位判据接上了(CertLifecycle 经 WarnLocalCert)—— 这是「过期之前看得见」的来源");
-
-                    // ---- ② 老判据的两处病灶都已拆掉 ----
-                    var hcCode = hc is null ? "" : CodeOnly(hc);
-                    Assert(!hcCode.Contains("UntrustedRoot") && !hcCode.Contains("PartialChain"),
-                           "★★ 客户端里不再有靠**异常英文文本**认因的针(它们在 TlsFailure 里,由实测原文钉着)");
-                    Assert(!hcCode.Contains("is System.Security.Authentication.AuthenticationException"),
-                           "★★★ 那条 AuthenticationException 兜底**已删** —— 实测它会把「拨到一个普通 HTTP 服务」"
-                           + "判成「必须重新配对」,而重新配对先删本机私钥");
-                    Assert(!hcCode.Contains("X509ChainStatusFlags"),
-                           "★ 那条 `e is X509ChainStatusFlags`(枚举与 Exception 永不同类,CS0184 死代码)也一并清掉");
-
-                    // ---- ③ 五种归因都到得了界面 ----
-                    var mwCert = TryReadSource("MainWindow.xaml.cs");
-                    var dvCert = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                    // ══════════ ① 运行时可问的 —— 发布产物里**照样跑** ══════════
+                    var states = Enum.GetNames(typeof(HubState));
                     foreach (var localState in new[] { "LocalCertExpired", "LocalProfileUnusable" })
-                    {
-                        Assert(hc is not null && hcCode.Contains("HubState." + localState),
+                        Assert(states.Contains(localState),
                                $"★★ HubState 有 {localState} 这一格(此前是空的,实际归宿是 Offline =「中枢没开机」)");
-                        Assert(mwCert is not null && mwCert.Contains("HubState." + localState),
-                               $"★★ 顶栏有 {localState} 的文案 —— 掉进 _ => 未连接 等于没单列");
-                        Assert(dvCert is not null && dvCert.Contains("HubState." + localState),
-                               $"★★ 设备页有 {localState} 的文案(那张卡上就有红色的「解除本机配对」按钮)");
-                    }
+                    Assert(states.Length == 12,
+                           $"★ 五种归因 = 12 个状态(实得 {states.Length})—— 反向全表:多一格少一格都要有人看见");
+
                     // ★★ 两态**不许合并**:代价不同 —— 一个重配要搭上一把本来有用的私钥,一个没有可搭的。
                     Assert(Strings.Get("status.local_cert_expired") != Strings.Get("status.local_unusable"),
                            "★★★ 两态的界面词不同(合并成一句 = 把「损失了什么」这件事对用户藏起来)");
                     Assert(Strings.Get("status.local_cert_expired") != Strings.Get("status.cert_expired"),
                            "★★★ 【本机】证书过期 ≠ 【主机】证书过期 —— 处置一个是重新配对,一个是去主机上续签");
+                    // ★ 反向:两个键真的在词表里(缺键时 Strings.Get 返回键名本身,
+                    //   而两个不同的键名彼此也不相等 ⇒ 上面两条会**恒真**。这条堵住那个恒真)。
+                    foreach (var k in new[] { "status.local_cert_expired", "status.local_unusable" })
+                        Assert(Strings.Get(k) != k, $"★ 词表里真的有 {k}(缺键会让上面那两条恒真)");
 
-                    // ---- ④ 过期【之前】就看得见:告警必须排在【在线】那一格**之前** ----
+                    // ★★ 主机侧轮换告警的**措辞**:运行时直接问那个属性,不去源码里找字符串。
+                    //   只说"需要注意"的告警等于没说 —— 必须带剩余天数和该做什么。
+                    var scWarn = new Services.HubAdmin();
+                    Assert(scWarn.ServerCertWarning is null,
+                           "★ 反向:还没探测过 ⇒ 不报主机证书告警(不编一个出来)");
+
+                    // ---- 三样东西的**行为**在不在(不看源码,看结果)----
+                    Assert(LocalAI.ClientTransport.TlsFailure.WarnLocalCert(null, DateTimeOffset.UtcNow) is null,
+                           "★ 没有档案时不报证书告警(WarnLocalCert 真的接得通,且反向不恒真)");
+
+                    // ══════════ ② 只有源码答得了的:接线位置与顺序 ══════════
+                    //  ★ 这些是**结构**判据("这一行调用写在哪里""谁排在谁前面"),
+                    //    发布产物旁边没有源码时整段跳过 —— build-client.ps1 会把 SRCMISS 打出来,
+                    //    所以它是**记了账的缺口**,不是无声放行。
+                    var hc = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                    if (hc is not null)
+                    {
+                        var hcCode = CodeOnly(hc);
+                        // ---- 三样东西真的有调用点(A5 就死在这里)----
+                        Assert(hcCode.Contains("TlsFailure.Classify("),
+                               "★★★ ClassifyTlsFailure 走 transport 的 TlsFailure.Classify —— "
+                               + "不在客户端里另写一份判据(两份必然漂开,而漂开那天两边都不会红)");
+                        Assert(hcCode.Contains("Transport.RenewDeviceCertIfDue("),
+                               "★★★ RenewDeviceCertIfDue 在客户端里**有调用点** —— "
+                               + "没有它,那套续签代码就是随包发布的死代码,设备证书 90 天一到只能重新配对");
+                        Assert(hcCode.Contains("TlsFailure.WarnLocalCert("),
+                               "★★★ 证书相位判据接上了(CertLifecycle 经 WarnLocalCert)—— 这是「过期之前看得见」的来源");
+
+                        // ---- 老判据的三处病灶都已拆掉 ----
+                        Assert(!hcCode.Contains("UntrustedRoot") && !hcCode.Contains("PartialChain"),
+                               "★★ 客户端里不再有靠**异常英文文本**认因的针(它们在 TlsFailure 里,由实测原文钉着)");
+                        Assert(!hcCode.Contains("is System.Security.Authentication.AuthenticationException"),
+                               "★★★ 那条 AuthenticationException 兜底**已删** —— 实测它会把「拨到一个普通 HTTP 服务」"
+                               + "判成「必须重新配对」,而重新配对先删本机私钥");
+                        Assert(!hcCode.Contains("X509ChainStatusFlags"),
+                               "★ 那条 `e is X509ChainStatusFlags`(枚举与 Exception 永不同类,CS0184 死代码)也一并清掉");
+                    }
+
+                    var mwCert = TryReadSource("MainWindow.xaml.cs");
+                    var dvCert = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                    foreach (var localState in new[] { "LocalCertExpired", "LocalProfileUnusable" })
+                    {
+                        if (mwCert is not null)
+                            Assert(mwCert.Contains("HubState." + localState),
+                                   $"★★ 顶栏有 {localState} 的文案 —— 掉进 _ => 未连接 等于没单列");
+                        if (dvCert is not null)
+                            Assert(dvCert.Contains("HubState." + localState),
+                                   $"★★ 设备页有 {localState} 的文案(那张卡上就有红色的「解除本机配对」按钮)");
+                    }
+
+                    // ---- 过期【之前】就看得见:告警必须排在【在线】那一格**之前** ----
                     // ★ 这条反直觉,也正是它容易被写错的原因:过期之前客户端**正是在线的**。
                     //   告警只挂在断线那几格的话,它永远等到过期之后才出现 —— 而那时续签路由已经够不着了。
                     if (mwCert is not null)
@@ -6517,10 +6557,11 @@ public static class Selftest
                                + "而那时唯一的自愈窗口已经关了");
                     }
 
-                    // ---- ⑤ 主机侧轮换的 fail-closed 最后一段路:界面真的读了 ----
-                    Assert(dvCert is not null && dvCert.Contains("ServerCertWarning"),
-                           "★★★ 主机卡片读 /admin/ping 的 serverCert —— 此前它**全仓没有读取方**,"
-                           + "而 lan-edge 那行注释写着「主机界面据此报警」:吐出来没人读 = 没响");
+                    // ---- 主机侧轮换的 fail-closed 最后一段路:界面真的读了 ----
+                    if (dvCert is not null)
+                        Assert(dvCert.Contains("ServerCertWarning"),
+                               "★★★ 主机卡片读 /admin/ping 的 serverCert —— 此前它**全仓没有读取方**,"
+                               + "而 lan-edge 那行注释写着「主机界面据此报警」:吐出来没人读 = 没响");
                 }
 
                 // ══════════════════════════════════════════════════════════════
