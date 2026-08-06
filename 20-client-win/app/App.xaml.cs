@@ -34,6 +34,8 @@ public partial class App : Application
     /// 谁需要 GPU 状态都从这里读,不各自去订阅;两条流会让"哪份是权威"没有答案。
     /// </summary>
     public HubGpu Gpu { get; private set; } = null!;
+    /// <summary>★ P4-S16b:这台客户端在中枢那边的"有人在用"凭据。见 LeaseKeeper 文件头。</summary>
+    public LeaseKeeper Lease { get; private set; } = null!;
     /// <summary>
     /// 内网同步(D86):家庭待办 + 共享会话。★ 全进程**只有这一条**流 ——
     /// 两条流会让"哪份是权威"没有答案(与 Gpu 同一条纪律)。
@@ -105,6 +107,13 @@ public partial class App : Application
         Vram.Hub = Gpu;
         Gpu.Start();
         Lifecycle.Register("stop-gpu-stream", () => Gpu.Stop());
+        // ★★★ P4-S16b:持一份 client_session 租约并续租。
+        //   它让「全网有没有人在用」成为一个**可以为假**的判据 ——
+        //   在它之前客户端一份租约都不持,于是中枢那边"没人在跑"和"空闲了 N 秒"
+        //   **两条都是恒真式**,而按需卸载正要靠它们。见 LeaseKeeper 文件头。
+        Lease = new LeaseKeeper(Hub);
+        Lease.Start();
+        Lifecycle.Register("stop-lease-keeper", () => Lease.Stop());
 
         // ★ P4-S13(D86):内网同步。这里只【建】不【起】——
         //   Start() 必须等本地存档读完(见下方 LoadStores 之后那一行)。

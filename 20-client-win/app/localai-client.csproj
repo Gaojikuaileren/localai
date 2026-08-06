@@ -33,6 +33,13 @@
     <Compile Include="..\..\10-core\identity\Identity.cs" />
     <Compile Include="..\..\10-core\identity\Paths.cs" />
     <Compile Include="..\..\10-core\identity\HubId.cs" />
+    <!-- 2026-08-06:core/identity 车道给 ClientTransport.cs 加了证书生命周期的判据
+         (TlsFailure.LocalCertNotAfter / CertLifecycle.Phase / ShouldRenew)。
+         那两个源文件 transport 自己的 csproj 早就收着,而**客户端这份没有** ⇒ 客户端编译不过。
+         ★ 修在这里是对的:csproj 归客户端车道,而它要跟上共享源码的新依赖。
+         ★ 不是去改 ClientTransport.cs —— 那是 core/identity 的地盘。 -->
+    <Compile Include="..\..\10-core\identity\CertLifecycle.cs" />
+    <Compile Include="..\transport\TlsFailure.cs" />
     <Compile Include="..\transport\ClientTransport.cs" />
   </ItemGroup>
 
