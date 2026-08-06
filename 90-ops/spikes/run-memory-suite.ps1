@@ -161,10 +161,23 @@ if (-not $RepairCredentials) {
         exit 1
     }
 
+    # ★★★ C2 护栏(2026-08-06,对抗式复核抓到的 —— 本脚本第一版漏了这条):
+    #   `repo.py:87` 是 `os.environ.get("LOCALAI_PG_USER", "ai_mem_local")`,
+    #   **连哪个 PG 角色由环境变量决定**,而同目录 8 处兄弟套件会把它设成 `postgres`。
+    #   本脚本原来只存还 PYTHONPATH / PYTHONIOENCODING,**LOCALAI_PG_USER 原样继承调用方**
+    #   —— 而 A 档对外宣称的正是「当前身份,不碰任何凭据,零机器状态改动」。
+    #   ★ 实测厘清:它**不能**让机主连上生产库(pg_ident 校验的是「系统用户+目标角色」这一对,
+    #     机主对任何角色都不在表里;实测 REFUSED)。所以这不是宣称作废,
+    #     而是 **C1 的放大器**:哪天以 ai-mem 跑,默认角色会被悄悄换成超级用户。
+    #   ⇒ A 档无条件清掉它,让「当前身份」这句话在环境上也成立,不只在 Windows 身份上成立。
+    if ($env:LOCALAI_PG_USER) {
+        Write-Host ("  ! 检测到 LOCALAI_PG_USER={0} —— A 档已清除后再跑" -f $env:LOCALAI_PG_USER) -ForegroundColor Yellow
+    }
     Push-Location $MemDir
-    $prevPP = $env:PYTHONPATH; $prevEnc = $env:PYTHONIOENCODING
+    $prevPP = $env:PYTHONPATH; $prevEnc = $env:PYTHONIOENCODING; $prevRole = $env:LOCALAI_PG_USER
     $env:PYTHONPATH = '.'
     $env:PYTHONIOENCODING = 'utf-8'    # 让输出与日志一律 UTF-8,不受控制台码页摆布
+    Remove-Item Env:\LOCALAI_PG_USER -ErrorAction SilentlyContinue
     foreach ($n in $NODB) {
         $out = & $Vpy $n 2>&1 | Out-String
         $code = $LASTEXITCODE
@@ -185,6 +198,7 @@ if (-not $RepairCredentials) {
         }
     }
     $env:PYTHONPATH = $prevPP; $env:PYTHONIOENCODING = $prevEnc
+    if ($prevRole) { $env:LOCALAI_PG_USER = $prevRole }   # 还原调用方的值,别替人做决定
     Pop-Location
 }
 

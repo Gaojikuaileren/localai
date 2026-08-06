@@ -160,6 +160,34 @@ check("connect 用了 from None", "raise _sanitize(e) from None" in src)
 check("★ 每个 except psycopg.Error 都 from None",
       src.count("from None") >= src.count("except psycopg.Error"))
 
+print("=== 7b. ★★ 只读护栏【本身】要被钉住(D91:不记技术债,当场补)===")
+# ══════════════════════════════════════════════════════════════════════════
+#  形状照抄 test_route.py:98-100 —— 那里用 inspect.getsource 扫 route.py,
+#  断言它连 psycopg / connect( 都不许出现。**但两者的强度完全不同**:
+#    · route.py 是**结构性**切断:导入闭包止于标准库,socket 物理上不可能存在;
+#    · 本文件不是。psycopg 早就 import 进来了(repo.py:32),
+#      §8 能进自动门禁靠的只是「connect 包在 try 里、失败即 skip」这一条**代码分支**。
+#
+#  ★★★ 代码分支不是被断言的性质。有人把那个 try 去掉,今天**不会有任何东西变红**,
+#    而门禁从此每跑一次都真的去拨生产记忆库。这条断言就是补上那个缺口。
+#    (3 号如实指出了这个洞并建议记技术债;协调层裁定不记债 —— 在同一次提交里补上。
+#     "后果轻一点"不是护栏。)
+#
+#  ★ needle 一律**拼接构造**,不写成整串字面量 —— 否则这段代码自己会被算进 count,
+#    那是 ASSERTION-PITFALLS 第 1 条(已踩 9 次):断言撞在描述它自己的那行字上。
+# ══════════════════════════════════════════════════════════════════════════
+_self = Path(__file__).read_text(encoding="utf-8")
+_conn_call = "repo." + "connect()"
+_sec8 = _self[_self.rindex("=== 8. " + "活库集成"):]
+check("★ 全文件只有一处 " + _conn_call + " —— 多一处就多一条绕过护栏的路",
+      _self.count(_conn_call) == 1, _self.count(_conn_call))
+check("★★★ 那一处必须包在 try 里(这是本套件唯一的只读护栏)",
+      "try" + ":" in _sec8[:_sec8.index(_conn_call)])
+check("★★★ 连不上要走 skip() 而不是抛 —— 在门禁里连不上是【常态】,不是失败",
+      "skip" + "(" in _sec8 and "except " + "Exception as ex:" in _sec8)
+check("★★ 活库段整体由 if conn 守着(connect 失败之后不得继续往下写库)",
+      "if " + "conn:" in _sec8)
+
 print("=== 8. 活库集成 ===")
 try:
     conn = repo.connect()

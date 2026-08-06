@@ -113,6 +113,117 @@ test_repo.py                   PASS=25    FAIL=0    SKIP=1   ← SKIP 是 §8 �
 合计                           PASS=201   FAIL=0    SKIP=1
 ```
 
+#### 1.4.1 ★★ 逐个静态确认程序(不是结论 —— 是我怎么排除连库路径的)
+
+主执行层要照这个改 `$RULES`,而**改错的代价是门禁真的连上生产记忆库**,所以写过程。
+
+**先说一条贯穿全部四个的判据分辨**,它是整套确认的地基:
+
+> **`import psycopg` 不是连接。** 模块级 `import psycopg`(`repo.py:32`)只是加载驱动。
+> 真正建立连接的只有 `psycopg.connect(...)`。
+> 把「import 了 psycopg」当成「连库」会把 4 个全判错(全都间接 import 到它);
+> 反过来,只看测试文件自己有没有 `connect(` 又会漏掉**间接调用点** ——
+> `test_gate.py` 自己一个 `connect` 字样都没有,却真的会去连(见下)。
+> ⇒ 必须**同时**做:① 传递导入图,② 可达调用点枚举,③ 区分 import 时 / 调用时。
+
+**四步程序:**
+
+| 步 | 做什么 | 为什么这一步不能省 |
+|---|---|---|
+| ① | 传递展开测试文件的**本地**导入图,列出每个模块的模块级 import | 连库能力是**继承**的:`test_gate` → `gate` → `repo` → `psycopg` |
+| ② | 在图里每个模块中,枚举**全部** `psycopg.connect` / `repo.connect` / `subprocess`(psql·pg_dump·pg_restore)/ `httpx` / `socket` 调用点,记 file:line | 只看测试文件会漏掉被调函数里的连接 |
+| ③ | 逐个判**可达性**与**保护形态**:测试会不会走到它;走到之后失败是「抛出并中止」「被 try/except 吞掉」还是「自跳过」 | 「有连接调用点」≠「会连库」;「会连库」≠「会失败」 |
+| ④ | **实跑一次,读 stderr** | 静态分析会漏。实跑那一行 stderr 是 `test_gate` 确实发起过连接的**直接物证** —— 我正是这样发现它的 |
+
+**逐文件结果(结论 + 它是怎么被排除的):**
+
+| 文件 | 导入图(本地) | 可达的连接/网络/子进程调用点 | 判定 |
+|---|---|---|---|
+| `test_tainted.py` | `tainted` **仅此一个** | **零个**。`tainted.py:32-39` 只 import `secrets/weakref/collections/dataclasses/enum/typing` —— 全是标准库 | ✅ 真·零连接。图是封闭的,不必往下追 |
+| `test_route.py` | `route` **仅此一个** | **零个**。`route.py:20-27` 只 import `tomllib/unicodedata/dataclasses/enum/pathlib/typing`。★ 而且 `test_route.py:98-100` **自己就在断言这件事**:扫 `route.py` 源码,`["psycopg","connect(","requests.","httpx","SELECT ","cursor"]` 一个都不许出现 | ✅ 真·零连接,且**有自守断言**:route.py 哪天长出连库能力,这个套件当场红 |
+| `test_gate.py` | `gate` → `tainted` · `repo` · `sensitivity` · `e1_detector`(借 `10-core/gateway`) | ⚠️ **有一个,而且会真的走到**:`repo.py:825` `psycopg.connect(_dsn(), autocommit=True)`,随后 `INSERT INTO mem.gate_rejection`。测试里触发凭证拒绝就会调到它 | ⚠️ **会去连,但连不上**(详见下方警示)。`repo.py:832-834` 把异常整个吞掉,只往 stderr 打一行,**永不抛** ⇒ 不影响断言 |
+| `test_repo.py` | `repo` · `tainted` | ⚠️ `repo.connect()`(`test_repo.py:165`),§8 活库集成段 | ⚠️ **包在 `try/except` 里,失败即 `skip()` 并打印原因**(`:166-168`),不是静默假通过。§1-7 完全不碰它 |
+
+**★★ 必须一起交出去的警示 —— 「不连库」的准确说法是「连不上」,不是「不去连」:**
+
+`test_gate.py` 与 `test_repo.py` 各有一条**会写生产库**的路径,它们今天安全**只因为跑门禁的身份连不上库**:
+
+- `test_gate.py` → `repo.py:825` 是 **`autocommit=True`**。一旦连得上,那几行
+  `INSERT INTO mem.gate_rejection` **当场提交,没有回滚余地**。
+- `test_repo.py` §8 → `insert_fact` + `commit`,末尾 `DELETE` 清理;**中途崩掉则残留**。
+
+⇒ **绝不要以 ai-mem 身份跑 `run-tests.ps1`。** 那会让 `test_gate` 往**生产**记忆库写行。
+  要以 ai-mem 跑记忆套件,走 `run-memory-suite.ps1 -Scope Full` ——
+  它**只**把那 10 个活库套件交给 ai-mem,这 4 个仍以当前身份跑,正是为了避开这一条。
+  (这条已同时写进 `$RULES` 的注释里,因为读规则表的人不一定会读到本包。)
+
+**⇒ 这条豁免成立需要三个条件同时为真,必须和规则写在一起:**
+
+| # | 条件 | 破了会怎样 | 谁在守 |
+|---|---|---|---|
+| **C1** | 跑门禁的 Windows 身份**不在 `pg_ident` 里** | `test_gate` 往生产 `mem.gate_rejection` 写一条**应用角色删不掉**的 S2 行;`test_repo` §8 整段跑起来 | 只有纪律 + `$RULES` 注释。★ 没有代码在守 |
+| **C2** | 进程环境里**没有 `LOCALAI_PG_USER`** | 不能让机主连上(实测 REFUSED),但**一旦 C1 也破了**,默认角色从 `ai_mem_local` 被换成**超级用户**,`roles.sql` 全部 REVOKE 失效 | ✅ 已加护栏(见下) |
+| **C3** | 这 4 个的闭包源码未变(`tainted`/`route`/`gate`/`repo`/`sensitivity`/`e1_detector`) | 导入图一变,①②③ 全部重做 | 部分:`test_route.py:98-100` 自守 route.py |
+
+**C2 是对抗式复核逼出来的,我第一版漏了。** `repo.py:87` 是
+`os.environ.get("LOCALAI_PG_USER", "ai_mem_local")` —— **连哪个角色由环境变量决定**,
+而同目录有 8 处兄弟套件会把它设成 `postgres`,环境是**继承**的。
+`run-tests.ps1` 原本一个环境变量都不碰,我的 A 档也只存还 `PYTHONPATH`/`PYTHONIOENCODING`。
+
+★ 但要把 C2 记成它**真正**是的东西,别记成它不是的:
+  一份复核报告称它是「第二条与 Windows 身份无关的绕过路径」。**我实测推翻了这半句** ——
+  `LOCALAI_PG_USER=postgres` + 机主身份,结果仍是 `REFUSED`,
+  因为 `pg_ident` 校验的是 **(系统用户, 目标角色) 这一对**,机主对**任何**角色都不在表里。
+  ⇒ C2 **不是**独立绕过,它是 **C1 的放大器**。差别很实际:
+    按「独立绕过」记会让人以为今天就有洞(没有);按「放大器」记才会去守正确的那一条。
+
+两个脚本都已加护栏:检测到 `LOCALAI_PG_USER` 就**留痕并清除**后再跑
+(`run-tests.ps1` 清了不还原 —— 门禁本就该在已知环境里跑;
+`run-memory-suite.ps1` A 档跑完还原调用方的值,不替人做决定)。
+
+**复核命令(任何人可独立重跑,附预期输出):**
+
+```bash
+cd 10-core/memory
+grep -nE "^\s*(import|from) " tainted.py route.py | grep -vE "typing|dataclasses|enum|pathlib|__future__|secrets|weakref|collections|tomllib|unicodedata"
+```
+预期:**恰好一行** —— `route.py:163:    import sys`(函数内的 `import sys`,标准库,无害)。
+除此之外任何一行都意味着图变了 ⇒ 重做 ①②③。
+（★ 我第一次把预期写成「无输出」，实跑才发现这一行 —— 所以这里贴的是**实跑值**，不是我以为的值。）
+
+```bash
+grep -rn "psycopg.connect\|repo.connect(\|subprocess.run\|httpx\." *.py | grep -v "^test_s"
+```
+预期(实跑值,共 9 行):
+
+| 行 | 在这 4 个的导入图里吗 | 说明 |
+|---|---|---|
+| `repo.py:93` | ✅ 在 | `connect()` 本体 —— 只有被调用才连 |
+| `repo.py:825` | ✅ 在 | **拒绝审计,`test_gate` 会真的走到**(见上方警示) |
+| `test_repo.py:165` | ✅ 在 | §8,有 `try/except` → `skip()` |
+| `eval_memory.py:174` · `:254` | ❌ **不在** | 只被 `test_s7` import |
+| `vectors.py:121/211/220/230` | ❌ **不在** | httpx → embedding/Qdrant。只被 `test_s2`·`test_s4` 一线 import |
+
+★ 判据是「**在不在这 4 个的导入图里**」,不是「文件名像不像测试」——
+`eval_memory.py` / `vectors.py` 都会连,但这 4 个套件够不着它们。
+出现表外的新行 ⇒ 有新的连库路径,重做 ③。
+
+```bash
+PYTHONPATH=. python test_gate.py 2>&1 | grep "gate_rejection"
+```
+预期:`[gate_rejection 审计写入失败] OperationalError` —— 这**正是它试过连接、且失败被吞掉**的物证。
+★ 如果这一行**消失了**,不要当成"变干净了" —— 更可能是**连上了**,该去查 pg_ident。
+
+**★ 这套确认【没有】证明什么:**
+
+- 没有证明这 4 个套件**永远**不连库 —— 只证明了**当前源码 + 当前身份**下不连。
+  `10-core/memory` 属 P3d 车道,`tainted.py` 随时可能被动;导入图一变,①②③ 必须重做。
+- 没有证明它们**逻辑正确** —— 只证明了 201 条断言在今天的源码上是绿的。
+  绿不等于被测的东西是对的,只等于断言和实现今天还一致。
+- 没有证明**剩下 10 个**跑起来会是什么样。那 269 条在 B 档真跑之前,状态是**未知**,不是绿。
+- 没有覆盖 `qdrant` / embedding 服务:这 4 个的图里没有 `vectors.py`,所以不涉及;
+  但**别把这个结论外推到 `test_s2`**(它 import `vectors` 与 `track_vector`,会走 httpx)。
+
 对照 `STATE.md:183` 的 07-28 口径
 (`tainted 64 · route 55 · repo 31 · gate 46 · S1 22 · S2 43 · S3冒烟 25 · S3 50 · S4 35 · S5 27 · S6 15 · S7 15 · S8 19 · S9 12`,合计正好 459):
 
@@ -184,11 +295,101 @@ test_repo.py                   PASS=25    FAIL=0    SKIP=1   ← SKIP 是 §8 �
 | # | 路径 | 要动什么 | **对判据的代价** | 结论 |
 |---|---|---|---|---|
 | **P1** | **一次性口令 + 计划任务以 ai-mem 跑**(项目既有机制) | 重置 ai-mem 口令(随机,无人知)+ 同步 4 服务 1 任务 | **零污染**。A 层原样不动(pg_ident/pg_hba 逐字节不变);B/C/D 全部照常被验。用的是**生产身份本身**,不是绕过它 | ✅ **推荐** |
-| **P2** | 给机主账户加一条 pg_ident 映射 | `pg_ident.conf`(生产配置) | **直接判红 A 层唯一看守**(`verify-isolation.ps1` ⑤ 反向全表)。且这正是该断言写来防的动作。跑出来的绿是假的 | ❌ **否决** |
+| **P2** | 给机主账户加 pg_ident 映射 | `pg_ident.conf`(生产配置) | **真实代价是 PG 集群超级用户,不是「读库权限」** —— 见 §2.3.1。不是「污染几条判据」,是**把 S4/S9 整批『验隔离』的断言变成空话**。从表里划掉,不是打折 | ❌❌ **划掉** |
 | **P3** | 建一个专用只读角色 | `roles.sql` + pg_ident | **没用,且退化成 P2**:拦路的是 A 层(OS 身份),不是 B 层(角色权限)。新角色照样得在 pg_ident 里有一行 OS 用户才连得上 | ❌ 不成立 |
 | **P4** | 全新一次性测试库(另起端口) | 只在临时目录,**零接触生产** | **零污染,但打折**:B/C/D 在重放的 schema 上仍成立;A 层**按构造缺席**(必须写明);★ S9 的价值基本归零 —— 它验的是**满载真实库**的恢复保真,而 `test_s9_drill.py:139` 自己就警告「夹具是空的时,pg_dump/restore 会『成功』、对拍会『相等』、演练报全绿」 | 🟡 **备选** |
 | **P5** | 计划任务 S4U 登录类型(不需口令) | 注册一个以 ai-mem 运行的任务 | 理论上免口令,但:① **未验证** —— S4U 令牌没有凭据材料,PG 的 SSPI(Negotiate)客户端多半握不出手,我判断跑不通;② 就算跑通,相对 P1 **没有任何判据上的优势**,只是省掉口令轮换;③ 注册期间同样存在一条以 ai-mem 执行的路径 | ⚪ 未验证,无收益 |
 | **P6** | 让某个已有服务账户跑测试 | —— | 那个账户**就是** ai-mem(4 个服务全是它)。等价于 P1,但复用长期服务的令牌比起一次性任务更难收尾 | ⚪ 并入 P1 |
+
+### 2.3.1 ★★ P2 的真实代价:不是「读库权限」,是 PG 集群超级用户
+
+线索来自 2 号执行层(它从另一条线绕进来,已停手)。**我没有抄它的结论,按它的判据自己复核了一遍**
+—— 两条车道各自量到同一件事才算数。复核结果:**结论成立,而机制比「加一行就给超级用户」更硬。**
+
+要点是:**这不是「你可以挑一个小一点的角色」的问题,是那 10 个套件自己逼出来的。**
+
+`pg_ident` 的语义是 `MAPNAME SYSTEM-USERNAME PG-USERNAME` 三元组集合。
+单加一行 `mem <机主> ai_mem_local` 确实**只**给 `ai_mem_local`,不给 `postgres`。
+所以「加一行 = 拿超级用户」这个说法,字面上不成立。
+
+**但「加一行 `ai_mem_local` 就能跑那 10 个套件」同样不成立** —— 而这才是承重的一半:
+
+| 套件 | 行号 | 干了什么 |
+|---|---|---|
+| `test_s3_repo.py` | :21-22 | `os.environ['LOCALAI_PG_USER'] = 'postgres'` 然后 `repo.connect()` |
+| `test_s3_acceptance.py` | :41-42 | 同上 |
+| `test_s4_acceptance.py` | :63-64 | 同上 |
+| `test_s5_acceptance.py` | :47-48 · :114-115 | 同上(两处) |
+
+`test_s3_repo.py:18-19` 自己把原因写在注释里了,逐字:
+
+> 「★ 用 postgres 身份清理 —— `ai_mem_local` **故意没有 DELETE 权限**(§12.4 永不 delete)。
+> 第一次跑冒烟时就是被这条挡住的,而那说明**授权是对的、测试写错了**。」
+
+★ **这句注释本身不够准确,我核了 `roles.sql` 才发现 —— 结论不变,机制要改正:**
+`ai_mem_local` **不是**「没有 DELETE 权限」。`roles.sql:20` 对 `mem` 下**全部表** GRANT 了 DELETE;
+真正被撤掉的只有 append-only 那一组(`:39`):
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA mem TO ai_mem_local;   -- :20
+REVOKE UPDATE, DELETE ON mem.audit_log, mem.cred_access_audit, mem.vigil_observations,
+                         mem.gate_rejection, mem.idempotent_ledger FROM ai_mem_local; -- :39
+REVOKE DELETE ON mem.secret_ref, mem.l4_procedure FROM ai_mem_local;                  -- :41
+```
+
+⇒ 逼出超级用户的**不是**「没有 DELETE」这个笼统说法,而是那几个 `clean()` **恰好要删
+`mem.gate_rejection`**(`test_s3_repo.py:26`、`test_s4_acceptance.py:70`)—— 那张表在 `:39` 的撤销名单里。
+换句话说:**是 append-only 这条安全性质在逼出超级用户**,而 append-only 正是被断言的东西之一。
+(结论比原来更硬:不是「权限配少了」,是「配对了,所以测它必须提级」。)
+
+⇒ 这些 `clean()` 跑在**任何断言之前**。没有 `postgres` 映射,套件在第一步就死。
+⇒ **「让那 10 个套件跑起来」所需要的 pg_ident 改动,必然包含一条指向 `postgres` 的映射。**
+
+再看那条映射到底给多少 —— `pg_hba.conf` 第一行:
+
+```
+host    all       postgres  127.0.0.1/32    sspi  map=mem  include_realm=0
+      ^^^ all,不是 memory
+```
+
+**是 `all`,不是 `memory`。** 即整个集群的超级用户,不限于记忆库。
+(对照:另外三行都是 `host memory <role>`,只开那一个库。)
+而 `mem_rw` 帮不上忙 —— `install-postgres.ps1:281` 是 `CREATE ROLE mem_rw LOGIN`,
+**没有 SUPERUSER**,它只是 `memory` 库的 OWNER,同样没有那些 DELETE 权限。
+
+**这就是那个讽刺的地方,也是这一格真正的分量:**
+
+> 套件之所以需要超级用户,**恰恰是因为 `ai_mem_local` 被正确地拒绝了 DELETE** ——
+> 而「`ai_mem_local` 拿不到 DELETE」本身就是一条被断言的隔离性质(§12.4)。
+> ⇒ **要验这条性质,就得先为自己破掉它。**
+
+#### 后果:比我原来写的「打红一条断言」严重一档
+
+我原来的说法是「P2 会把 `verify-isolation.ps1` ⑤ 打红」。那句话没错,但**不够重**:
+
+- **看得见的那半**:⑤ 的反向全表会红(SYSTEM-USERNAME 列多了一个账户)。这是好事 —— 有人拦。
+- **看不见的那半,才是要命的**:S4 ②③④ 与 S9 ⑦ 验的是**类型层 / 视图投影 / 角色权限**
+  (§2.2 已论证它们与发起连接的 OS 身份无关)。一个**超级用户主体**根本不在这套权限模型里
+  —— 超级用户绕过一切权限检查。`verify-isolation.ps1:212-219` 早就写下了这一点:
+
+  > 「★ 诚实降级:第一行把 ai-mem 映到 PG 超级用户 postgres,而超级用户绕过一切权限检查
+  > ⇒ roles.sql 的 REVOKE 只对 ai_mem_local/remote 成立,
+  > 不得声称 mem.audit_log 的 append-only 是绝对的。」
+
+  ⇒ 机器上多一个超级用户主体之后,那批断言**照样全绿**,但它们证明的东西
+  从「隔离在这台机器上成立」缩水成「隔离对不是机主的那些角色成立」。
+  **绿还在,意思没了。**
+
+- 而 ⑤ 那条红**很容易被"修掉"**:它拦住你的时候,最自然的下一步就是把新账户加进白名单。
+  一旦有人这么做,最后一个会响的东西也不响了。
+
+⇒ **P2 从判据表里划掉,不是打折。** 它不是「代价大一点的路」,
+它是「为了测隔离而先把隔离拆掉,然后让测隔离的断言继续报绿」。
+
+★ §2.2 那个「这些断言与 OS 身份无关」的事实,在这里是**双向刃**,两边都要写:
+  · 对 **P1**:正因为无关,以 ai-mem 身份跑不会污染它们 → 零污染成立;
+  · 对 **P2**:也正因为无关,它们**发现不了**多出来的超级用户 → 绿是假的。
+  同一个事实,两个相反的结论。这就是为什么这一格必须单独量,不能靠直觉推。
 
 **为什么 P5 我没有实测**:验证它必须真的注册一个以 ai-mem 身份运行的计划任务,
 那等于在没有授权的情况下**先跨过一次被测边界**。硬禁止那条写得很清楚
@@ -383,9 +584,10 @@ venv 路径按 `install-embedding.ps1:28` 的既有惯例从 `models` 根导出�
 |---|---|
 | **生产侧:无。** | 没有重置任何口令;没有改 `pg_ident` / `pg_hba` / `postgresql.conf` / Qdrant 配置;没有起停任何服务;没有注册任何计划任务;没有建任何数据库;没有给任何路径改 ACL |
 | 新文件 3 个 | 都在本车道边界内(`90-ops/spikes/` 2 个 + 本文件)。`10-core/memory/` **零改动**(`git status` 无任何 `M` 项) |
-| ⚠️ **`10-core/memory/__pycache__/`(worktree 内)** | 我跑测试时 Python 自动生成的 `.pyc`。**已被 `.gitignore:29` 忽略**,不进 git。★ **主树的 `__pycache__` 未被触碰**(时间戳仍是 07-28 / 08-05)—— 我一次都没在主树里跑过东西。要清就 `rm -r` 那个目录,无副作用 |
+| ⚠️ **`__pycache__/`(worktree 内,两处)** | 跑测试时 Python 生成的 `.pyc`。**已被 `.gitignore:29` 忽略**,`git status` 看不见。★ 我第一版只报了 `10-core/memory/`,**漏了 `10-core/gateway/`** —— `gate.py:45` 把 gateway 插进 `sys.path`,于是 `e1_detector.cpython-312.pyc` 也被写了(实测 mtime 08-06 02:08)。**跑 test_gate 会往另一个组件的源码树写字节码**,这一条值得单独知道。★ **主树两处均未被触碰**(时间戳仍是 07-28 / 08-05)—— 我一次都没在主树里跑过东西。要清 `rm -r` 即可,无副作用 |
+| ⚠️ 生产 PG 日志里的失败认证记录 | `test_gate` / `test_repo` 每跑一次都会对 `127.0.0.1:5432` 发起一次 TCP + SSPI,被拒。**「连接失败」≠「生产侧什么都没发生」**:被拒的认证会写进 `D:\AI\state\memory\pg\18` 的生产日志。无害,但不是零痕迹,如实记 |
 | 读取行为 | 读了 `pg_ident.conf` / `pg_hba.conf` / ACL / 服务配置(提权只读) |
-| 测试进程 | A 档 4 个套件跑了若干次;10 个活库套件各跑一次(**全部在 `repo.connect()` 处失败退出,一条 SQL 都没执行到** —— 生产库里没有留下任何一行) |
+| 测试进程 | A 档 4 个套件跑了若干次;10 个活库套件各跑一次(**全部在 `repo.connect()` 处失败退出,一条 SQL 都没执行到** —— 生产库里没有留下任何一行)。另做过**一次** `LOCALAI_PG_USER=postgres` 的连接尝试以实测 C2(见 §1.4.1):`connect()` 后**立即 close,不执行任何 SQL**,结果 `REFUSED` |
 
 **证据 —— `pg_ident.conf` SHA256(本车道全程未变):**
 

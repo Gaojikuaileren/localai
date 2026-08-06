@@ -71,6 +71,15 @@ identity     = 'D:\AI\state\identity'     # ★★ P3b 成员表/证书公共材
 #  · ★ 活库绝不文件级复制(§8.5.5):pg\18\data 与 qdrant*/storage 走 pg_dump / snapshot
 #  · config.yaml 含明文 api_key(S2)→ 靠 NTFS 强 ACL 保护(它在 E: 仓库外,.gitignore 管不到它)
 [memory]
+# ★★ 记忆套件的 venv(2026-08-06 · D91 登记)。
+#   `90-ops\run-tests.ps1` 从这里读它去跑 test_repo —— 系统 python 没有 psycopg
+#   (实测:test_repo/test_gate 在 `import psycopg` 处即 ModuleNotFoundError)。
+#   ★ 为什么登记一个键、而不是从 `models` 根推导出 `<AI 根>\venvs\memory`:
+#     推导要先假定「models 的父目录就是 AI 根」——**那是一次猜测**,
+#     而本文件里没有任何一行写着它。今天 models=D:\AI\models 让它碰巧成立;
+#     哪天 models 单独挪盘,推导会指向一个不存在的路径,而失败信息会说「venv 没装好」。
+#   ★ 换盘时这一行要跟着改 —— 这正是本文件存在的意义(只改一处)。
+venv                = 'D:\AI\venvs\memory'          # 实测 psycopg 3.3.4 · Python 3.12.10
 pg_bin              = 'D:\AI\state\memory\pg\18\bin'
 pg_data             = 'D:\AI\state\memory\pg\18\data'
 pg_port             = '5432'
