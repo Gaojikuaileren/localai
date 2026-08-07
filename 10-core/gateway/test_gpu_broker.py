@@ -16,6 +16,7 @@
 import asyncio
 import dataclasses
 import inspect
+import socket
 import os              # ★ D92 元断言要去客户端源码里找配对标记
 import re
 import sys
@@ -2444,6 +2445,90 @@ if _st_src is not None:
                           "CONTRACT" + ":gpu.intended"))
     check("★ 反向:真的写了那个契约号时,边界判据认得出来",
           _has_anchor("… CONTRACT" + ":gpu.intended —— 说明 …", "CONTRACT" + ":gpu.intended"))
+
+# ══════════════════════════════════════════════════════════════════════
+#  V9 · 自动关栈(D?)—— 判据在中枢侧、跨机、fail-closed
+#
+#  ★★★ 这一组的第一个理由是**同一形状已经出现三次**:
+#    A5 库写好零调用点 · doctor ⑫ 环写好没提交 · `model_loader.shutdown()` 调用点 0 处。
+#    ⇒ 通则:**凡"写好了的收尾/清理函数",都要有一条断言钉住它有调用点。**
+#    下面第一条就是这条通则在本例上的落点。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== V9:自动关栈的判据 ===")
+
+_shutdown_handlers = list(getattr(gateway.app.router, "on_shutdown", []))
+check("★★★ 网关注册了 shutdown 钩子 —— 在这之前**一个都没有**,"
+      "而 ModelLoader.shutdown() 的调用点是 0 处 ⇒ 关网关会留下孤儿后端、显存继续占着",
+      len(_shutdown_handlers) >= 1, f"实测 {len(_shutdown_handlers)} 个")
+# ★ 用 code_only:第一版直接 getsource,而这个钩子的**注释里就写着 `_adopted`**
+#   (它正是在说明"认领的不动")⇒ 断言撞在解释它所守之物的那段话上,当场红。
+#   ASSERTION-PITFALLS 第 1 条,本轮又踩一次 —— 已按第 1 条的推荐写法改。
+_reap_src = assert_helpers.code_only(gateway._reap_backends_on_shutdown)
+check("★★★ 那个钩子**真的调了**装载器的 shutdown(不是只登记了一个空函数)——"
+      "「写好了的收尾函数有没有调用点」正是这条断言要钉的那件事",
+      ".shutdown()" in _reap_src and "_loader" in _reap_src)
+check("★★ 钩子**不碰** _adopted —— 认领来的不是我们起的,不该被我们杀;"
+      "那条边界在 model_loader 里本来就写对了,这里只是别去'改进'它",
+      "_adopted" not in _reap_src)
+
+# ★★★ 通则的第二个落点:**判据本身也得有调用点**。
+#   本轮这个形状已经出现三次(A5 库零调用点 · doctor ⑫ 环写好没提交 ·
+#   ModelLoader.shutdown 零调用点)—— 一条没人读的判据和没有判据是一回事。
+_startup_src = assert_helpers.code_only(gateway._start_gpu_broker)
+check("★★★ 关栈巡检**被起起来了**(stack_shutdown_verdict 有调用点)—— "
+      "少了这一行,判据写得再对也只是又一个没人读的函数",
+      "_stack_shutdown_sweeper" in _startup_src)
+_sweep_src = assert_helpers.code_only(gateway._stack_shutdown_sweeper)
+check("★★★ 关栈走**优雅退出**(SIGINT),不是 os._exit —— "
+      "后者会跳过 shutdown 钩子,自己起的后端全成孤儿,而那正是坑 3 本身",
+      "SIGINT" in _sweep_src and "_exit" not in _sweep_src)
+check("★★ 巡检里**判不出来就不关**(except 里不许有关栈动作)",
+      "continue" in _sweep_src)
+
+_ok, _why = gateway.stack_shutdown_verdict(blocking=0, resident=0, idle_s=9999, peers=[])
+check("★★★ 四条全满足 ⇒ 放行。**判据不能是恒假的** —— 一个永远不放行的 fail-closed "
+      "和「关栈没实现」是一回事,而『没关』与『条件没满足』长得一模一样", _ok, _why)
+for _kw, _name in (
+    (dict(blocking=1, resident=0, idle_s=9999, peers=[]), "有 blocking 租约(坑 2 · D90②)"),
+    (dict(blocking=0, resident=1, idle_s=9999, peers=[]), "还有组件驻留着"),
+    (dict(blocking=0, resident=0, idle_s=9999, peers=["PC-B"]), "有副机在线(坑 1)"),
+    (dict(blocking=0, resident=0, idle_s=10, peers=[]), "还不够空闲"),
+):
+    _r, _w = gateway.stack_shutdown_verdict(**_kw)
+    check(f"★★ 不放行:{_name}", not _r, _w)
+    check(f"★ 而且说得出理由:{_name}", len(_w) > 10)
+
+check("★★★ 「有副机在线」是**硬条件**,不是提醒后仍关 —— "
+      "关栈会作废所有租约(D83:租约不挺过中枢重启),副机正在对话就被切断",
+      not gateway.stack_shutdown_verdict(blocking=0, resident=0, idle_s=10**9,
+                                         peers=["PC-B"])[0])
+
+# ★ 同上:函数**自己就叫** stack_idle_seconds,裸搜 "idle_seconds" 必然命中自己。
+#   ⇒ 判据改成钉那个**具体的错误接法**:BROKER.idle_seconds。
+_idle_src = assert_helpers.code_only(gateway.stack_idle_seconds)
+check("★★★ 关栈的空闲判据走网关侧的 `_last_request_at`,**不是** BROKER.idle_seconds ——"
+      "后者被租约心跳每 ~30 秒刷一次,只要有任何一台客户端活着就永远到不了阈值"
+      "(它自己的注释写着这件事,并明说『本属性从此是纯观测量,没有任何动作读它』)",
+      "_last_request_at" in _idle_src and "BROKER.idle_seconds" not in _idle_src)
+
+check("★★ /health 在豁免名单里(它会被体检与起栈探测轮询,算进来的话空闲数永远归零)",
+      "/health" in gateway._IDLE_EXEMPT_PATHS)
+
+_saved_online = dict(gateway._sync_online)
+try:
+    gateway._sync_online.clear()
+    gateway._sync_online[object()] = socket.gethostname()
+    check("★★★ 在线名单里只有**自己** ⇒ peers_online 为空 —— "
+          "否则主机自己的客户端会把自己算成『还有别人在用』,栈永远关不掉",
+          gateway.peers_online() == [], gateway.peers_online())
+    gateway._sync_online[object()] = "PC-B"
+    check("★★ 加一台真副机 ⇒ 认得出来", gateway.peers_online() == ["PC-B"],
+          gateway.peers_online())
+finally:
+    gateway._sync_online.clear()
+    gateway._sync_online.update(_saved_online)
+check("★ 在线名单已还回去(不还的话后面每条断言都在对着一份测试用的名单说话)",
+      gateway._sync_online == _saved_online)
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)
