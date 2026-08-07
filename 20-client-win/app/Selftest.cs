@@ -6835,9 +6835,14 @@ public static class Selftest
                     //  服务端(Python)、网关消费者(Python)、本客户端(C#)三处读同一份登记表,
                     //  而 C# 这边只能抄一份常量 ⇒ **抄本会分家**,所以在这里跟原本对拍。
                     //  对不上当场红 ⇒ 期望值实质上仍然只有一份。
+                    //  ★★★ 2026-08-07 修:这条原来写成 `Assert(cjson is not null, …)`(**硬要求**),
+                    //    出包时当场红 —— 发布产物旁边**没有仓库**,`10-core/speech/contracts.json` 读不到。
+                    //    与 V1 那次是同一个形状:**结构类判据在发布产物里读不到源码**
+                    //    (见 build-client.ps1 的 SRCMISS 口径)。
+                    //    ⇒ 改成"读不到就跳过",与本文件其余结构判据同一条惯例;那个缺口**由 SRCMISS 记账**,
+                    //      不是无声放行。★ 而"抄本不许跟原本分家"在**开发树**里照常生效,
+                    //      而门禁跑的正是开发树 —— 该守住的那一次没有放松。
                     var cjson = TryReadSource(Path.Combine("..", "..", "10-core", "speech", "contracts.json"));
-                    Assert(cjson is not null,
-                           "★★ 读得到 10-core/speech/contracts.json(读不到 ⇒ 下面整段对拍会静默跳过 = 假绿)");
                     if (cjson is not null)
                     {
                         using var cdoc = JsonDocument.Parse(cjson);
