@@ -7488,6 +7488,122 @@ public static class Selftest
                     "★ 反向:空列表就是空列表 —— 不是【解析器永远返回一条】");
 
                 // ════════════════════════════════════════════════════════
+                //  V9 · D36 主机自识别 + 开机分流(D?)
+                //
+                //  ★★ 两个方向各测一次。**只测一个方向等于没测**:
+                //    只测"主机上判成主机"挡不住一个恒真的判据;
+                //    只测"副机上判成不是主机"挡不住一个恒假的判据。
+                // ════════════════════════════════════════════════════════
+                {
+                    // ── 方向一:主机上判成主机 ──
+                    var hostByAddr = HostSetup.DecideRole(
+                        new HostSetup.RoleEvidence(false, false, "localhost", true));
+                    Assert(hostByAddr.IsHost,
+                        "★★★ D36:中枢地址解析到本机 ⇒ 判【是主机】(D36 原文那条判据)");
+
+                    var hostByInstall = HostSetup.DecideRole(
+                        new HostSetup.RoleEvidence(true, true, null, null));
+                    Assert(hostByInstall.IsHost,
+                        "★★★ D36「安装事实」:铸过身份 + 带主机工具目录 ⇒ 判【是主机】,"
+                        + "**不需要配过对** —— 这正是全新安装时旧判据答不出来的那一格");
+
+                    // ── 方向二:副机上判成不是主机 ──
+                    Assert(!HostSetup.DecideRole(
+                               new HostSetup.RoleEvidence(false, false, "hub.local", false)).IsHost,
+                        "★★★ 中枢地址解析到别人 ⇒ 判【不是主机】");
+
+                    // ★★★ 两条证据打架:有主机工具目录,但地址指向别人 ⇒ 仍判不是主机。
+                    //   一台副机上如果有人整包拷来了 host 目录,这条是唯一挡住它去起栈的东西。
+                    var conflict = HostSetup.DecideRole(
+                        new HostSetup.RoleEvidence(true, true, "hub.local", false));
+                    Assert(!conflict.IsHost,
+                        "★★★ 证据打架(有主机工具 + 地址指向别人)⇒ **一律判不是主机** —— "
+                        + "否则两台机器会同时起 Edge 抢 8443、两个 Broker 各写各的账本");
+                    Assert(conflict.Why.Contains("打架"),
+                        "★★ 而且要说清为什么 —— 判错方向时给的理由必须是它真的验过的那件事");
+
+                    // ── ★★ 全新安装(什么都没有)⇒ fail-closed,并说清拿不准 ──
+                    var fresh = HostSetup.DecideRole(
+                        new HostSetup.RoleEvidence(false, false, null, null));
+                    Assert(!fresh.IsHost,
+                        "★★★ 全新安装、没配过对、没有主机工具 ⇒ **拿不准就判不是主机**(fail-closed)");
+                    Assert(fresh.Why.Contains("拿不准") && fresh.Why.Contains("代价不对称"),
+                        "★★ fail-closed 要说清**为什么**拿不准、以及为什么默认落这一边");
+
+                    // ── ★ 有工具没身份:光有工具不等于是主机(可能是整包拷过来的)──
+                    Assert(!HostSetup.DecideRole(
+                               new HostSetup.RoleEvidence(true, false, null, null)).IsHost,
+                        "★★ 有主机工具但**没铸过身份** ⇒ 不是主机(D36:主机 = 持有 CA 私钥那一台)");
+
+                    // ── ★★ 解析器:拿不准(null)与"不是本机"(false)必须分开 ──
+                    Assert(HostSetup.ResolvesToThisMachine("127.0.0.1") == true
+                           && HostSetup.ResolvesToThisMachine("localhost") == true
+                           && HostSetup.ResolvesToThisMachine("::1") == true,
+                        "★★ 回环的几个字面量判 true");
+                    Assert(HostSetup.ResolvesToThisMachine("127.0.0.1:8443") == true,
+                        "★ 带端口的拨号地址也认得出来(Profile.Dial 就是这个形状)");
+                    Assert(HostSetup.ResolvesToThisMachine("") is null,
+                        "★★★ 空地址 ⇒ **null(拿不准)**,不是 false —— "
+                        + "合成一个的话,一次 DNS 抖动会让主机在下次启动时被判成副机");
+
+                    // ── ★★★ 副机绝不起栈:结构上取不到 MayStartStack ──
+                    var roleNo = new HostSetup.RoleVerdict(false, "测试用",
+                        new HostSetup.RoleEvidence(false, false, null, null));
+                    var roleYes = new HostSetup.RoleVerdict(true, "测试用",
+                        new HostSetup.RoleEvidence(true, true, null, null));
+                    Assert(!HostSetup.DecideBoot(roleNo, false, false, false).MayStartStack
+                           && !HostSetup.DecideBoot(roleNo, true, false, false).MayStartStack
+                           && !HostSetup.DecideBoot(roleNo, true, true, false).MayStartStack
+                           && !HostSetup.DecideBoot(roleNo, false, true, true).MayStartStack,
+                        "★★★ **副机的每一条路径 MayStartStack 都是 false** —— "
+                        + "起栈的唯一入口被它挡着,副机一行起栈代码都走不到");
+                    Assert(HostSetup.DecideBoot(roleYes, false, false, true).MayStartStack,
+                        "★★★ 主机 · 有身份 · 栈没起 ⇒ **这一条才允许起栈**");
+                    Assert(!HostSetup.DecideBoot(roleYes, false, false, false).MayStartStack,
+                        "★★ 主机但**还没铸身份** ⇒ 先引导铸身份,不起栈"
+                        + "(栈起来了也没用:没有身份 Edge 绑不上)");
+                    Assert(!HostSetup.DecideBoot(roleYes, false, true, true).MayStartStack,
+                        "★ 主机且栈已经在跑 ⇒ 不重复起");
+
+                    // ── ★ 每条路都有界面落点,不许静默 ──
+                    Assert(HostSetup.DecideBoot(roleNo, false, false, false).Headline.Length > 0
+                           && HostSetup.DecideBoot(roleNo, true, false, false).Headline.Length > 0
+                           && HostSetup.DecideBoot(roleYes, false, false, false).Headline.Length > 0
+                           && HostSetup.DecideBoot(roleYes, false, false, true).Headline.Length > 0,
+                        "★★★ 四条**要人做点什么**的路都有界面落点(空 headline = 静默)");
+                    Assert(HostSetup.DecideBoot(roleYes, false, true, true).Headline.Length == 0
+                           && HostSetup.DecideBoot(roleNo, true, true, false).Headline.Length == 0,
+                        "★★ 而一切正常的两条**不占那一行** —— 没有坏消息就不该有提示");
+                    // ★★ 判成"不是主机"的**理由**必须被带到界面上,而不是只给一个结论。
+                    //   ★ 判据钉的是"role.Why 被原样带过去了",不是某个固定词 ——
+                    //     钉固定词的话,理由改一次措辞断言就红,而它其实没坏(第 9 条坑)。
+                    var roleNoWithReason = new HostSetup.RoleVerdict(false, "某条具体的理由X",
+                        new HostSetup.RoleEvidence(false, false, null, null));
+                    Assert(HostSetup.DecideBoot(roleNoWithReason, false, false, false)
+                               .Headline.Contains("某条具体的理由X"),
+                        "★★ 副机没配对时,界面上要带上**为什么判成不是主机** —— "
+                        + "否则用户看到的是一个没有理由的结论");
+                    Assert(HostSetup.DecideRole(new HostSetup.RoleEvidence(false, false, null, null))
+                               .Why.Length > 20,
+                        "★ 而真实的那条理由本身也得说得出话(不是空字符串)");
+
+                    // ── ★★ 半套状态必须能被认出来(起了网关没起 Edge 是最坏的中间态)──
+                    var okStep = new SetupStep("网关", SetupOutcome.Ok, "");
+                    var badStep = new SetupStep("Edge", SetupOutcome.Failed, "没起来");
+                    Assert(new HostSetup.StackResult(okStep, badStep).HalfUp,
+                        "★★★ 起了一半 ⇒ HalfUp 为真(它和「全没起来」的下一步不同,必须分开)");
+                    Assert(!new HostSetup.StackResult(okStep, okStep).HalfUp
+                           && new HostSetup.StackResult(okStep, okStep).AllUp,
+                        "★ 两个都起来了才算全起");
+                    Assert(!new HostSetup.StackResult(badStep, badStep).HalfUp
+                           && !new HostSetup.StackResult(badStep, badStep).AllUp,
+                        "★ 两个都没起 ⇒ 不是半套,是全没起");
+                    Assert(new HostSetup.StackResult(
+                               new SetupStep("网关", SetupOutcome.Skipped, ""), okStep).AllUp,
+                        "★★ Skipped(本来就在跑)算**成**,不算失败 —— 幂等的那一半");
+                }
+
+                // ════════════════════════════════════════════════════════
                 //  V6 · sync / chat 切片的跨进程契约(客户端那半边)
                 //
                 //  另一半在 `10-core/gateway/test_sync.py`(搜 CROSS_PROCESS_CONTRACTS),
