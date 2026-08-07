@@ -105,14 +105,29 @@ public partial class App : Application
         //   否则第一帧界面会走本机回退路径,显存条先闪一下「本机显卡」再跳成「中枢显存」。
         Gpu = new HubGpu(Hub);
         Vram.Hub = Gpu;
-        Gpu.Start();
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ V9(D?):**先判角色,再起流。** 用户裁定 2026-08-07 ——
+        //    「开启应用就该开始判断电脑角色以及配对,不应该只在我点进设置滑到下面去才开始;
+        //      如果一开始不判断角色,也没办法让主机自动起栈。」
+        //
+        //  此前这里直接 `Gpu.Start()` 去连中枢,连不上就显示 Offline **结束**;
+        //  而 `HostSetup` 的唯一调用方在设置深处(DevicesView),启动路径零调用。
+        //
+        //  ★★ 为什么是后台任务而不是在 UI 线程上等:
+        //    起栈最多要等 40 秒(两个组件各探 20 秒)。在 OnStartup 里同步等 =
+        //    首屏 40 秒白屏;而用 `.GetAwaiter().GetResult()` 等 async **必然死锁** ——
+        //    HostSetup 文件头记着这一条,2026-08-04 实机卡死过。
+        //  ⇒ 决策在后台做完再回 UI 线程起流:**三条流确实排在角色判定之后**,
+        //    而界面该显示什么在第一时间就有了(BootHeadline)。
+        // ══════════════════════════════════════════════════════════════
+        StartAfterBootDecision();
         Lifecycle.Register("stop-gpu-stream", () => Gpu.Stop());
         // ★★★ P4-S16b:持一份 client_session 租约并续租。
         //   它让「全网有没有人在用」成为一个**可以为假**的判据 ——
         //   在它之前客户端一份租约都不持,于是中枢那边"没人在跑"和"空闲了 N 秒"
         //   **两条都是恒真式**,而按需卸载正要靠它们。见 LeaseKeeper 文件头。
         Lease = new LeaseKeeper(Hub);
-        Lease.Start();
+        // ★ V9:与 Gpu 同一条 —— 由 StartAfterBootDecision 在角色判定之后统一起。
         Lifecycle.Register("stop-lease-keeper", () => Lease.Stop());
         // ★★★ V8 · D87③:把任务中心接给 GPU 面(与上面 `Vram.Hub = Gpu` 同一手法)。
         //   这一行给了 `TaskCenter` **第一个真实客户**:在它之前那个类的生产写入点是 0,
@@ -338,6 +353,95 @@ public partial class App : Application
         AllDay(4, 6, "(示例)出差 · 柏林", "我", "个人", "工作", ai: true);   // AI 建立
         AllDay(9, 13, "(示例)家庭旅行", "双方", "家庭", "家庭");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ V9 · 开机就判角色 → 主机自动起栈(D?)
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>开机分流的结论。界面读它显示那一行;null = 还在判。</summary>
+    public static HostSetup.BootDecision? Boot { get; private set; }
+
+    /// <summary>起栈的逐组件结果(只有主机路径会有);null = 没起过。</summary>
+    public static HostSetup.StackResult? Stack { get; private set; }
+
+    /// <summary>界面上那一行开机状态。★ 空字符串 = 一切正常,不该占一行。</summary>
+    public static string BootHeadline { get; private set; } = "";
+
+    public static event Action? BootChanged;
+
+    static void RaiseBootChanged()
+    {
+        try { BootChanged?.Invoke(); }
+        catch { /* 一个订阅者抛异常不该拖垮启动 —— 与 SyncClient.Notify 同款 */ }
+    }
+
+    /// <summary>
+    /// 先判角色、再起三条流。★ 全程在后台线程,回 UI 线程才碰界面对象。
+    /// </summary>
+    void StartAfterBootDecision()
+    {
+        _ = Task.Run(async () =>
+        {
+            HostSetup.BootDecision decision;
+            try
+            {
+                // ★ 已配对时把拨号地址当作"已知的中枢地址"喂进去 —— 它只是**其中一个**来源。
+                //   判据本身不要求配过对(D36),没配过对时传 null,由安装事实那条兜。
+                decision = await HostSetup.DetectBootAsync(Hub.Profile?.Dial, Hub.IsPaired);
+            }
+            catch (Exception ex)
+            {
+                LogCrash("boot-decision", ex);
+                // ★★ 判不出来 ⇒ **按副机走**(fail-closed)。绝不因为判据自己炸了就去起栈。
+                decision = new HostSetup.BootDecision(
+                    HostSetup.BootRoute.ClientHubUnreachable,
+                    new HostSetup.RoleVerdict(false, "角色判定本身出错:" + ex.Message,
+                        new HostSetup.RoleEvidence(false, false, null, null)),
+                    "开机角色判定出错(已记 crash.log)—— 按副机处理,不会去起栈。");
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                Boot = decision;
+                BootHeadline = decision.Headline;
+                RaiseBootChanged();
+            });
+
+            // ★★★ 起栈的**唯一**入口,而且被 MayStartStack 挡着 ——
+            //   副机的四条路径结构上都取不到它(见 HostSetup.BootDecision)。
+            if (decision.MayStartStack)
+            {
+                var res = await HostSetup.EnsureStackAsync();
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    Stack = res;
+                    BootHeadline = res.AllUp
+                        ? ""
+                        : res.HalfUp
+                            // ★ 半套是最坏的中间态 —— 必须单独说,别混进"起失败了"
+                            ? $"⚠ 栈只起来一半:{res.Gateway.Name}={Say(res.Gateway)} · {res.Edge.Name}={Say(res.Edge)}"
+                            : $"✗ 栈没起来:{res.Gateway.Name}={Say(res.Gateway)} · {res.Edge.Name}={Say(res.Edge)}";
+                    RaiseBootChanged();
+                });
+            }
+
+            // ★ 无论哪条路都要起流:副机要连中枢,主机起完栈也要连自己那套。
+            //   起栈失败也照起 —— 流自己会重试,而界面上那行已经说清是哪一步没起来。
+            await Dispatcher.InvokeAsync(() =>
+            {
+                Gpu.Start();
+                Lease.Start();
+            });
+        });
+    }
+
+    static string Say(SetupStep s) =>
+        s.Outcome switch
+        {
+            SetupOutcome.Ok => "已起",
+            SetupOutcome.Skipped => "本来就在跑",
+            _ => "没起来(" + s.Detail + ")",
+        };
 
     // 崩溃日志:追加到 {state}\crash.log(带时间/来源/完整堆栈)。写日志本身绝不能再抛。
     static void LogCrash(string source, Exception? ex)
