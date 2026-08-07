@@ -380,6 +380,57 @@ if _doc is not None:
     check("★★ 「没有 VERSION.txt」也判红 —— 一个身份不明的产物和一个过期的产物一样不能装出去",
           "VERSION.txt" in _pkg_src and "没有 VERSION" in _pkg_src)
 
+# ── ⑫ ★★★ sysmem fallback 那一环:识别器两个方向都钉 + 它**不许判对错**(2026-08-07)──
+#
+#  ★ 用户裁定:注册表那个开关**不动**,拦超配的是我们自己的三道闸 + D99 压力即让。
+#    ⇒ 这一环**报的是事实,不是判决**。
+#    判 ✘ 会有人跑去把系统设置关掉(那是他没被要求做的事);
+#    判 ✔ 等于声称"已经安全了",而**我们并没有验过它是关的**。
+#
+#  ★★ **只钉识别器,不钉今天的答案**。今天注册表是空的 —— 但用户哪天真去关它是他的权利,
+#    把"今天是空的"钉住会让那一天变红,而那不是缺陷(ASSERTION-PITFALLS 第 5 条)。
+if _doc is not None:
+    _SM_CASES = [
+        ([(r"HKLM\X", "SysmemFallbackPolicy", 1)], 1,
+         "★★★ 正向:名字里带 Sysmem 的**必须被挑出来** —— 挑不出来这一环就永远报「没有覆盖项」"),
+        ([(r"HKLM\X", "EnableFallback", 0)], 1,
+         "★★ 正向:带 Fallback 的也算(两个词各自都要认,不是只认合起来那一串)"),
+        ([(r"HKLM\X", "sysmemfallbackpolicy", 1)], 1,
+         "★ 大小写不敏感 —— 注册表值名的大小写不由我们决定"),
+        ([(r"HKLM\X", "DisplayVersion", "610.62"),
+          (r"HKLM\X", "MemoryBudget", 8)], 0,
+         "★★★ 反向:**不带那两个词的一个都不许挑** —— 误挑会把一台没改过的机器"
+         "报成「有覆盖项」,而那会让人以为设置已经生效了"),
+        ([], 0, "★★ 反向:空输入 → 空结果,**不许凭空造一条**"),
+    ]
+    for _scanned, _want, _why in _SM_CASES:
+        _got = len(_doc.sysmem_overrides(_scanned))
+        check(f"sysmem 识别器:{_why}", _got == _want, f"期望 {_want} 实得 {_got}")
+
+    #  ★ 与第 ⑨ 环同一手法:从**源码**上钉,而不是靠今天的运行结果 ——
+    #    运行结果会随注册表内容漂,源码不会。
+    _doc_all = (REPO / "90-ops" / "debug" / "doctor.py").read_text(encoding="utf-8")
+    _sm_src = ast.get_source_segment(
+        _doc_all,
+        next(n for n in ast.walk(ast.parse(_doc_all))
+             if isinstance(n, ast.FunctionDef) and n.name == "link_sysmem")) or ""
+    check("★★★ 这一环**恒返回提示态**(第一个返回值是 None)—— "
+          "判 ✘ 会有人跑去关系统设置(那是他没被要求做的事);"
+          "判 ✔ 等于声称已经安全,而我们并没有验过它是关的",
+          "return None," in _sm_src and "return True" not in _sm_src
+          and "return False" not in _sm_src, "link_sysmem 里出现了 True/False 判决")
+    check("★★★ 它**自己说出**够不着的那一半:控制面板那个设置在 Drs 二进制里、本检查不解析 —— "
+          "不说的话,这一环本身就是「看着有防护、实际没有」",
+          "Drs" in _sm_src and "不解析" in _sm_src)
+    check("★★ 「注册表没有覆盖项」必须写明**不等于「已关」** —— 正是审计 C6 抓的那句话的形状",
+          "不是" in _sm_src and ("默认值" in _sm_src or "已关" in _sm_src))
+    check("★★ 读不到的键**单独带回来并如实说**,不当作「没问题」",
+          "errors" in _sm_src and "读不到" in _sm_src)
+    check("★ 它在 LINKS 里注册了 —— 写了函数却没挂上去 = 永远不跑",
+          "link_sysmem" in _doc_all.split("LINKS = [", 1)[1])
+    check("★★ 它**只读**:整段里没有任何写注册表的调用(KEY_WRITE / SetValue / CreateKey)",
+          not any(w in _doc_all for w in ("KEY_WRITE", "SetValue", "CreateKey", "DeleteValue")))
+
 print("-" * 78)
 print(f"  === 调试工具自检:{_p} PASS · {_f} FAIL ===")
 sys.exit(1 if _f else 0)

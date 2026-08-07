@@ -410,6 +410,118 @@ def link_sync():
     return True, f"共享数据:{d.get('counts')} · generation={d.get('generation')}", ""
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑫ CUDA sysmem fallback —— **只读一次注册表,如实上报,不判对错**
+#
+#  ★★★ 用户裁定(2026-08-07 · P4 收官):
+#    **我们自己的闸提前介入**(D99:压力即让 → 卸载 + 任务暂停 + 主副机都收到提醒);
+#    **系统注册表那个开关【不动】** —— 它是系统级驱动设置,会影响游戏等所有程序。
+#  ⇒ 本环**恒返回提示态**,不返回 ✔ 也不返回 ✘:
+#    判 ✘ 等于把「裁定不做」渲染成「有问题」,那会有人跑去把它关掉;
+#    判 ✔ 等于声称"已经安全了",而我们并没有验过它是关的。
+#    **它报的是一个事实,不是一个判决。**
+#
+#  ★★ 这一环存在的理由,是 `start-stack.ps1` 那段注释踩过的坑(审计 C6):
+#    「sysmem fallback 关掉后是硬失败」曾被当成**已成立的前提**用了很久,
+#    而它**从来没有被建立过**。⇒ 现在每次体检都把真实状态摆出来。
+#
+#  ★★★ **本检查覆盖不到的那一半,必须自己说出来**:
+#    NVIDIA 控制面板里的「CUDA - Sysmem Fallback Policy」存在**驱动配置库二进制**
+#    (`%ProgramData%\NVIDIA Corporation\Drs\nvdrsdb*.bin`)里,**不在注册表**。
+#    本检查**不解析**那个二进制。
+#    ⇒ **「注册表里没有覆盖项」只等于「没人从注册表改过」,不等于「fallback 已关」。**
+#    不写这一句的话,这一环本身就成了「看着有防护、实际没有」。
+# ══════════════════════════════════════════════════════════════════════════
+_SYSMEM_ROOTS = [
+    r"HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm",
+    r"HKLM\SOFTWARE\NVIDIA Corporation\Global",
+    r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
+]
+_SYSMEM_RE = re.compile(r"sysmem|fallback", re.I)
+
+
+#  ★ 抽成纯函数是为了**能被合成输入两个方向各问一遍**(selfcheck.py)。
+#    ★★ selfcheck 里**不断言今天的答案**(注册表今天是空的)——
+#      那条断言会在用户哪天真的去关它的时候变红,而那是他的权利,不是缺陷
+#      (ASSERTION-PITFALLS 第 5 条:会因为「状态变了」而红的断言,测的不是它自称在测的东西)。
+#      ⇒ 只钉**识别器**:给它带 sysmem 的名字必须挑出来,不带的必须不挑。
+def sysmem_overrides(scanned):
+    """从 `[(根, 值名, 值)]` 里挑出 sysmem/fallback 覆盖项。**纯函数,不碰注册表。**"""
+    return [(root, name, val) for root, name, val in scanned if _SYSMEM_RE.search(name)]
+
+
+def _scan_sysmem_registry():
+    """只读扫上面那几个根(含子键)。返回 `(scanned, errors)`。
+    ★ 读不到不等于没有 —— 错误单独带回来,由调用方如实说,**不当作"没问题"**。"""
+    scanned, errors = [], []
+    try:
+        import winreg                                        # noqa: PLC0415
+    except ImportError:                                      # 非 Windows
+        return scanned, ["winreg 不可用(非 Windows)"]
+
+    def _walk(hkey, path, depth=0):
+        try:
+            k = winreg.OpenKey(hkey, path, 0, winreg.KEY_READ)
+        except OSError as e:
+            errors.append(f"{path}: {type(e).__name__}")
+            return
+        with k:
+            try:
+                n_sub, n_val, _ = winreg.QueryInfoKey(k)
+            except OSError as e:
+                errors.append(f"{path}: QueryInfoKey {type(e).__name__}")
+                return
+            for i in range(n_val):
+                try:
+                    name, val, _ = winreg.EnumValue(k, i)
+                    scanned.append((f"HKLM\\{path}", name, val))
+                except OSError:
+                    continue
+            if depth < 2:                                    # 只下探两层:够到 NVTweak 那一类
+                for i in range(n_sub):
+                    try:
+                        _walk(hkey, path + "\\" + winreg.EnumKey(k, i), depth + 1)
+                    except OSError:
+                        continue
+
+    for root in _SYSMEM_ROOTS:
+        _walk(winreg.HKEY_LOCAL_MACHINE, root.split("\\", 1)[1])
+    return scanned, errors
+
+
+def link_sysmem():
+    scanned, errors = _scan_sysmem_registry()
+    hits = sysmem_overrides(scanned)
+    # ★ 从环境变量取,**不写死盘符** —— pre-commit 当场拦过一次(§11.1:代码里禁绝对路径)。
+    #   钩子是对的:ProgramData 可以被挪走,写死的那一行会在挪走的那台机器上变成一句错话,
+    #   而它的表现是「未找到 Drs 配置库」—— 一个**指向别处**的结论。
+    #   ⇒ 取不到就如实说取不到,**不猜一个默认值**。
+    _pd = os.environ.get("ProgramData")
+    drs = Path(_pd) / "NVIDIA Corporation" / "Drs" if _pd else None
+    drs_files = sorted(p.name for p in drs.glob("nvdrsdb*.bin")) if drs and drs.is_dir() else []
+
+    if hits:
+        what = " · ".join(f"{n}={v}" for _, n, v in hits[:3])
+        fact = f"注册表里有 {len(hits)} 项 sysmem/fallback 覆盖:{what}"
+    else:
+        fact = (f"注册表里**没有**任何 sysmem/fallback 覆盖项(扫了 {len(scanned)} 个值)"
+                " ⇒ 用的是**驱动默认值**,**不是「已关」**")
+    if errors:
+        fact += f" · ★ 有 {len(errors)} 处读不到:{errors[0]}"
+    if drs_files:
+        fact += f" · 控制面板那个设置在 Drs/{','.join(drs_files)}(本检查**不解析**)"
+    elif drs is None:
+        fact += " · ★ 读不到 %ProgramData%,**没去找** Drs 配置库(不猜路径)"
+    else:
+        fact += " · 未找到 Drs 配置库"
+
+    todo = ("★ 这是**如实上报,不是判决**:用户已裁定【注册表开关不动】,"
+            "拦住超配的是我们自己的三道闸 + D99 压力即让。"
+            "★★ 「注册表没有覆盖项」**不等于** fallback 已关 —— "
+            "控制面板那个设置在 Drs 二进制里,本检查够不着。要确认只能开控制面板看。")
+    return None, fact, todo
+
+
 LINKS = [
     ("① 路径契约", link_paths),
     ("② 模型文件", link_models),
@@ -422,6 +534,7 @@ LINKS = [
     ("⑨ 客户端产物", link_client_pkg),
     ("⑩ 配对档案", link_pairing),
     ("⑪ 显存", link_vram),
+    ("⑫ sysmem fallback", link_sysmem),
 ]
 
 
