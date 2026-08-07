@@ -111,4 +111,94 @@ EOF
   echo "  √ 自检通过($(grep -oE 'PASS=[0-9]+ FAIL=0' /tmp/localai-precommit.log | tail -1))"
 fi
 
+# =============================================================================
+#  ③ 行尾 churn 护栏(2026-08-07 加)
+#
+#  ★★★ 起因:同一个坑**连踩三次**才修对 —— 改已有文件时,把**没打算改的部分
+#    (行尾)**也改了。三次都是 worklog:
+#      78e01d5  整个文件 CRLF → LF   (churn 3154)
+#      0b042cc  "还原"成 CRLF,而原文件是**混合**的  (churn 3918)
+#      f9af80b  取原始字节重来才对    (churn 764)
+#    ASSERTION-PITFALLS 第 7 条记着这个形状,而**它一直没有护栏**。
+#
+#  ★★ 每次抓到它的都是**同一个判据,而且是人肉看出来的**:
+#      「我只加了 N 行,而 git 报 M insertions / K deletions」
+#    ⇒ 把那个判据做成机器做的事。
+#
+#  判据(精确,不是启发式):
+#      churn = (git 数的 增+删) − (内容层去掉 \r 之后 diff 数的 增+删)
+#    · 只改了行尾的一行:git 记 1 删 + 1 增 = 2,内容层记 0  ⇒ churn += 2
+#    · 真改了内容的一行:两边都记 2                          ⇒ churn 0
+#    · 纯追加的一行    :两边都记 1                          ⇒ churn 0
+#    ⇒ **churn > 0 的那部分,就是被静默改掉的行尾。**
+#
+#  ★ 已在真实历史上对拍过(两个方向都验了):
+#    上面三条"踩坑"提交 churn = 3154 / 3918 / 764,**全部会被拦**;
+#    而 b38464a(5 个文件)与 104e3d8(3 个文件)这两条**干净的追加/编辑提交
+#    churn 全部 = 0**,一个都不误报。★ 误报会让人习惯性 --no-verify,
+#    而本文件开头就警告过那件事 —— 所以"不误报"和"能报"一样承重。
+#
+#  ★ 放行口是**窄的**:`LOCALAI_ALLOW_EOL_CHANGE=1 git commit …`。
+#    **不要用 --no-verify** —— 那会把绝对路径检查和自检门禁一起关掉。
+#    真要整体改行尾(例如把一份混合行尾的文件规范化)是合法的,但必须是**有意的一次动作**。
+# =============================================================================
+if [ "$LOCALAI_ALLOW_EOL_CHANGE" = "1" ]; then
+  echo "→ 行尾 churn 护栏:已被 LOCALAI_ALLOW_EOL_CHANGE=1 显式跳过(这是一次有意的行尾改写)"
+else
+  eol_bad=""
+  # 只看**已存在且被修改**的文件:新增文件没有"没打算改的部分"可言。
+  for f in $(git diff --cached --name-only --diff-filter=M); do
+    ns=$(git diff --cached --numstat -- "$f")
+    ins=$(printf '%s' "$ns" | awk '{print $1}')
+    del=$(printf '%s' "$ns" | awk '{print $2}')
+    # 二进制文件 numstat 是 "-  -" —— 跳过,别对它算行
+    case "$ins$del" in *-*) continue ;; esac
+    [ -z "$ins" ] && continue
+
+    o=$(mktemp) || continue
+    n=$(mktemp) || { rm -f "$o"; continue; }
+    git show "HEAD:$f" 2>/dev/null | tr -d '\r' > "$o" || { rm -f "$o" "$n"; continue; }
+    git show ":$f"     2>/dev/null | tr -d '\r' > "$n" || { rm -f "$o" "$n"; continue; }
+    content=$(diff "$o" "$n" | grep -c '^[<>]')
+    cr_old=$(git show "HEAD:$f" 2>/dev/null | tr -cd '\r' | wc -c | tr -d ' ')
+    cr_new=$(git show ":$f"     2>/dev/null | tr -cd '\r' | wc -c | tr -d ' ')
+    rm -f "$o" "$n"
+
+    churn=$(( ins + del - content ))
+    # ★ churn < 0 说明两边的 diff 算法配对不同 —— **不判红**:
+    #   看不懂的东西不许当成证据。只在它明确 ≥ 2(至少一整行)时才拦。
+    if [ "$churn" -ge 2 ]; then
+      eol_bad="$eol_bad
+      $f
+        git 数 +$ins/-$del,而内容(去 \\r 后)只变了 $content 行
+        ⇒ 有 $(( churn / 2 )) 行**只有行尾被改了** · 文件里的 \\r 数 $cr_old → $cr_new"
+    fi
+  done
+
+  if [ -n "$eol_bad" ]; then
+    cat <<'EOF'
+
+────────────────────────────────────────────────────────────
+提交被拒绝 — **改到了没打算改的部分:行尾**。
+EOF
+    printf '%s\n' "$eol_bad"
+    cat <<'EOF'
+
+  ★ 这个形状同一个坑连踩三次(见 00-docs/ASSERTION-PITFALLS.md 第 7 条)。
+    每次抓到它的都是同一句话:「我只加了 N 行,而 git 报了 M 行改动」——
+    以前靠人肉看,现在由这条护栏看。
+
+  怎么修(按可靠性排序):
+    1. **取原始字节重来**:git show HEAD:<文件> 出来,只在锚点后拼上你那一段,
+       其余一个字节都不碰。★ 这是三次里唯一一次修对的做法。
+    2. 别用会整体重写文件的编辑器/工具去改一份**混合行尾**的文件。
+    3. 如果你**确实要**整体改行尾(例如有意规范化一份文件):
+         LOCALAI_ALLOW_EOL_CHANGE=1 git commit ...
+       ★ 用这个,**不要用 --no-verify** —— 后者会把绝对路径检查和自检门禁一起关掉。
+────────────────────────────────────────────────────────────
+EOF
+    exit 1
+  fi
+fi
+
 exit 0
