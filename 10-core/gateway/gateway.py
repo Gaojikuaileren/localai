@@ -811,12 +811,6 @@ async def _start_gpu_broker():
         await gpu_broker.BROKER.finish_startup()
     except Exception:                                        # noqa: BLE001
         pass   # 同上:留在 STARTING 比谎称 READY 安全,快照里看得见
-    # ★★★ 起关栈巡检 —— 这一行就是 stack_shutdown_verdict 的调用点。
-    #   少了它,判据写得再对也只是一个没人读的函数(本轮已见三例)。
-    try:
-        asyncio.get_running_loop().create_task(_stack_shutdown_sweeper())
-    except Exception:                                        # noqa: BLE001
-        pass   # 巡检起不来不该拖垮网关;后果只是不自动关栈
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -834,134 +828,58 @@ async def _start_gpu_broker():
 #    下面 `_SHUTDOWN_CALLS_LOADER` 就是这条断言的抓手。
 # ══════════════════════════════════════════════════════════════════════════
 
-#: 关栈判据里"多久没人要东西了"的阈值(秒)。
-STACK_IDLE_SHUTDOWN_S = 900.0
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-07 口径变更:**自动关栈的"自动"那一半撤掉了。**
+#
+#  用户提出把系统拆成【主机管理端 + 通用客户端】——起栈/关栈归管理端,
+#  客户端不再判断主机副机。协调层核过 D48,认为这是把 D48 的方法论推到底
+#  (「用**够不着**代替**判断**」)。
+#  ⇒ 关栈在新设计下是**人的动作**,不是推断:
+#    · 跨机空闲阈值 / 副机在线名单 / 自动关的巡检 —— **全部撤掉**(它们是在替人做判断);
+#    · 留下的只有「**关了会不会切断别人**」这一条**给人看的**判据。
+#
+#  ★ 本轮实际删掉的:`_stack_shutdown_sweeper`(自动关的执行者)· 它在 startup 里的接线 ·
+#    `_last_request_at` 中间件 · `stack_idle_seconds` · `peers_online` · 空闲阈值。
+#    **写过又删掉这件事本身留在这儿**,免得下一个人以为"从来没人想过自动关"。
+#
+#  ★★ 而坑 3(孤儿后端)**与架构无关,照修** —— 见下面那个 shutdown 钩子。
+# ══════════════════════════════════════════════════════════════════════════
 
-#: 最近一次**任何机器**的实质请求。★ 由中间件盖章 —— 一个地方,不散落。
-_last_request_at: float = time.monotonic()
 
-#: 不算"有人在用"的路径:探活与只读快照。★ 它们会被轮询,算进来的话这个数永远刷不老。
-_IDLE_EXEMPT_PATHS = frozenset({"/health"})
+def safe_to_stop_stack(*, blocking: int | None = None,
+                       resident: int | None = None) -> tuple:
+    """现在关栈会不会切断别人。返回 (可以关吗, 理由)。
 
+    ★★★ 它**不自己关任何东西** —— 关是人的动作(管理端),这里只回答"安不安全"。
+      ⇒ 这正是口径变更的落点:判据留着给人看,**推断与自动执行撤掉**。
 
-@app.middleware("http")
-async def _stamp_activity(request: Request, call_next):
-    """给「最近一次有人要东西」盖章。★ **只有这一个地方**写 `_last_request_at`。
+    ★★ 方向是有意选的:**误判成可以关的代价是切断别人**
+      (D83:租约不挺过中枢重启 ⇒ 关栈 = 所有租约当场作废,副机正在对话就被切断);
+      **误判成不能关只是多占一会儿显存**。两个方向不对称 ⇒ 拿不准一律答"不能关"。
 
-    ★★ 为什么不用 `gpu_broker.BROKER.idle_seconds()`:
-      **它是恒假的。** 那个数被客户端租约心跳刷新(TTL/3 ≈ 30 秒一次),
-      只要有任何一台客户端活着就**永远到不了阈值** —— 它自己的注释写着这件事,
-      并且明说「本属性从此是纯观测量,**没有任何动作读它**」。
-      拿它当关栈条件,等于写一条**永远不会为真**的判据:栈永远不关,而且没人会发现,
-      因为"没关"和"条件没满足"长得一模一样。
-    ★ D87⑧「计时器是主机与副机共享的一个,归中枢」在这里的落点:
-      这个戳在**中枢**上,**任何一台机器**的请求都刷新它 —— 这正是坑 1 要的跨机判据。
+    ★ 参数可注入 —— 判据要能被**两个方向**各测一次。
     """
-    global _last_request_at
-    if request.url.path not in _IDLE_EXEMPT_PATHS:
-        _last_request_at = time.monotonic()
-    return await call_next(request)
-
-
-def stack_idle_seconds() -> float:
-    """多久没有任何机器要过东西了。★ 纯读。"""
-    return max(0.0, time.monotonic() - _last_request_at)
-
-
-def peers_online() -> list:
-    """除**本机**之外还有谁连着同步流。★ 坑 1:主机客户端退出 ≠ 没人在用。"""
-    me = socket.gethostname()
-    return sorted({v for v in _sync_online.values()
-                   if v and v.lower() != me.lower() and v != UNKNOWN_DEVICE})
-
-
-def stack_shutdown_verdict(*, blocking: int | None = None,
-                           resident: int | None = None,
-                           idle_s: float | None = None,
-                           peers: list | None = None,
-                           threshold_s: float = STACK_IDLE_SHUTDOWN_S) -> tuple:
-    """现在可以关栈吗。返回 (可以吗, 理由)。
-
-    ★★★ **四条全部满足才关;任何一条拿不准 ⇒ 不关。**
-      方向是有意选的:**误关的代价是切断别人**(D83:租约不挺过中枢重启 ⇒
-      关栈 = 所有租约当场作废,副机正在对话就被切断);
-      **误不关的代价只是多占一会儿显存**。两个方向不对称 ⇒ fail-closed 落在"不关"。
-
-    ★ 全部参数可注入 —— 判据要能被**两个方向**各测一次,而"没有副机在线"
-      这一条在单机上没法用真实副机造出来。
-    """
-    # ── 采集(注入优先)。★ 任何一步取不到 ⇒ 拿不准 ⇒ 不关。
     try:
         if blocking is None:
             blocking = len(gpu_broker.BROKER.blocking_leases())
         if resident is None:
-            # ★ `snapshot()` 返回的是 **Snapshot 数据类**,不是 dict —— 第一版写成
-            #   `snap.get("committed")` 当场 AttributeError,被上面那个 except 兜成
-            #   「拿不准就不关」。**那次 fail-closed 是对的,但它掩盖了一个真 bug**:
-            #   判据会**永远**走进 except ⇒ 栈永远不关,而"没关"和"条件没满足"长得一模一样。
-            #   ⇒ 这与我刚在 idle_seconds 上诊断出的病是**同一个**:恒假的判据不是判据。
+            # ★ `snapshot()` 返回 **Snapshot 数据类**,不是 dict —— 第一版写成
+            #   `snap.get("committed")` 当场 AttributeError 被下面 except 兜成"不能关"。
+            #   **那次 fail-closed 是对的,但它掩盖了一个真 bug**:判据会**永远**走进
+            #   except ⇒ 恒答"不能关",而"不能关"和"条件没满足"长得一模一样。
+            #   ⇒ 恒假的判据不是判据 —— 与 `idle_seconds` 那个病同源。
             snap = gpu_broker.BROKER.snapshot()
             resident = len(snap.committed or []) + len(snap.transient_resident or [])
     except Exception as e:                                   # noqa: BLE001
-        return False, f"读不到 Broker 状态({type(e).__name__})—— **拿不准就不关**"
-    if idle_s is None:
-        idle_s = stack_idle_seconds()
-    if peers is None:
-        peers = peers_online()
+        return False, f"读不到 Broker 状态({type(e).__name__})—— **拿不准就答不能关**"
 
-    # ── ① 有活在跑 ⇒ 不关(坑 2 / D90 裁定②。**硬条件,不是"提醒后仍关"**)
+    # ── ① 有活在跑(坑 2 · D90 裁定②)
     if blocking > 0:
         return False, f"有 {blocking} 份租约点名了组件(有活在跑)—— 关栈会把它们当场作废"
-    # ── ② 还驻留着东西 ⇒ 不关(关栈就是在杀它们)
+    # ── ② 还驻留着东西(关栈就是在杀它们)
     if resident > 0:
-        return False, f"还有 {resident} 个组件驻留着 —— 先让「空闲即卸」把它们卸掉再谈关栈"
-    # ── ③ 有副机在线 ⇒ 不关(坑 1:不能由主机单方面判断)
-    if peers:
-        return False, f"还有副机在线:{peers} —— 「没人在用」不能由主机单方面判断"
-    # ── ④ 还不够空闲 ⇒ 不关
-    if idle_s < threshold_s:
-        return False, f"距上一次有人要东西才 {idle_s:.0f} 秒(阈值 {threshold_s:.0f})"
-    return True, (f"四条都满足:无 blocking 租约 · 无驻留组件 · 无副机在线 · "
-                  f"空闲 {idle_s:.0f}s ≥ {threshold_s:.0f}s")
-
-
-#: 关栈巡检的间隔(秒)。★ 只读判据,不动任何状态。
-STACK_SWEEP_EVERY_S = 60.0
-
-#: 关掉自动关栈(排障用:设成 False 就只判不关)。
-STACK_AUTO_SHUTDOWN = True
-
-
-async def _stack_shutdown_sweeper():
-    """★★★ 判据的**调用点**。
-
-    没有它,`stack_shutdown_verdict` 就是又一个「写好了零调用点」的函数 ——
-    而本轮立的那条通则(收尾/清理函数必须有断言钉住调用点)正是为了防这个。
-    ★ 本轮它已经出现三次:A5 库零调用点 · doctor ⑫ 环写好没提交 ·
-      `ModelLoader.shutdown()` 零调用点。**判据本身也算一个。**
-
-    ★★ 关的是**网关自己**(它持有装载器 ⇒ 持有显存)。退出走 uvicorn 的优雅路径,
-      于是上面那个 shutdown 钩子会跑、后端被收掉。
-      **绝不能从外面 kill**:那样钩子不跑,后端全成孤儿 —— 那正是坑 3 的形状。
-    ★ Edge **不关**:它不持显存,而且是副机将来够得着这台机器的唯一入口。
-    """
-    while True:
-        await asyncio.sleep(STACK_SWEEP_EVERY_S)
-        if not STACK_AUTO_SHUTDOWN:
-            continue
-        try:
-            ok, why = stack_shutdown_verdict()
-        except Exception:                                    # noqa: BLE001
-            continue                                         # ★ 判不出来 ⇒ 不关
-        if not ok:
-            continue
-        log_upstream_problem("(stack)", "-", "auto_shutdown",
-                             f"自动关栈:{why}。收掉自己起的后端后退出;"
-                             "下次有人要东西时由主机客户端重新拉起。")
-        # ★ 优雅退出:给自己发 SIGINT,uvicorn 收到后走 lifespan shutdown。
-        #   ★★ 不用 os._exit —— 那会跳过 shutdown 钩子,后端全成孤儿。
-        os.kill(os.getpid(), signal.SIGINT)
-        return
+        return False, f"还有 {resident} 个组件驻留着 —— 关栈会把它们卸掉"
+    return True, "没有点名组件的租约,也没有组件驻留 —— 关栈不会切断谁"
 
 
 #: ★ 断言抓手:`_shutdown_stack` 必须真的调装载器的 shutdown。
