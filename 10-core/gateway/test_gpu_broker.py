@@ -101,16 +101,22 @@ _ren = assert_helpers.code_only(gateway.gpu_lease_renew)
 check("(辅助)续租的档位标记仍是 lease,不是 change_resident",
       '"lease"' in _ren and "change_resident" not in _ren)
 gpu_policy.reset_quota()
-_lease_cap = gpu_policy.TIER_CAPS["lan-device"].leases_per_min
+# ★ 2026-08-07(D?):这一对改用 trusted-local 跑。副机已经**没有** change_resident 了
+#   (方案书四集合表:intended 只有主机变更面能写),拿 lan-device 跑「点确定」会在
+#   【工具】维就被拦掉 —— 测出来的将不再是额度维。承重的性质一个字没变:
+#   **同一个档位**里,把租约桶打满,变更桶必须还能过。
+_lease_cap = gpu_policy.TIER_CAPS["trusted-local"].leases_per_min
 for _i in range(_lease_cap):
-    gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
-_after_renews = gpu_policy.check("lan-device", "change_resident", components=["x"], holder="PC-A")
+    gpu_policy.check("trusted-local", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
+_after_renews = gpu_policy.check("trusted-local", "change_resident", components=["x"], holder="PC-A")
 check(f"★★★ 续租【真的】不吃变更配额:打满 {_lease_cap} 次续租之后,"
       "用户点确定仍然过得去(这才是那句话的判据)",
       _after_renews.ok, _after_renews.to_json())
 gpu_policy.reset_quota()
 # ★ 反向:两个桶各自仍然封顶 —— 拆桶不等于把额度维关掉。
-for _i in range(_lease_cap):
+#   ★ 这一条仍用 lan-device:租约桶是副机**今天还有**的那个桶,它才是心跳的真实来源。
+_lan_lease_cap = gpu_policy.TIER_CAPS["lan-device"].leases_per_min
+for _i in range(_lan_lease_cap):
     gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
 _over = gpu_policy.check("lan-device", "lease", lease_kind="client_session", ttl_s=90, holder="PC-A")
 check("★★ 反向:租约桶自己仍然会满(拆桶 ≠ 给续租开一条免额度通道)",
@@ -1724,15 +1730,22 @@ with _Isolated() as _c:
           _granted == "PC-A", f"实得 {_granted!r}")
 
     # ── B1 额度维:换名字不再是换桶 ──
+    # ★ 2026-08-07(D?):原来这条打 /v1/gpu/intended。副机已经**没有** change_resident
+    #   (四集合表:intended 只有主机变更面能写)⇒ 那条路今天恒 403,测不到额度维。
+    #   ⇒ 改打 **/v1/gpu/lease**,即副机今天还有的那个桶。
+    #   ★★ 承重的性质一个字没变:**桶的 key 必须来自服务端解析出来的设备**,
+    #     而不是请求体里那个自报的 holder —— 否则每换一个名字就是一个新桶,
+    #     额度维形同虚设(改动前实测 25/25 全过)。
     gpu_policy.reset_quota()
-    _cap = gpu_policy.TIER_CAPS["lan-device"].changes_per_min
+    _cap = gpu_policy.TIER_CAPS["lan-device"].leases_per_min
     _codes = []
     for _i in range(_cap + 5):
-        _codes.append(_c.post("/v1/gpu/intended", headers=_LAN_H,
-                              json={"if_generation": _gen(_c), "components": [_small],
+        _codes.append(_c.post("/v1/gpu/lease", headers=_LAN_H,
+                              json={"if_generation": _gen(_c), "kind": "client_session",
+                                    "components": [], "ttl_s": 60,
                                     "holder": f"PC-A-{_i}"}).status_code)
     check(f"★★★ B1:每次换一个自报名字打 {_cap + 5} 次,仍然会撞额度 —— "
-          f"改动前实测 25/25 全过(桶 key 是自报值,每换个名字就是一个新桶)",
+          f"桶的 key 是**服务端解出来的 PC-A**,不是自报值",
           429 in _codes, f"实测状态码 {_codes}")
 
     # ── B2:一台副机点名释放另一台的租约 ──
@@ -1792,18 +1805,63 @@ with _Isolated() as _c:
                        "permitted_on_demand": [_small]})
     check("★★★ B6:副机写按需授权 → 403(改动前实测:授权当场写进了权威状态)",
           _r.status_code == 403, f"{_r.status_code} {_r.text[:140]}")
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★ 2026-08-07(D?):点名的动作从 `permit_on_demand` 变成了 `change_resident`。
+    #  **这不是判据松了,是拒得更早了。** `gpu_intended` 的顺序是
+    #    ① read 档 → ② resolve_action(components) 再判 → ③ 带了 permitted_on_demand 才判 B6 那道闸。
+    #  副机现在在 ② 就被拦住(它连普通变更都不能做),根本走不到 ③。
+    #
+    #  ★★★ 副作用要如实记:**B6 那道闸今天对所有档位都够不着了** ——
+    #    表里只有 `trusted-local` 有 change_resident,而它同时也有 permit_on_demand。
+    #    ⇒ 它现在是**纵深防御的第二层**,不是唯一那道闸。留着是对的:
+    #    哪天有人加一个"能改驻留、但不能签按需授权"的新档位,它会立刻重新承重。
+    #    ⇒ 判据只钉【工具】维 + 【动作被点名】,不钉具体是哪一个动作 ——
+    #      钉死具体动作名,就是把"今天恰好在哪一层拒的"焊进断言里(第 9 条坑)。
+    # ══════════════════════════════════════════════════════════════════
     check("★ 拦在【工具】维,并点名了动作 —— 用户据此知道这事要去主机上做",
           _r.json()["error"]["dimension"] == "tool"
-          and _r.json()["error"]["action"] == "permit_on_demand", _r.json()["error"])
+          and _r.json()["error"]["action"] in ("permit_on_demand", "change_resident"),
+          _r.json()["error"])
     check("★★ 授权集合**一个字节都没被改**",
           list(gpu_broker.BROKER.snapshot().permitted_on_demand) == [],
           list(gpu_broker.BROKER.snapshot().permitted_on_demand))
-    # 反面:普通变更(不带这个字段)照常放行 —— 修的是那一个字段,不是把副机的面板关掉
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ 2026-08-07(D?):这一条**翻面**了。
+    #
+    #  它原来写的是「副机的普通变更照常过权限层(否则副机面板变只读 = 产品回退)」——
+    #  而那句话与方案书四集合表(行 1550)**直接冲突**:`intended_resident_set` 的
+    #  「谁能写」一栏是 **只有主机变更面**。08-06 补 B6 时只给第二行
+    #  (`permitted_on_demand_set`,行 1553)装了闸,两行一模一样的规格只装了一道。
+    #  ⇒ 实测确认:副机带非空 components 打一次,**回 200,真的写进去了**。
+    #
+    #  ★ 产品代价如实记:副机的组件勾选面板变为只读。但**不是**"副机什么都动不了" ——
+    #    `lease` 档留着,D87①「意图即起」在副机上照常工作(见下一条正面断言)。
+    # ══════════════════════════════════════════════════════════════════
     gpu_policy.reset_quota()
+    _gen_before = _gen(_c)
+    _intended_before = list(gpu_broker.BROKER.snapshot().intended)
     _r2 = _c.post("/v1/gpu/intended", headers=_LAN_H,
-                  json={"if_generation": _gen(_c), "components": [_small]})
-    check("★ 反面:副机的普通变更照常过权限层(否则副机面板变只读 = 产品回退)",
-          _r2.status_code not in (401, 403), f"{_r2.status_code} {_r2.text[:140]}")
+                  json={"if_generation": _gen_before, "components": [_small]})
+    check("★★★ 副机的**普通变更**同样被拒 —— 四集合表:intended 只有主机变更面能写"
+          "(改动前实测 200,驻留集合真的被副机改掉了)",
+          _r2.status_code == 403, f"{_r2.status_code} {_r2.text[:140]}")
+    check("★ 同样拦在【工具】维并点名动作 —— 与 permit_on_demand 那条同一个形状",
+          _r2.status_code == 403
+          and _r2.json()["error"]["dimension"] == "tool"
+          and _r2.json()["error"]["action"] == "change_resident", _r2.text[:200])
+    check("★★ 驻留集合**一个字节都没被改**(只看状态码不够:403 也可能是写完之后才拒的)",
+          list(gpu_broker.BROKER.snapshot().intended) == _intended_before,
+          list(gpu_broker.BROKER.snapshot().intended))
+    # ★ 正面:副机**不是**什么都不能动 —— 意图即起(lease 档)照常。
+    #   没有这一条,上面那三条就读成了"把副机关掉",而那不是这次的裁定。
+    gpu_policy.reset_quota()
+    _alias_lan = next((a for a in gateway.REGISTRY
+                       if _small in gateway.components_for_alias(a)), None)
+    if _alias_lan:
+        _r3 = _c.post("/v1/gpu/intent", headers=_LAN_H, json={"alias": _alias_lan})
+        check("★★★ 副机的「意图即起」照常过权限层 —— 变成只读的**只有**"
+              "「替机主改写常驻清单」这一件,他要用的功能仍会为他起来",
+              _r3.status_code not in (401, 403), f"{_r3.status_code} {_r3.text[:140]}")
 
 with _Isolated(tier="trusted-local") as _c:
     _g = _c.get("/v1/gpu/snapshot").json()["generation"]
@@ -2250,12 +2308,23 @@ with _Isolated() as _c:
     _observed["CONTRACT:gpu.components"] = (_rc.status_code, set(_rc.json()))
     _cat_body = _rc.json()
 
-    # ── V5 · CONTRACT:gpu.intended(200 与 409 两个形状都要)────────
-    _ri2 = _c.post("/v1/gpu/intended", headers=_LAN_H,
-                   json={"if_generation": _gen(_c), "components": [_small]})
+    pass
+
+# ── V5 · CONTRACT:gpu.intended(200 与 409 两个形状都要)────────────────
+# ★★ 2026-08-07(D?):这两次**必须用主机档**打。副机已经没有 change_resident
+#   (四集合表:intended 只有主机变更面能写)⇒ 拿 lan-device 打只会拿到 403,
+#   而 403 的形状**不是**这条契约要登记的那个形状 —— 那样登记下来的"契约"
+#   会把客户端引到一条它永远解析不出 result/snapshot 的路上。
+#   ⇒ 换 `trusted-local`(不带 _LAN_H:那个头会把它解析成 lan-device)。
+with _Isolated(tier="trusted-local") as _c:
+    # ★ 这里**不能**走 _gen():它的默认头是 _LAN_H(证书指纹),而 `h or _LAN_H` 里
+    #   空字典是假值 ⇒ 传 {} 也照样带上那个头,请求就被解析成另一个主体了(实测 KeyError)。
+    _g_host = _c.get("/v1/gpu/snapshot").json()["generation"]
+    _ri2 = _c.post("/v1/gpu/intended",
+                   json={"if_generation": _g_host, "components": [_small]})
     _observed["CONTRACT:gpu.intended"] = (_ri2.status_code, set(_ri2.json()))
     # ★ 故意用一个**过期**的世代号 —— 这是客户端最常撞上的那条失败路径
-    _rconf = _c.post("/v1/gpu/intended", headers=_LAN_H,
+    _rconf = _c.post("/v1/gpu/intended",
                      json={"if_generation": -1, "components": [_small]})
     _intended_conflict = (_rconf.status_code, _rconf.json())
 

@@ -148,10 +148,29 @@ check("★ 但 ttl=10^9 仍被参数维拦住 —— 权限高不等于参数不
 
 _s, _c, _w, _l = _probe(None, headers={"x-localai-cert-sha256": "aa"}, patch_lan=True)
 check("lan-device 读得到", _s.status_code == 200)
-check("lan-device 能改驻留集合(否则副机上的面板会变只读,是产品回退)",
-      _c.status_code not in (401, 403), f"{_c.status_code}/{_dim(_c)}")
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ 2026-08-07(D?):副机**不得写 `intended_resident_set`**。
+#
+#  方案书四集合表(行 1550)「谁能写」= **只有主机变更面**;08-06 审计 B6 那道闸
+#  只补了 `permitted_on_demand`(行 1553,同一句规格)那一半,写 `intended` 本身
+#  一直放行 —— 实测 `lan-device` 带非空 components POST 一次,**过**。
+#
+#  ★★ 判据必须测【行为】,不是「源码里有没有那个词」(ASSERTION-PITFALLS 第 9 条,
+#    gpu_policy.py:75-83 那段教训)。所以这里走的是 `_probe` 的**真 HTTP**:
+#    用 lan-device 身份真发一次 POST /v1/gpu/intended,读它真的回了什么。
+#  ★ 这条**可以为假**:同一段代码里 trusted-local 那次(上面)必须**不是** 403;
+#    两条一起看才排除掉「反正全都 403」那种恒绿。
+# ══════════════════════════════════════════════════════════════════════
+check("★★★ lan-device **不能**改驻留集合 —— 方案书四集合表:intended 只有主机变更面能写",
+      _c.status_code == 403 and _dim(_c) == "tool", f"{_c.status_code}/{_dim(_c)}")
+check("★ 而且拒的是【工具】维、不是额度/参数 —— 说明它是「这一档没有这个动作」,"
+      "不是「今天太快了」(后者会让人以为等一分钟就能做)",
+      _dim(_c) == "tool", _dim(_c))
 check("★★ lan-device 不能『卸掉全部』—— 拦在【工具】维",
       _w.status_code == 403 and _dim(_w) == "tool", f"{_w.status_code}/{_dim(_w)}")
+check("★ 副机不是「什么都不能动」:lease 档还在 ⇒ D87①「意图即起」照常 —— "
+      "变成只读的只有【替机主改写常驻清单】这一件",
+      "lease" in gpu_policy.TIER_CAPS["lan-device"].actions)
 check("★ lan-device 不能拿独占租约(它会让整台中枢拒发一切新租约,而副机看不到主机屏幕)",
       _l.status_code == 403 and _dim(_l) == "param")
 
@@ -188,8 +207,11 @@ check("★ 组件数有上限(一次点名 99 个不是正常请求)",
 
 print("\n=== 6. ★ 额度维 ===")
 gpu_policy.reset_quota()
-_cap = gpu_policy.TIER_CAPS["lan-device"].changes_per_min
-_res = [gpu_policy.check("lan-device", "change_resident", components=["x"], holder="h")
+# ★ 2026-08-07:变更桶这几条从 lan-device 改用 trusted-local ——
+#   副机已经**没有任何** change 桶动作了(见上一节),拿它跑变更额度会在【工具】维
+#   就被拦掉,测出来的将不再是额度维。承重的性质没变,只是换了一个还有这个动作的档位。
+_cap = gpu_policy.TIER_CAPS["trusted-local"].changes_per_min
+_res = [gpu_policy.check("trusted-local", "change_resident", components=["x"], holder="h")
         for _ in range(_cap + 3)]
 check(f"前 {_cap} 次放行", all(r.ok for r in _res[:_cap]))
 check("★ 超出后被拒,且点名 quota 维", (not _res[_cap].ok) and _res[_cap].dimension == "quota")
@@ -197,13 +219,24 @@ check("★★ 拒绝文案说清「这不是权限不够,是太快了」—— �
       "不是权限不够" in _res[_cap].message, _res[_cap].message)
 gpu_policy.reset_quota()
 for _ in range(50):
-    gpu_policy.check("lan-device", "read", holder="h")
+    gpu_policy.check("trusted-local", "read", holder="h")
 check("★ read 不占变更额度(读状态不该被限流,那会让界面反而看不见发生了什么)",
-      gpu_policy.check("lan-device", "change_resident", components=["x"], holder="h").ok)
+      gpu_policy.check("trusted-local", "change_resident", components=["x"], holder="h").ok)
 gpu_policy.reset_quota()
-check("★ 额度按 holder 分桶(一台副机刷爆自己的,不该把主机也拖下水)",
-      all(gpu_policy.check("lan-device", "change_resident", components=["x"], holder=f"h{i}").ok
+check("★ 额度按 holder 分桶(一台机器刷爆自己的,不该把别人也拖下水)",
+      all(gpu_policy.check("trusted-local", "change_resident", components=["x"], holder=f"h{i}").ok
           for i in range(_cap + 2)))
+# ★ 副机那一侧的分桶仍然要测,只是落在它**还有**的那个桶(租约)上:
+#   多台副机各自心跳,一台刷爆不该把另一台连坐。
+gpu_policy.reset_quota()
+_lcap = gpu_policy.TIER_CAPS["lan-device"].leases_per_min
+_burn = [gpu_policy.check("lan-device", "lease", lease_kind="client_session",
+                          ttl_s=10, holder="noisy") for _ in range(_lcap + 2)]
+check("★ 副机把自己的租约桶刷爆了(点名 quota 维)",
+      (not _burn[_lcap].ok) and _burn[_lcap].dimension == "quota", _burn[_lcap].to_json())
+check("★★ 另一台副机不受连坐 —— 租约桶同样按 holder 分",
+      gpu_policy.check("lan-device", "lease", lease_kind="client_session",
+                       ttl_s=10, holder="quiet").ok)
 gpu_policy.reset_quota()
 _probe_src = assert_helpers.code_only(gateway)
 check("★★ reset_quota 在生产代码里【没有任何调用点】——"

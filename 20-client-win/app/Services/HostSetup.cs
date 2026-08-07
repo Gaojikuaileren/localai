@@ -377,13 +377,31 @@ public static class HostSetup
         catch { return false; }
     }
 
-    /// <summary>Edge 在不在(只看 8443 能不能连上 —— TLS 握手要证书,这里不做)。</summary>
+    /// <summary>
+    /// Edge 在不在。★ 探的是**回环管理面**(127.0.0.1:8442),不是 8443。
+    ///
+    /// <para>★★★ 2026-08-07(D?)改的判据,理由是原来那一条**问错了问题**:
+    /// 它探 `127.0.0.1:8443`,而那个口在 `run` 模式下确实开着 ⇒ 自动起栈报「已起并探到 8443」,
+    /// 界面上一路绿灯 —— 可本机客户端接下来要用的两样东西**一样都没有**:
+    ///   ① 管理面(8442)没绑 ⇒ `ProbeRoleAsync` 判 `HostHubDown`,这台电脑在自己的界面上
+    ///      被说成「不是主机」,只渲染 `HubDownCard`;
+    ///   ② 业务口只在回环上 ⇒ `DiscoverEdgeDialsAsync` 逐张网卡去找 8443(它**跳过回环**),
+    ///      一个都找不到。
+    /// 于是"起栈成功"这句话与客户端能不能用**完全无关** —— 典型的「失败与成功长得一样」。</para>
+    ///
+    /// <para>★ 换成管理面之后这句话才承重:管理面在**两种**模式下都只绑回环
+    /// (`Program.cs` 里 `k.Listen(IPAddress.Loopback, cfg.AdminPort)` 是写死的),
+    /// 它答话 = 角色能判出来 = 自配对够得着。这正是我们需要它回答的那个问题。</para>
+    ///
+    /// <para>★ 仍然只做 TCP 连接、不做 HTTP:这一层要回答的是「进程起来了没」,
+    /// 「是不是**我们这个**中枢」由 <c>HubAdmin.ProbeAsync</c> 比 hubId 去答,不在这里下结论。</para>
+    /// </summary>
     public static async Task<bool> EdgeUpAsync(int timeoutMs = 1500)
     {
         try
         {
             using var t = new System.Net.Sockets.TcpClient();
-            var connect = t.ConnectAsync(System.Net.IPAddress.Loopback, EdgePort);
+            var connect = t.ConnectAsync(System.Net.IPAddress.Loopback, HubAdmin.AdminPort);
             var done = await Task.WhenAny(connect, Task.Delay(timeoutMs));
             return done == connect && t.Connected;
         }
@@ -483,6 +501,90 @@ public static class HostSetup
             + "**不当作成功**(端口被占?venv 缺依赖?)");
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    //  ★★★ 绑哪个地址(D?)。自动起栈从 `run` 改成 `run-lan <ip>` 之后才需要这一步。
+    //
+    //  ★ 为什么必须选一个**网卡**地址、而不能继续用 `run` 的回环:见 EnsureEdgeAsync 上方。
+    //  ★ 为什么这不算"替用户猜":这里问的是**操作系统自己**会用哪个源地址出网 ——
+    //    UDP 的 Connect **不发任何数据包**,它只让内核按路由表做一次源地址选择,
+    //    读 LocalEndPoint 就是内核给的答案。那是一次查询,不是一次猜测。
+    //  ★ 查不出来时【不硬选】:只有在候选**唯一**时才继续,否则如实报「有几个、分别是什么」
+    //    并让这一步失败。多网卡上随手挑一个会把一个错地址写进配对档案,
+    //    而那比"没起来"难查得多(V1 那批归因就是这么来的)。
+    // ════════════════════════════════════════════════════════════════════
+    /// <summary>选一个用于对外监听的本机 IPv4。选不出来返回 null,<paramref name="why"/> 说清为什么。</summary>
+    public static string? PickBindIp(out string why)
+    {
+        var locals = HubAdmin.LocalIPv4List();
+        if (locals.Count == 0)
+        {
+            why = "本机没有可用的 IPv4 网卡地址(网卡都没启用,或只剩 169.254.* 自封地址)—— "
+                + "中枢没法对外监听。★ 先把网线/Wi-Fi 接上再试。";
+            return null;
+        }
+        // ① 问内核:要出网的话你会用哪个源地址。
+        //   目标用 192.0.2.1(RFC 5737 TEST-NET-1,专供文档举例的保留地址)——
+        //   选它是为了让人一眼看出**我们并没有真的去连谁**;换成任何公网地址效果一样,
+        //   但会让读代码的人以为这里在拨号。
+        try
+        {
+            using var s = new System.Net.Sockets.Socket(
+                System.Net.Sockets.AddressFamily.InterNetwork,
+                System.Net.Sockets.SocketType.Dgram,
+                System.Net.Sockets.ProtocolType.Udp);
+            s.Connect(new System.Net.IPEndPoint(System.Net.IPAddress.Parse("192.0.2.1"), 9));
+            if (s.LocalEndPoint is System.Net.IPEndPoint ep)
+            {
+                var pick = ep.Address.ToString();
+                // ★ 必须落在我们自己那张表里才采信 —— 内核可能选中一张我们有意跳过的网卡
+                //   (回环 / APIPA / 没启用)。对不上就当这一步没答上,往下走 ②。
+                if (locals.Contains(pick)) { why = $"按本机路由表选出的出网地址({pick})"; return pick; }
+            }
+        }
+        catch { /* 没有默认路由(纯隔离网段)时会抛 —— 那不是错误,往下走 ② */ }
+
+        // ② 只有一张网卡就没有可猜的。
+        if (locals.Count == 1) { why = $"本机只有这一个网卡地址({locals[0]})"; return locals[0]; }
+
+        // ③ 多个候选而路由表又没给出答案 ⇒ **不替他挑**。
+        why = $"本机有 {locals.Count} 个网卡地址({string.Join("、", locals)}),"
+            + "而路由表没能指出该用哪一个 —— **不替你挑**:挑错会把一个连不上的地址写进配对档案。"
+            + "★ 请到「设备」页里手动选一张网卡。";
+        return null;
+    }
+
+    /// <summary>
+    /// 起 LAN Edge。★ 用 `run-lan &lt;ip&gt;`,**不是** `run`。
+    ///
+    /// <para>★★★ 2026-08-07(D?)。原来这里是 `run`,注释的理由是
+    /// 「对外监听要配合防火墙那一步,不能顺手在自动起栈里替用户开对外的门」。
+    /// 那个顾虑本身没错,但它挡住的东西**挡错了地方**,代价是整条自配对链断掉:</para>
+    /// <list type="number">
+    ///   <item>`run` 走 `Program.cs` 的 `Run()`,它建 `EdgeConfig(…, 8443)` —— **不传 AdminPort**,
+    ///     而那个形参默认 0,`if (cfg.AdminPort &gt; 0)` 于是不成立 ⇒ **回环管理面根本没绑**。
+    ///     没有管理面,`ProbeRoleAsync` 只能判 `HostHubDown`,`Build()` 只渲染 `HubDownCard`,
+    ///     而 `SelfPairAsync` 唯一的调用点在 `HostSelfCard` 里 ⇒ 用户裁定的「主机上的客户端
+    ///     也要自配对」在这条路上**结构上永不触发**。</item>
+    ///   <item>就算把管理面补上也还不够:`run` 的业务口绑在回环,而 `DiscoverEdgeDialsAsync`
+    ///     是**逐张网卡**去找 8443 的(它明确跳过回环)⇒ 自配对会停在
+    ///     「网卡地址上都没人在 8443 上听」。**两道闸,补一道不通。**</item>
+    /// </list>
+    ///
+    /// <para>★★ 而「不替用户开对外的门」这条顾虑,`run-lan` 并**没有**违反:</para>
+    /// <list type="bullet">
+    ///   <item>**管理面仍然只绑回环** —— `Program.cs` 里是写死的 `k.Listen(IPAddress.Loopback,
+    ///     cfg.AdminPort)`,外加每条 `/admin/*` 路由自己再查一次「端口 + 回环」。
+    ///     D48「管理面只绑回环」**一个字都没动**;`run-lan` 放到网卡上的是**业务口**(8443,mTLS)。</item>
+    ///   <item>**绑上 ≠ 够得着** —— 防火墙那一步(`EnsureFirewallAsync`)本车道一行都没碰。
+    ///     规则不在时,Windows 默认的入站阻止让 8443 对局域网**仍然不可达**,
+    ///     所以不存在"监听着却没人护着"的窗口。这正是 `lan-edge` 自己在 `RunLan` 上方
+    ///     写的那段话。真正把门打开的仍然是用户点那次系统授权框。</item>
+    ///   <item>`run-lan` 还顺带带上了 `OpenPairingWindowOnStart: false`。而 `run` **没有** ——
+    ///     它走的是那个形参的默认值 `true` ⇒ **开机自启会自动敞开 30 分钟准入窗口**,
+    ///     恰恰是审计发现 [3] 明令禁止的那件事。改用 `run-lan` 把这个洞一并带上了。
+    ///     (自配对不受影响:`SelfPairAsync` 自己开一个 1 分钟的窗口,用完就关。)</item>
+    /// </list>
+    /// </summary>
     static async Task<SetupStep> EnsureEdgeAsync()
     {
         const string name = "LAN Edge :8443";
@@ -491,30 +593,114 @@ public static class HostSetup
         if (exe is null)
             return new SetupStep(name, SetupOutcome.Failed,
                 "找不到 `..\\host\\localai-lan-edge.exe` —— 这台没有主机工具目录");
+
+        // ★ 选不出地址就【停在这里】,不退回 `run`。退回去会"成功"——
+        //   而那个成功正是这次要消灭的东西(起了,客户端却用不了,还没人看得出来)。
+        var ip = PickBindIp(out var whyIp);
+        if (ip is null) return new SetupStep(name, SetupOutcome.Failed, "选不出要绑的网卡地址:" + whyIp);
+
         try
         {
-            // ★ `run` 只绑回环;`run-lan <ip>` 才对外。这里用 `run` ——
-            //   对外监听要配合防火墙那一步(EnsureFirewallAsync),是**另一次**有意的动作,
-            //   不能顺手在自动起栈里替用户开对外的门。
             var psi = new ProcessStartInfo
             {
                 FileName = exe,
-                Arguments = "run",
+                Arguments = "run-lan " + ip,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ 这三个 Redirect **不是**为了好看,少一个就出真事故:
+                //
+                //  ① `RedirectStandardInput` —— **承重**。`run-lan` 末尾有个命令台
+                //    REPL(`list / approve / open / quit`),它 `Console.ReadLine()` 读到
+                //    null 就 `break` ⇒ **中枢打完「已监听」当场退出**(2026-08-04 实测撞过)。
+                //    中枢那边为此加了「`Console.IsInputRedirected` ⇒ 不进 REPL,安静地一直跑」,
+                //    而那句判据只有在**我们真的重定向了 stdin** 时才为真。
+                //    ★★ 原来这里用的 `run` 走 `Run()`,那条路**没有 REPL**,所以不重定向也没事 ——
+                //      换成 `run-lan` 之后不补这一条,就会换来一个"起来了、几秒后自己没了"的中枢。
+                //  ② ③ stdout/stderr 收进日志 —— 审计 B 级那条「起栈进程的输出没有落点」。
+                //    `CreateNoWindow` 藏掉了黑框,而那个黑框本来担着**唯一能看到失败原因**的活。
+                //    藏窗口的前提是先给失败找到别的去处,否则就是把错误藏起来。
+                //  ★ 这一套是 `Views/DevicesView.StartEdgeAsync` 已经在跑的做法,逐字对齐 ——
+                //    两处不一样的话,"手动起得来、自动起不来"会变成查不出根因的问题。
+                // ══════════════════════════════════════════════════════════
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 WorkingDirectory = Path.GetDirectoryName(exe) ?? "",
             };
-            using var p = Process.Start(psi);
-            if (p is null) return new SetupStep(name, SetupOutcome.Failed, "进程没起来");
+            var proc = Process.Start(psi);
+            if (proc is null) return new SetupStep(name, SetupOutcome.Failed, "进程没起来");
+            // ★ 存成静态字段而不是 `using var`:管道一旦重定向就**必须有人一直抽**,
+            //   不抽,子进程写满约 4 KiB 缓冲就卡死。把 Process 留住,读取回调才活着。
+            //   (客户端是长驻的,中枢本来也该比这个方法活得久。)
+            _edgeProc = proc;
+            try
+            {
+                var sw = new StreamWriter(EdgeLogPath, append: true) { AutoFlush = true };
+                sw.WriteLine($"--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} 自动起栈: \"{exe}\" run-lan {ip}({whyIp})---");
+                proc.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
+                proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+            }
+            catch { /* ★ 日志写不了**不算起栈失败** —— 中枢已经起来了,别因为记不了账就说它没起 */ }
         }
         catch (Exception ex)
         {
             return new SetupStep(name, SetupOutcome.Failed, ex.GetType().Name + ": " + ex.Message);
         }
+        // ★★★ 边界③:**不看退出码,去探**。Edge 起不来时进程可能还活着而端口没开。
+        //   ★ 但探的是**管理面**(见 EdgeUpAsync)—— 探 8443 的那一版对客户端毫无意义。
         if (await WaitUntilAsync(() => EdgeUpAsync(), 20_000))
-            return new SetupStep(name, SetupOutcome.Ok, "已起并探到 8443");
+            return new SetupStep(name, SetupOutcome.Ok,
+                $"已起(业务口 {ip}:{EdgePort},管理面 127.0.0.1:{HubAdmin.AdminPort})并探到管理面。{whyIp}");
         return new SetupStep(name, SetupOutcome.Failed,
-            "进程起了,但 20 秒内连不上 8443 —— **不当作成功**(证书没铸?端口被占?)");
+            $"进程起了,但 20 秒内连不上回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— **不当作成功**。"
+            + ExitNote(_edgeProc) + " 中枢自己打印的话在:" + EdgeLogPath);
+    }
+
+    /// <summary>自动起栈拉起来的那个中枢进程。★ 留住它,重定向的管道才有人抽(见 EnsureEdgeAsync)。</summary>
+    static Process? _edgeProc;
+
+    /// <summary>
+    /// 中枢自己打印的话落在哪。★ 与 <c>Views/DevicesView.StartEdgeAsync</c> **同一个文件** ——
+    /// 两条起栈路径写两个日志的话,人找错文件会得出"它什么都没说"的结论。
+    /// </summary>
+    public static string EdgeLogPath => Path.Combine(Path.GetTempPath(), "localai-edge.log");
+
+    /// <summary>
+    /// 起栈失败时,把子进程**已经退出**这件事和它的退出码翻译成人话。
+    ///
+    /// <para>★ 这是审计 B 级「自动起栈的进程输出今天完全没有落点」那一条的**便宜那一半**:
+    /// `CreateNoWindow` 且不 Redirect ⇒ 那几行关键的诊断(密钥打不开 / 端口被占)全打进了
+    /// 一个没有窗口的控制台,谁也看不到。而 `lan-edge` 已经把同样的信息**编进了退出码**,
+    /// 那份信号今天被 `EnsureEdgeAsync` 整个丢掉了 —— 捡回来不要钱。</para>
+    ///
+    /// <para>★★ 为什么不干脆重定向 stdout/stderr:那要么得有人**持续**抽干管道
+    /// (不抽,子进程写满 ~4KB 缓冲就**卡死**),要么套一层 `cmd /c … &gt; log`(多一个进程,
+    /// 且返回的 Process 就不再是 Edge 本身了)。两条都不是顺手能做对的,已写进决议包。</para>
+    /// </summary>
+    static string ExitNote(Process? p)
+    {
+        try
+        {
+            if (p is null) return "(没拿到子进程句柄,读不到它的退出状态。)";
+            if (!p.HasExited)
+                return "(进程**还活着**,只是端口没开 —— 多半是它卡在某一步,"
+                     + "或者绑的地址不对。手动双击 `localai-lan-edge.exe` 能看到它到底说了什么。)";
+            // ★ 这几个数字来自 `10-core/lan-edge/Program.cs` 的 RunLan;
+            //   对不上的表现是"给了一句自信而错误的原因",比不给还坏 ⇒ 未登记的码**如实说不认识**。
+            return " 子进程**已经退出**,退出码 " + p.ExitCode + p.ExitCode switch
+            {
+                1 => ":这台还没有中枢身份(要先 `localai-identity init`)。",
+                2 => ":lan-edge 说命令行不对 —— 我们传的绑定地址它不认。",
+                3 => ":**打不开身份密钥(CA)**。★ TPM/CNG 用户密钥绑定【铸造时】的完整性等级 —— "
+                   + "这套身份多半是用另一个等级(普通/管理员)铸的。",
+                4 => $":{EdgePort} 已被占用 —— 多半是中枢**已经在跑了**(另一个窗口),那就不用再开一个。",
+                _ => "(这个码没有登记过,我不知道它是什么意思 —— 手动双击那个 exe 看它自己怎么说)。",
+            };
+        }
+        catch (Exception ex) { return "(读不到子进程的退出状态:" + ex.Message + ")"; }
     }
 
     /// <summary>轮询直到条件为真或超时。★ 起进程到端口可用之间必然有一段,不等就会误判成失败。</summary>

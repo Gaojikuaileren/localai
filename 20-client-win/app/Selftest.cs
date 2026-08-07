@@ -7753,6 +7753,112 @@ public static class Selftest
                     Assert(new HostSetup.StackResult(
                                new SetupStep("网关", SetupOutcome.Skipped, ""), okStep).AllUp,
                         "★★ Skipped(本来就在跑)算**成**,不算失败 —— 幂等的那一半");
+
+                    // ════════════════════════════════════════════════════
+                    //  ★★★ D? · 自动起栈必须起出一个**本机客户端用得上**的中枢
+                    //
+                    //  实测过的病(2026-08-07):自动起栈用 `run`,而 `run` 走
+                    //  `Program.cs` 的 `Run()`,那里建 EdgeConfig 时**不传 AdminPort**
+                    //  ⇒ 回环管理面根本没绑。于是:
+                    //    · ProbeRoleAsync 判 HostHubDown ⇒ 只渲染 HubDownCard
+                    //    · SelfPairAsync 的唯一调用点在 HostSelfCard 里 ⇒ **结构上永不触发**
+                    //  而 EnsureEdgeAsync 当时探的是 `127.0.0.1:8443`(run 模式下**确实开着**)
+                    //  ⇒ 它报「已起并探到 8443」,一路绿灯。**失败与成功长得一模一样。**
+                    // ════════════════════════════════════════════════════
+
+                    // ── ① 行为:起栈的"起来了没"必须问【管理面】那个口,不是业务口 ──
+                    //   ★ 这条是**行为**判据,不是"源码里有没有那个词"(第 9 条坑):
+                    //     真开一个监听、真让 EdgeUpAsync 去探,看它探的是哪个口。
+                    Assert(Services.HubAdmin.AdminPort != Services.HubAdmin.EdgePort,
+                        "★ 管理口与业务口本来就是两个口 —— 相等的话下面那条判据区分不了任何东西");
+                    var envSaved = Environment.GetEnvironmentVariable("LOCALAI_ADMIN_PORT");
+                    System.Net.Sockets.TcpListener? la = null, lb = null;
+                    try
+                    {
+                        // ★★ 端口要【先绑住再读号】,不许"读一个空闲号 → 放掉 → 过会儿再绑回去" ——
+                        //   那中间有一段谁都能抢走的窗口,实测过一次假红(第一遍绿、第二遍红)。
+                        //   ⇒ 两个监听都**一直绑着**,要制造"没人听"就把其中一个 Stop 掉。
+                        System.Net.Sockets.TcpListener Listen()
+                        {
+                            var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                            l.Start();
+                            return l;
+                        }
+                        lb = Listen();                       // "别的口",全程听着
+                        la = Listen();                       // 冒充管理口
+                        int portA = ((System.Net.IPEndPoint)la.LocalEndpoint).Port;
+                        Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", portA.ToString());
+
+                        // ① 管理口上有人听 ⇒ 必须说【起来了】。
+                        var upRightPort = System.Threading.Tasks.Task.Run(
+                            async () => await HostSetup.EdgeUpAsync(800)).GetAwaiter().GetResult();
+                        Assert(upRightPort,
+                            "★★★ 回环**管理面**答话了才算中枢起来了 —— 那正是角色判定与自配对"
+                            + "接下来要用的那个口(两者都只走 127.0.0.1:AdminPort)");
+
+                        // ② 把管理口停掉,"别的口"照样听着 ⇒ 必须说【没起来】。
+                        //   ★ 这一条同时钉住"没在探 8443":这台机器上 8443 可能正有中枢在跑,
+                        //     而它**不许**因此说成起来了。
+                        la.Stop(); la = null;
+                        var upWrongPort = System.Threading.Tasks.Task.Run(
+                            async () => await HostSetup.EdgeUpAsync(800)).GetAwaiter().GetResult();
+                        Assert(!upWrongPort,
+                            "★★ 别的口上有人听**不算**中枢起来了 —— 原来那一版探 8443,"
+                            + "而 `run` 模式下 8443 确实开着、管理面却没绑,于是"
+                            + "「起栈成功」与「客户端根本用不了」长得一模一样");
+                    }
+                    finally
+                    {
+                        try { la?.Stop(); } catch { }
+                        try { lb?.Stop(); } catch { }
+                        Environment.SetEnvironmentVariable("LOCALAI_ADMIN_PORT", envSaved);
+                    }
+
+                    // ── ② 行为:选绑定地址要么给出一个**本机真有**的地址,要么说清为什么没有 ──
+                    var pickedIp = HostSetup.PickBindIp(out var pickWhy);
+                    Assert(pickWhy is { Length: > 10 },
+                        "★★ 选没选出来都要说得出理由 —— 这一步失败会让整台主机起不来栈,"
+                        + "而一句「选不出来」不足以让人知道下一步该干什么");
+                    Assert(pickedIp is null || Services.HubAdmin.LocalIPv4List().Contains(pickedIp),
+                        "★★★ 选出来的必须是**本机真的有**的网卡地址 —— "
+                        + "绑一个不存在的地址会让 Edge 起不来,而症状是「起了但连不上」,极难查");
+                    Assert(pickedIp is null || !pickedIp.StartsWith("127.", StringComparison.Ordinal),
+                        "★★★ **绝不能选回环**:业务口绑回环时 DiscoverEdgeDialsAsync 逐张网卡去找"
+                        + "(它明确跳过回环)⇒ 一个都找不到,自配对停在「网卡地址上都没人在 8443 上听」。"
+                        + "这是那条链上的**第二道闸**,只补管理面那一道是不通的");
+
+                    // ── ③ 结构:自动起栈用 run-lan,不是 run ──
+                    //   ★ 这一条**只能**写成结构判据:要变成行为判据就得在自检里真起一个中枢
+                    //     (要身份、要证书、要端口),那不是自检该做的事。所以如实标成结构判据,
+                    //     并且钉得**够窄**:既要有 run-lan,也要确认那个光秃秃的 `"run"` 不在了。
+                    //   ★★ 与本文件其它源码判据同款,**必须**用 `if (src is not null)` 兜住:
+                    //     出厂产物旁边没有源码,读不到时这几条要【跳过】而不是判红。
+                    //     (写成 `Assert(slice is not null && …)` 的那一版实测在
+                    //      `build-client.ps1` 的「发布产物原位自检」那一趟直接三条红。)
+                    var hsSrc = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
+                    if (hsSrc is not null)
+                    {
+                        var ensureEdge = Slice(hsSrc, "static async Task<SetupStep> EnsureEdgeAsync",
+                                               "static string ExitNote");
+                        Assert(ensureEdge is not null && ensureEdge.Contains("\"run-lan \""),
+                            "★★★ 自动起栈必须用 `run-lan <ip>` —— `run` 那条路上 lan-edge 不绑管理面"
+                            + "(EdgeConfig 的 AdminPort 形参默认 0),主机上的客户端会被自己判成「不是主机」");
+                        Assert(ensureEdge is not null && !ensureEdge.Contains("Arguments = \"run\""),
+                            "★★ 而且那个光秃秃的 `Arguments = \"run\"` 不许再出现 —— 它同时还漏掉了"
+                            + "`OpenPairingWindowOnStart: false`(run 走默认值 true)⇒ 开机自启会"
+                            + "**自动敞开 30 分钟准入窗口**,正是审计发现 [3] 禁止的那件事");
+                        Assert(ensureEdge is not null && ensureEdge.Contains("PickBindIp"),
+                            "★ 选不出地址时**停在这一步**,不许退回 `run` —— 退回去会「成功」,"
+                            + "而那个成功正是这次要消灭的东西");
+                        // ★★ stdin 必须重定向:`run-lan` 末尾有个 REPL,读到 null 就 break
+                        //   ⇒ 中枢打完「已监听」当场退出。中枢那边的
+                        //   `Console.IsInputRedirected ⇒ 不进 REPL` 只有在我们真重定向了才为真。
+                        //   ★ `run` 那条路没有 REPL,所以这一条是**换成 run-lan 之后才承重**的。
+                        Assert(ensureEdge is not null && ensureEdge.Contains("RedirectStandardInput = true"),
+                            "★★★ 起 `run-lan` 必须重定向 stdin —— 不然中枢会在打完 banner 之后"
+                            + "自己退出(它的命令台 REPL 读到 null 就 break),症状是"
+                            + "「起来了、几秒后就没了」,比原来的病更难查");
+                    }
                 }
 
                 // ════════════════════════════════════════════════════════
