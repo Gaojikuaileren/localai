@@ -6775,6 +6775,153 @@ public static class Selftest
                 }
                 // ▲▲▲ V4 追加段到此为止 ▲▲▲
 
+                // ══════════════════════════════════════════════════════════════
+                //  ▼▼▼ V7(P5 语音 v1 · 按住说话)—— 本段【只追加】,上面一律没动 ▼▼▼
+                // ══════════════════════════════════════════════════════════════
+                {
+                    var capSrc = TryReadSource(Path.Combine("Services", "AudioDevices.cs"));
+                    var spSrc = TryReadSource(Path.Combine("Services", "SpeechClient.cs"));
+                    var isSrc = TryReadSource(Path.Combine("Services", "InterpretState.cs"));
+
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★★ 架构底线:「同传可以失败,用户的麦克风不可以」
+                    //      —— 判据是**结构性的**,不是"有没有 try-catch"
+                    // ══════════════════════════════════════════════════════════
+                    //  采集类必须**不认识任何网络类型**。它一旦认识,那条底线就从
+                    //  「代码路径上够不着」退化成「靠某个 catch 兜住」,
+                    //  而这个项目已经踩过太多次「靠自觉的底线不是底线」。
+                    if (capSrc is not null)
+                    {
+                        // ★ 只切 AudioCapture 那一段再判 —— 拿整个文件判会撞上文件头
+                        //   那段**解释这条底线**的注释(ASSERTION-PITFALLS 第 1 条,已踩 9 次)。
+                        var capOnly = capSrc[capSrc.IndexOf("public sealed class AudioCapture", StringComparison.Ordinal)..];
+                        Assert(capOnly.Length > 500, "切片得真的切到 AudioCapture(切不到 = 这一节静默跳过)");
+                        var capCode = CodeOnly(capOnly);
+                        // ★ 针拼出来写:否则这几行断言自己的字面量会成为它要找的东西。
+                        foreach (var netType in new[] { "Http" + "Client", "Speech" + "Client", "Trans" + "port", "The" + "App" })
+                            Assert(!capCode.Contains(netType),
+                                   $"★★★ 采集类里**没有** {netType} —— 麦克风那条线在**代码路径上**就够不着语音服务,"
+                                   + "所以服务全挂也不影响录音。这不是 try-catch,是够不着");
+                        Assert(capCode.Contains("StopAndTakeWav"),
+                               "★ 采集的出口是「交出一段录好的 WAV」,不是一条流 —— 半双工的边界由手决定");
+                    }
+                    // ★ 反过来也要钉:消费者不许碰音频设备。两个方向都堵住,那条线才算断干净。
+                    if (spSrc is not null)
+                    {
+                        var spCode = CodeOnly(spSrc);
+                        foreach (var audioType in new[] { "Audio" + "Capture", "wave" + "In", "IMMDevice" })
+                            Assert(!spCode.Contains(audioType),
+                                   $"★★★ 语音客户端里**没有** {audioType} —— 它只收一段已经录好的音频,不持有任何音频通路");
+                    }
+                    // ★★ 顺序是承重的:先把录音收尾拿到字节,**再**去转写。
+                    //   反过来(在转写的 try 里才停录音)的话,转写抛出去时录音还开着 ——
+                    //   一个"用户以为已经松开、其实还在录"的麦克风。
+                    if (isSrc is not null)
+                    {
+                        var rel = Slice(isSrc, "public async Task PttReleaseAsync", "public Task<SpeechHealth?> PttHealthAsync");
+                        Assert(rel is not null, "切片得真的取到 PttReleaseAsync");
+                        var iStop = rel?.IndexOf("StopAndTakeWav", StringComparison.Ordinal) ?? -1;
+                        var iAsr = rel?.IndexOf("TranscribeAsync", StringComparison.Ordinal) ?? -1;
+                        // ★ 两个下标都先确认存在再比大小(IndexOf 找不到返回 -1,-1 恒小于任何下标)
+                        Assert(iStop >= 0 && iAsr >= 0 && iStop < iAsr,
+                               "★★★ 先停录音拿到字节、**再**转写 —— 顺序反过来的话,转写抛出去时麦克风还开着");
+                        Assert(rel is not null && rel.Contains("PttLastWav = wav"),
+                               "★★ 录到的音频**留着**(转写失败也留)—— 它是「你的话没丢」的凭据");
+                    }
+
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★ 契约:C# 侧那份键集合副本必须与 contracts.json 逐条对得上
+                    // ══════════════════════════════════════════════════════════
+                    //  服务端(Python)、网关消费者(Python)、本客户端(C#)三处读同一份登记表,
+                    //  而 C# 这边只能抄一份常量 ⇒ **抄本会分家**,所以在这里跟原本对拍。
+                    //  对不上当场红 ⇒ 期望值实质上仍然只有一份。
+                    var cjson = TryReadSource(Path.Combine("..", "..", "10-core", "speech", "contracts.json"));
+                    Assert(cjson is not null,
+                           "★★ 读得到 10-core/speech/contracts.json(读不到 ⇒ 下面整段对拍会静默跳过 = 假绿)");
+                    if (cjson is not null)
+                    {
+                        using var cdoc = JsonDocument.Parse(cjson);
+                        var cs = cdoc.RootElement.GetProperty("contracts");
+                        var pairs = new (string cid, string[] keys)[]
+                        {
+                            (Services.SpeechClient.ContractHealth, Services.SpeechClient.KeysHealth),
+                            (Services.SpeechClient.ContractAsr,    Services.SpeechClient.KeysAsr),
+                            (Services.SpeechClient.ContractTts,    Services.SpeechClient.KeysTts),
+                        };
+                        foreach (var (cid, csKeys) in pairs)
+                        {
+                            var want = cs.GetProperty(cid).GetProperty("keys").EnumerateArray()
+                                         .Select(x => x.GetString()!).ToHashSet(StringComparer.Ordinal);
+                            Assert(want.SetEquals(csKeys),
+                                   $"★★★ {cid}:C# 侧键集合 == contracts.json(抄本不许跟原本分家)"
+                                   + $" 实际 [{string.Join(",", csKeys.OrderBy(x => x, StringComparer.Ordinal))}]"
+                                   + $" / 登记 [{string.Join(",", want.OrderBy(x => x, StringComparer.Ordinal))}]");
+                        }
+                        // ★ 元断言:登记表里的每一条,C# 侧都要有对应的常量 —— 表里新增一条而这儿没跟上,当场红。
+                        var regCids = cs.EnumerateObject().Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+                        Assert(regCids.SetEquals(pairs.Select(p => p.cid)),
+                               "★★★ 元断言:contracts.json 里每一条契约在 C# 侧都有键集合 —— 缺:["
+                               + string.Join(", ", regCids.Except(pairs.Select(p => p.cid))) + "]");
+                        Assert(regCids.Count > 0, "★ 零命中也判红(空表与'全对上了'在断言里长得一样)");
+                    }
+
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★ 客户端半边:拿登记表生成的形状,真解析器解得出目标字段
+                    // ══════════════════════════════════════════════════════════
+                    JsonElement Shape(string[] shapeKeys)
+                    {
+                        string V(string k) => k switch
+                        {
+                            "ok" or "ready" or "asr_loaded" or "tts_loaded" => "true",
+                            "duration_s" => "1.25",
+                            "sample_rate" => "22050",
+                            "frames" => "100",
+                            "provenance" => "\"" + Services.SpeechClient.ProvenanceTrusted + "\"",
+                            _ => "\"x\"",
+                        };
+                        return JsonDocument.Parse("{" + string.Join(",", shapeKeys.Select(k => $"\"{k}\":{V(k)}")) + "}").RootElement;
+                    }
+                    var (hOk, hWhy) = Services.SpeechClient.ParseHealth(Shape(Services.SpeechClient.KeysHealth));
+                    Assert(hOk is { Ready: true }, "★★★ CONTRACT:speech.health 客户端半边:解得出 ready(" + (hWhy ?? "ok") + ")");
+                    var (aOk, aWhy) = Services.SpeechClient.ParseAsr(Shape(Services.SpeechClient.KeysAsr));
+                    Assert(aOk is not null && aOk.Provenance == Services.SpeechClient.ProvenanceTrusted,
+                           "★★★ CONTRACT:speech.asr 客户端半边:解得出 text/language/provenance(" + (aWhy ?? "ok") + ")");
+                    // ★ 反向:少一个键 / 多一个键都要判失败(集合相等,不是包含)
+                    foreach (var drop in Services.SpeechClient.KeysAsr)
+                        Assert(Services.SpeechClient.ParseAsr(
+                                   Shape(Services.SpeechClient.KeysAsr.Where(k => k != drop).ToArray())).r is null,
+                               $"★★ 反向 speech.asr:少了 `{drop}` ⇒ 判失败,不拼半份出来");
+
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★★ 记忆写入的准入:只认**服务端给的** provenance
+                    // ══════════════════════════════════════════════════════════
+                    Assert(Services.SpeechClient.MayWriteMemory(aOk),
+                           "★★★ 可信来源(user_voice_asr)⇒ 允许直通记忆写入");
+                    var untrusted = new Services.AsrResult("你好", "zh", 1.0, "lite", "untrusted_audio");
+                    Assert(!Services.SpeechClient.MayWriteMemory(untrusted),
+                           "★★★ 不可信来源 ⇒ **拒绝**写入,而不是退一步记成低可信度 —— "
+                           + "记忆库里一条来源可疑的记录会被当成事实用下去");
+                    Assert(!Services.SpeechClient.MayWriteMemory(null),
+                           "★★ 没有结果时也不许写(null 不等于'可信')");
+                    if (spSrc is not null)
+                        Assert(!CodeOnly(spSrc).Contains("Provenance = ") && !CodeOnly(spSrc).Contains("provenance ="),
+                               "★★★ 客户端**不许自己给** provenance 赋值 —— 来源档位由通道决定,由服务端算出");
+
+                    // ── WAV 封装是纯函数,能在无人值守的门禁里验(采集本身要真麦克风)──
+                    var pcm = new byte[1600];   // 0.05s @16k mono 16-bit
+                    var wav = Services.AudioCapture.WavFromPcm(pcm, Services.AudioCapture.SampleRate,
+                                                               Services.AudioCapture.Channels,
+                                                               Services.AudioCapture.BitsPerSample);
+                    Assert(wav.Length == pcm.Length + 44, $"★ WAV 头恰好 44 字节(实得 {wav.Length - pcm.Length})");
+                    Assert(wav[0] == (byte)'R' && wav[1] == (byte)'I' && wav[8] == (byte)'W',
+                           "★ RIFF/WAVE 魔数对(下游 whisper 直接吃这个)");
+                    Assert(BitConverter.ToInt32(wav, 24) == 16000,
+                           "★★ 采样率就是 whisper 的原生 16 kHz —— 在采集处就录成它要的形状,省掉一次会写错的重采样");
+                    Assert(Services.AudioCapture.DeviceSelectionSupported == false,
+                           "★ 如实暴露:这条采集路径(waveIn)**不支持选设备** —— 界面据此不摆假下拉框");
+                }
+                // ▲▲▲ V7 追加段到此为止 ▲▲▲
+
                 // ---- Open WebUI 退役(判据项)----
                 var stack = TryReadSource(Path.Combine("..", "..", "90-ops", "start-stack.ps1"));
                 if (stack is not null)

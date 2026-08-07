@@ -128,3 +128,229 @@ public static class AudioDevices
         [FieldOffset(8)] public IntPtr pwszVal;
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  D?(P5 语音 v1)· 按住说话的【采集】—— 一段录音,不是一条实时流
+// ═════════════════════════════════════════════════════════════════════════════
+//
+//  ★★★ 架构底线(STATE 与 InterpretState 顶部都写着,这里是它的落点之一):
+//        **同传可以失败,用户的麦克风不可以。**
+//
+//  本类对那条底线的落实是**结构性的,不是 try-catch**:
+//
+//    · 它**不认识任何网络类型**。整个类里没有 HttpClient、没有 SpeechClient、
+//      没有 Transport、没有 TheApp —— 采集完把 WAV 字节交出去就结束了。
+//    · ⇒ 语音服务挂掉 / 权重被删 / 端口被占,**在代码路径上都够不着这里**。
+//      录音照录、字节照给;失败的只是"这段话转成了什么字"。
+//    · 反过来这也是本类的硬约束:**永远不要在这里加一条"顺便发出去"的捷径**。
+//      加了之后那条底线就从结构性退化成靠自觉,而这个项目已经踩过太多次
+//      「靠自觉的底线不是底线」。⇒ 已用断言钉死(Selftest 的「麦克风独立性」一节)。
+//
+//  ★ 为什么用 WinMM(waveIn*)而不是 WASAPI 采集:
+//    本文件上半已经用 WASAPI **枚举**端点了,而 waveIn 的**录音**只要几个 P/Invoke,
+//    不引任何 NuGet(与本仓「全本地、不加第三方二进制」同一条口径)。
+//    代价如实记:waveIn 走系统默认输入设备,**选设备那一项它管不着** ——
+//    见 <see cref="DeviceSelectionSupported"/>,界面据此如实说明,不摆假开关。
+//
+//  ★ 16 kHz 单声道 16-bit:whisper 的原生采样率。在这里就录成它要的形状,
+//    省掉一次重采样 —— 也省掉「重采样写错导致识别率莫名变差」这类查不出来的问题。
+public sealed class AudioCapture : IDisposable
+{
+    public const int SampleRate = 16000;
+    public const int Channels = 1;
+    public const int BitsPerSample = 16;
+
+    /// <summary>
+    /// 这条采集路径**支不支持按端点 ID 选设备**。今天是 false —— waveIn 只认系统默认输入。
+    /// ★ 如实暴露成一个常量,而不是让界面摆一个"选了不生效"的下拉框:
+    ///   一个看起来能选、其实不生效的设置,比没有这个设置更坏。
+    /// </summary>
+    public const bool DeviceSelectionSupported = false;
+
+    readonly object _gate = new();
+    readonly List<byte> _pcm = new();
+    readonly List<IntPtr> _buffers = new();
+    IntPtr _handle;
+    bool _recording;
+    WaveInProc? _proc;      // ★ 必须存成字段:委托被 GC 掉的话回调会打进已释放的内存
+
+    public bool Recording { get { lock (_gate) return _recording; } }
+
+    /// <summary>已经录到的秒数(界面显示"按住了多久")。</summary>
+    public double Seconds
+    {
+        get { lock (_gate) return _pcm.Count / (double)(SampleRate * Channels * (BitsPerSample / 8)); }
+    }
+
+    /// <summary>开始录。返回空串 = 开始了;否则是**为什么没开始**(直接拿给用户看)。</summary>
+    public string Start()
+    {
+        lock (_gate)
+        {
+            if (_recording) return "";
+            _pcm.Clear();
+            var fmt = new WAVEFORMATEX
+            {
+                wFormatTag = 1,                                  // PCM
+                nChannels = Channels,
+                nSamplesPerSec = SampleRate,
+                wBitsPerSample = BitsPerSample,
+                nBlockAlign = Channels * BitsPerSample / 8,
+                cbSize = 0,
+            };
+            fmt.nAvgBytesPerSec = (uint)(fmt.nSamplesPerSec * fmt.nBlockAlign);
+
+            _proc = OnWaveIn;
+            var r = waveInOpen(out _handle, WAVE_MAPPER, ref fmt, _proc, IntPtr.Zero, CALLBACK_FUNCTION);
+            if (r != 0)
+            {
+                _handle = IntPtr.Zero;
+                _proc = null;
+                // ★ 说得出**是哪一步**失败 ——「录不了音」这句话本身帮不上任何忙。
+                //   最常见的两种:没有输入设备、或 Windows 的麦克风隐私开关关着。
+                return r is MMSYSERR_NODRIVER or MMSYSERR_BADDEVICEID
+                    ? "打不开麦克风:这台机器上没有可用的输入设备(或者它被禁用了)。"
+                    : $"打不开麦克风(waveInOpen 返回 {r})—— 请检查 Windows 设置里的麦克风权限。";
+            }
+
+            for (var i = 0; i < BufferCount; i++) AddBuffer();
+            if (waveInStart(_handle) != 0) { CloseLocked(); return "麦克风打开了,但启动录音失败。"; }
+            _recording = true;
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// 停止并取回这一段的 WAV 字节。★ 一次按住 = 一段完整的录音,**不是流**。
+    /// 一个采样都没录到时返回 null(而不是一段 0 字节的 wav —— 那会让下游读成"识别不出来")。
+    /// </summary>
+    public byte[]? StopAndTakeWav()
+    {
+        lock (_gate)
+        {
+            if (!_recording) return null;
+            CloseLocked();
+            _recording = false;
+            return _pcm.Count == 0 ? null : WavFromPcm(_pcm.ToArray(), SampleRate, Channels, BitsPerSample);
+        }
+    }
+
+    /// <summary>
+    /// 把裸 PCM 包成 WAV。★ **纯函数,单独抽出来** —— 采集要真麦克风才跑得起来,
+    /// 而这一段是断言在无人值守的门禁里唯一验得了的部分(头 44 字节 / 长度 / 采样率)。
+    /// </summary>
+    public static byte[] WavFromPcm(byte[] pcm, int rate, int channels, int bits)
+    {
+        var blockAlign = channels * bits / 8;
+        var ms = new MemoryStream();
+        var w = new BinaryWriter(ms);
+        w.Write(new[] { 'R', 'I', 'F', 'F' });
+        w.Write(36 + pcm.Length);
+        w.Write(new[] { 'W', 'A', 'V', 'E' });
+        w.Write(new[] { 'f', 'm', 't', ' ' });
+        w.Write(16);                       // fmt chunk size
+        w.Write((short)1);                 // PCM
+        w.Write((short)channels);
+        w.Write(rate);
+        w.Write(rate * blockAlign);        // byte rate
+        w.Write((short)blockAlign);
+        w.Write((short)bits);
+        w.Write(new[] { 'd', 'a', 't', 'a' });
+        w.Write(pcm.Length);
+        w.Write(pcm);
+        w.Flush();
+        return ms.ToArray();
+    }
+
+    // ── WinMM 回调:把每个填满的缓冲区收进 _pcm,再把它还回去继续录 ──────────
+    void OnWaveIn(IntPtr h, uint msg, IntPtr inst, ref WAVEHDR hdr, IntPtr p2)
+    {
+        if (msg != WIM_DATA) return;
+        lock (_gate)
+        {
+            if (!_recording) return;
+            var n = (int)hdr.dwBytesRecorded;
+            if (n > 0)
+            {
+                var buf = new byte[n];
+                Marshal.Copy(hdr.lpData, buf, 0, n);
+                _pcm.AddRange(buf);
+            }
+            waveInAddBuffer(_handle, ref hdr, Marshal.SizeOf<WAVEHDR>());
+        }
+    }
+
+    void AddBuffer()
+    {
+        var bytes = SampleRate * Channels * (BitsPerSample / 8) / 10;   // 100 ms
+        var data = Marshal.AllocHGlobal(bytes);
+        var hdrPtr = Marshal.AllocHGlobal(Marshal.SizeOf<WAVEHDR>());
+        var hdr = new WAVEHDR { lpData = data, dwBufferLength = (uint)bytes };
+        Marshal.StructureToPtr(hdr, hdrPtr, false);
+        waveInPrepareHeader(_handle, hdrPtr, Marshal.SizeOf<WAVEHDR>());
+        waveInAddBuffer(_handle, hdrPtr, Marshal.SizeOf<WAVEHDR>());
+        _buffers.Add(hdrPtr);
+    }
+
+    void CloseLocked()
+    {
+        if (_handle == IntPtr.Zero) return;
+        try { waveInStop(_handle); waveInReset(_handle); } catch { }
+        foreach (var p in _buffers)
+        {
+            try
+            {
+                waveInUnprepareHeader(_handle, p, Marshal.SizeOf<WAVEHDR>());
+                var h = Marshal.PtrToStructure<WAVEHDR>(p);
+                Marshal.FreeHGlobal(h.lpData);
+                Marshal.FreeHGlobal(p);
+            }
+            catch { }
+        }
+        _buffers.Clear();
+        try { waveInClose(_handle); } catch { }
+        _handle = IntPtr.Zero;
+        _proc = null;
+    }
+
+    public void Dispose() { lock (_gate) { _recording = false; CloseLocked(); } }
+
+    // ── P/Invoke ──────────────────────────────────────────────────────────────
+    const int BufferCount = 8;
+    const uint WAVE_MAPPER = 0xFFFFFFFF;
+    const uint CALLBACK_FUNCTION = 0x00030000;
+    const uint WIM_DATA = 0x3C0;
+    const int MMSYSERR_BADDEVICEID = 2;
+    const int MMSYSERR_NODRIVER = 6;
+
+    delegate void WaveInProc(IntPtr hwi, uint uMsg, IntPtr dwInstance, ref WAVEHDR hdr, IntPtr p2);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEFORMATEX
+    {
+        public ushort wFormatTag, nChannels;
+        public uint nSamplesPerSec, nAvgBytesPerSec;
+        public ushort nBlockAlign, wBitsPerSample, cbSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEHDR
+    {
+        public IntPtr lpData;
+        public uint dwBufferLength, dwBytesRecorded;
+        public IntPtr dwUser;
+        public uint dwFlags, dwLoops;
+        public IntPtr lpNext;
+        public IntPtr reserved;
+    }
+
+    [DllImport("winmm.dll")] static extern int waveInOpen(out IntPtr h, uint dev, ref WAVEFORMATEX f, WaveInProc cb, IntPtr inst, uint flags);
+    [DllImport("winmm.dll")] static extern int waveInPrepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveInUnprepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveInAddBuffer(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveInAddBuffer(IntPtr h, ref WAVEHDR hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveInStart(IntPtr h);
+    [DllImport("winmm.dll")] static extern int waveInStop(IntPtr h);
+    [DllImport("winmm.dll")] static extern int waveInReset(IntPtr h);
+    [DllImport("winmm.dll")] static extern int waveInClose(IntPtr h);
+}

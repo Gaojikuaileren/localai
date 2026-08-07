@@ -35,6 +35,11 @@ public sealed class InterpretPanel : UserControl
     readonly TextBlock _subtitle = new();
     readonly Border _subtitleBar;
 
+    // ── D?(P5 语音 v1)· 按住说话 ──────────────────────────────────────────
+    readonly Border _pttBar;
+    readonly Button _pttButton = new();
+    readonly TextBlock _pttStatus = new();
+
     /// <summary>当前打开的同传会话 —— 它的转写就是上方的气泡。null = 没选会话。</summary>
     readonly string? _sessionId;
 
@@ -42,8 +47,14 @@ public sealed class InterpretPanel : UserControl
     {
         _sessionId = sessionId;
         _subtitleBar = SubtitleBar();
+        _pttBar = PushToTalkBar();
 
         var dock = new DockPanel { LastChildFill = true };
+
+        // ★ 按住说话摆在最下面(最靠近手)。它是这一页今天**唯一真的能用**的语音功能,
+        //   而上面那条字幕说的是「同传还没接」—— 两件事,别让后者把前者盖掉。
+        DockPanel.SetDock(_pttBar, Dock.Bottom);
+        dock.Children.Add(_pttBar);
 
         // 底部:字幕横条(独立、略高、半透明灰)
         DockPanel.SetDock(_subtitleBar, Dock.Bottom);
@@ -88,6 +99,69 @@ public sealed class InterpretPanel : UserControl
         return b;
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  D?(P5 语音 v1)· 按住说话 —— 半双工:一次按住 = 一段话
+    // ═════════════════════════════════════════════════════════════════════════
+    //  ★ 为什么是「按住」而不是「点一下开始/再点结束」:半双工的边界必须**由手决定**。
+    //    点开点关那种形状,人会忘了关 —— 而忘了关的麦克风,正是这一页最不能出的事。
+    //  ★★ 界面对失败的说法分两层(它们的下一步完全不同):
+    //      · 录音就没开起来  -> 说清是**哪一步**(没有输入设备 / 权限)
+    //      · 录到了但没转成  -> **明说"你的话已经录下来了,没有丢"**
+    //    把两者混成一句「失败了」,用户会以为自己白说了一遍。
+    Border PushToTalkBar()
+    {
+        _pttButton.Content = "按住说话";
+        _pttButton.Padding = new Thickness(18, 8, 18, 8);
+        _pttButton.MinWidth = 120;
+        // ★ 按下就录、松开就停 —— 用 Preview 事件,免得被内部模板吞掉。
+        _pttButton.PreviewMouseLeftButtonDown += (_, _) => TheApp.Interpret.PttPress();
+        _pttButton.PreviewMouseLeftButtonUp += async (_, _) => await TheApp.Interpret.PttReleaseAsync();
+        // ★ 鼠标移出按钮也算松开:否则按住拖走会留下一个**一直在录**的麦克风。
+        _pttButton.MouseLeave += async (_, _) =>
+        {
+            if (TheApp.Interpret.PttRecording) await TheApp.Interpret.PttReleaseAsync();
+        };
+
+        _pttStatus.TextWrapping = TextWrapping.Wrap;
+        _pttStatus.VerticalAlignment = VerticalAlignment.Center;
+        _pttStatus.Margin = new Thickness(12, 0, 0, 0);
+        _pttStatus.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+
+        var row = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(_pttButton, Dock.Left);
+        row.Children.Add(_pttButton);
+        row.Children.Add(_pttStatus);
+
+        var b = new Border { Child = row, Padding = new Thickness(12, 8, 12, 8), Margin = new Thickness(0, 8, 0, 0) };
+        b.SetResourceReference(Border.BackgroundProperty, "BgSunken");
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusMd");
+        return b;
+    }
+
+    /// <summary>按住说话那一条的刷新。★ 每一种状态都要说得出**下一步做什么**。</summary>
+    void RefreshPtt()
+    {
+        var st = TheApp.Interpret;
+        _pttButton.IsEnabled = !st.PttTranscribing;
+        _pttButton.Content = st.PttRecording ? $"正在录…{st.PttSeconds:0.0}s(松开结束)" : "按住说话";
+
+        if (st.PttTranscribing) { _pttStatus.Text = "正在转写…"; return; }
+        if (st.PttError.Length > 0) { _pttStatus.Text = st.PttError; return; }
+        if (st.PttResult is { } r)
+        {
+            // ★ 把 provenance 如实显示出来:它决定这段话能不能进记忆库,
+            //   而那是用户有权知道的一件事(而不是我们替他悄悄决定)。
+            _pttStatus.Text = r.Text.Length > 0
+                ? $"「{r.Text}」({r.Language} · {r.DurationS:0.0}s)"
+                  + (st.PttMayWriteMemory ? " · 可直通记忆" : " · 来源不可信,不写记忆")
+                : "没听清 —— 再试一次(录到的音频还在)。";
+            return;
+        }
+        _pttStatus.Text = InterpretState.PushToTalkIsLocalOnly
+            ? "按住说话:本机语音服务(回环)。★ 副机上还用不了 —— 网关代理那一段还没接。"
+            : "按住说话。";
+    }
+
     /// <summary>字幕逐字生长(识别侧每来一小段就调一次)。★ 还没定稿,只待在底部横条里。</summary>
     public void AppendSubtitle(string partial) => _subtitle.Text += partial;
 
@@ -125,6 +199,10 @@ public sealed class InterpretPanel : UserControl
 
         // 字幕开关关掉 -> 整条收起,不留一条空槽占地方
         _subtitleBar.Visibility = st.Subtitles ? Visibility.Visible : Visibility.Collapsed;
+
+        // ★ 按住说话**不受** PipelineReady 影响 —— 那个开关说的是「同传」,
+        //   而按住说话今天真的能用。放在 return 之前刷,免得被同传那条早退盖掉。
+        RefreshPtt();
 
         if (InterpretState.PipelineReady) return;
 

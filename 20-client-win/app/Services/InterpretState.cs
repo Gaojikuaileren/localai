@@ -177,6 +177,107 @@ public sealed class InterpretState
     /// <summary>同传模式需要的模型清单(切进来时由 GPU Broker 装卸,聊天模型明确不在内)。</summary>
     public static readonly string[] RequiredModels = { "asr-streaming", "translate", "tts-voice" };
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  D?(P5 语音 v1)· 【按住说话】—— 半双工,一次按住 = 一段话
+    // ═════════════════════════════════════════════════════════════════════════
+    //
+    //  ★★ 它与上面那套「同传」是**两件事**,不许混:
+    //    · 同传 = 连续、双向、经过翻译与合成 —— `PipelineReady` 今天仍恒为 false;
+    //    · 按住说话 = 半双工、单向、只做 ASR —— 这一条**今天真的能用**(本机)。
+    //    把两者混成一个开关,会让"同传还没接"这句话把一个已经能用的功能也盖掉。
+    //
+    //  ★★★ 架构底线在这里的落法(**结构性,不是 try-catch**):
+    //    `AudioCapture` 与 `SpeechClient` 是**两个互不认识的对象**,本状态类持有它们两个,
+    //    但它们之间**没有任何引用**。⇒ 转写失败时录音这条路一个字节都没受影响:
+    //    `PttLastWav` 仍然握着那段音频,界面据此如实说「录到了,但这次没转成字」。
+    //    ⇒ 用户的麦克风**在代码路径上**就不依赖语音服务,而不是靠某个 catch 兜住。
+
+    readonly AudioCapture _capture = new();
+    readonly SpeechClient _speech = new();
+
+    /// <summary>正在按住(录音中)。</summary>
+    public bool PttRecording => _capture.Recording;
+
+    /// <summary>已经按住了多久(秒)—— 界面显示,让人知道它真的在录。</summary>
+    public double PttSeconds => _capture.Seconds;
+
+    /// <summary>上一次按住说话的转写结果。null = 还没有 / 这次没转成。</summary>
+    public AsrResult? PttResult { get; private set; }
+
+    /// <summary>
+    /// 上一次录到的那段音频。★ **转写失败也留着** —— 它是"你的话没丢"的凭据,
+    /// 也是将来"重试转写"的原料。录音成功而转写失败时,界面靠它说实话。
+    /// </summary>
+    public byte[]? PttLastWav { get; private set; }
+
+    /// <summary>上一次的失败原因(录音的或转写的)。空 = 没有失败。</summary>
+    public string PttError { get; private set; } = "";
+
+    /// <summary>正在转写(界面显示转圈,并且此时不该再开始下一次按住)。</summary>
+    public bool PttTranscribing { get; private set; }
+
+    /// <summary>
+    /// 这段转写能不能直通记忆写入。★ 判据只有一条:**服务端给的 provenance**。
+    ///   来源档位由**通道**决定(回环 / 已认证 LAN 设备),不由客户端自报。
+    /// </summary>
+    public bool PttMayWriteMemory => SpeechClient.MayWriteMemory(PttResult);
+
+    /// <summary>按下:开始录。返回空串 = 开始了;否则是原因(直接给用户看)。</summary>
+    public string PttPress()
+    {
+        if (PttTranscribing) return "上一段还在转写,稍等一下。";
+        PttResult = null;
+        PttError = "";
+        var why = _capture.Start();          // ★ 这一步**完全不碰网络**
+        if (why.Length > 0) PttError = why;
+        Changed?.Invoke();
+        return why;
+    }
+
+    /// <summary>
+    /// 松开:停止录音,然后**才**去转写。
+    ///
+    /// ★ 两步之间是**顺序**关系,不是嵌套:录音先收尾并把字节拿在手上(PttLastWav),
+    ///   之后转写成不成都不再影响它。这就是"麦克风不可失败"在这一层的样子。
+    /// </summary>
+    public async Task PttReleaseAsync(CancellationToken ct = default)
+    {
+        var wav = _capture.StopAndTakeWav();   // ★ 录音这条路到此为止,已经交付
+        PttLastWav = wav;
+        Changed?.Invoke();
+        if (wav is null)
+        {
+            // ★ 一个采样都没录到 —— 与"录到了但没听清"是两件事,分开说。
+            if (PttError.Length == 0) PttError = "没有录到声音 —— 按住的时间太短,或者麦克风没有拾到音。";
+            Changed?.Invoke();
+            return;
+        }
+        PttTranscribing = true;
+        Changed?.Invoke();
+        try
+        {
+            PttResult = await _speech.TranscribeAsync(wav, ct);
+            if (PttResult is null)
+                // ★★ 说清"录到了、只是没转成" —— 否则用户会以为自己白说了一遍。
+                PttError = (_speech.LastError ?? "转写失败") + " ★ 你的话已经录下来了,没有丢。";
+        }
+        finally
+        {
+            PttTranscribing = false;
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>探一次本机语音服务(界面进页面时调一次,用来如实说明可用性)。</summary>
+    public Task<SpeechHealth?> PttHealthAsync(CancellationToken ct = default) => _speech.HealthAsync(ct);
+
+    /// <summary>
+    /// 按住说话今天**在这台机器上**能不能用。
+    /// ★ v1 只连本机回环:主机上可用;副机要等网关把 /v1/speech/* 代理过去(本轮未做)。
+    ///   界面据此如实说明,不摆一个按下去没反应的按钮。
+    /// </summary>
+    public static bool PushToTalkIsLocalOnly => true;
+
     // ---------------------------------------------------------------- 存档(本机偏好)
     public sealed record Snapshot(string MyLang, string TheirLang, bool SpeakTranslation, bool Subtitles, string? VoiceId,
                                  string? InputDeviceId = null, string? OutputDeviceId = null);
