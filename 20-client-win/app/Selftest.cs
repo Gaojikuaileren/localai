@@ -6313,6 +6313,134 @@ public static class Selftest
                            "★★ 不许再回到遍历 TokenGroups 找完整性 SID 那条路 —— 它在那里根本不存在");
             }
 
+            // ══════════════════════════════════════════════════════════════════════
+            //  ★★★★ 元断言②(V21 纪律③):**每个 json 在两个工程里合起来只能有一个写者**。
+            //
+            //  为什么它承重:客户端与管理端是**两个进程**,而两边写盘的形状都是
+            //  「整份读进内存 → 改一个字段 → 整份写回」。同一个文件两个写者 ⇒
+            //  **后写的那个把对方这期间改的字段整个盖掉**,而且**两边都会报『保存成功』**。
+            //  ★ 这不是理论:皮肤、语言、聊天偏好几十项都在客户端那份 settings.json 里,
+            //    管理端只要为了存一个模型路径把整份写回去,就可能把用户刚换的皮肤打回去。
+            //
+            //  ★★ 判据形状(第 3b 条:范围由判词决定):
+            //    判词说「两个工程合起来」⇒ 判据**同时枚举 app/ 与 admin/ 两棵树**,
+            //    不写死文件名清单;json 的名字也是**从代码里抓出来的**,不是手抄的。
+            //  ★★★ 三条元断言防它静默变成零断言(第 4 条 / 第 10 条):
+            //    ① 真的扫到了两棵树;② 真的抓出了 ≥6 个 json 名字;③ 真的找到了 ≥6 个写点。
+            //    —— 少任何一条,「一个都没冲突」与「一条都没查」在终端上长得一模一样。
+            // ══════════════════════════════════════════════════════════════════════
+            {
+                var appRootW = ClientSourceRoot();
+                var adminRootW = appRootW is null ? null
+                    : Path.GetFullPath(Path.Combine(appRootW, "..", "admin"));
+                if (appRootW is not null && adminRootW is not null && Directory.Exists(adminRootW))
+                {
+                    static List<(string Proj, string File, string Text)> Tree(string root, string proj)
+                    {
+                        var o = new List<(string, string, string)>();
+                        foreach (var f in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+                        {
+                            var rel = Path.GetRelativePath(root, f).Replace('\\', '/');
+                            if (rel.StartsWith("bin/") || rel.StartsWith("obj/")) continue;
+                            try { o.Add((proj, rel, File.ReadAllText(f))); } catch (IOException) { }
+                        }
+                        return o;
+                    }
+                    var trees = Tree(appRootW, "app").Concat(Tree(adminRootW, "admin")).ToList();
+                    Assert(trees.Count(x => x.Proj == "app") >= 20 && trees.Count(x => x.Proj == "admin") >= 8,
+                        $"★ 元断言之一:两棵树都真的扫到了(app={trees.Count(x => x.Proj == "app")} · "
+                        + $"admin={trees.Count(x => x.Proj == "admin")})—— 零命中与全清白长得一模一样");
+
+                    // ── ① 谁是「路径属性」:`XxxPath => …"yyy.json"` ────────────────
+                    //   ★ 从代码里抓,不手抄名单:新加一个 json 而这里没跟上,
+                    //     那个新文件就会**静默**不受这条判据管(第 3b 条那四次的形状)。
+                    //   ★★★ 第一版这里**判据比想判的东西宽**(第 4 条),而且是当场跑出来的:
+                    //     正则连 `var path = … "manifest.json"` 里的 `path` 也收了进来 ⇒
+                    //     此后**每一行**含 `path` 的写盘调用都被算成写 manifest.json,
+                    //     于是它报「manifest.json 有 11 个写者」—— 一个假红。
+                    //   ⇒ 收紧成**属性命名约定**:大写开头、以 `Path` 或 `Path_` 结尾。
+                    //     那正是本仓声明 json 落点的写法(`ChatPath` / `SettingsPath` / `Path_`),
+                    //     而 `path` / `p` / `f` 这些临时变量一个都进不来。
+                    var pathProp = new Dictionary<string, string>(StringComparer.Ordinal);  // 属性名 -> json 文件名
+                    var jsonRe = new System.Text.RegularExpressions.Regex(
+                        @"\b([A-Z]\w*Path_?)\s*(?:=>|=)[^;\r\n]*?\""([\w.-]+\.json)\""");
+                    foreach (var (_, _, text) in trees)
+                        foreach (System.Text.RegularExpressions.Match m in jsonRe.Matches(NoComments(text)))
+                            pathProp[m.Groups[1].Value] = m.Groups[2].Value;
+                    Assert(pathProp.Count >= 6,
+                        $"★ 元断言之二:真的抓出了 json 路径属性(现 {pathProp.Count} 个)—— "
+                        + "抓不到的话下面那条会变成一句什么都没查的空话");
+
+                    // ── ② 谁在写:落到那几个写 API 上的调用点 ──────────────────────
+                    //   ★★★ `S(` 是 `App.SaveStores` 里那个**本地包装**:
+                    //     `void S<T>(string path, T data) { … ClientStore.Save(path, data); }`
+                    //     不认它的话,客户端**最主要的那一批写点**(chat / projects / todos …)
+                    //     全部看不见 ⇒ 判据会漏掉它要守的那件事,而且是**静默**漏掉。
+                    //     这一格是跑出来的:第一版正是因为漏了它,`chat.json` 一处写点都没抓到。
+                    //   ★★ 而认一个**单字母函数名**是危险的(它会误命中别处的 `S(`),
+                    //     所以下面配一条元断言:那个包装**确实**是个写盘动作。
+                    string[] writeApis = { "ClientStore.Save(", "File.WriteAllText(", "File.WriteAllBytes(",
+                                           "File.AppendAllText(", "File.Copy(", "File.Move(",
+                                           "S(ClientStore." };
+                    var appSrcW = trees.FirstOrDefault(x => x.Proj == "app" && x.File == "App.xaml.cs").Text;
+                    Assert(appSrcW is not null
+                           && System.Text.RegularExpressions.Regex.IsMatch(
+                                  NoComments(appSrcW), @"void S<T>\([^)]*\)[^;]*ClientStore\.Save\("),
+                        "★★ 元断言:`S(ClientStore.…)` 那个包装**确实**落到 `ClientStore.Save` 上 —— "
+                        + "它要是哪天不再写盘了,上面把它算成写点就成了一句假话");
+                    var writers = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);  // json -> 工程集合
+                    var writeSites = 0;
+                    foreach (var (proj, rel, text) in trees)
+                    {
+                        foreach (var raw in NoComments(text).Split('\n'))
+                        {
+                            if (!writeApis.Any(a => raw.Contains(a, StringComparison.Ordinal))) continue;
+                            foreach (var kv in pathProp)
+                            {
+                                // ★ 认「属性名」也认「字面量」——两种写法都算一个写点。
+                                //   ★★ 属性名要按**词**匹配:`ChatPath` 不许被 `XChatPathY` 误命中。
+                                var byProp = System.Text.RegularExpressions.Regex.IsMatch(
+                                    raw, @"\b" + System.Text.RegularExpressions.Regex.Escape(kv.Key) + @"\b");
+                                if (!byProp && !raw.Contains("\"" + kv.Value + "\"", StringComparison.Ordinal)) continue;
+                                if (!writers.TryGetValue(kv.Value, out var set))
+                                    writers[kv.Value] = set = new SortedSet<string>(StringComparer.Ordinal);
+                                set.Add(proj + ":" + rel);
+                                writeSites++;
+                            }
+                        }
+                    }
+                    Assert(writeSites >= 6,
+                        $"★ 元断言之三:真的找到了写点(现 {writeSites} 处)—— "
+                        + "一处都没找到时,下面那条会**恒绿**");
+
+                    // ── ③ 判词本身:每个 json 的写者只能在**一个**工程里 ───────────
+                    foreach (var (json, files) in writers.OrderBy(x => x.Key, StringComparer.Ordinal))
+                    {
+                        var projs = files.Select(f => f.Split(':')[0]).Distinct().ToList();
+                        Assert(projs.Count == 1,
+                            $"★★★★ 元断言②:`{json}` 只能有**一个工程**在写它 —— "
+                            + "两个进程各自「整份读→改一格→整份写回」,后写的会把对方刚改的字段整个盖掉,"
+                            + "而且**两边都会说保存成功**。现有:" + string.Join(" · ", files));
+                    }
+                    // ★ 反向:纪律③点名的那两份必须**确实**各有归属,不许因为抓不到而漏检。
+                    //   ★★ 用 TryGetValue,不用下标 —— 第一版用下标,抓不到时直接抛
+                    //     `KeyNotFoundException`,**把整套自检打断在这儿**(后面几千条一条都没跑)。
+                    //     一条判据自己把测试跑崩,比它判错更坏:它让别的判据一起失声。
+                    foreach (var (must, owner) in new[] { ("memory.json", "admin"), ("chat.json", "app") })
+                    {
+                        var seen = writers.TryGetValue(must, out var who);
+                        Assert(seen,
+                            $"★★ 反向:`{must}` 必须真的被这条判据看见 —— 看不见就等于没查它");
+                        Assert(!seen || who!.All(f => f.StartsWith(owner + ":", StringComparison.Ordinal)),
+                            $"★★★ `{must}` 归 **{(owner == "admin" ? "管理端" : "客户端")}独占** —— "
+                            + (owner == "admin"
+                               ? "客户端里连读都不留:留一个只读也是两个进程碰同一个文件,而下一个人会顺手把它改成可写。"
+                               : "管理端一个字节都不许写它。")
+                            + " 现有:" + string.Join(" · ", who ?? new SortedSet<string>()));
+                    }
+                }
+            }
+
             // ★★ V21:「一键配对 + S4 管理面」那两大段整体搬进管理端(admin/SelftestMoved.cs)——
             //   它们钉的是 `HubAdmin` 与 `DevicesView` 的主机侧,两者都不在客户端了。
             //   ★ 下面这个收口是那两段带走的:它闭的是**上一层**那个块,不是它们自己的。
