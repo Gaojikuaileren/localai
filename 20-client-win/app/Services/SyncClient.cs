@@ -42,6 +42,27 @@ public sealed class SyncClient : IDisposable
     /// <summary>超过这么久没收到任何帧(含心跳)即判连接已死。服务端心跳 15 秒。</summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(40);
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ 开流之前那次对齐的**期限**(V15 收工前对抗式复核抓到的自伤)。
+    //
+    //  V15 把「拉全量 + 补推」挪到了 `Transport.OpenStream` **之前**并且 `await` 它。
+    //  而那两步走的是 `Transport.Send`,它用的 HttpClient **没有设 Timeout**
+    //  ⇒ 吃 .NET 的默认值 **100 秒**(对照:`OpenStream` 自己显式设了 InfiniteTimeSpan,
+    //    也就是说这份传输层里"设不设超时"本来就是逐处决定的,不是漏了一个全局值)。
+    //
+    //  ⇒ 「TCP 接得上、对端不答话」(主机网关正在起、edge 收了连接但上游是死的)时,
+    //    每一轮重连都要先耗掉最多 100 秒才轮到开流 —— 这期间这台机器
+    //    **既不是 Live、也不在中枢的在线名单里**。
+    //  ★★ 那正好是实机记的那句「不是启动即连」的形状 —— 而它是 V15 **自己**引进来的:
+    //    改之前 PullFullAsync 只被 `Task.Run(...)` 甩出去,卡 100 秒也拦不住任何东西。
+    //
+    //  ⇒ 给开流前那一步一个**自己的期限**:到点就放弃、去开流,标记留着由 OnLine 补。
+    //    ★ 不是"拉不到就算了" —— `_needFullPull` 还立着,界面照样说「还没跟中枢对齐」。
+    //  ★ 必须 **< StaleAfter**:对齐要是能比"判连接已死"还久,
+    //    界面会在流都还没开出去的时候先说自己断了。下面有断言钉着这条大小关系。
+    // ══════════════════════════════════════════════════════════════════
+    public static readonly TimeSpan AlignDeadline = TimeSpan.FromSeconds(10);
+
     readonly HubClient _hub;
     CancellationTokenSource? _cts;
     Task? _loop;
@@ -199,7 +220,35 @@ public sealed class SyncClient : IDisposable
     /// </summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
-        var all = FullSet?.Invoke();
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ 先**落成一份表**再进锁(V15 收工前对抗式复核抓到的第二处自伤)。
+        //
+        //  宿主注入的 FullSet 是**惰性**的:`Todos.SharedSnapshot()` 是
+        //  `_items.Where(...).Select(...)`,`Chat.SharedSnapshot()` 是 `yield return` ——
+        //  真正遍历各 Center 的那些 List 发生在**这里**,而这里跑在线程池线程上。
+        //
+        //  V15 之前这一步只由 OnLine 甩出去(第一帧到手之后),那时 OnStartup 早返回了。
+        //  V15 把它挪到了**开机路上** ⇒ UI 线程此刻可能正在改同一批 List
+        //  (App 的清示例、清过期待办都在起同步流之后)⇒ `List<T>` 枚举当场抛
+        //  「集合已修改」。
+        //
+        //  ★★ 而更坏的是它**抛到哪儿**:一路冒到 RunAsync 的 catch,被判成
+        //    `Link = Reconnecting`,界面显示「与中枢的同步连接断了」——
+        //    **一件本地的事被报成了网络的事**,而人会照着这句话去查网络。
+        //    失败要长得和成功不一样,但也**不能长得像另一种失败**。
+        //  ⇒ 就地接住:这一轮不推,待推队列一条没动,下一次连上/下一次变更自然会补。
+        //  ★ 只接 InvalidOperationException(那正是「集合已修改」的类型)——
+        //    宽到 catch-all 会把宿主真正的 bug 一起吞掉。
+        // ══════════════════════════════════════════════════════════════
+        List<SyncItem>? all;
+        try { all = FullSet?.Invoke()?.ToList(); }
+        catch (InvalidOperationException ex)
+        {
+            LastError = "这次对齐没做完(本地列表正在变动):" + ex.Message
+                        + " —— 待推的一条没丢,下次连上补";
+            Notify();
+            return;
+        }
         if (all is not null)
         {
             lock (_gate)
@@ -348,10 +397,18 @@ public sealed class SyncClient : IDisposable
                 //    ⇒ 拉不成就**不推**,两个标记都留着,由 OnLine 在下一帧补
                 //    (清掉标记等于假装对齐过了)。
                 //  ★ 这里用 ct 版本;OnLine 那边的补救走无参版本 —— 两处调的是同一个方法。
+                //  ★★ 但**必须带期限**(见 AlignDeadline):这一步 await 在开流之前,
+                //    而它底下那个 HttpClient 的默认超时是 100 秒 —— 不设期限的话,
+                //    一台"接得上但不答话"的主机能把这条流按住一分半钟,
+                //    而那正是「不是启动即连」。到点就放弃去开流,标记留着让 OnLine 补。
                 // ══════════════════════════════════════════════════════════
                 _needFullPull = true;
                 _pullFirst = true;
-                if (await PullFullAsync(ct)) { _pullFirst = false; await ReconcileAsync(ct); }
+                using (var align = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    align.CancelAfter(AlignDeadline);
+                    if (await PullFullAsync(align.Token)) { _pullFirst = false; await ReconcileAsync(align.Token); }
+                }
                 // ★ 报上自己的名字 —— 中枢据此维护在线名单,另一台才知道我们在不在。
                 //   判据是"这条订阅活着",所以断线的那一刻对方就会看到我们掉线。
                 await Transport.OpenStream(

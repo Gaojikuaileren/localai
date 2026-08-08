@@ -508,8 +508,14 @@ if _client.exists():
           "Absorb(text)" in _c)
 
     # ── ② 调用点在**开流之前**(上线/重连都走它)────────────────────
-    _i_pull = _c.find("PullFullAsync(ct)")
-    _i_open = _c.find("Transport.OpenStream")
+    #  ★ 锚点**只在 RunAsync 的方法体里**找,不扫整份文件 —— 与下面 ③ 同一个教训:
+    #    判词说的是"在 RunAsync 里、开流之前",判据就不该去别的方法里碰运气。
+    _i_run = _c.find("async Task RunAsync(")
+    _run = _c[_i_run:_block_end(_c, _i_run) + 1] if _i_run >= 0 else ""
+    check("★ 元断言:取到了 RunAsync 的方法体(取不到 ⇒ 下面几条是零断言)",
+          len(_run) > 200 and "PullFullAsync" in _run, len(_run))
+    _i_pull = _run.find("PullFullAsync(")
+    _i_open = _run.find("Transport.OpenStream")
     check("★ 元断言:两个锚点都找得到(位置判据的前提;零命中判红)",
           _i_pull >= 0 and _i_open >= 0, f"pull={_i_pull} open={_i_open}")
     check("★★★ 拉全量在**开流之前** —— 这一格正是首帧永远盖不到的那一格:"
@@ -517,8 +523,55 @@ if _client.exists():
           0 <= _i_pull < _i_open, f"pull={_i_pull} open={_i_open}")
     check("★★★ 而且它在**重连循环里面**(不是只在 Start 里跑一次)—— "
           "只在开机跑一次的话,断线期间丢的更新靠推送永远补不回来",
-          "while (!ct.IsCancellationRequested)" in _c
-          and _c.find("while (!ct.IsCancellationRequested)") < _i_pull)
+          "while (!ct.IsCancellationRequested)" in _run
+          and _run.find("while (!ct.IsCancellationRequested)") < _i_pull)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ── ②b 开流之前那一步**必须带期限**(V15 收工前对抗式复核抓到的自伤)──
+    #
+    #  这一步是 await 在 OpenStream **之前**的,而它底下走的 `Transport.Send`
+    #  用的 HttpClient **没有设 Timeout** ⇒ 吃 .NET 默认的 **100 秒**
+    #  (对照:同一份传输层里 OpenStream 显式设了 InfiniteTimeSpan ——
+    #   也就是说"设不设超时"在那儿本来就是逐处决定的,不是漏了一个全局值)。
+    #  ⇒ 「TCP 接得上、对端不答话」时,每一轮重连都要先耗掉最多 100 秒才轮到开流,
+    #    这期间这台机器既不是 Live、也不在中枢的在线名单里 ——
+    #    **那正好是实机记的那句「不是启动即连」**,而且是 V15 自己引进来的:
+    #    改之前 PullFullAsync 只被 Task.Run 甩出去,卡多久都拦不住任何东西。
+    # ══════════════════════════════════════════════════════════════════
+    check("★★★ 开流之前那次对齐**带期限**(CancelAfter),而且期限设在开流之前 —— "
+          "不带的话,一台『接得上但不答话』的主机能把同步流按住一分半钟",
+          "CancelAfter" in _run and 0 <= _run.find("CancelAfter") < _i_open,
+          f"cancelAfter={_run.find('CancelAfter')} open={_i_open}")
+    _m_align = re.search(r"AlignDeadline\s*=\s*TimeSpan\.FromSeconds\((\d+)\)", _cs)
+    _m_stale = re.search(r"StaleAfter\s*=\s*TimeSpan\.FromSeconds\((\d+)\)", _cs)
+    check("★ 元断言:两个时限在源码里都找得到(找不到 ⇒ 下一条静默变成零断言)",
+          _m_align is not None and _m_stale is not None,
+          f"align={_m_align} stale={_m_stale}")
+    check("★★ 对齐期限必须**小于**判活阈值 —— 对齐要是能比「判连接已死」还久,"
+          "界面会在流都还没开出去的时候先说自己断了",
+          bool(_m_align) and bool(_m_stale)
+          and int(_m_align.group(1)) < int(_m_stale.group(1)),
+          f"align={_m_align and _m_align.group(1)}s stale={_m_stale and _m_stale.group(1)}s")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ── ②c 对齐要先把 FullSet **落成一份表**再进锁 ────────────────────
+    #
+    #  宿主注入的 FullSet 是惰性的(SharedSnapshot 现场遍历各 Center 的 List),
+    #  而 V15 把这一步挪到了**开机路上** ⇒ UI 线程此刻可能正在改同一批 List
+    #  ⇒ List<T> 枚举当场抛「集合已修改」。★ 更坏的是它会一路冒到 RunAsync 的 catch,
+    #    被判成 Reconnecting、界面显示「与中枢的同步连接断了」——
+    #    **一件本地的事被报成了网络的事**,而人会照着那句话去查网络。
+    #  ⇒ 失败要长得和成功不一样,但也不能长得像**另一种**失败。
+    # ══════════════════════════════════════════════════════════════════
+    _rec = _c[_c.find("public async Task ReconcileAsync"):]
+    _rec = _rec[:_rec.find("public async Task<SyncPushResult?> FlushAsync")] if "FlushAsync" in _rec else _rec
+    check("★ 元断言:取到了 ReconcileAsync 的源码", len(_rec) > 200, len(_rec))
+    check("★★★ FullSet 先落成一份表再进锁,且枚举失败就地接住 —— "
+          "不接的话,一次本地列表变动会被报成「与中枢的连接断了」",
+          "FullSet?.Invoke()?.ToList()" in _rec and "InvalidOperationException" in _rec,
+          _rec[:0])
+    check("★ 而且**不是** catch-all —— 宽到 catch-all 会把宿主真正的 bug 一起吞掉",
+          "catch (InvalidOperationException" in _rec and "catch {" not in _rec)
 
     # ══════════════════════════════════════════════════════════════════
     #  ── ③ 补全量的触发**不在** data 分支里(心跳也要能救回来)────────
