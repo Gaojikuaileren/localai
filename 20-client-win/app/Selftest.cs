@@ -6018,15 +6018,107 @@ public static class Selftest
                            "★★ 「添加一台新电脑」默认收起 —— 只有主机没有副机的人才不会无意中开窗;"
                            + "展开这个动作本身就是明确意图");
 
-                    // ⑤ 六词比对【不许】被一键化掉
-                    var approveDlg = Slice(dv4, "async Task ShowApprovalDialogAsync", "// ============");
-                    Assert(approveDlg is not null && approveDlg.Contains("六个词逐字一样"),
+                    // ══════════════════════════════════════════════════════════
+                    //  ⑤ 六词比对【不许】被一键化掉
+                    //
+                    //  ★★★ V19(2026-08-08):这三条**原来钉在死代码上**。
+                    //    它们切的是 `ShowApprovalDialogAsync`,而那条路 2026-08-08 前就废了
+                    //    (DevicesView 里那段注释白纸黑字:enroll 是**匿名**的,自动弹窗
+                    //     等于「局域网上任何人都能触发的动作」⇒ 改成不自动弹)。
+                    //    真正在跑的是 `PendingRow` 上的批准/拒绝按钮。
+                    //    ⇒ **今天测的是死代码**:把活路径上的六词比对整个删掉,这三条照样绿。
+                    //
+                    //  ★ 修法不是"把针脚挪过去就完事" —— 判据要**能扛住那两种去留**:
+                    //    弹窗接回来(由人主动点某一条才弹)也好、彻底删掉也好,
+                    //    「批准之前必须逐字比过六个词」这条判词都得成立。
+                    //    ⇒ 所以下面第三条是**遍历所有批准入口**,不是钉某一个函数。
+                    // ══════════════════════════════════════════════════════════
+                    var pendRow = Slice(dv4, "UIElement PendingRow", "UIElement DeviceRow");
+                    Assert(pendRow is not null,
+                           "★ 元断言:切得到 `PendingRow`(活的批准路径)—— "
+                           + "切不到的话下面三条会**静默变成零断言**");
+                    Assert(pendRow is not null && pendRow.Contains("逐字核对过了,批准"),
                            "★★ 批准按钮的文字本身就是那句断言,不是中性的「确定」—— "
                            + "六个词管的是「这条请求是不是你发的」,displayName 是自报的可以随便写");
-                    Assert(approveDlg is not null && approveDlg.Contains("DenyAsync"),
-                           "★ 弹窗要有拒绝这条路,不能只有批准和关掉");
-                    Assert(approveDlg is not null && !approveDlg.Contains("跳过"),
-                           "★★ 不提供任何「跳过比对」的快捷方式");
+                    Assert(pendRow is not null && pendRow.Contains("DenyAsync"),
+                           "★ 批准那一行要有拒绝这条路,不能只有批准和无视");
+                    Assert(pendRow is not null && pendRow.Contains("p.Sas"),
+                           "★★ 六个词要**摆在屏幕上**给人对 —— 只写一句「请核对」而不显示词,"
+                           + "那句话就没有对象可核");
+
+                    // ★★★ 遍历**所有**批准入口:每一处 `ApproveAsync(` 之前都得有六词比对的字样。
+                    //   ★ 这条**不挑函数** —— 挑函数的判据会随那个函数的去留一起失效,
+                    //     而这正是上面那三条栽过的地方。
+                    //
+                    //   ★★★ 有**一个**登记在册的例外:`SelfPairAsync`(本机自配对)。
+                    //     它写这条判据时**当场把我抓了一次** —— 第一版不认例外,
+                    //     于是对着一条项目**深思熟虑决定不比六个词**的路径判红。
+                    //     那种红是误红,而本仓的经验是:**误红的护栏很快就没人看**。
+                    //     ⇒ 例外要**登记**,而且例外自己的那道闸要被单独钉住
+                    //       (与契约门禁里 `_SUBSHAPE_CIDS` 逐条写明"为什么不抵消欠债"同款手法)。
+                    //     它凭什么免:同机走回环,没有中间人可防;能调回环管理面的人已经在这台机器上,
+                    //     他本来就能批准任何请求。⇒ 免的是**②确认请求来源**,不是①防中间人(那层仍在)。
+                    {
+                        var dvCode = NoComments(dv4);
+                        var selfPair = Slice(dv4, "async Task SelfPairAsync", "UIElement HostDevicesCard");
+                        var selfPairCode = selfPair is null ? "" : NoComments(selfPair);
+
+                        var allSites = System.Text.RegularExpressions.Regex
+                            .Matches(dvCode, @"ApproveAsync\s*\(").Count;
+                        Assert(allSites >= 2,
+                               $"★ 元断言:数得到批准入口(现 {allSites} 处)—— "
+                               + "数到 0/1 时下面的判据会静默恒真或把例外算成全部");
+
+                        // ★ 把登记在册的那个例外**整段挖掉**再扫剩下的。
+                        var scanned = selfPairCode.Length > 0 ? dvCode.Replace(selfPairCode, "") : dvCode;
+                        var scannedSites = System.Text.RegularExpressions.Regex
+                            .Matches(scanned, @"ApproveAsync\s*\(").Count;
+                        // ★★ 挖掉的**必须恰好是 1 个** —— 挖 0 个说明切片没匹配上(判据白扫),
+                        //   挖 ≥2 个说明例外的范围悄悄变大了(那才是真正危险的方向:
+                        //   有人把新的批准入口塞进自配对那一段来躲开这条判据)。
+                        Assert(allSites - scannedSites == 1,
+                               $"★★★ 登记在册的例外必须**恰好挖掉一个**批准入口"
+                               + $"(全部 {allSites} · 挖后 {scannedSites})—— "
+                               + "挖 0 个 = 切片没匹配上,这条判据在空扫;"
+                               + "挖 ≥2 个 = 有人把新的批准入口塞进自配对那一段来躲开它");
+
+                        var bad = 0;
+                        foreach (System.Text.RegularExpressions.Match m in
+                                 System.Text.RegularExpressions.Regex.Matches(scanned, @"ApproveAsync\s*\("))
+                        {
+                            var from = Math.Max(0, m.Index - 1200);
+                            if (!scanned[from..m.Index].Contains("逐字")) bad++;
+                        }
+                        Assert(bad == 0,
+                               $"★★★ 除登记的自配对例外外,**每一个**批准入口之前都必须有六词【逐字】比对"
+                               + $"({bad} 处没有)—— 这条判据不挑函数:弹窗接回来也好、彻底删掉也好,"
+                               + "「批准之前逐字比过六个词」都得成立。"
+                               + "上一版把它钉在一个具体函数上,而那个函数早就没人调了");
+
+                        // ★★★ 例外**自己的那道闸**:免了六词,就必须当场重探管理面并确认 hubId。
+                        //   不能拿几分钟前的探测结果当通行证 —— 那期间中枢可能换了、Edge 可能重起过。
+                        //   ⇒ 免六词的**全部依据**就是"这是同一台机器的回环",这条一松,例外就不成立了。
+                        Assert(selfPairCode.Length > 0,
+                               "★ 元断言:切得到 `SelfPairAsync` —— 切不到的话下面那条会静默零断言,"
+                               + "而上面那条「恰好挖掉一个」也会同时红(两条互相兜)");
+                        Assert(selfPairCode.Contains("admin.ProbeAsync(TheApp.Hub.Profile?.HubId)")
+                               && selfPairCode.Contains("admin.LastProbe != Services.AdminProbeResult.Ok"),
+                               "★★★ 自配对免比六个词的**前提**:必须【当场重探】回环管理面并确认 hubId 一致。"
+                               + "拿旧结论当通行证,那段免除的理由就不成立了 —— "
+                               + "免的是「确认请求来源」,凭的是「这确实是本机的回环」,"
+                               + "而那件事只有刚刚探过才知道");
+                    }
+
+                    // ★★★ 安全判据:**轮询那条路不许自动弹窗**。
+                    //   enroll 是匿名的 ⇒ 自动弹窗 = 局域网上任何人都能决定你屏幕上跳出什么,
+                    //   由对方的到达时机说了算。这条与「弹窗要不要回来」**无关**:
+                    //   就算接回来,也只能是**人主动点某一条**才弹,不能由轮询触发。
+                    var pollForPopup = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
+                    Assert(pollForPopup is not null
+                           && !NoComments(pollForPopup).Contains("ShowApprovalDialogAsync"),
+                           "★★★ 待批准**轮询**里不许弹窗 —— enroll 是匿名的,"
+                           + "「新请求一到就自动弹」等于把「你屏幕上跳出什么」交给局域网上的任何人,"
+                           + "准入的节奏必须归你,不归发起方");
 
                     // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
                     var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
