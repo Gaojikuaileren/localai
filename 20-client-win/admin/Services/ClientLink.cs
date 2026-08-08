@@ -46,10 +46,25 @@ public static class ClientLink
     public static async Task<(bool Stopped, string Why)> RequestClientQuitAsync(TimeSpan budget)
     {
         if (!IsClientRunning()) return (true, "客户端本来就没在跑。");
-        if (!InstanceLock.SignalQuit(ClientAppKey))
-            return (false, "发不出退出信号 —— 客户端的退出通道没开着(它可能刚起来还没接上,或者已经在退了)。");
-
         var deadline = DateTime.UtcNow + budget;
+
+        // ★★ 退出通道要**等它开**,不能一次发不出去就判失败。
+        //   锁文件是在客户端的 `Program.Main` 里建的,而退出监听是在 `App.OnStartup` 里接的 ——
+        //   两者之间有一段真实存在的窗口。而那段窗口恰恰覆盖了一个**正常时序**:
+        //   管理端刚把客户端拉起来(裁定第 1 条),用户马上又去关管理端(裁定第 7 条)。
+        //   ★ 这条是自检的 live 段当场抓到的:第一版在那段窗口里直接答"发不出信号",
+        //     于是八步善后一步都没跑,而管理端还以为自己尽力了。
+        var signalled = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!IsClientRunning()) return (true, "客户端在收到信号之前就自己退了。");
+            if (InstanceLock.SignalQuit(ClientAppKey)) { signalled = true; break; }
+            await Task.Delay(200);
+        }
+        if (!signalled)
+            return (false, $"等了 {budget.TotalSeconds:0} 秒都没能把退出信号送进去 —— "
+                         + "客户端的退出通道始终没开着。**没有强杀它**;请到客户端窗口里手动退出。");
+
         while (DateTime.UtcNow < deadline)
         {
             if (!IsClientRunning()) return (true, "客户端已经走完八步善后退出了。");

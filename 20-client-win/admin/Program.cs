@@ -9,6 +9,7 @@
 //   ★ 理由与 D46 完全相同:TPM/CNG 用户密钥绑定**铸造时**的完整性等级,
 //     而管理端要去起客户端与整套栈 —— 它一旦在 High 上跑,子进程全都继承 High。
 
+using System.Runtime.InteropServices;
 using LocalAI.Admin.Services;
 using LocalAI.Client.Services;
 
@@ -16,9 +17,24 @@ namespace LocalAI.Admin;
 
 public static class Program
 {
+    // 管理端是 WinExe(GUI 子系统)—— 没有自带控制台。自检要把字写到【调用者的】控制台,
+    // 蹭不到就自己开一个,否则自检输出无处可去(与客户端 Program.cs 同款)。
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+    [DllImport("kernel32.dll")] static extern bool AllocConsole();
+    const int AttachParentProcess = -1;
+
     [STAThread]
     public static int Main(string[] args)
     {
+        // ★ 自检分流排在**最前面**:
+        //   · 不该被单实例锁挡住 —— 自检时托盘里可能正挂着一个真的管理端;
+        //   · 不该走提权护栏 —— 自检不起任何窗口,也不去开客户端与栈。
+        if (args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!AttachConsole(AttachParentProcess)) AllocConsole();
+            return Selftest.Run();
+        }
+
         // ── D46 同款护栏(理由见文件头)────────────────────────────────
         // ★★ 先问**真问题**:密钥打不打得开。打得开就放行 —— 无论完整性等级是什么。
         //   拿"是不是管理员"当判据,在 UAC 关闭的机器(EnableLUA=0)上恒为真,
