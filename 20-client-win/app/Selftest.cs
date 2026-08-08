@@ -8697,14 +8697,28 @@ public static class Selftest
                         //   ★ 而收窄之后它**没有变松**:V21 搬进来的 7 个界面/服务文件
                         //     全部被它当场抓住(AdminWindow / ComponentPicker / HostHubView /
                         //     HostProvision / HubAdmin / MemoryStore / MemoryView),一个没漏。
-                        //   ★★ 反过来的元断言就在下面:被排除的必须**真的只有自检那几个**,
-                        //     排除名单一旦长出第三个,那条会红。
+                        //   ★★ 反过来的元断言就在下面:被排除的必须**真的是自检文件**。
+                        //   ★★★ 这一格改过一次,理由要留下:第一版的元断言是
+                        //     「排除的个数 ≤ 2」—— 一个**写死的数**。V21 给管理端加了第三个
+                        //     自检文件(`SelftestLiveViews.cs`)之后它当场红,而红得**理由是假的**:
+                        //     它说「有人在用『它不是界面』绕过判据」,而真相只是自检文件多了一个。
+                        //     ⇒ 这正是第 9 条(判据问的是一个**相关**的问题,不是**那个**问题)。
+                        //   ⇒ 改成问真问题:被排除的那几个,**内容上真的是自检吗**?
+                        //     判据是「里面有 Assert( 调用」——把一个界面文件改名成 Selftest*.cs
+                        //     并不能让它长出断言来,所以这条比数个数难糊弄。
                         var mdScan = adminCs
                             .Where(f => !Path.GetFileName(f).StartsWith("Selftest", StringComparison.Ordinal))
                             .ToList();
-                        Assert(adminCs.Count - mdScan.Count is > 0 and <= 2,
-                            $"★★ 元断言:界面文案扫描只排除了自检文件(排除 {adminCs.Count - mdScan.Count} 个)—— "
-                            + "排除名单长出第三个就说明有人在用『它不是界面』绕过这条判据");
+                        var mdSkipped = adminCs.Except(mdScan).ToList();
+                        Assert(mdSkipped.Count > 0,
+                            "★ 元断言:确实排除了自检文件(0 个的话下面那条在量一件没发生的事)");
+                        var notReallySelftest = mdSkipped
+                            .Where(f => !File.ReadAllText(f).Contains("Assert(", StringComparison.Ordinal))
+                            .Select(Path.GetFileName).ToList();
+                        Assert(notReallySelftest.Count == 0,
+                            "★★ 元断言:被排除的每一个**内容上真的是自检**(里面有断言调用)—— "
+                            + "把界面文件改名成 Selftest*.cs 来绕过这条判据,会在这里现形。现有:"
+                            + string.Join(" · ", notReallySelftest));
                         var mdHits = new List<string>();
                         foreach (var f in mdScan)
                             if (NoComments(File.ReadAllText(f)).Contains("**"))
