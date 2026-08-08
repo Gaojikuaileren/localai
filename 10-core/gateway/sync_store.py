@@ -4,9 +4,12 @@ r"""P4-S13 · 内网同步的存储层(D86)。
 
 ★★★ 三条硬规矩,都是 D86 裁定的直接落点:
 
-  ① **只收「家庭/共享」的。** 个人待办、普通会话**根本不该到这儿来** ——
-     真到了也拒收,不是"顺手存了吧"。范围判据放在服务端,是因为客户端可能有 bug,
-     而"把私人东西推到另一台机器上"这种错误**不可撤销**。
+  ① **只收「家庭/共享」的,也只发「家庭/共享」的。** 个人待办、普通会话
+     **根本不该到这儿来** —— 真到了也拒收,不是"顺手存了吧"。范围判据放在服务端,
+     是因为客户端可能有 bug,而"把私人东西推到另一台机器上"这种错误**不可撤销**。
+     ★★ V15 起**收和发两侧都过同一个判据**:只在收的那侧过,库里已经躺着的东西
+     就再没有人问过一句(会话删掉之后它那些消息就是这么继续发出去的)。
+     见 `snapshot()` 顶上那段。
 
   ② **后到的赢,但被覆盖的那一版【存起来】。** 以中枢收到的顺序为准 ——
      中枢是单一权威,不靠两台机器的钟对表(钟本来就不准)。
@@ -64,6 +67,9 @@ class SyncStore:
         self._root.mkdir(parents=True, exist_ok=True)
         (self._root / "superseded").mkdir(exist_ok=True)
         self._gen = 0
+        #: 读侧范围闸扣下过的 (kind, id) → 为什么。★ 在内存里,不靠留证文件 ——
+        #: 留证写不进去(盘满/只读)时,这份记账仍然在,不至于连"扣过东西"都说不出来。
+        self._withheld: Dict[Tuple[str, str], str] = {}
         self._cache: Dict[str, Dict[str, dict]] = {}
         for k in KINDS:
             self._cache[k] = self._load(k)
@@ -138,13 +144,70 @@ class SyncStore:
         return (False, f"未登记的集合 {kind}")
 
     # ── 读 ──────────────────────────────────────────────────────────
+    def _note_withheld(self, kind: str, rec: dict, why: str) -> None:
+        """读侧被扣下的那条,留一份证。
+
+        ★★ 扣下**不是**丢掉,但从副机的角度看两者长得一模一样:它就是少一条。
+           ⇒ 与「被覆盖的那一版存起来」同一条纪律 —— 看不见的扣留等于静默丢。
+        ★ 同一条只留一次证:`snapshot()` 每帧都调,每帧写一份会把证据自己淹掉。
+        ★ 证里**不抄记录正文**:被扣的往往正是个人待办/私人会话的正文,
+          而它在同一个目录的 {kind}.json 里已经有一份 —— 再抄一遍只是多一个副本。
+        """
+        rid = str(rec.get("id") or "?")
+        key = (kind, rid)
+        if key in self._withheld:
+            return
+        self._withheld[key] = why
+        try:
+            d = self._root / "withheld"
+            d.mkdir(exist_ok=True)
+            (d / f"{kind}-{rid[:12]}.json").write_text(
+                json.dumps({"kind": kind, "id": rid, "rev": rec.get("rev"),
+                            "at": time.time(), "why": why}, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except Exception:                                    # noqa: BLE001
+            pass    # ★ 留证写不进去不该让整次读崩掉 —— 上面那份内存记账仍然在
+
+    def withheld(self) -> Dict[Tuple[str, str], str]:
+        """读侧范围闸扣下过哪些 (kind, id) → 为什么。★ 给自检/体检读,不上线。"""
+        return dict(self._withheld)
+
     def snapshot(self, since_rev: int = 0) -> dict:
-        """全量或增量。★ since_rev=0 即全量;客户端重连后拿它对齐。"""
+        """全量或增量。★ since_rev=0 即全量;客户端**上线与每次重连**拿它对齐。
+
+        ★★★ V15:范围判据在【读】这一侧**也过一遍**(D86 裁定①)。
+
+          在此之前它只在 `put()` 里跑过一次,于是「只同步家庭/共享的」这件事
+          在**拉**的方向上是一句**推论**,不是判据 —— 库里已经躺着的东西,
+          发出去之前没有任何人再问一句。而这不是理论风险,至少有一条今天就能走到:
+
+            共享会话被删(墓碑)⇒ 它的消息**从此拒收**(`in_scope` 明写,
+            为的是不留孤儿消息)—— 但**已经在库里的那些消息照发不误**。
+            会话都没了,正文还在一帧一帧地往另一台机器上走。
+
+          ★ 判据必须是**同一个** `in_scope`,不另写一份:两份判据会漂,
+            而漂的那天写这侧是绿的、读这侧在漏,并且没有任何东西会红。
+          ★ 墓碑天然通过(`in_scope` 对 deleted 只要求"这条共享过")——
+            它**必须**传得出去,否则另一台永远不知道这条被删了。
+
+        ★★ `counts` 报的是**这个端点真会发出去的条数**(过闸之后),不是库里有几条。
+           报库里的数会让体检看到一个谁也拿不到的数字,而"counts 5 / data 3"
+           这种差额没有任何人在看 —— 那正好是一种看不见的少给。
+           被扣下的那些去 `withheld()` 与 `{root}/withheld/` 查。
+        """
         out = {}
+        counts = {}
         for k in KINDS:
-            out[k] = [r for r in self._cache[k].values() if int(r.get("rev", 0)) > since_rev]
-        return {"generation": self._gen, "since_rev": since_rev, "data": out,
-                "counts": {k: len(self._cache[k]) for k in KINDS}}
+            visible = []
+            for r in self._cache[k].values():
+                ok, why = self.in_scope(k, r, self._cache.get("sessions"), self._cache.get(k))
+                if not ok:
+                    self._note_withheld(k, r, why)
+                    continue
+                visible.append(r)
+            counts[k] = len(visible)
+            out[k] = [r for r in visible if int(r.get("rev", 0)) > since_rev]
+        return {"generation": self._gen, "since_rev": since_rev, "data": out, "counts": counts}
 
     # ── 写 ──────────────────────────────────────────────────────────
     def put(self, kind: str, rec: dict, device: str) -> dict:

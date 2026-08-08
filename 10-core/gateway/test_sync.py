@@ -347,6 +347,226 @@ if _client.exists():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  ★★★ V15 · D? ①:范围判据在【读】这一侧也过一遍
+#
+#  D86 裁定①的原话是"只收家庭/共享的"。它此前**只落在 `put()`** ——
+#  于是「只同步家庭/共享的」在**拉**的方向上是一句推论,不是判据:
+#  库里已经躺着的东西,发出去之前没有任何人再问一句。
+#
+#  ★ 这不是理论风险。一条今天就能走到的路径:共享会话被删(墓碑)之后,
+#    `in_scope` 明写不再收它的消息(免得留孤儿),**但已经在库里的那些照发不误** ——
+#    会话都没了,正文还在一帧一帧往另一台机器上走。
+#  ★★ 而这类错误**没有撤销键**:数据一旦到了对方硬盘上,删也删不干净。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== ★★★ V15:范围判据在【读】这一侧也过一遍(拉的方向) ===")
+
+_rs = sync_store.SyncStore(root=tempfile.mkdtemp(prefix="readgate_"))
+_rs.put("todos", {"id": "ok1", "scope": "家庭", "title": "买菜"}, "PC-A")
+
+# ── ① 反向注入:绕开 put 直接把一条个人待办放进库里 ──────────────────
+#  ★ 为什么必须注入:`put` 今天就拦得住它 ⇒ 光靠正常路径,读侧这道闸
+#    **永远不会被走到**,那条断言就是恒绿的(给一条没人走的路配断言)。
+#    库里出现表外记录的真实来路:老版本写进去的、手改过的存档、
+#    以及下面 ③ 那条**今天就能走到**的。
+_rs._cache["todos"]["leak"] = {"id": "leak", "scope": "个人", "title": "私事", "rev": 99}
+check("★ 元断言:那条个人待办**确实**被塞进库里了(塞不进去 ⇒ 下一条空转)",
+      _rs._cache["todos"].get("leak") is not None)
+_snap = _rs.snapshot()
+_ids = {r["id"] for r in _snap["data"]["todos"]}
+check("★★★ 读侧把它**扣下**了 —— 只在写那侧过闸的话,库里已有的东西发出去前没人再问一句",
+      "leak" not in _ids, sorted(_ids))
+check("★ 反向:合格的那条**没有**被误扣(读侧闸不是『一律不发』)", "ok1" in _ids, sorted(_ids))
+_wh = _rs.withheld()
+check("★★★ 扣下**不是静默的**:留了账,而且说得出理由 —— "
+      "从副机看,『扣下』和『丢了』长得一模一样(它就是少一条)",
+      ("todos", "leak") in _wh and "个人" in _wh[("todos", "leak")], _wh)
+check("★ 留证文件也落了盘(体检/事后查账用的那一份)",
+      (pathlib.Path(_rs._root) / "withheld" / "todos-leak.json").exists())
+
+# ── ② counts 报的是**真会发出去的**条数,不是库里有几条 ─────────────
+check("★★ counts 不广告拿不到的数字 —— 报库里的数会让『counts 2 / data 1』这种差额"
+      "变成一种没人在看的少给",
+      _snap["counts"]["todos"] == len(_snap["data"]["todos"]) == 1, _snap["counts"])
+
+# ── ③ 会话删了之后,它**已经在库里**的消息不再发出去(不用注入,今天就能走到)──
+_rs.put("sessions", {"id": "s9", "shared": True, "title": "家庭计划"}, "PC-A")
+_rs.put("messages", {"id": "m9", "session_id": "s9", "text": "正文"}, "PC-A")
+check("★ 元断言:删之前那条消息**确实在**快照里(不在的话下一条测的是空气)",
+      any(r["id"] == "m9" for r in _rs.snapshot()["data"]["messages"]))
+_rs.put("sessions", {"id": "s9", "deleted": True}, "PC-A")
+_snap2 = _rs.snapshot()
+check("★★★ 会话删掉之后,它那些**已经在库里**的消息不再发出去 —— "
+      "此前『不再收』只挡住了新的,旧的照发:会话都没了,正文还在往另一台机器上走",
+      not any(r["id"] == "m9" for r in _snap2["data"]["messages"]),
+      [r["id"] for r in _snap2["data"]["messages"]])
+check("★★★ 而会话**墓碑本身仍然发得出去** —— 它要是也被扣下,"
+      "另一台就永远不知道这条被删了,删除又变成删不掉",
+      any(r["id"] == "s9" and r.get("deleted") for r in _snap2["data"]["sessions"]),
+      _snap2["data"]["sessions"])
+
+# ── ④ 两侧必须是**同一个**判据,不是各写一份 ───────────────────────
+_snap_src = assert_helpers.code_only(sync_store.SyncStore.snapshot)
+check("★★★ 读侧走的是**同一个** in_scope —— 另写一份的话两份判据会漂,"
+      "而漂的那天写这侧是绿的、读这侧在漏,没有任何东西会红",
+      "in_scope" in _snap_src, _snap_src[:0])
+check("★★ 扣下的那条要留账(判据落在源码上:行为断言在上面 ①,这条防的是把留账删掉)",
+      "_note_withheld" in _snap_src)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ V15 · D? ②:`/v1/sync/snapshot` 的客户端消费者在【上线/重连】那条路上
+#
+#  V6 把这条路由接上了,但**只接在"帧内断层"那一处**,理由是"重连那条路本来
+#  就没洞 —— `/v1/sync/events` 首帧就是全量"。那句话对了一半:
+#  **服务端首帧确实是全量**,但「首帧是全量」≠「客户端拿到了全量」——
+#  中间隔着"流没建起来""首帧没吃下"两格,而那两格的表现完全一样:
+#  连接活着、generation 有值、界面说「已同步」,而这台机器上一条共享数据都没有。
+#  ⇒ 用户 2026-08-07 裁:**上线拉一次,断线重连也拉**。
+#
+#  ★ 下面这组钉的是**它真的在那条路上**。少了这组,客户端可以把调用点挪回帧里,
+#    而 `CONTRACT:sync.snapshot` 那条成对断言**照样绿** —— 它只问"两半在不在"。
+# ══════════════════════════════════════════════════════════════════════
+print("\n=== ★★★ V15:拉全量挂在【上线/重连】那条路上(不是只挂在帧上)===")
+
+
+def _cs_code_only(src: str) -> str:
+    """去掉 C# 的 // 与 /* */ 注释,并把字符串字面量整体换成 ""。
+
+    ★ 必须去注释再判:本文件下面几条是**位置/嵌套**判据,而注释里就写着
+      `if (line.StartsWith("data: "))` 这样的字样和成对的括号 ——
+      不去注释的话,判据会命中一段注释,然后报出一个**假的**绿或红。
+      (ASSERTION-PITFALLS 第 1 条的同款用法;那边怕注释弄红,这边怕注释弄绿。)
+    """
+    out, i, n = [], 0, len(src)
+    while i < n:
+        if src[i:i + 2] == "//":
+            while i < n and src[i] != "\n":
+                i += 1
+            out.append("\n")
+            continue
+        if src[i:i + 2] == "/*":
+            i += 2
+            while i + 1 < n and src[i:i + 2] != "*/":
+                i += 1
+            i += 2
+            continue
+        if src[i] == '"':
+            verbatim = i > 0 and src[i - 1] == "@"
+            i += 1
+            while i < n:
+                if verbatim:
+                    if src[i] == '"':
+                        if src[i + 1:i + 2] == '"':
+                            i += 1
+                        else:
+                            break
+                elif src[i] == "\\":
+                    i += 1
+                elif src[i] == '"':
+                    break
+                i += 1
+            i += 1
+            out.append('""')
+            continue
+        out.append(src[i])
+        i += 1
+    return "".join(out)
+
+
+def _block_end(s: str, i: int) -> int:
+    """从 i 往后找第一个 `{`,返回与它配对的 `}` 的下标(找不到回 -1)。"""
+    j = s.find("{", i)
+    if j < 0:
+        return -1
+    d = 0
+    while j < len(s):
+        if s[j] == "{":
+            d += 1
+        elif s[j] == "}":
+            d -= 1
+            if d == 0:
+                return j
+        j += 1
+    return -1
+
+
+check("★★★ 能读到客户端源码(读不到 ⇒ 下面整组跨端断言**静默消失** ⇒ 判红,"
+      "不当作没问题 —— 「查不了」不等于「没问题」)",
+      _client.exists(), str(_client))
+if _client.exists():
+    _c = _cs_code_only(_cs)
+    check("★ 元断言:去注释器没把整份文件吃掉(吃掉的话下面整组静默变成零断言)",
+          len(_c) > len(_cs) * 0.3, f"{len(_c)}/{len(_cs)}")
+
+    # ── ① 这条路由**真有**客户端消费者,而且拉的是全量 ──────────────
+    check("★★ 客户端确实有 PullFullAsync(找不到 = 这条路由又变回没人走的路)",
+          "PullFullAsync" in _c)
+    check("★★★ 它打的就是 GET /v1/sync/snapshot(路径写在源码里,不是靠注释声称)",
+          '"/v1/sync/snapshot"' in _cs)
+    check("★★ 拉回来喂的是**同一个** Absorb —— 两份解析会漂,"
+          "而漂的那天自检只盯着其中一份",
+          "Absorb(text)" in _c)
+
+    # ── ② 调用点在**开流之前**(上线/重连都走它)────────────────────
+    _i_pull = _c.find("PullFullAsync(ct)")
+    _i_open = _c.find("Transport.OpenStream")
+    check("★ 元断言:两个锚点都找得到(位置判据的前提;零命中判红)",
+          _i_pull >= 0 and _i_open >= 0, f"pull={_i_pull} open={_i_open}")
+    check("★★★ 拉全量在**开流之前** —— 这一格正是首帧永远盖不到的那一格:"
+          "流建不起来时,平的 GET 是唯一还能跑的东西",
+          0 <= _i_pull < _i_open, f"pull={_i_pull} open={_i_open}")
+    check("★★★ 而且它在**重连循环里面**(不是只在 Start 里跑一次)—— "
+          "只在开机跑一次的话,断线期间丢的更新靠推送永远补不回来",
+          "while (!ct.IsCancellationRequested)" in _c
+          and _c.find("while (!ct.IsCancellationRequested)") < _i_pull)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ── ③ 补全量的触发**不在** data 分支里(心跳也要能救回来)────────
+    #
+    #  ★★★ 这条判据的第一版**红测时没红**,而它暴露的是判据本身的洞
+    #    (与 V6 那次 V2 同一族,记在这儿):
+    #      第一版写的是 `_c.rfind("if (_needFullPull)") > data 分支的收尾`。
+    #      红测往 data 分支**里面**加了一处 ⇒ 外面那处还在 ⇒ `rfind` 找到外面那个 ⇒ **绿**。
+    #    那次绿其实是对的(多一处不改变行为),但同一个判据有一个**真的**假绿:
+    #      `rfind` 扫的是**整份文件**。哪天有人在 `PullFullAsync` 里也写一句
+    #      `if (_needFullPull)`,而 OnLine 里那处被挪进了 data 分支 ——
+    #      `rfind` 会找到文件末尾那个,判据照样绿,而洞已经回来了。
+    #  ⇒ 收紧两处:① 只在 **OnLine 的方法体**里找;② 看**全部**出现位置,
+    #    要求"至少有一处在 data 分支外面",而不是"最后一处在外面"。
+    # ══════════════════════════════════════════════════════════════════
+    _i_online = _c.find("Task OnLine(string line)")
+    _online = _c[_i_online:_block_end(_c, _i_online) + 1] if _i_online >= 0 else ""
+    check("★ 元断言:取到了 OnLine 的方法体(取不到 ⇒ 下面两条是零断言)",
+          len(_online) > 200 and "_needFullPull" in _online, len(_online))
+    _i_data = _online.find("if (line.StartsWith(")
+    _end_data = _block_end(_online, _i_data) if _i_data >= 0 else -1
+    _occ = [_m.start() for _m in re.finditer(r"if \(_needFullPull\)", _online)]
+    check("★ 元断言:三个锚点都找得到(零命中判红)",
+          _i_data >= 0 and _end_data > _i_data and len(_occ) > 0,
+          f"data={_i_data} end={_end_data} occ={_occ}")
+    check("★★★ OnLine 里**至少有一处**补全量的触发落在 data 分支**外面** —— "
+          "全都在里面的话,只有【下一帧数据】能救它;而首帧没吃下之后,"
+          "下一帧数据要等到有人改东西才会来:家里没人动的那段时间,"
+          "心跳照到、连接活着、界面说「已同步」,而本机一条共享数据都没有",
+          bool(_occ) and any(_i > _end_data > 0 for _i in _occ),
+          f"occ={_occ} data 分支结束于 {_end_data}")
+
+    # ── ④ 全量没吃下就**不推**(先拉后推,挡的是"拉失败了"那一格)──
+    check("★★★ 全量没吃下就不推 —— 先拉后推此前只挡住了『顺序反了』,"
+          "没挡住『拉失败了』:Absorb 的 catch 是真的会走到的(那次 ObjectDisposedException),"
+          "墓碑没落地却照样推,对方删掉的东西就在他那边复活",
+          "_pullFirst && !_needFullPull" in _c)
+
+    # ── ⑤ 欠着一次对齐时,界面上**有位置**说这件事 ──────────────────
+    _status = _cs[_cs.find("public string StatusLine()"):]
+    check("★ 元断言:取到了 StatusLine 的源码", len(_status) > 100)
+    check("★★★ 欠着全量对齐时界面要说出来 —— 「未同步必须看得见」此前只覆盖了**推**那一侧;"
+          "拉这一侧一个位置都没有,而『我这边少了对方的东西』正是副机冷启动的表现",
+          "_needFullPull" in _status[:_status.find("public void Dispose")
+                                     if "public void Dispose" in _status else len(_status)])
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  ★★★ D92 硬前置:跨进程响应契约,两侧成对(sync + chat 切片 · V6)
 #
 #  D92:每一个跨进程响应契约必须有一条成对断言 —— 服务端钉顶层键集合、
@@ -401,7 +621,44 @@ with TestClient(gateway.app, client=("127.0.0.1", 5555)) as _cc:
     check("★ GET /v1/models 200", _r_models.status_code == 200, _r_models.status_code)
     _observed["CONTRACT:models.list"] = set(_r_models.json())
 
-    pass
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ V15:`CONTRACT:sync.snapshot` 那条成对断言的**复核**。
+    #
+    #  任务原话:接上消费者之后要核实它「仍然成立,别让它从『钉着一条没人走的路』
+    #  变成『钉错了』」。逐条核:
+    #    · 服务端那半边(顶层键集合)——**没变**,上面那条循环照跑;
+    #    · 客户端那半边(PullFullAsync → Absorb)——**还在**,而且触发点从 1 个变成 3 个
+    #      (上线/重连 · 断层 · 解析失败),上一节逐条钉过;
+    #    · ★★ 但**顶层键集合不够**了。这条路由此前只在丢帧时走一次,
+    #      钉住"顶层长这样"够用;现在**副机冷启动的全部共享数据都从这里来** ——
+    #      `data.sessions[i]` 少一个 `id`、或者 `data` 整个空掉,顶层键集合**照样绿**,
+    #      而副机开机看到的是一片空白。⇒ 把消费者真正读到的那几层一起钉。
+    #  ★ 钉的是 **Absorb 真的会去取的那些字段**(见 SyncClient.Absorb):
+    #    generation · since_rev · data.{sessions,todos,messages} 三个数组 · 每条的 id。
+    # ══════════════════════════════════════════════════════════════════
+    _r_snap2 = _cc.get("/v1/sync/snapshot", headers=_H)
+    check("★ 复核用的那次 GET 也是 200", _r_snap2.status_code == 200, _r_snap2.status_code)
+    _sn = _r_snap2.json() if _r_snap2.status_code == 200 else {}
+    check("★★ 全量的 since_rev 是 0 —— 客户端上线拉的就是它;"
+          "它一旦变成增量,冷启动的机器就只拿到『最近改过的那几条』,而那正是"
+          "「看着连上了、实际少一大半」",
+          _sn.get("since_rev") == 0, _sn.get("since_rev"))
+    check("★★ generation 是数字(客户端拿它做断层判据的起点)",
+          isinstance(_sn.get("generation"), int), _sn.get("generation"))
+    _dat = _sn.get("data") if isinstance(_sn.get("data"), dict) else {}
+    check("★★★ data 里**三个集合一个不少**(客户端逐个 kind 去取;"
+          "少一个 = 那一类数据在副机上永远不出现,而顶层键集合照样绿)",
+          set(_dat) == set(sync_store.KINDS), sorted(_dat))
+    check("★★ 每个集合都是数组", all(isinstance(_dat.get(k), list) for k in sync_store.KINDS))
+    _all_rows = [r for k in sync_store.KINDS for r in (_dat.get(k) or [])]
+    check("★★ 元断言:这次快照里**确实有记录**(空的话下面那条逐项断言静默变成零断言)",
+          len(_all_rows) > 0, _dat)
+    check("★★★ 每一条都带 id —— 客户端合并靠它认同一条记录;"
+          "缺了的话远端记录会被当成新记录反复插进去",
+          all(isinstance(r.get("id"), str) and r["id"] for r in _all_rows),
+          [r for r in _all_rows if not r.get("id")])
+    check("★★ 每一条都带 rev(增量与断层判据的来源)",
+          all(isinstance(r.get("rev"), int) for r in _all_rows))
 
 #  ★ 这两条**在下面单独打**,不能进这个循环:
 #    · chat 那条要注入上游(不打真模型);
