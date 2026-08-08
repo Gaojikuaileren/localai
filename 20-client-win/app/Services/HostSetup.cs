@@ -231,12 +231,17 @@ public static class HostSetup
     public sealed record RoleVerdict(bool IsHost, string Why, RoleEvidence Evidence);
 
     /// <summary>判定用到的三条互相独立的证据。★ 全部由调用方采集,判据本身不碰 IO。</summary>
-    /// <param name="HostToolsPresent">客户端旁边有没有 `..\host\localai-lan-edge.exe`(D36「安装事实」)。</param>
+    /// <param name="AdminAppPresent">客户端旁边**装没装管理端程序**(`..\admin\localai-admin.exe`,D36「安装事实」)。
+    /// <para>★★ 裁定②(2026-08-07)把这条从「旁边有没有 `..\host\localai-lan-edge.exe`」改成了
+    /// 「装没装管理端」。指向物换了,判据的**形状**没换 —— 仍然只问「**装没装**」,不问「**跑没跑**」:
+    /// 后者会死锁,主机第一次启动时管理端当然还没跑(见 <see cref="HubAdmin.AdminAppPath"/>)。</para>
+    /// <para>★★★ 意义:**副机不起栈从此是结构性的** —— 副机上根本没有那个程序,
+    /// 不是"判断出来不该起",是"没有东西可起"(D48「用够不着代替判断」推到底)。</para></param>
     /// <param name="IdentityExists">本机有没有铸好的中枢身份(D36「持有 CA 私钥的那一台」)。</param>
     /// <param name="ConfiguredHubHost">已知的中枢主机名/地址;不知道就传 null。**不要求配过对**。</param>
     /// <param name="ConfiguredHubResolvesLocal">上面那个地址解析到本机(回环或本机网卡 IP)了吗。
     /// null = 没得解析或解析失败 —— ★ 它与 false 不是一回事,必须分开。</param>
-    public sealed record RoleEvidence(bool HostToolsPresent, bool IdentityExists,
+    public sealed record RoleEvidence(bool AdminAppPresent, bool IdentityExists,
                                       string? ConfiguredHubHost, bool? ConfiguredHubResolvesLocal);
 
     /// <summary>
@@ -251,9 +256,11 @@ public static class HostSetup
         if (ev.ConfiguredHubResolvesLocal == false)
             return new RoleVerdict(false,
                 $"中枢地址 `{ev.ConfiguredHubHost}` 解析到的不是本机 —— 这台是副机。"
-                + (ev.HostToolsPresent
-                   ? "★ 但旁边有一份主机工具目录:两条证据打架时一律判【不是主机】,"
+                + (ev.AdminAppPresent
+                   ? "★ 但这台上装着管理端:两条证据打架时一律判【不是主机】,"
                      + "否则两台机器会同时起 Edge 抢 8443、两个 Broker 各写各的账本。"
+                     + "(★ 这正是**整包拷到另一台机器**的形状 —— 管理端也跟着拷过去了,"
+                     + "只有'配对地址指向别人'这条否定证据能拦住它。)"
                    : ""),
                 ev);
 
@@ -265,18 +272,18 @@ public static class HostSetup
         // ── ★ 肯定证据 ②:D36 的「安装事实」。地址无从解析时才轮到它。
         //   **两条都要**:光有工具目录不算(可能是拷过来的),必须真的**铸过身份**
         //   —— 那才是 D36 说的「持有 CA 私钥与成员表的那一台」。
-        if (ev.HostToolsPresent && ev.IdentityExists)
+        if (ev.AdminAppPresent && ev.IdentityExists)
             return new RoleVerdict(true,
-                "本机铸过中枢身份、且带着主机工具目录 —— 按 D36「主机 = 持有 CA 私钥与成员表的那一台」,"
+                "本机铸过中枢身份、且**装着管理端** —— 按 D36「主机 = 持有 CA 私钥与成员表的那一台」,"
                 + "这台就是主机(没有配置中枢地址,走的是安装事实这条)。", ev);
 
         // ── 其余一律判"不是主机",并**说清是哪一种拿不准**。
-        if (ev.HostToolsPresent && !ev.IdentityExists)
+        if (ev.AdminAppPresent && !ev.IdentityExists)
             return new RoleVerdict(false,
-                "旁边有主机工具目录,但**还没有铸过中枢身份** —— 光有工具不等于是主机"
+                "这台装着管理端,但**还没有铸过中枢身份** —— 光装着程序不等于是主机"
                 + "(可能是整包拷过来的)。铸完身份再判一次就会认出来。", ev);
         return new RoleVerdict(false,
-            "没有中枢地址可解析,旁边也没有主机工具目录 —— **拿不准,按规矩判【不是主机】**。"
+            "没有中枢地址可解析,这台也没装管理端 —— **拿不准,按规矩判【不是主机】**。"
             + "副机误判成主机会去起一套不该起的栈,而主机误判成副机只是退回手动;两个方向代价不对称。",
             ev);
     }
@@ -288,8 +295,12 @@ public static class HostSetup
     /// 但那只是**其中一个**来源 —— 判据本身不要求配过对。</param>
     public static async Task<RoleVerdict> DetectRoleAsync(string? knownHubHost)
     {
-        var dir = HubAdmin.HostToolsDir();
-        var toolsPresent = dir is not null;
+        // ★★ 裁定②:角色判据的指向物从「主机工具目录」换成「**管理端装没装**」。
+        //   ★ 换的是**指向物**,不是形状 —— 仍然只问"装没装"(文件在不在),不问"跑没跑"。
+        //   ★ `HostToolsDir()` 本身没动:起 Edge 那条路(:485 一带)问的确实是主机工具目录,
+        //     那是另一件事。这里只换**角色证据**这一处。
+        var adminApp = HubAdmin.AdminAppPath();
+        var toolsPresent = adminApp is not null;
         var identity = toolsPresent && await IdentityExistsAsync();
         bool? resolvesLocal = null;
         if (!string.IsNullOrWhiteSpace(knownHubHost))

@@ -581,6 +581,49 @@ public sealed class HubAdmin
         return File.Exists(Path.Combine(host, "localai-lan-edge.exe")) ? host : null;
     }
 
+    // ------------------------------------------------- 管理端【装没装】(裁定②:角色判据改指向物)
+    /// <summary>管理端的出包目录名 —— `dist\admin\`,与 `dist\client\` 并排。</summary>
+    public const string AdminDirName = "admin";
+    /// <summary>管理端的可执行文件名。</summary>
+    public const string AdminExeName = "localai-admin.exe";
+
+    /// <summary>
+    /// 本机上**装没装**管理端程序。
+    ///
+    /// ★★ 判据是「**装没装**」,不是「**跑没跑**」—— 后者会**死锁**:
+    ///   主机**第一次启动**时管理端当然还没跑,若判据问"跑没跑",它会答"没跑"
+    ///   ⇒ 判成"不是主机" ⇒ **不起管理端** ⇒ 永远不跑。
+    ///   ⇒ 只问**文件在不在**(D36「安装事实」那一路)。
+    ///
+    /// ★★★ 这条改动真正的意义:**副机不起栈从此是结构性的**。
+    ///   改之前,副机不起栈靠的是**判断**(它判自己不是主机);
+    ///   改之后,**副机机器上根本没有那个程序** —— 不是"判断出来不该起",是"**没有东西可起**"。
+    ///   这正是 D48「用够不着代替判断」推到底:
+    ///   一条靠判断挡住的路,判断写错就通了;一条结构上不存在的路,写错也通不了。
+    ///
+    /// ★ 但它**不削弱**否定证据:地址明确解析到别人 ⇒ 仍然立刻判不是主机
+    ///   (见 <see cref="HostSetup.DecideRole"/> 第一段)—— 那条挡的是「整包拷到另一台机器」,
+    ///   而那台机器上管理端程序也在(跟着拷过去了)。
+    /// </summary>
+    public static string? AdminAppPath()
+    {
+        // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(同 HostToolsDir 的理由)
+        try { return AdminAppPathNextTo(Path.GetDirectoryName(Environment.ProcessPath)); }
+        catch { return null; }   // 路径拿不到就是没这条线索,不是错误
+    }
+
+    /// <summary>
+    /// 上面那条的纯逻辑部分:给定客户端 exe 所在目录,看它旁边有没有 `..\admin\localai-admin.exe`。
+    /// ★ 抽出来的理由与 <see cref="HostToolsDirNextTo"/> 完全相同 —— 直接断言 <see cref="AdminAppPath"/>
+    ///   的返回值等于在断言「自检此刻跑在哪个目录下」,那种断言两边都不说明代码对不对。
+    /// </summary>
+    public static string? AdminAppPathNextTo(string? clientExeDir)
+    {
+        if (string.IsNullOrWhiteSpace(clientExeDir)) return null;
+        var exe = Path.GetFullPath(Path.Combine(clientExeDir, "..", AdminDirName, AdminExeName));
+        return File.Exists(exe) ? exe : null;
+    }
+
     /// <summary>主机端的启动脚本(存在才返回)。界面用它把"去点哪个文件"直接说出来。</summary>
     public static string? StartEdgeCmd()
     {

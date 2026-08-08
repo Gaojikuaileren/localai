@@ -8660,6 +8660,75 @@ public static class Selftest
                     "★ 排他靠内核级独占打开(天然跨会话、零特权),不靠命名对象");
             }
             // ======================= V14 单实例锁段结束 =======================
+
+            // ============ V14 · 裁定②:角色判据的指向物换成【管理端装没装】 ============
+            // ★★ 为什么必须新加这一段:既有的 DecideRole 断言(7652 一带)喂的是**构造出来的**
+            //   RoleEvidence,所以指向物从 lan-edge 换成管理端,那些断言**一条都不会红** ——
+            //   它们测的是判据表,不是"谁来填这张表"。这正是 ASSERTION-PITFALLS 第 13 条那句
+            //   「我喂给它的输入,在真机上是谁喂的?那个'谁'有没有被钉住?」
+            //   ⇒ 下面两组:① 探针本身的行为;② 生产入口确实在用那个探针。
+            {
+                var aaTmp = Path.Combine(tmp, "adminprobe");
+                var client = Path.Combine(aaTmp, "client");
+                Directory.CreateDirectory(client);
+
+                // ---- ① 探针行为(两个方向都走一遍)----
+                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is null,
+                    "★ 旁边没有 admin 目录 ⇒ 判【没装】—— 副机就是这一格");
+
+                var adminDir = Path.Combine(aaTmp, Services.HubAdmin.AdminDirName);
+                Directory.CreateDirectory(adminDir);
+                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is null,
+                    "★ 只有空目录、没有 exe ⇒ 仍然判【没装】(目录在不算数,程序在才算)");
+
+                var adminExe = Path.Combine(adminDir, Services.HubAdmin.AdminExeName);
+                File.WriteAllText(adminExe, "x");
+                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is { } gotAdmin
+                       && string.Equals(gotAdmin, Path.GetFullPath(adminExe), StringComparison.OrdinalIgnoreCase),
+                    "★★ 文件在 ⇒ 判【装了】—— 而且这个文件**没有在跑**。"
+                    + "这一条就是【判据问的是装没装、不是跑没跑】的直接证据:"
+                    + "问【跑没跑】会死锁(主机第一次启动时管理端当然还没跑 ⇒ 判不是主机 ⇒ 不起管理端 ⇒ 永远不跑)");
+
+                Assert(Services.HubAdmin.AdminAppPathNextTo(null) is null
+                       && Services.HubAdmin.AdminAppPathNextTo("  ") is null,
+                    "★ 拿不到自己的路径时判【没装】,不抛 —— 那只是没有这条线索,不是错误");
+
+                // ---- ② 否定证据仍然优先(裁定②不许削弱它)----
+                //   这一格就是「整包拷到另一台机器」:管理端跟着拷过去了(装了),身份也拷过去了,
+                //   只有"配对地址指向别人"能拦住它。
+                Assert(!HostSetup.DecideRole(
+                           new HostSetup.RoleEvidence(true, true, "hub.local", false)).IsHost,
+                    "★★★ 装着管理端 + 铸过身份,但中枢地址解析到【别人】⇒ 仍然判【不是主机】。"
+                    + "裁定②换的是肯定证据的指向物,**不许削弱否定证据** —— "
+                    + "它挡的正是把整包拷到另一台机器那一种");
+                Assert(HostSetup.DecideRole(
+                           new HostSetup.RoleEvidence(true, true, null, null)).IsHost,
+                    "★ 反向存在性:装着管理端 + 铸过身份 + 没有地址可解析 ⇒ 判【是主机】。"
+                    + "只钉【该拒的拒掉】、不钉【该放的放得过去】,就是一条随时会变成恒拒的闸");
+            }
+
+            // ---- ③ 生产入口确实在用那个探针(不是我在自检里自己喂的)----
+            // ★ 用 CodeOnly(剥注释**与**字符串):这里查的是**代码结构**(调了哪个函数),
+            //   而 DetectRoleAsync 的注释里恰好写着 `HostToolsDir()` —— 照字面搜会把
+            //   那段解释"为什么它没动"的注释判红(ASSERTION-PITFALLS 第 1 条,已踩 10 次)。
+            var roleSrcV14 = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
+            if (roleSrcV14 is not null)
+            {
+                var detectV14 = Slice(roleSrcV14, "public static async Task<RoleVerdict> DetectRoleAsync",
+                                          "public static bool? ResolvesToThisMachine");
+                Assert(detectV14 is not null, "★ 元断言:切得到 DetectRoleAsync 的正文(切不到的话下面两条会静默消失)");
+                if (detectV14 is not null)
+                {
+                    var detectCodeV14 = CodeOnly(detectV14);
+                    Assert(detectCodeV14.Contains("AdminAppPath()"),
+                        "★★★ 角色证据必须由**管理端探针**喂 —— 这一条钉的是【谁来填 RoleEvidence】。"
+                        + "没有它,把指向物改回 lan-edge 时上面那些 DecideRole 断言一条都不会红");
+                    Assert(!detectCodeV14.Contains("HostToolsDir()"),
+                        "★★ 角色证据这一处**不许**再问主机工具目录 —— 那是裁定②要换掉的那个指向物。"
+                        + "(HostToolsDir 本身没被删:起 Edge 那条路问的确实是它,那是另一件事)");
+                }
+            }
+            // ============ V14 裁定②段结束 ============
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally
