@@ -9203,8 +9203,19 @@ public static class Selftest
         var dir = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && dir is not null; i++)
         {
-            // ★ 锚点用 Selftest.cs 自己:它一定在客户端源码根下
-            if (File.Exists(Path.Combine(dir, "Selftest.cs")))
+            // ★★ 锚点必须是【两个】文件同时在:Selftest.cs **且** localai-client.csproj。
+            //   ★ 只看 Selftest.cs 是一个**代理指标**，而 2026-08-08 出包时它真的认错了家:
+            //     %TEMP% 里躺着另一个会话拷出来的 Selftest.cs（757 KB），
+            //     而「换个安装位置」那一趟把 exe 放在 %TEMP%\localai-gate-<guid>\client\ 下，
+            //     往上走一步就碰到它 ⇒ 把 **%TEMP% 整个当成了客户端源码根**，
+            //     递归扫进了 1218 个不相干的 .cs（别的会话的 scratchpad）⇒ 文案护栏当场 4 条红，
+            //     而那四条报的文件名根本不在本仓里。
+            //   ★★ 反方向更坏：假如那些临时文件里恰好**没有**针，一条「全仓不得出现 X」
+            //     就会在一个根本不是本仓的目录上**假绿**。
+            //   ⇒ csproj 只存在于真正的源码根；两个一起看，才是在问「这儿是不是客户端源码根」，
+            //     而不是「这儿有没有一个叫这个名字的文件」（ASSERTION-PITFALLS 第 9 条）。
+            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
+                && File.Exists(Path.Combine(dir, "localai-client.csproj")))
             {
                 var outp = new List<(string, string)>();
                 foreach (var f in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
@@ -9263,7 +9274,10 @@ public static class Selftest
         var dir = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && dir is not null; i++)
         {
-            if (File.Exists(Path.Combine(dir, "Selftest.cs"))) return true;
+            // ★ 与 TryReadAllSources 同一个锚点（两个文件）—— 两处分家的那天，
+            //   SourceRootPresent 会说「源码根在」而 TryReadAllSources 一个文件都读不到。
+            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
+                && File.Exists(Path.Combine(dir, "localai-client.csproj"))) return true;
             dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
         }
         return false;

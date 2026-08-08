@@ -11,7 +11,9 @@
 # 产物:  <Out>\localai-client.exe · SHA256.txt · VERSION.txt · 安装说明.txt
 
 param(
-    [string]$Out = ""
+    [string]$Out = "",
+    # V14b:管理端的产物目录。★ 默认与客户端产物**并排**(见 [3]/[4] 那两段的理由)。
+    [string]$AdminOut = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -230,7 +232,49 @@ if ($null -eq $pass2) {
     Write-Host "    把那条断言改成与位置无关(例如把纯逻辑抽出来、拿临时目录做两向测试)。" -ForegroundColor Red
     exit 1
 }
-$last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS=$pass2,FAIL=0）"
+# ══════════════════════════════════════════════════════════════════════════════
+#  [3][4] 管理端(V14b)—— 在此之前本脚本**零命中 admin**:那个程序编得过、门禁也编它,
+#         而 dist 下根本没有它 ⇒ **用户拿不到、双击不了**。
+#         审计刚记过这个形状:**编得过 ≠ 跑得起来**。
+#
+#  ★★ 出包自检必须在【出包形态】里跑,不能在仓库里跑:
+#     管理端自检的 live 段要真起一个客户端、真发一次「请你优雅退出」,
+#     再读客户端写的善后日志断言那八步逐条跑过 —— 而它找客户端的路径是 `..\client\`。
+#     ⇒ 这里搭出 <tmp>\client\ + <tmp>\admin\ 这个**真实的并排形状**再跑。
+#     ★ 不搭的话 live 段会 SKIP,而 SKIP 会被读成通过 —— 那正是本项目最恨的形状。
+# ══════════════════════════════════════════════════════════════════════════════
+Write-Host "[3] 发布管理端(单文件,win-x64)…"
+if (-not $AdminOut) { $AdminOut = Join-Path (Split-Path $Out -Parent) 'admin-pack' }
+New-Item -ItemType Directory -Force -Path $AdminOut | Out-Null
+$adminProj = Join-Path $repo '20-client-win\admin\localai-admin.csproj'
+if (-not (Test-Path $adminProj)) {
+    # ★ 零命中判红:找不到 = 路径写错或工程被删,两种都得当场知道,不许静默跳过。
+    Write-Host "X 找不到管理端工程:$adminProj" -ForegroundColor Red; exit 1
+}
+& dotnet publish $adminProj -c Release -r win-x64 --self-contained true `
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true -p:InformationalVersion=$ver `
+    -o $AdminOut --nologo -v q
+if ($LASTEXITCODE -ne 0) { Write-Host "X 管理端发布失败" -ForegroundColor Red; exit 1 }
+$adminExe = Join-Path $AdminOut 'localai-admin.exe'
+if (-not (Test-Path $adminExe)) { Write-Host "X 没有产出管理端 exe" -ForegroundColor Red; exit 1 }
+
+Write-Host "[4] 管理端自检（出包形态:client 与 admin 并排）…"
+$ashape = Join-Path ([IO.Path]::GetTempPath()) ("localai-admin-gate-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $ashape 'client') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $ashape 'admin')  | Out-Null
+Copy-Item $exe      (Join-Path $ashape 'client\localai-client.exe') -Force
+Copy-Item $adminExe (Join-Path $ashape 'admin\localai-admin.exe')   -Force
+$passAdmin = Invoke-GateSelftest -ExePath (Join-Path $ashape 'admin\localai-admin.exe') -Label '管理端(出包形态)'
+Remove-Item $ashape -Recurse -Force -ErrorAction SilentlyContinue
+if ($null -eq $passAdmin) {
+    Write-Host "  ★ 管理端自检没过。live 段若红,多半是「八步优雅退出」这条真的断了 ——" -ForegroundColor Red
+    Write-Host "    那是裁定第 7 条的承重路径。**不要**靠强杀绕过去:" -ForegroundColor Red
+    Write-Host "    D106 钉住的是那张八步表本身,强杀会让它守不到真正会跑的那条路。" -ForegroundColor Red
+    exit 1
+}
+
+$last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS=$pass2,FAIL=0;管理端 PASS=$passAdmin,FAIL=0）"
 # ★★★ 口径跟着数字进 VERSION.txt(2026-08-06)。
 #   在此之前 VERSION.txt 只写「PASS=852 / PASS=848」,而 STATE 的基线是四位数 ——
 #   读的人只能自己猜这两个数在量什么,而**猜错的方向是"以为覆盖变少了"**。

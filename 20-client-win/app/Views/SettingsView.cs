@@ -112,14 +112,16 @@ public sealed class SettingsView : UserControl
         tray.Checked += (_, _) => { s.MinimizeToTrayOnClose = true; s.Save(); };
         tray.Unchecked += (_, _) => { s.MinimizeToTrayOnClose = false; s.Save(); };
 
-        // ★★ V14 裁定第 5 条:**主机**客户端的设置里有「打开管理端面板」按钮;**副机没有这个按钮**。
-        //   ★ 判据是「这台是不是主机 **且** 装没装管理端」,不是「管理端跑没跑」——
-        //     管理端没在跑时按钮**仍然要在**,点它就是把它起起来(跑没跑那条会死锁,见 AdminAppPath)。
-        //   ★ 副机上这一格是 `Height=0` 的空 Border 而不是一个置灰的按钮:
-        //     副机**永远**不该有这个入口(它机器上根本没有那个程序),
-        //     摆一个点不动的按钮 = 界面上摆着一个副机永远点不动的东西,正是拆分要消灭的那类东西。
+        // ★★ V14 裁定第 5 条:设置里那颗「打开管理端面板」按钮。
+        //   ★★ 判据**只问「这台装没装管理端」**(用户裁定 2026-08-08 摘掉了原来那个 isHost 合取项)。
+        //     这是通用客户端里**唯一被允许的例外**,而它被允许恰恰是因为它问的是**安装事实**、
+        //     不是运行期角色分叉 —— 副机上根本没有那个 exe,判据自然为假,
+        //     不需要谁去「判断」它该不该看见(D48「用够不着代替判断」)。
+        //   ★ 判据是「装没装」不是「跑没跑」:管理端没在跑时按钮仍然要在,点它就是把它起起来。
+        //   ★ 判据为假时这一格是 `Height=0` 的空 Border,**不是**一个置灰的按钮:
+        //     摆一个点不动的按钮 = 界面上摆着一个永远点不动的东西,正是拆分要消灭的那类东西。
         UIElement adminPanelCard = new Border { Height = 0 };
-        if (HostSetup.AdminPanelButtonVisible(App.Boot?.Role.IsHost == true))
+        if (HostSetup.AdminPanelButtonVisible())
         {
             var openAdmin = Ui.Primary("打开管理端面板", (_, _) =>
             {

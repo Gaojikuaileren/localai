@@ -63,7 +63,7 @@ public static class ClientLink
         }
         if (!signalled)
             return (false, $"等了 {budget.TotalSeconds:0} 秒都没能把退出信号送进去 —— "
-                         + "客户端的退出通道始终没开着。**没有强杀它**;请到客户端窗口里手动退出。");
+                         + "客户端的退出通道始终没开着。没有强杀它;请到客户端窗口里手动退出。");
 
         while (DateTime.UtcNow < deadline)
         {
