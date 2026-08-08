@@ -315,7 +315,14 @@ public static class Selftest
             var mwStatus = TryReadSource("MainWindow.xaml.cs");
             if (mwStatus is not null)
             {
-                Assert(mwStatus.Contains("ThisMachineIsHub"), "状态块显示本机是否为主机");
+                // ★ V19:针脚从 `ThisMachineIsHub`(看拨号地址的启发式)改成角色判定。
+                //   ★★ 换的是**针脚**,不是判词 —— 这一格仍然要回答「本机是不是主机」。
+                //     `ThisMachineIsHub` 已删(零调用方),而 `DecideRole` 拿的是**同一个输入**
+                //     (Profile.Dial)、走的是更严的 `ResolvesToThisMachine`
+                //     (IPv6 不会被切坏;「解析不出」与「解析到别人」分开)。
+                //   ★ 判词跟着口径微调:它答的是**角色**,不是「中枢在不在跑」——
+                //     后者由 V19 那组断言单独钉(见「左下角那一格」那一节)。
+                Assert(mwStatus.Contains("App.Boot?.Role"), "状态块显示本机的【角色】(主机/副机)");
                 Assert(mwStatus.Contains("OnOpenUsage") && mwStatus.Contains("usage.title"), "点状态块弹出 token 用量表");
                 // 用户裁定(2026-07-30):token 块左边加【当前使用者】显示栏,未连接中枢时显示"未连接中枢"
                 Assert(mwStatus.Contains("MemberText.Text") && mwStatus.Contains("IdentityGuess.Current"),
@@ -8193,6 +8200,74 @@ public static class Selftest
                         try { stubCts.Cancel(); } catch { }
                         try { stub.Stop(); } catch { }
                         try { stubLoop.Wait(2000); } catch { }
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
+                //  ★★★ V19 · 左下角那一格:数据源换了,**口径也必须跟着换**
+                //
+                //  它以前靠 `HubAdmin.ProbeAsync` 探本机回环管理面 —— 那答的是
+                //  【中枢正在这台上跑吗】。而 `HubAdmin` 整个要搬进管理端:
+                //  ★ 它是 V10 §2.1 那六个文件**之外**的一处漏网运行期主机分支。
+                //  改读 `App.Boot?.Role.IsHost` 之后,它答的变成【这台是不是主机】——
+                //  依据是**安装事实**(装没装管理端 / 铸没铸身份 / 地址解析到谁)。
+                //
+                //  ★★ 两者差别正好落在最会骗人的那一处:管理端装着、身份也在,
+                //    而网关/Edge 没起来 —— 新口径写「主机」(对),
+                //    照旧口径读它的人却会以为「中枢在跑」(错)。
+                //    ⇒ 只换数据源不换文案 = 拿新证据说旧结论。
+                //      本项目判词:**给错原因的提示比不给更坏**。
+                //  ⇒ 所以下面这几条钉的不只是"读了哪个字段",还钉**那句话有没有说出来**。
+                // ════════════════════════════════════════════════════════
+                {
+                    var mwV19 = TryReadSource("MainWindow.xaml.cs");
+                    if (mwV19 is not null)
+                    {
+                        var code = NoComments(mwV19);
+
+                        Assert(code.Contains("App.Boot?.Role"),
+                               "★★★ 左下角那一格读**角色判定**(App.Boot?.Role),"
+                               + "不再探回环管理面 —— HubAdmin 要整个搬进管理端");
+
+                        // ★ 反向:客户端外壳里不许再留那条运行期主机分支(纪律②)。
+                        //   ★★ 判据看的是**去掉注释后**的正文 —— 上面那段墓碑注释里
+                        //     写着 `HubAdmin.ProbeAsync` 这几个字,按裸 Contains 会把注释算成代码
+                        //     (ASSERTION-PITFALLS 第 1 条,已踩 10 次)。
+                        Assert(!code.Contains("HubAdmin.ProbeAsync")
+                               && !code.Contains("AdminProbeResult"),
+                               "★★★ 主窗口里**一处** HubAdmin 探测都不许留 —— "
+                               + "「每 20 秒探一次本机回环管理面」正是纪律②要清掉的运行期角色分支,"
+                               + "而且 HubAdmin 搬走那天它会当场编不过(或者被顺手改成恒 false,那是静默退化)");
+
+                        // ★★★ 口径那句话本身就是判据 —— 这一条守的是"别给错原因"。
+                        //
+                        // ★★★ 这三条一律读 `code`(**去掉注释**的正文),不读 `mwV19` 原文。
+                        //   写第一版时它们读的是原文,而红测当场抓到:上面那段 `EnsureHostProbe`
+                        //   的墓碑注释里也写着「右上角那颗状态点」⇒ 把界面文案整句删掉,
+                        //   断言**照样绿** —— 它被自己旁边的一句注释喂饱了。
+                        //   这正是 ASSERTION-PITFALLS 第 1 条(注释不算,已踩 10 次)的第 11 次,
+                        //   而这一次是**在一条专门用来防"给错原因"的断言上**踩的。
+                        //   ⇒ 判据要问"界面上说了吗",就只能读**会被编进界面的那部分**。
+                        Assert(code.Contains("不代表中枢正在跑"),
+                               "★★★ 那一格的说明必须**明说它不代表中枢在跑** —— "
+                               + "换成安装事实之后,「装了管理端」≠「中枢正在跑」,"
+                               + "不说这一句就是拿新证据说旧结论");
+                        Assert(code.Contains("右上角那颗状态点"),
+                               "★★ 还要说清【去哪儿看中枢跑没跑】 —— "
+                               + "只说「这里不回答那件事」而不给去处,等于把人晾在原地");
+                        Assert(code.Contains("依据:") && code.Contains("role!.Why"),
+                               "★★ 结论旁边要摆**依据原文**(RoleVerdict.Why)—— "
+                               + "`RoleVerdict` 的约定就是「为真必须说清凭什么,为假也要说清哪种拿不准」,"
+                               + "把它丢掉就退回成一个没法追问的二值标签");
+
+                        // ★★ 判定还没落定时不许先默认成副机 —— 那是个会自己消失的谎。
+                        Assert(code.Contains("status.role_deciding"),
+                               "★★ `App.Boot` 还是 null(角色判定还在跑)时如实写「判定中…」,"
+                               + "**不先默认成副机** —— 默认一个结论再悄悄改掉,比不显示更坏");
+                        Assert(code.Contains("App.BootChanged"),
+                               "★★★ 必须订阅 `App.BootChanged` —— 角色判定是异步的,"
+                               + "窗口建好时 Boot 还是 null。没有这条订阅,那一格会**永远停在「判定中…」**,"
+                               + "而「永远停在中间态」和判错一样是在给错信息,只是看起来更无辜");
                     }
                 }
 

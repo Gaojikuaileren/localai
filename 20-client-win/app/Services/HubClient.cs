@@ -105,24 +105,23 @@ public sealed class HubClient
 
     public bool IsPaired => Profile is not null;
 
-    /// <summary>
-    /// 本机是否【就是中枢主机】—— 启发式:配对的拨号地址指向本机(回环或本机某个网卡 IP)。
-    /// 主机端的客户端配对到 127.0.0.1/本机 IP;副机配对到主机的 LAN IP。仅用于状态显示,不做权限判定。
-    /// </summary>
-    public bool ThisMachineIsHub()
-    {
-        var dial = Profile?.Dial;
-        if (string.IsNullOrWhiteSpace(dial)) return false;
-        var host = dial.Split(':')[0].Trim();
-        if (host is "127.0.0.1" or "localhost" or "::1") return true;
-        try
-        {
-            foreach (var a in Dns.GetHostAddresses(Dns.GetHostName()))
-                if (string.Equals(a.ToString(), host, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        catch { /* DNS 解析不出就当不是主机 —— 状态显示而已,保守即可 */ }
-        return false;
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★ `ThisMachineIsHub()` 已删(V19 · 2026-08-08)—— 它的最后一个调用方没了。
+    //
+    //  它是个启发式:配对的拨号地址指向本机(回环或本机某个网卡 IP)就算主机。
+    //  自己的注释一直写着「**仅用于状态显示,不做权限判定**」,而 V13 决定档位时
+    //  也白纸黑字**拒绝**用它(见 `IsHostMachine` 上面那段)。
+    //  它唯一还活着的地方是左下角那一格的 `guessHub` 回退。
+    //
+    //  ⇒ V19 把那一格改读 `App.Boot?.Role.IsHost` 之后,它**零调用方**。
+    //    而 `DecideRole` 的 `ConfiguredHubResolvesLocal` 拿的是**同一个输入**
+    //    (`Profile.Dial`)、走的是 `HostSetup.ResolvesToThisMachine` —— 那一份严格更好:
+    //      · IPv6 不会被 `Split(':')[0]` 切坏(`::1` 会被切成空串,那条是自检当场抓出来的);
+    //      · 把「解析不出来」(null / 拿不准)与「解析到别人」(false / 明确不是)**分开**,
+    //        而这个启发式把两者都返回 false —— 一次 DNS 抖动就能让主机被判成副机。
+    //  ⇒ 所以删掉它**不丢任何判据**,只是不再留一份更差的同义实现在旁边等人误用。
+    //    ★ 留着的代价不是 14 行:是下一个人看到两个名字相近的判据,挑了错的那个。
+    // ════════════════════════════════════════════════════════════════════════
 
     public HubClient() => Reload();
 
@@ -265,9 +264,12 @@ public sealed class HubClient
     /// <summary>
     /// D36 角色判定的结论。★ 默认 <c>false</c> 且**只由开机分流写入** ——
     /// 判据本身在 <see cref="HostSetup.DecideRole"/>,这里只是把它记下来给拨号用。
-    /// <para>★★ 不用 <see cref="ThisMachineIsHub"/>:那是个看拨号地址的启发式,
+    /// <para>★★ 不用 <c>ThisMachineIsHub</c> 那个看拨号地址的启发式:
     /// 它自己的注释就写着「仅用于状态显示,不做权限判定」—— 而这里决定的是
-    /// 这次请求会拿到哪个档位,正是它明说自己不该管的那件事。</para>
+    /// 这次请求会拿到哪个档位,正是它明说自己不该管的那件事。
+    /// ★ 那个方法已于 V19(2026-08-08)删除 —— 最后一个调用方(左下角那一格)改读角色判定了。
+    /// 这段理由**留着**:它记的是「为什么不能走那条路」,而理由不随实现消失
+    /// —— 删掉理由,下一个人会把同样的启发式再写一遍。</para>
     /// </summary>
     public bool IsHostMachine { get; private set; }
 
