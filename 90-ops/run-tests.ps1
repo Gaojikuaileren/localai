@@ -764,6 +764,34 @@ if ($Full) {
         } else {
             Write-Host "  √ 客户端工程编译通过(只 build,未 publish)" -ForegroundColor DarkGray
         }
+
+        # ★★ V14:管理端(20-client-win\admin)也要编译。
+        #   不加这一段的话,把管理端源码改坏、门禁**照样全绿** —— 而那正是本仓第一戒律的形状:
+        #   这个工程没有自己的自检,它的判据全在客户端 Selftest 的 V14 段里(扫源码 + 扫 csproj),
+        #   而"扫得过"不等于"编得过":link 少一个文件、pack:// 路径写错,扫描判据一条都不会红。
+        #   ⇒ 编译本身就是那条缺掉的判据。
+        $adminCsproj = Join-Path $repo '20-client-win\admin\localai-admin.csproj'
+        if (Test-Path $adminCsproj) {
+            $aout = & dotnet build $adminCsproj -c Release --nologo -v quiet 2>&1 | Out-String
+            $acode = $LASTEXITCODE
+            if ($acode -ne 0) {
+                $aerr = @($aout -split "`r?`n" | Where-Object { $_ -match ':\s*error\s' } | Select-Object -First 12)
+                if ($aerr.Count -eq 0) { $aerr = @($aout -split "`r?`n" | Select-Object -Last 8) }
+                $broken += [pscustomobject]@{ File = 'admin build'
+                                              Why = ("管理端工程编译不过(exit $acode)。首条:" +
+                                                     ($aerr | Select-Object -First 1)) }
+                Write-Host "  X 管理端工程编译不过(exit $acode):" -ForegroundColor Red
+                foreach ($l in $aerr) { Write-Host "      $l" -ForegroundColor Red }
+            } else {
+                Write-Host "  √ 管理端工程编译通过(只 build,未 publish)" -ForegroundColor DarkGray
+            }
+        } else {
+            # ★ 零命中判红:管理端 csproj 找不到 = 要么路径写错了、要么它被删了。
+            #   两种都得当场知道 —— 静默跳过会让上面那段话变成一句空话。
+            $broken += [pscustomobject]@{ File = 'admin build'
+                                          Why = "找不到管理端 csproj($adminCsproj)—— 路径写错或工程被删。" }
+            Write-Host "  X 找不到管理端 csproj:$adminCsproj" -ForegroundColor Red
+        }
         if ($null -ne $exeBefore -and (Test-Path $exeForStale) -and
             (Get-Item $exeForStale).LastWriteTimeUtc -ne $exeBefore) {
             $broken += [pscustomobject]@{ File = 'client build'
