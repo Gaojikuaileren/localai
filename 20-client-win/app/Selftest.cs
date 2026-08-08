@@ -2268,7 +2268,13 @@ public static class Selftest
 
                     {
                         // ★ V21:声明跟着块一起送回来 —— 它读的是 `HubClient.cs`,而那个文件没搬。
-                        var hcCls = TryReadSource(Path.Combine("Services", "HubClient.cs")) ?? "";
+                        // ★★ 第 11 条:读不到源码的那一趟(**出厂产物原位**)必须【跳过】而不是判红。
+                        //   第一版我写的是 `?? ""` —— 那把「读不到」变成了空串,
+                        //   于是下面每个 Contains 恒假 ⇒ **出包闸上当场两条红**,
+                        //   而红的理由与它守的那件事毫无关系。
+                        var hcCls = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                        if (hcCls is not null)
+                        {
                         Assert(Body(hcCls).Contains("HubIdentityChanged"),
                                "★★ 链不到钉住的 CA 要单列一态 —— 那是「换了中枢」,必须重新配对;"
                                + "而「过期」不必重配。旧代码把所有 TLS 失败都判成过期,界面还加粗说不必重配");
@@ -2287,6 +2293,7 @@ public static class Selftest
                                "★ 换了中枢时要说清唯一出路就是重新配对");
                         Assert(CodeOnly(hcCls).Contains("HubState.HubIdentityChanged   => TlsFailure.Explain"),
                                "★★ 而且这一态真的路由到那句话 —— 否则文案对了、界面上却看不到它");
+                        }
                     }
 
             {
@@ -4637,7 +4644,9 @@ public static class Selftest
 
                 // ---- ★ 反向钉:聊天界面接的是 IntentChanged,**不是** Gpu.Changed ----
                 var cvGpu = TryReadSource(Path.Combine("Views", "ChatView.cs"));
-                Assert(cvGpu is not null && cvGpu.Contains("TheApp.Gpu.IntentChanged += OnIntentChanged")
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (cvGpu is not null)
+                    Assert(cvGpu.Contains("TheApp.Gpu.IntentChanged += OnIntentChanged")
                        && !CodeOnly(cvGpu).Contains("TheApp.Gpu.Changed +="),
                        "★★★ 接 IntentChanged 而不是 Gpu.Changed —— 后者跟着显存快照每秒一帧,"
                        + "拿它当刷新信号会把输入框每秒重建一次(打字当场被打断)");
@@ -4678,7 +4687,9 @@ public static class Selftest
                        "★ 并集去重(同一个组件同时出现在两个集合里时不许算两遍)");
                 // ★ 反向钉:并集只有一处实现
                 var cvRes = TryReadSource(Path.Combine("Views", "ChatView.cs"));
-                Assert(cvRes is not null && cvRes.Contains("TokenBudget.ResidentOf(TheApp.Gpu.Snapshot)")
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (cvRes is not null)
+                    Assert(cvRes.Contains("TokenBudget.ResidentOf(TheApp.Gpu.Snapshot)")
                        && !CodeOnly(cvRes).Contains("Snapshot?.Committed"),
                        "★★ 发请求那一处也走同一个并集函数,不再单取 Committed(三处各写一遍的话,"
                        + "漂的那天只有一处会被发现)");
@@ -4689,15 +4700,21 @@ public static class Selftest
                 Assert(vs20.ModelReservedGiB > 0.01 && vs20.TransientGiB > 0.01,
                        "★ 快照能同时说出「装着多少」和「其中多少是按需的」");
                 var vmSrc = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
-                Assert(vmSrc is not null && vmSrc.Contains("TokenBudget.ResidentOf(hs)")
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (vmSrc is not null)
+                    Assert(vmSrc.Contains("TokenBudget.ResidentOf(hs)")
                        && !CodeOnly(vmSrc).Contains("PeakSumGiB(hs.Committed"),
                        "★★★ 模型段算的是两层的并 —— 只算 committed 就是「模型明明装着,"
                        + "左下角却说暂无已启用模型」那个自相矛盾的来源");
                 var vbSrc = TryReadSource(Path.Combine("Views", "VramBar.cs"));
-                Assert(vbSrc is not null && vbSrc.Contains("含按需"),
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (vbSrc is not null)
+                    Assert(vbSrc.Contains("含按需"),
                        "★★ 有按需成分时**单独说出来**(「模型 6.8(含按需 5.3)」)—— "
                        + "D90 裁定③:不许让用户以为按需那一层是他勾的");
-                Assert(vbSrc is not null && vbSrc.Contains("你勾的常驻"),
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (vbSrc is not null)
+                    Assert(vbSrc.Contains("你勾的常驻"),
                        "★ 提示框里两层逐行分开:「你勾的常驻」与「按需装载(空闲会自动卸)」");
             }
 
@@ -4776,15 +4793,21 @@ public static class Selftest
 
                 // ---- ★ 反向钉:三条边界 ----
                 var cvMd = TryReadSource(Path.Combine("Views", "ChatView.cs"));
-                Assert(cvMd is not null && cvMd.Contains("!user && !streaming && MarkdownText.NeedsRendering(shown)"),
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (cvMd is not null)
+                    Assert(cvMd.Contains("!user && !streaming && MarkdownText.NeedsRendering(shown)"),
                        "★★★ 三条边界都在:用户自己发的不渲染(他打了什么就该看到什么)· "
                        + "正在流式的不渲染(半截的 ** 会来回跳,而且富文本重排比改一行 Text 贵得多)· "
                        + "没记号的不渲染");
                 var mdvSrc = TryReadSource(Path.Combine("Views", "MarkdownText.cs"));
-                Assert(mdvSrc is not null && mdvSrc.Contains("PlainRichTextBox"),
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (mdvSrc is not null)
+                    Assert(mdvSrc.Contains("PlainRichTextBox"),
                        "★★ 走 PlainRichTextBox 样式 —— RichTextBox 自带的 ScrollViewer 会吃掉滚轮,"
                        + "而它就住在会话区那个 ScrollViewer 里面(嵌套滚动)");
-                Assert(mdvSrc is not null && !CodeOnly(mdvSrc).Contains("new Hyperlink"),
+                // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                if (mdvSrc is not null)
+                    Assert(!CodeOnly(mdvSrc).Contains("new Hyperlink"),
                        "★★★ 链接**不做成能点的** —— 这段文字是模型生成的,"
                        + "带可激活的超链接等于让模型决定打开哪个网站");
                 var ctrlsSrc = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
@@ -5852,7 +5875,9 @@ public static class Selftest
                            "★★ 只读:没有 PUT/DELETE —— 写回 Apple 不可逆,这一版不开");
                     // 自动重试会把用户账号打进锁定 —— 整条链路不得有
                     var syncSrc = TryReadSource(Path.Combine("Services", "AppleCalendarSync.cs"));
-                    Assert(syncSrc is not null && !syncSrc.Contains("for (var retry") && !syncSrc.Contains("while (retry"),
+                    // ★ 第 11 条:旁边没源码的那一趟要【跳过】,不是判红 —— 出包闸就在那一趟上。
+                    if (syncSrc is not null)
+                        Assert(!syncSrc.Contains("for (var retry") && !syncSrc.Contains("while (retry"),
                            "★★ 认证路径上没有自动重试(反复失败会锁掉真实 Apple ID)");
                 }
             }
@@ -9183,12 +9208,33 @@ public static class Selftest
     /// </summary>
     static string? TryReadSource(string relative)
     {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir is not null; i++)
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★★★★ V21:锚点收拢到 `ClientSourceRoot()` **一处**。
+        //
+        //  在此之前这里有**自己的一套**向上找:从 `AppContext.BaseDirectory` 起,
+        //  逐级往上 8 层,**只要那一级下面有同名文件就采信**。
+        //  ⇒ 它与 `ClientSourceRoot()`(要求两个锚点**同时**在)用的是**两套判据**,
+        //    于是会出现「源码根说没有,而 TryReadSource 却读到了东西」这种自相矛盾的状态。
+        //
+        //  ★★ 这不是假想,是出包闸上**跑出来**的(2026-08-08 · V21):
+        //    出包第 [3] 步把 exe 拷到 `%TEMP%\localai-gate-<guid>\client\` 再跑,
+        //    而这台机器的 `%TEMP%` 里躺着一份**别的会话留下的、陈旧的 `Selftest.cs`**。
+        //    往上走三层就撞上了它 ⇒ 自检读着一份**几个小时前的源码**在下判断,
+        //    于是「源码根锚点只许出现一处」当场判 0 处并判红。
+        //  ★★★ 而它红得**理由是假的**:锚点没被删,是判据读错了文件。
+        //    这正是 ASSERTION-PITFALLS 第 9 条那个形状 —— 判据问了一个**相关**的问题
+        //    (「往上找得到同名文件吗」),而不是**那个**问题(「本仓的源码根在哪」)。
+        //
+        //  ⇒ 只认 `ClientSourceRoot()` 解出来的那一个根:它要求 `Selftest.cs` 与
+        //    `localai-client.csproj` **同时**在同一级,一份孤零零的临时文件配不上这个条件。
+        //  ★ 行为不变的那一半:开发树/CI 里照常读得到;发布产物旁边没有源码 ⇒ 照常返回 null
+        //    (第 11 条:那一趟要【跳过】,不是判红)。
+        // ══════════════════════════════════════════════════════════════════════
+        var root = ClientSourceRoot();
+        if (root is not null)
         {
-            var p = Path.Combine(dir, relative);
+            var p = Path.Combine(root, relative);
             if (File.Exists(p)) { _srcHit++; return File.ReadAllText(p); }
-            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
         }
         _srcMiss++;
         return null;
