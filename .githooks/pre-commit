@@ -201,4 +201,84 @@ EOF
   fi
 fi
 
+# =============================================================================
+#  ④ 中央三文档串行闸(2026-08-08 加 · D111)
+#
+#  ★ 起因:V13 的 ecf0009 直接改了 00-docs/ASSERTION-PITFALLS.md(115 行,新增第 13 条)。
+#    按 D82 原文「00-docs/ 其余只读」这是越界 —— 而**今天没有任何东西拦得住**。
+#
+#  ★★ 但 D82 那句话写得太宽,所以是**先改规矩再装闸**(D111),不是照原文装:
+#    真正必须串行的只有三份 —— 它们各有唯一的"当前状态"与 D 号计数器,两处写必打架:
+#        00-docs/DECISIONS.md · 00-docs/PROJECT_PLAN_v3.0.md · 00-docs/STATE.md
+#    ASSERTION-PITFALLS.md 与 00-docs/worklog/ 改归**共享文件**类(与 Selftest.cs 同形)。
+#    ★ 理由:它们是**追加式**的,而且**学到教训的那条车道最有资格写它** ——
+#      强制经第 0 条车道转述会丢细节,而"转述失真"这件事今天已经出过八次。
+#
+#  ★★★ 判据用【分支名】而不是【当前 worktree】—— 两者都不完美,理由必须写清:
+#    · 分支名:git **结构上禁止**两个 worktree 同时检出 `main`。
+#      主工作树占着 main 的时候,任何车道都**拿不到**这个名字 ——
+#      这是「用够不着代替判断」(D48),所以选它。
+#      ★ detached HEAD ⇒ 拿不到分支名 ⇒ **判红**(fail-closed:新状态默认落在"拦住"那边)。
+#        本仓今天真的有两个 detached 的 worktree,这一格不是假想。
+#    · 当前 worktree:有一个**真实的洞** —— 在主工作树里 `git checkout -b mylane`
+#      仍然算"主工作树",于是车道分支照样改得动中央三文档。⇒ 不选它。
+#
+#  ★★ 这道闸**只回答"在哪儿改",回答不了"谁在改"** —— 别把它宣称成后者。
+#    今天多路会话**共用主工作树**:另一路会话 cd 进来,照样能在 main 上改这三份。
+#    ⇒ 它钉住的性质是「**中央三文档的改动发生在 main 上**」,
+#      **不是**「只有第 0 条车道写它们」。后者不是钩子能验的东西
+#      (ASSERTION-PITFALLS 第 9 条:判据问的是"我是什么身份"还是"我做不做得到")。
+#
+#  ★ 放行口是窄的:LOCALAI_ALLOW_CENTRAL_DOCS=1 —— 与第 ③ 段同款,理由也同款:
+#    没有窄口子,人就会去用 --no-verify,而那会把 ①②③④ **一起**关掉。
+#    它会在终端上留一行明说,不是隐藏后门。
+#
+#  ★ 反向断言在 10-core/gateway/test_gpu_broker.py:钉住「这里盯的正好是那三份」——
+#    多一份少一份都红。没有它,这张名单会**静默地**和 D111 分家。
+# =============================================================================
+central_hit=""
+for f in $(git diff --cached --name-only); do
+  case "$f" in
+    00-docs/DECISIONS.md|00-docs/PROJECT_PLAN_v3.0.md|00-docs/STATE.md)
+      central_hit="$central_hit
+      $f" ;;
+  esac
+done
+
+if [ -n "$central_hit" ]; then
+  cur_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
+  [ -z "$cur_branch" ] && cur_branch="(detached HEAD —— 拿不到分支名)"
+
+  if [ "$LOCALAI_ALLOW_CENTRAL_DOCS" = "1" ]; then
+    echo "→ 中央三文档串行闸:已被 LOCALAI_ALLOW_CENTRAL_DOCS=1 显式跳过(当前分支:$cur_branch)"
+  elif [ "$cur_branch" != "main" ]; then
+    cat <<EOF
+
+────────────────────────────────────────────────────────────
+提交被拒绝 — **中央三文档由第 0 条车道串行并入(D82 · 范围经 D111 收窄)**。
+
+  当前分支:$cur_branch  ← 不是 main
+  本次动到的:$central_hit
+
+  ⇒ **请把内容写进你自己的决议包**:00-docs/decision-packets/<你的包>.md
+     由第 0 条车道在并入那一刻逐处 Edit 进中央三文档,并在那一刻取 D 号。
+
+  ★ 为什么只有这三份:它们各有唯一的"当前状态"与 D 号计数器 —— 两处同时写必打架。
+
+  ★★ 以下**不在**本闸范围内,你可以直接改(D111 把它们归为【共享文件】):
+       00-docs/ASSERTION-PITFALLS.md  —— 追加式经验库,**学到教训的车道自己写**
+       00-docs/worklog/               —— 同上
+       00-docs/decision-packets/<你自己新建的那些>
+     协议(与 Selftest.cs 同款):只追加不重排 · 各写各段加分隔注释 ·
+     合并用 git merge,**不要复制粘贴**。
+
+  真要在车道里直接改这三份(应当极少):
+       LOCALAI_ALLOW_CENTRAL_DOCS=1 git commit ...
+     ★ 用这个,**不要用 --no-verify** —— 后者会把 ①②③④ 四道闸一起关掉。
+────────────────────────────────────────────────────────────
+EOF
+    exit 1
+  fi
+fi
+
 exit 0
