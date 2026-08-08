@@ -135,7 +135,14 @@ public sealed class ComponentPicker : UserControl
         Loaded += async (_, _) => await LoadAsync();
     }
 
-    async Task LoadAsync()
+    /// <summary>
+    /// 取目录并把面板填出来。★ `Loaded` 处理器调的就是这一个。
+    /// <para>★★ V21 改成 `internal`:出包实测那一节要**真的触发这个入口**再看后果
+    /// (ASSERTION-PITFALLS 第 14 条),而不是读源码猜它会不会填。
+    /// ★ 为什么不靠 `Loaded`:无头环境里窗口不真渲染,`Loaded` 不一定触发 ——
+    ///   而「没触发」与「填充坏了」在断言上长得一模一样。直接调这一个,两者就分开了。</para>
+    /// </summary>
+    internal async Task LoadAsync()
     {
         SetStatus("正在向中枢取组件清单…");
         _list.Children.Clear();

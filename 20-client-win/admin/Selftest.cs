@@ -51,6 +51,7 @@ public static partial class Selftest
             RunPure();
             RunWiring();
             RunMoved();     // ★ V21:跟着 3100 行一起搬过来的那批(admin/SelftestMoved.cs)
+            RunLiveViews(); // ★ V21:那两页**真的点开用**(admin/SelftestLiveViews.cs)
             RunLive();
         }
         catch (Exception ex) { _fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
