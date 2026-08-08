@@ -938,6 +938,21 @@ public sealed class DevicesView : UserControl
                                                  + ")—— 这【不等于】没有别的电脑在册,别据此重复配对。"));
                 return;
             }
+            // ★★★ 真拿到了才缓存 —— 项目「文件夹所在机器」下拉复用这一份(ProjectEditor.MachineOptions)。
+            //
+            //   ★ 这一行以前在 `RenderDevices` 里,而 `RenderDevices` **一个调用方都没有**
+            //     (V19 · 2026-08-08 实测:全仓只有它自己的声明,以及自检里拿它当切片边界的一处)。
+            //     ⇒ `CacheDevices` 今天**根本没人调**,`KnownDevices` 是**结构性恒空**,
+            //       那个下拉从来只有「本机」一项 —— 而 Selftest 那条断言照绿,
+            //       因为它只在 HubClient.cs 里 grep 到了这两个**名字**(声明,不是调用)。
+            //   ⇒ 挪到这条**活路径**上来(LoadDevicesAsync ← :921 真的被调),并配一条能为假的断言。
+            //
+            //   ★★ 给下一轮迁移的人:主机侧这一段搬进管理端之后,客户端就**再也没有**
+            //     `CacheDevices` 的写入点了。那不是"顺手带走一行",那是把那个下拉**功能删掉**。
+            //     ⇒ 那条断言会当场红,请在那里做决定(接回来 / 还是连同下拉一起撤掉),
+            //       不要把断言改宽让它闭嘴。
+            TheApp.Hub.CacheDevices(devices.Select(d => new HubDevice(d.DeviceId, d.DisplayName, d.Status)));
+
             // ★ provisioning = 批准了但对方没来领证(常见于两边截止时间不一致那一档)。
             //   混在"已配对"里会让人以为配好了,而它其实是个没走完的半截 —— 要标出来。
             var live = devices.Where(d => d.Status != "revoked").ToList();
@@ -1376,32 +1391,22 @@ public sealed class DevicesView : UserControl
         catch { return false; }   // 认不出就当不是自己 —— 宁可多给一个解除按钮,也不误判成"这是主机"
     }
 
-    void RenderDevices(StackPanel list, string json)
-    {
-        List<HubDevice> devices;
-        try { devices = HubClient.ParseDevices(json); }
-        catch (Exception ex) { list.Children.Add(Ui.Body("设备列表解析失败:" + ex.Message, muted: true)); return; }
-
-        TheApp.Hub.CacheDevices(devices);   // 真拿到了才缓存 —— 项目"文件夹所在机器"复用这份
-        var others = devices.Where(d => d.Status != "revoked").ToList();
-        if (others.Count == 0) { list.Children.Add(Ui.Body(Strings.Get("devices.empty"), muted: true)); return; }
-
-        foreach (var d in others)
-        {
-            var row = new DockPanel { Margin = new Thickness(0, 6, 0, 6), LastChildFill = true };
-            var revoke = Ui.Danger(Strings.Get("devices.revoke"), async (_, _) =>
-            {
-                if (!ConfirmDialog.Show(Strings.Get("devices.revoke"),
-                        Strings.Get("devices.revoke_confirm", ("device", d.DisplayName)),
-                        confirmText: Strings.Get("devices.revoke"), danger: true)) return;
-                await TheApp.Hub.RevokeDeviceAsync(d.DeviceId);
-                Build();
-            });
-            DockPanel.SetDock(revoke, Dock.Right);
-            row.Children.Add(revoke);
-            // 自报名可能含恶意内容:只作显示,已由 WPF 文本节点转义,永不进 prompt(Store.cs 注释同款纪律)
-            row.Children.Add(Ui.Body($"{d.DisplayName}   ·   {d.Status}"));
-            list.Children.Add(row);
-        }
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ `RenderDevices` 已删(V19 · 2026-08-08)—— 它**一个调用方都没有**。
+    //
+    //  实测(全仓,排除 bin/obj):只有它自己的声明,加上自检里拿它当 `Slice` 边界的一处。
+    //  它是 `DeviceRow` / `LoadDevicesAsync` 那条活路径的**旧副本**:
+    //  少了「自己不能解除自己」(D47 用户裁定)、少了指纹短码、少了 provisioning 那一档 ——
+    //  也就是说,它要是哪天真的被接回去用,会**悄悄退回**三条已经修过的缺陷。
+    //
+    //  ★★ 而它带走的不只是死代码:`CacheDevices` 的**唯一写入点**在它里面。
+    //    ⇒ 今天 `HubClient.KnownDevices` 是**结构性恒空**,项目「文件夹所在机器」那个下拉
+    //      从来只有「本机」—— 而 Selftest 那条断言**照绿**,因为它 grep 的是
+    //      `HubClient.cs` 里的两个**名字**(声明),不是有没有人调。
+    //      这正是「功能没了而断言照绿」。写入点已挪到 `LoadDevicesAsync` 那条活路径上。
+    //
+    //  ★ `HubClient.ParseDevices` 现在只剩自检在调 —— **本轮不动它**:
+    //    它的去留是 V10 §2.4 的事(那一族打的是副机结构上永远 404 的路由),
+    //    而那要连着 `ListDevicesRawAsync` / `RevokeDeviceAsync` 一起裁。
+    // ════════════════════════════════════════════════════════════════════════
 }

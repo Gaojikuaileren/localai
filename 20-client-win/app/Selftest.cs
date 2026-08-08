@@ -2958,10 +2958,70 @@ public static class Selftest
                 Assert(peDup.Contains("已删除项目") && peDup.Contains("已完成项目"), "提示里说明该项目当前在哪(进行中/已完成/已删除)");
                 Assert(peDup.Contains("MachineOptions") && peDup.Contains("本机"), "可选择文件夹所在机器(本机 / 已配对电脑)");
             }
-            var hubDev = TryReadSource(Path.Combine("Services", "HubClient.cs"));
-            if (hubDev is not null)
-                Assert(hubDev.Contains("KnownDevices") && hubDev.Contains("CacheDevices"),
-                       "★ 远程机器清单只来自【真的拿到过】的设备表(拿不到就只有本机,不摆假列表)");
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★ V19(2026-08-08)· 这一条**换掉了一条假绿**。
+            //
+            //  原来写的是:在 `HubClient.cs` 里 grep 到 "KnownDevices" 和 "CacheDevices"
+            //  这两个**名字**就算过。可那两个名字是**声明**,不是**调用** ——
+            //  于是它测的是"这个字段存在吗",而判词说的是"远程机器清单只来自真的拿到过的设备表"。
+            //
+            //  实测(V19):`CacheDevices` 的唯一调用点在 `DevicesView.RenderDevices` 里,
+            //  而 `RenderDevices` **一个调用方都没有**。⇒ `KnownDevices` 结构性恒空,
+            //  项目「文件夹所在机器」那个下拉从来只有「本机」一项 —— **而这条断言一直是绿的**。
+            //  功能没了、判据照绿,整整绿了多久没人知道。
+            //
+            //  ⇒ 新判据问的是**有没有人调**,而且那个调用方**自己得被调**:
+            //    ① 至少一处 `CacheDevices(` 的调用点(声明所在的 HubClient.cs 不算);
+            //    ② 那处调用落在 `LoadDevicesAsync` 里 —— 那是主机侧真的会跑的拉取路径;
+            //    ③ `LoadDevicesAsync` 自己被调(名字出现 ≥2 次 = 声明 + 调用);
+            //    ④ 消费端还连着:`ProjectEditor.MachineOptions` 仍然读 `KnownDevices`。
+            //  ★★ 四条**每一条都能为假**,而且是**下一轮迁移会踩的那种假**:
+            //    主机侧那一段搬进管理端之后,客户端就再也没有写入点 ⇒ ① 与 ② 当场红。
+            //    那时要做的是**做决定**(接回来 / 连同下拉一起撤掉),不是把判据改宽。
+            // ══════════════════════════════════════════════════════════════════
+            {
+                var hubDev = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                var devView = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                var projEd = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
+                // ★ 元断言:三份源码都读得到。读不到就整段跳过,而"零断言"与"全过了"
+                //   在终端上长得一模一样(ASSERTION-PITFALLS 第 11 条)。
+                if (hubDev is not null && devView is not null && projEd is not null)
+                {
+                    Assert(hubDev.Contains("public void CacheDevices("),
+                           "★ 元断言:`CacheDevices` 的声明还在 HubClient.cs —— "
+                           + "它要是改了名,下面数调用点的判据会静默数到 0 而报一个假原因");
+
+                    var dvNoComments = NoComments(devView);
+                    var callSites = System.Text.RegularExpressions.Regex
+                        .Matches(dvNoComments, @"CacheDevices\s*\(").Count;
+                    Assert(callSites >= 1,
+                           "★★★ `CacheDevices` 必须**真的有人调** —— 只有声明不算。"
+                           + "上一版判据 grep 的是名字,而实测那时唯一的调用点在一段"
+                           + "**没有任何调用方**的死代码里:功能早就没了,判据一直绿。"
+                           + $"(现数到 {callSites} 处)");
+
+                    var loadFn = Slice(devView, "async Task LoadDevicesAsync", "// ═════");
+                    Assert(loadFn is not null && loadFn.Contains("CacheDevices("),
+                           "★★★ 写入点必须落在 `LoadDevicesAsync` 这条**活**路径上 —— "
+                           + "落在一段没人调的方法里,`KnownDevices` 就是结构性恒空,"
+                           + "而那个下拉会永远只有「本机」");
+
+                    var loadRefs = System.Text.RegularExpressions.Regex
+                        .Matches(dvNoComments, @"\bLoadDevicesAsync\b").Count;
+                    Assert(loadRefs >= 2,
+                           "★★ `LoadDevicesAsync` 自己也得**被调**(声明 + 至少一处调用)—— "
+                           + "否则写入点是挪到了另一段死代码里,而上面那两条照样绿。"
+                           + $"(现数到 {loadRefs} 处引用)");
+
+                    Assert(projEd.Contains("KnownDevices"),
+                           "★★ 消费端还连着:项目「文件夹所在机器」下拉仍然读 `KnownDevices` —— "
+                           + "消费端断了的话,上面那条写入点就成了写给没人看的地方");
+
+                    // ★ 反过来钉住那条**诚实**的兜底:拿不到就只有本机,不摆假的远程列表。
+                    Assert(projEd.Contains("ProjectCenter.LocalMachine"),
+                           "★ 拿不到设备表时**只有本机** —— 不编一个假的远程列表(判词的另一半)");
+                }
+            }
             var appMerge = TryReadSource("App.xaml.cs");
             if (appMerge is not null)
                 Assert(appMerge.Contains("MergeDuplicateFolders"), "启动加载存档后合并同路径重复项目");
@@ -6085,7 +6145,14 @@ public static class Selftest
                     Assert(devRow is not null && devRow.Contains("if (!isSelf)"),
                            "★★ 已配对列表里【看得到自己但不能移除自己】—— 自己就是主机,"
                            + "解除自己等于让这台机器把自己踢出去");
-                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "void RenderDevices");
+                    // ★ 下界原来是 `void RenderDevices` —— 那个方法**一个调用方都没有**,已随 V19 删掉。
+                    //   ★★ 顺带记一条:拿一段**死代码**当切片边界,等于让一条活断言的范围
+                    //     由一段没人调的代码来定 —— 它被删掉的那天,`Slice` 返回 null,
+                    //     而 `is not null &&` 会让整条断言**静默变成恒假**…… 不,更糟:
+                    //     写成 `x is not null && x.Contains(...)` 时它判红(还好);
+                    //     写成 `x?.Contains(...) != false` 那种就会静默转绿。
+                    //     ⇒ 边界要挑**结构上不会消失**的东西。这里改用类的收尾分节注释。
+                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "// ═════");
                     Assert(isSelfFn is not null && isSelfFn.Contains("CertShort") && isSelfFn.Contains("SHA256"),
                            "★★ 认「是不是自己」要按证书指纹,不按名字 —— 同名设备很常见,而名字还是自报的");
                     // ㉓ 副机侧:只允许「开始寻找主机」+ 网络选择(仅多网)+ 角色检测
