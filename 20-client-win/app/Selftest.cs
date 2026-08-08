@@ -8927,12 +8927,29 @@ public static class Selftest
                                 //   `notLinked` 一声不吭,只有那条元断言(数够不够 12 条)红了。
                                 //   ⇒ 而"复制到本地"恰恰就长这个样子 —— 判据正好漏掉了它要防的那一种。
                                 var segs = v.Split('\\', '/');
-                                var isThemeOrUi = segs.Any(sg =>
+                                // ★★★ V19(2026-08-08)把范围从 Theme/Views **扩到 Services 与 identity**。
+                                //   上一版只看 Theme/Views 两个段 ⇒ 管理端 csproj 里那 8 条
+                                //   `..\app\Services\*.cs`(AppSettings / Vocab / AppPaths / Languages /
+                                //   InstanceLock / SingleInstance / Elevation …)与 `10-core\identity\Ca.cs`
+                                //   **一条都不在判据视野里** —— 把它们中任何一条换成本地副本,
+                                //   `notLinked` 一声不吭。而 phase 2 要往这一栏里加的正是
+                                //   `ProcRun.cs`(切成两半的那个私有方法)——
+                                //   它恰恰是**最该防复制**的那一份:两份漂了不会有任何东西红。
+                                //   ⇒ 判据的范围要跟着"哪些东西是共用的"走,不是跟着最初写它时想到的那两个目录走。
+                                var isShared = segs.Any(sg =>
                                     sg.Equals("Theme", StringComparison.OrdinalIgnoreCase) ||
-                                    sg.Equals("Views", StringComparison.OrdinalIgnoreCase));
-                                if (!isThemeOrUi) continue;
+                                    sg.Equals("Views", StringComparison.OrdinalIgnoreCase) ||
+                                    sg.Equals("Services", StringComparison.OrdinalIgnoreCase) ||
+                                    sg.Equals("identity", StringComparison.OrdinalIgnoreCase));
+                                if (!isShared) continue;
                                 themeUi.Add(v);
-                                if (!v.StartsWith(@"..\app\", StringComparison.OrdinalIgnoreCase)) notLinked.Add(v);
+                                // ★ 两个允许的 link 前缀:客户端源码 `..\app\`,以及 10-core 的共用身份代码
+                                //   `..\..\10-core\`(D93 裁定④:WireContracts.cs / Ca.cs / HubId.cs 由多个 csproj 编同一份)。
+                                //   ★★ 除此之外一律算**本地副本** —— 包括 `Services\Foo.cs` 这种
+                                //     不带前导反斜杠的写法(既有注释里记着:红测当场抓到过这个窄判据)。
+                                if (!v.StartsWith(@"..\app\", StringComparison.OrdinalIgnoreCase)
+                                    && !v.StartsWith(@"..\..\10-core\", StringComparison.OrdinalIgnoreCase))
+                                    notLinked.Add(v);
                             }
                             Assert(themeUi.Count >= 12,
                                 $"★★ 元断言:csproj 里真的数到了 Theme/UI 条目(数到 {themeUi.Count} 条)——"
@@ -8956,6 +8973,27 @@ public static class Selftest
                             })
                                 Assert(proj.Contains(@"Include=""" + must + @""""),
                                     $"★★ 裁定④点名要 link 的这一份必须在:{must}");
+
+                            // ── ★★★ V19 · phase 2 迁移的前置:这几份必须**现在就是 link** ──
+                            //   ★ 逐条说明它为什么在这张名单上 —— 一条只写"必须在"的断言,
+                            //     下一个人看不出撤掉它会坏什么,于是它很容易被当成洁癖删掉。
+                            //   ★★ 判据是**反向**的:少 link 一份不会有任何东西红,
+                            //     只会让管理端在搬迁那天悄悄用上另一份实现(或者干脆被复制一份)。
+                            foreach (var (must, why) in new[]
+                            {
+                                (@"..\app\Services\ProcRun.cs",
+                                 "RunCapturedAsync:HostSetup 一切两半,留下的 IdentityExistsAsync 与"
+                                 + "搬走的 EnsureIdentityAsync 都用它 —— 复制出来的两份漂了不会有任何东西红"),
+                                (@"..\app\Views\ConfirmDialog.cs",
+                                 "批准弹窗与删除确认;它同时是**六词比对**那句判词的载体(按钮文字本身就是断言)"),
+                                (@"..\app\Services\BuildInfo.cs", "DevicesView 里显示本机客户端版本"),
+                                (@"..\app\Services\VramBudget.cs", "ComponentPicker 的显存预算判据"),
+                                (@"..\app\Services\HubDiscovery.cs", "HubAdmin 与 DevicesView **两边都用**"),
+                                (@"..\..\10-core\identity\HubId.cs",
+                                 "HubDiscovery 要它;单链 HubDiscovery 会 CS0234,**成对**才闭合"),
+                            })
+                                Assert(proj.Contains(@"Include=""" + must + @""""),
+                                    $"★★ V19 前置:这一份必须是 link —— {must}({why})");
                         }
                     }
                 }

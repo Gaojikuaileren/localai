@@ -54,7 +54,7 @@ public static class HostSetup
         if (!File.Exists(exe)) return false;
         try
         {
-            var (code, _) = await RunCapturedAsync(exe, "status", dir);
+            var (code, _) = await ProcRun.RunCapturedAsync(exe, "status", dir);
             return code == 0;
         }
         catch { return false; }
@@ -78,7 +78,7 @@ public static class HostSetup
         var exe = Path.Combine(dir, "localai-identity.exe");
         if (!File.Exists(exe)) return new SetupStep(name, SetupOutcome.Failed, "找不到 " + exe);
 
-        var (code, output) = await RunCapturedAsync(exe, "init", dir);
+        var (code, output) = await ProcRun.RunCapturedAsync(exe, "init", dir);
         // ★ init 是 fail-closed 的:已存在就返回 1 并说 "already exists"。那是【好事】,不是失败。
         if (output.Contains("already exists", StringComparison.OrdinalIgnoreCase))
             return new SetupStep(name, SetupOutcome.Skipped, "本机已经有中枢身份了,没有覆盖它。");
@@ -142,7 +142,7 @@ public static class HostSetup
     /// <summary>查规则在不在。★ 查询不需要管理员 —— 所以"验"这一步永远做得到,没有借口不做。</summary>
     public static async Task<bool> FirewallRuleExistsAsync()
     {
-        var (code, output) = await RunCapturedAsync("powershell.exe",
+        var (code, output) = await ProcRun.RunCapturedAsync("powershell.exe",
             "-NoProfile -ExecutionPolicy Bypass -Command \"if (Get-NetFirewallRule -DisplayName '"
             + FirewallRuleName + "' -ErrorAction SilentlyContinue) { 'YES' } else { 'NO' }\"", null);
         return code == 0 && output.Contains("YES", StringComparison.Ordinal);
@@ -931,30 +931,12 @@ public static class HostSetup
     }
 
     // ---------------------------------------------------------------- 工具
-    /// <summary>跑一个进程并把 stdout+stderr 都收回来。★ 不提权 —— 这里跑的都是必须普通用户跑的东西。</summary>
-    static async Task<(int code, string output)> RunCapturedAsync(string exe, string args, string? workDir)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = exe,
-                Arguments = args,
-                UseShellExecute = false,            // ★ false 才能重定向
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                WorkingDirectory = workDir ?? "",
-            };
-            using var p = Process.Start(psi);
-            if (p is null) return (-1, "进程没起来");
-            var so = await p.StandardOutput.ReadToEndAsync();
-            var se = await p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
-            return (p.ExitCode, (so + "\n" + se).Trim());
-        }
-        catch (Exception ex) { return (-1, ex.GetType().Name + ": " + ex.Message); }
-    }
+    // ★★ `RunCapturedAsync` 已搬进 `Services/ProcRun.cs`(V19 · 2026-08-08)。
+    //   它原来是本类的**私有**方法,而管理端拆分会把本类切成两半:
+    //   `IdentityExistsAsync` 留客户端(角色证据),`EnsureIdentityAsync` 搬管理端 ——
+    //   **两半都用它**。留在这儿的话,切分那天最省事的写法就是复制一份过去,
+    //   而两份漂了**不会有任何东西红**。⇒ 提成一个文件、两个 csproj 编同一份。
+    //   理由与判据都写在 `ProcRun.cs` 顶部。
 
     static string ReadAndDelete(string path)
     {
