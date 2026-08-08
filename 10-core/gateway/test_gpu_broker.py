@@ -1403,6 +1403,42 @@ check("★ 文档给每条写了护栏(没有护栏的条目等于没记)",
 check("★ 文档写明了两种【不许的修法】(删断言 / 改注释迁就测试)",
       "把断言删掉" in _doc and "迁就测试" in _doc)
 
+#  ── 中央三文档串行闸(pre-commit ④)的反向全表 · D111 ────────────────────
+#  ★ 为什么要这条:那张名单写在 shell 里,而**规矩写在 D111 里** ——
+#    两处分家不会报错、不会告警,闸照样退出 0。多一份 = 有人被误拦,
+#    少一份 = 有人静默越界。⇒ 用**反向全表**钉住:集合相等,不是"包含"。
+#  ★★ 判据是**从钩子源码里解出来的集合**,不是我这里重抄一份手写名单 ——
+#    手写名单只能当期望值,不能当遍历源(第 3b 条坑)。
+_HOOK_P = _HERE_T.parents[1] / ".githooks" / "pre-commit"
+check("★ pre-commit 钩子在(不在的话下面几条会【静默不跑】)", _HOOK_P.exists())
+_hook = _HOOK_P.read_text(encoding="utf-8") if _HOOK_P.exists() else ""
+# 从第 ④ 段那条 case 分支里把被盯的路径解出来:形如 `00-docs/X.md|00-docs/Y.md|...)`
+_m = re.search(r"^\s*(00-docs/[^)]*?)\)\s*$", _hook, re.M)
+_watched = set(_m.group(1).split("|")) if _m else set()
+_EXPECT_CENTRAL = {
+    "00-docs/DECISIONS.md",
+    "00-docs/PROJECT_PLAN_v3.0.md",
+    "00-docs/STATE.md",
+}
+check("★★★ 串行闸盯的正好是【中央三文档】—— 反向全表,多一份少一份都红",
+      _watched == _EXPECT_CENTRAL,
+      f"钩子里解出来的是 {sorted(_watched)},期望 {sorted(_EXPECT_CENTRAL)}")
+# ★ 元断言:提取器没有静默失灵。空集 == 空集 也是相等 —— 那是零断言(第 4 条坑)。
+check("★★ 元断言:提取器确实从钩子里解出了东西(空集也算相等,那是零断言)",
+      len(_watched) >= 3, f"只解出 {len(_watched)} 条")
+# ★★ 反过来钉:这两份**必须不在**闸里 —— D111 特意把它们改归共享文件类,
+#   因为「学到教训的那条车道最有资格写它」。哪天有人顺手把它们加回名单,这条会红。
+check("★★ ASSERTION-PITFALLS 不在串行闸里(D111:它归共享文件类,车道自己写)",
+      "00-docs/ASSERTION-PITFALLS.md" not in _watched)
+check("★★ worklog 不在串行闸里(D111 同上;协调层曾把它误称为中央四文档之一)",
+      not any("worklog" in w for w in _watched))
+# ★ 判据本身要说得出它拦的是什么:失败信息里必须给出可操作的出路,
+#   否则人只会去找 --no-verify(本仓已被这个模式咬过一次,见 D24)。
+check("★ 闸的失败信息给了出路(写进自己的决议包)而不只是拒绝",
+      "decision-packets" in _hook and "LOCALAI_ALLOW_CENTRAL_DOCS" in _hook)
+check("★★ 闸用【分支名】判而不是 worktree,并且 detached 落在【拦住】那边",
+      "symbolic-ref" in _hook and "detached" in _hook)
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  审计 2026-08-05 · loader_absent 必须说出【是哪一种】
