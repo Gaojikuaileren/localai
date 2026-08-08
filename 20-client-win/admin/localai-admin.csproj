@@ -100,6 +100,35 @@
     <Compile Include="..\app\Services\VramBudget.cs"><Link>Services\VramBudget.cs</Link></Compile>
     <Compile Include="..\app\Services\HubDiscovery.cs"><Link>Services\HubDiscovery.cs</Link></Compile>
     <Compile Include="..\..\10-core\identity\HubId.cs"><Link>Identity\HubId.cs</Link></Compile>
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         V21(2026-08-08)· 3100 行迁移带过来的**共享源码**。
+         ★★ 一条都不是复制:两个 csproj 编译**同一个文件**(裁定④ / D93 裁定④同款手法)。
+            复制的那天两份会漂,而漂了**不会有任何东西红** —— 这正是本仓最恨的形状。
+
+         · AdminApp.cs   —— 出包布局(旁边装没装 admin / host)。**判据留客户端**:
+           角色判定的第一条证据就是它,设置里那颗「打开管理端面板」按钮也靠它。
+           而管理端这边 `HostProvision` / `HubAdmin.StartEdgeCmd` 也要问同一个问题。
+         · HostSetup.cs  —— **角色判据那一半**(见该文件头)。管理端起网关时读的
+           `GatewayPort` / `GatewayUpAsync` 就是客户端拨号读的那两个 ——
+           两处各写一个字面量的话,「客户端拨到哪儿」与「管理端起在哪儿」会静默漂成两个数。
+         · GpuWire.cs    —— `HubGpu` 的**解析那一半**(partial)。组件面板搬过来之后
+           两边读同一份 `ParseCatalog` / `ParseOutcome`,不存在第二个解析器(V4 修过一次的缺陷)。
+         · WireContracts.cs —— `/admin/*` 那几组响应形状的**唯一登记表**,与 lan-edge 同一份。
+         ══════════════════════════════════════════════════════════════════ -->
+    <Compile Include="..\app\Services\AdminApp.cs"><Link>Services\AdminApp.cs</Link></Compile>
+    <Compile Include="..\app\Services\HostSetup.cs"><Link>Services\HostSetup.cs</Link></Compile>
+    <Compile Include="..\app\Services\GpuWire.cs"><Link>Services\GpuWire.cs</Link></Compile>
+    <Compile Include="..\..\10-core\identity\WireContracts.cs"><Link>Identity\WireContracts.cs</Link></Compile>
+
+    <!-- 记忆库搬过来带的三个小依赖。★ 都是「一份定义两处编」,理由分别写在各自文件头上:
+         · ProjectScope.cs  —— 各写一份会让 D45 的三档范围在两个进程里序号漂开,而**不会红**;
+         · MemberContext.cs —— 可见范围判定(fail-closed),两份判据就是两套安全性质;
+         · ClientStore.cs   —— 原子写 + 坏档留证(D50 那四条硬约束)。★ 管理端用它写的是
+           **自己那份** `admin\memory.json`,路径由调用方给 —— 它本身不认哪个目录。 -->
+    <Compile Include="..\app\Services\ProjectScope.cs"><Link>Services\ProjectScope.cs</Link></Compile>
+    <Compile Include="..\app\Services\MemberContext.cs"><Link>Services\MemberContext.cs</Link></Compile>
+    <Compile Include="..\app\Services\ClientStore.cs"><Link>Services\ClientStore.cs</Link></Compile>
   </ItemGroup>
 
   <ItemGroup>
@@ -107,6 +136,9 @@
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
     <Using Include="System.IO" />
+    <!-- V21:链进来的 `HostSetup.GatewayUpAsync` 用 HttpClient 探 /health。
+         ★ 与客户端 csproj 逐字一致 —— WPF/WinForms 工程的隐式 using 集合缺 System.Net.Http。 -->
+    <Using Include="System.Net.Http" />
   </ItemGroup>
 
   <!-- App.xaml 降为 Page:否则 WPF 自动生成的 Main 会与 Program.Main 冲突(CS0017) -->

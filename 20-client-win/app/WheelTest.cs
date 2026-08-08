@@ -458,7 +458,7 @@ public static class WheelTest
             ThemeManager.Initialize(Skin.Breeze);
             foreach (var (name, make) in new (string, Func<FrameworkElement>)[]
                      { ("settings", () => new SettingsView()),
-                       ("model",    () => new ModelsView()),
+                       // ★ V21:「模型」页已搬进管理端 —— 客户端这份轮盘自检里也就没有它了。
                        ("extensions", () => new ExtensionsView()) })
             // ★ tall:页面自带 ScrollViewer,640 高只看得到顶部 ——
             //   底下那几块(比如模型页的「模型选择策略」占位符)得拉高了才看得见。

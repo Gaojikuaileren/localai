@@ -21,11 +21,25 @@
 //   既不增加安全性(能连回环就已经在这台机器上了),又会把"主机自己管自己"绑死在
 //   "必须先配对成功"上 —— 而配对界面本身就归它管,那会变成鸡生蛋。
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  ★★★ V21(2026-08-08):本文件**整块从客户端搬到管理端**(迁移地图 §2.1)。
+//
+//  判据是 V10 §2「两侧协议 ⇒ 客户端留;单侧权威 ⇒ 整块搬」——
+//  它**就是**回环管理面的客户端,而副机调它结构上永远 404(D37/D48)⇒ 留在客户端里是纯死代码。
+//  ★ 这是 MOVE 不是 COPY:客户端里**一行都没留**(留下的 40 余行是出包布局判断,
+//    已提成 `app/Services/AdminApp.cs`,那不是管理动作)。
+//
+//  ★★ `AdminDirName` / `AdminExeName` / `AdminAppPath` / `AdminAppPathNextTo` /
+//     `HostToolsDir` / `HostToolsDirNextTo` 现在住在 `LocalAI.Client.Services.AdminApp`,
+//     两个 csproj 编同一份 —— 本文件底下 `StartEdgeCmd` 仍然用它,靠 using 取。
+// ══════════════════════════════════════════════════════════════════════════════
+
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using LocalAI.Client.Services;
 
-namespace LocalAI.Client.Services;
+namespace LocalAI.Admin.Services;
 
 /// <summary>
 /// 探测回环管理面的结果分类。★ 存在的理由:界面必须说【观察到的事】,
@@ -552,82 +566,17 @@ public sealed class HubAdmin
     }
 
     // ---------------------------------------------------------------- 本机【能不能】当主机(线索,不是判据)
-    /// <summary>
-    /// 本机上有没有主机端程序。★ 这是一条**线索**,不是判据 ——
-    /// 它回答的是「这台**能不能**当主机」,不是「这台**是不是正在**当主机」;
-    /// 后者只有回环管理面答话才算数(见 ProbeAsync)。
-    ///
-    /// 依据出包布局:`dist\client\localai-client.exe` 与 `dist\host\localai-lan-edge.exe` 并排。
-    /// 副机上只装 client-pack、没有 host 目录 ⇒ 找不到就说明这台多半真的不是主机。
-    /// 开发树里跑(bin\Debug\…)也找不到 —— 那时就当没有这条线索,界面照样能说清楚。
-    /// </summary>
-    public static string? HostToolsDir()
-    {
-        // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(BaseDirectory 可能指向解包目录)
-        try { return HostToolsDirNextTo(Path.GetDirectoryName(Environment.ProcessPath)); }
-        catch { return null; }   // 路径拿不到就是没这条线索,不是错误
-    }
-
-    /// <summary>
-    /// 上面那条的纯逻辑部分:给定客户端 exe 所在目录,看它旁边有没有 `..\host\localai-lan-edge.exe`。
-    /// ★ 抽出来是为了能**确定性地**测:直接断言 HostToolsDir() 的返回值等于在断言
-    ///   「自检此刻跑在哪个目录下」—— 那个断言在 dist\client 里会红、在 dist\client-pack 里会绿,
-    ///   两边都不说明代码对不对。(这个坑本次真踩了一回。)
-    /// </summary>
-    public static string? HostToolsDirNextTo(string? clientExeDir)
-    {
-        if (string.IsNullOrWhiteSpace(clientExeDir)) return null;
-        var host = Path.GetFullPath(Path.Combine(clientExeDir, "..", "host"));
-        return File.Exists(Path.Combine(host, "localai-lan-edge.exe")) ? host : null;
-    }
-
-    // ------------------------------------------------- 管理端【装没装】(裁定②:角色判据改指向物)
-    /// <summary>管理端的出包目录名 —— `dist\admin\`,与 `dist\client\` 并排。</summary>
-    public const string AdminDirName = "admin";
-    /// <summary>管理端的可执行文件名。</summary>
-    public const string AdminExeName = "localai-admin.exe";
-
-    /// <summary>
-    /// 本机上**装没装**管理端程序。
-    ///
-    /// ★★ 判据是「**装没装**」,不是「**跑没跑**」—— 后者会**死锁**:
-    ///   主机**第一次启动**时管理端当然还没跑,若判据问"跑没跑",它会答"没跑"
-    ///   ⇒ 判成"不是主机" ⇒ **不起管理端** ⇒ 永远不跑。
-    ///   ⇒ 只问**文件在不在**(D36「安装事实」那一路)。
-    ///
-    /// ★★★ 这条改动真正的意义:**副机不起栈从此是结构性的**。
-    ///   改之前,副机不起栈靠的是**判断**(它判自己不是主机);
-    ///   改之后,**副机机器上根本没有那个程序** —— 不是"判断出来不该起",是"**没有东西可起**"。
-    ///   这正是 D48「用够不着代替判断」推到底:
-    ///   一条靠判断挡住的路,判断写错就通了;一条结构上不存在的路,写错也通不了。
-    ///
-    /// ★ 但它**不削弱**否定证据:地址明确解析到别人 ⇒ 仍然立刻判不是主机
-    ///   (见 <see cref="HostSetup.DecideRole"/> 第一段)—— 那条挡的是「整包拷到另一台机器」,
-    ///   而那台机器上管理端程序也在(跟着拷过去了)。
-    /// </summary>
-    public static string? AdminAppPath()
-    {
-        // ★ 单文件发布下 Environment.ProcessPath 才是真正的 exe 路径(同 HostToolsDir 的理由)
-        try { return AdminAppPathNextTo(Path.GetDirectoryName(Environment.ProcessPath)); }
-        catch { return null; }   // 路径拿不到就是没这条线索,不是错误
-    }
-
-    /// <summary>
-    /// 上面那条的纯逻辑部分:给定客户端 exe 所在目录,看它旁边有没有 `..\admin\localai-admin.exe`。
-    /// ★ 抽出来的理由与 <see cref="HostToolsDirNextTo"/> 完全相同 —— 直接断言 <see cref="AdminAppPath"/>
-    ///   的返回值等于在断言「自检此刻跑在哪个目录下」,那种断言两边都不说明代码对不对。
-    /// </summary>
-    public static string? AdminAppPathNextTo(string? clientExeDir)
-    {
-        if (string.IsNullOrWhiteSpace(clientExeDir)) return null;
-        var exe = Path.GetFullPath(Path.Combine(clientExeDir, "..", AdminDirName, AdminExeName));
-        return File.Exists(exe) ? exe : null;
-    }
+    // ★★ `HostToolsDir` / `HostToolsDirNextTo` / `AdminDirName` / `AdminExeName` /
+    //   `AdminAppPath` / `AdminAppPathNextTo` **已提成 `app/Services/AdminApp.cs`**(V21 迁移)。
+    //   它们不是管理动作,只回答「旁边那个目录里有没有那个 exe」——
+    //   而客户端**必须**留着它们:角色判据的第一条证据就是「装没装管理端」,
+    //   设置里那颗「打开管理端面板」按钮的判据也是它。⇒ 两个 csproj 编同一份,不是复制。
+    //   ★ 本文件靠 `using LocalAI.Client.Services;` 取它们(见文件头)。
 
     /// <summary>主机端的启动脚本(存在才返回)。界面用它把"去点哪个文件"直接说出来。</summary>
     public static string? StartEdgeCmd()
     {
-        var d = HostToolsDir();
+        var d = AdminApp.HostToolsDir();
         if (d is null) return null;
         var p = Path.Combine(d, "启动Edge.cmd");
         return File.Exists(p) ? p : null;

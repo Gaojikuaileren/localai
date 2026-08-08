@@ -745,73 +745,28 @@ public sealed class HubClient
         catch (Exception ex) { LastError = "设备证书自动续签这次没成:" + ex.Message; }
     }
 
-    // ---------------------------------------------------------------- 主机管理 API(P3c S2)
-    // 客户端里「列出已配对的 PC + 解除」用的就是这组。非家庭安全管理员返回 403 ——
-    // 由界面如实告知,不假装列表为空。
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★ V21:「主机管理 API」那一组(`ListDevicesRawAsync` / `KnownDevices` /
+    //    `CacheDevices` / `RevokeDeviceAsync` / `ParseDevices`)**整组删除**。
     //
-    // ★★ 已知的结构性限制(审计 2026-07-31 确认,别再把它当成"主机没升级"):
-    //   按 D37 / D48,/admin/* 只挂在主机【本地回环口】上;这里走的是局域网 mTLS 口,
-    //   它对 /admin/* 一律 404 —— 连存在性都不暴露,这是有意为之。
-    //   所以从别的机器调这组接口【永远】是 404,升级主机也不会变。
-    //   要让远程真的能管设备,得另开一条"仅主机本地"的回环通道(未做),
-    //   而不是继续往这个口上打。界面文案已改成说实话(见 DevicesView 的 404 分支)。
-
-    /// <summary>取设备列表原始响应。返回 (状态码, 正文),不抛 HTTP 异常,便于界面分辨 404/403。</summary>
-    public async Task<(int status, string body)> ListDevicesRawAsync(CancellationToken ct = default)
-    {
-        if (Profile is null) throw new InvalidOperationException("尚未配对");
-        return await Transport.Send(Profile, Dial(), HttpMethod.Get, "/admin/devices", null, ct);
-    }
-
-    /// <summary>
-    /// 最近一次【真的从主机拿到】的其它设备(已解除的不算)。★ 诚实:只有主机真给了才有内容;
-    /// 没配对 / 连不上 / 没权限 时永远是空 —— 界面据此"只显示本机",不摆假的远程列表。
-    /// 由设备页在成功拉取后调用 CacheDevices 填充。
-    /// </summary>
-    public IReadOnlyList<HubDevice> KnownDevices { get; private set; } = Array.Empty<HubDevice>();
-
-    /// <summary>设备页拉到真实设备表后回填这里,供别处(如项目文件夹选机器)复用。</summary>
-    public void CacheDevices(IEnumerable<HubDevice> devices)
-        => KnownDevices = devices.Where(d => d.Status != "revoked").ToList();
-
-    /// <summary>
-    /// 吊销一台设备(走局域网口 —— 按 D37/D48 这条**结构上**永远 404,见本类顶部那段说明)。
-    /// ★ 返回值形状不变(界面按它写的),但应答体现在**真的被核对了** ——
-    ///   与 <c>HubAdmin.RevokeAsync</c> 共用同一处解析。此前两个调用方都不看应答体,
-    ///   一次失败的吊销与一次成功的吊销在界面上长得一模一样。
-    /// </summary>
-    public async Task<(int status, string body)> RevokeDeviceAsync(string deviceId, CancellationToken ct = default)
-    {
-        if (Profile is null) throw new InvalidOperationException("尚未配对");
-        var r = await Transport.Send(Profile, Dial(), HttpMethod.Post,
-                                     "/admin/devices/revoke", new { deviceId }, ct);
-        if (r.status == 200)
-        {
-            var (ok, gen, why) = HubAdmin.ParseRevokeBody(r.body);
-            LastError = ok ? null : why;
-            if (ok && gen <= 0) LastError = "吊销应答里的 generation 不是正数 —— 这次写盘可能没生效";
-        }
-        return r;
-    }
-
-    /// <summary>
-    /// 把 <c>/admin/devices</c> 的正文解析成显示用的设备表。
-    ///
-    /// ★★ 2026-08-06(V4):这里**曾经是第二份解析器** —— 与 <c>HubAdmin.DevicesAsync</c>
-    ///   各自解析同一个形状,而 DevicesView 的两条路径分别调它们(:912 与 :1366)。
-    ///   两份代码解析同一个形状 ⇒ 服务端改一个键名**只会有一处被发现**,
-    ///   另一处安静地退化成"设备名全空",看起来像"主机上没有别的设备"。
-    ///   ⇒ 现在它**委派**给唯一那一处,自己只做投影(AdminDevice → HubDevice)。
-    /// ★ 形状不认识时**抛**,不返回空表:空表在界面上会被写成「没有别的设备」,
-    ///   而那是一句**看起来很有信息量的假答案**(与 PendingAsync 的 ok 位同一条纪律)。
-    /// </summary>
-    public static List<HubDevice> ParseDevices(string json)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var (ok, list, why) = HubAdmin.ParseDevices(doc.RootElement);
-        if (!ok) throw new FormatException(why ?? "设备表的形状与登记的契约对不上");
-        return list.Select(d => new HubDevice(d.DeviceId, d.DisplayName, d.Status)).ToList();
-    }
+    //  这不是「跟着 HubAdmin 搬走」—— 它是 V10 §2.4 点名的**净删**:
+    //  这几个方法打的是 `/admin/*`,而按 D37/D48 那组路由只挂在主机的**回环**口上,
+    //  这里走的是局域网 mTLS 口 ⇒ **结构上永远 404**,升级主机也不会变。
+    //  它们在客户端里从来就没有成功过一次。
+    //
+    //  ★★ V4 当年发现 `/admin/devices` 有**两个**解析器,当时的修法是收拢到一处。
+    //    拆分之后**第二个消费者根本不该存在** —— 方向是「少一个消费者」,不是「多一份同步」。
+    //    唯一的解析器现在住在管理端(`LocalAI.Admin.Services.HubAdmin.ParseDevices`)。
+    //
+    //  ★★★ 一处**如实交代的功能损失**(不是漏掉):
+    //    `KnownDevices` 被 `ProjectEditor.MachineOptions()`(项目「文件夹所在机器」下拉)读。
+    //    而 V19 实测:`CacheDevices` 的写入点在**主机侧**的设备列表里,那一段已经搬进管理端
+    //    ⇒ 客户端**再也没有**写入点。留一个恒空的 `KnownDevices` 会让那个下拉
+    //    「永远只有本机」而看起来像功能正常 —— 那正是 V19 刚修掉的那种假绿。
+    //    ⇒ 整组删掉,`MachineOptions()` 改成**如实说**「跨机选择要等中枢下发设备表」。
+    //    要把它接回来,该走的是一条**业务口**上的设备表路由(中枢侧还没有),
+    //    不是继续往一个永远 404 的口上打。
+    // ══════════════════════════════════════════════════════════════════════════
 
     /// <summary>
     /// 解除本机与中枢的配对(本地侧)。删档案 + **删掉设备私钥**(留着就是一份无用但敏感的凭据)。

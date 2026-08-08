@@ -131,7 +131,14 @@ public static class StorageUsage
             new("会话原文", FileBytes(ClientStore.ChatPath), "所有会话与消息(永不自动删)"),
             new("归档原文", Directory.Exists(ArchiveDir) ? archive : -1,
                 Directory.Exists(ArchiveDir) ? "已归档的早期消息(可手动删除)" : $"尚无归档 —— 每会话超过 {ChatCenter.HotMessages} 条后,更早的原文会自动移到这里"),
-            new("记忆库", memoryBytes, "AI 生成的摘要与事实"),
+            // ★★ V21:记忆库归**管理端**了(用户裁定「搬干净」)。客户端算不出它多大,
+            //   所以调用方传 -1 —— 这里把它写成一句**说得出去向**的话。
+            //   ★ 传 0 是不行的:界面会显示「0 字节」,而那是一句假话
+            //     (记忆可能有几百条,只是不归这个程序管)。
+            //   ★ 走的是 `Human()` 已有的那条 `< 0 ⇒ 不显示数字` 的路,不新造一档。
+            new("记忆库", memoryBytes,
+                memoryBytes < 0 ? "归主机的管理端管 —— 在管理端的「记忆库」页里看"
+                                : "AI 生成的摘要与事实"),
             new("缓存", CacheBytes(), "临时与损坏文件、以及不再被任何消息引用的旧截图(随时可清)"),
         };
     }

@@ -42,6 +42,20 @@ public partial class App : Application
         _skin = ReadSkin();
         ThemeManager.Initialize(_skin);
 
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V21:记忆库的一次性迁移。**排在建窗口之前**,理由是承重的:
+        //    迁移失败时界面必须能把这件事说出来(纪律③),而窗口是在
+        //    `ShowPanel()` 里建的 —— 迁移排在后面的话,第一次打开的那一页
+        //    读到的是「还没迁」的状态,于是**它会显示一个空记忆库**,
+        //    而那正是用户会读成「我的记忆没了」的那句假话。
+        //  ★ 幂等:每次启动都跑,跑几次结果都一样(见 MemoryStore 文件头的四格表)。
+        //  ★★ 迁移失败**不阻止管理端启动** —— 那会让人连看原因的地方都没有。
+        //    失败会留在 `MemoryStore.Notice` 里,由「记忆库」那一页顶上说出来。
+        // ══════════════════════════════════════════════════════════════════
+        MemoryStore.Migrate();
+        if (MemoryStore.LoadOrNull() is { } mem) Views.MemoryView.Memory.Import(mem);
+        Views.MemoryView.Memory.Changed += SaveMemory;
+
         BuildTray();
         WatchSettings();
 
@@ -50,6 +64,19 @@ public partial class App : Application
 
         // 再点一次图标 = 叫醒已有实例的窗口(与客户端同一套机制)
         _instance.ListenForWake(() => Dispatcher.Invoke(ShowPanel));
+    }
+
+    /// <summary>
+    /// 记忆变了就存回**管理端自己那份**。★ 与客户端 `Touch` 同一条纪律:改一次存一次,
+    /// 不等退出 —— 管理端是后台常驻的,它没有「退出」这个可靠的存盘时机。
+    /// </summary>
+    void SaveMemory()
+    {
+        // ★★ 迁移失败时**绝不存盘**:那会拿一个空库覆盖掉…… 不,它甚至更坏 ——
+        //   迁移失败意味着我们没读到你的记忆,这时存一份空的过去,
+        //   就把「读不到」变成了「真的没有了」。宁可这一次不存。
+        if (MemoryStore.LastResult == MemoryMigration.Failed) return;
+        try { MemoryStore.Save(Views.MemoryView.Memory.Export()); } catch { }
     }
 
     // ---------------------------------------------------------------- 皮肤(裁定③:监听文件,不走契约)

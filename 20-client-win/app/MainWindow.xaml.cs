@@ -527,7 +527,13 @@ public partial class MainWindow : Window
 
         // 下半区:系统项 —— 贴底(用户裁定)。设备/配对已并入设置,不再单列。
         AddGroupLabel(Strings.Get("nav.system"), NavSystemPanel);
-        AddItem(new NavItem("model", "nav.model", IconName.Model, () => new ModelsView()), NavSystemPanel);
+        // ★★★ V21:「模型」这一项**已搬进管理端**(V10 §2.1:勾组件/选模型 = 对显存的
+        //   单侧权威决定,`POST /v1/gpu/intended` 是一次真事务)。
+        //   ⇒ 通用客户端左栏里不再有这一项 —— 不是「藏起来」,是**这一页不在这个 exe 里**。
+        //   ★ 主机上要改模型:设置 →「打开管理端面板」→「模型」。
+        //     副机上改不了 —— 而这一条从此是**结构性**的(那台机器上根本没有那个程序),
+        //     不再靠一次运行期判断把按钮藏起来(纪律②)。
+        //   ★★ 显存条**留在客户端**:那是「现在什么在跑」的观察,两边都该看得见。
         AddItem(new NavItem("extensions", "nav.extensions", IconName.Extensions, () => new ExtensionsView()), NavSystemPanel);
         AddItem(new NavItem("settings", "nav.settings", IconName.Settings, () => new SettingsView()), NavSystemPanel);
     }

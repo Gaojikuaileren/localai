@@ -6833,16 +6833,16 @@ public static class Selftest
                     Directory.CreateDirectory(host);
                     try
                     {
-                        Assert(Services.HubAdmin.HostToolsDirNextTo(client) is null,
+                        Assert(Services.AdminApp.HostToolsDirNextTo(client) is null,
                                "★ 旁边有 host 目录但【没有那个 exe】时仍返回 null —— 线索要看到真东西才算数");
                         File.WriteAllText(Path.Combine(host, "localai-lan-edge.exe"), "x");
-                        Assert(Services.HubAdmin.HostToolsDirNextTo(client) is { } got
+                        Assert(Services.AdminApp.HostToolsDirNextTo(client) is { } got
                                && string.Equals(Path.GetFullPath(got).TrimEnd('\\'), Path.GetFullPath(host).TrimEnd('\\'),
                                                 StringComparison.OrdinalIgnoreCase),
                                "★★ 旁边真有主机端程序时要找得到 —— 这条线索是"
                                + "「主机但 Edge 没启动」与「这台真不是主机」的唯一分界");
-                        Assert(Services.HubAdmin.HostToolsDirNextTo(null) is null
-                               && Services.HubAdmin.HostToolsDirNextTo("  ") is null,
+                        Assert(Services.AdminApp.HostToolsDirNextTo(null) is null
+                               && Services.AdminApp.HostToolsDirNextTo("  ") is null,
                                "★ 拿不到目录就是没这条线索,不抛异常");
                     }
                     finally { try { Directory.Delete(htTmp, true); } catch { } }
@@ -9326,24 +9326,24 @@ public static class Selftest
                 Directory.CreateDirectory(client);
 
                 // ---- ① 探针行为(两个方向都走一遍)----
-                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is null,
+                Assert(Services.AdminApp.AdminAppPathNextTo(client) is null,
                     "★ 旁边没有 admin 目录 ⇒ 判【没装】—— 副机就是这一格");
 
-                var adminDir = Path.Combine(aaTmp, Services.HubAdmin.AdminDirName);
+                var adminDir = Path.Combine(aaTmp, Services.AdminApp.AdminDirName);
                 Directory.CreateDirectory(adminDir);
-                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is null,
+                Assert(Services.AdminApp.AdminAppPathNextTo(client) is null,
                     "★ 只有空目录、没有 exe ⇒ 仍然判【没装】(目录在不算数,程序在才算)");
 
-                var adminExe = Path.Combine(adminDir, Services.HubAdmin.AdminExeName);
+                var adminExe = Path.Combine(adminDir, Services.AdminApp.AdminExeName);
                 File.WriteAllText(adminExe, "x");
-                Assert(Services.HubAdmin.AdminAppPathNextTo(client) is { } gotAdmin
+                Assert(Services.AdminApp.AdminAppPathNextTo(client) is { } gotAdmin
                        && string.Equals(gotAdmin, Path.GetFullPath(adminExe), StringComparison.OrdinalIgnoreCase),
                     "★★ 文件在 ⇒ 判【装了】—— 而且这个文件**没有在跑**。"
                     + "这一条就是【判据问的是装没装、不是跑没跑】的直接证据:"
                     + "问【跑没跑】会死锁(主机第一次启动时管理端当然还没跑 ⇒ 判不是主机 ⇒ 不起管理端 ⇒ 永远不跑)");
 
-                Assert(Services.HubAdmin.AdminAppPathNextTo(null) is null
-                       && Services.HubAdmin.AdminAppPathNextTo("  ") is null,
+                Assert(Services.AdminApp.AdminAppPathNextTo(null) is null
+                       && Services.AdminApp.AdminAppPathNextTo("  ") is null,
                     "★ 拿不到自己的路径时判【没装】,不抛 —— 那只是没有这条线索,不是错误");
 
                 // ---- ② 否定证据仍然优先(裁定②不许削弱它)----

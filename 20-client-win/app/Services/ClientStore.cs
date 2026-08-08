@@ -32,7 +32,13 @@ public static class ClientStore
     public static string CalendarPath => Path.Combine(AppPaths.StateDir, "calendar.json");
     /// <summary>天气缓存(只存读数与它的时间戳,不存坐标)。</summary>
     public static string WeatherPath => Path.Combine(AppPaths.StateDir, "weather.json");
-    public static string MemoryPath => Path.Combine(AppPaths.StateDir, "memory.json");
+    // ★★★ V21:`MemoryPath` **已删,不是改路径**。记忆库连数据带界面搬进管理端
+    //   (`%LOCALAPPDATA%\LocalAI\admin\memory.json`,用户裁定「搬就搬干净,
+    //   不留一个名字骗人的路径」)。
+    //   ★ 迁移(先复制→验内容→再删原件 · 幂等 · 失败要看得见)在
+    //     `admin/Services/MemoryStore.cs`,它读这里的**旧**路径**一次**,然后就没有了。
+    //   ★★ 客户端这边一个读点、一个写点都不留 —— 纪律③:每个 json 只能有一个写者,
+    //     而「只留一个读」是下一次它变回可写的入口。
     public static string NotesPath => Path.Combine(AppPaths.StateDir, "notes.json");
     /// <summary>翻译历史的【收藏】。★ 只存收藏的键,原文一直在会话里(不留两份真相)。</summary>
     public static string HistoryFavPath => Path.Combine(AppPaths.StateDir, "history-favorites.json");

@@ -13,7 +13,9 @@ using System.Diagnostics;
 
 namespace LocalAI.Client.Services;
 
-public enum ProjectScope { Family, Personal, OnlyMe }
+// ★ V21:`ProjectScope` 已提成 `Services/ProjectScope.cs` —— 记忆库搬进管理端之后
+//   两个工程都要用它,而为了一个枚举把整个 ProjectCenter 链过去是不行的
+//   (那会把半个客户端拖进管理端)。「绝不各写一份」那一条写在那个文件头上。
 
 /// <summary>准备中 / 进行中 / 已完成。主页项目板块只显示前两者;已完成进"项目库"。</summary>
 public enum ProjectStatus { Preparing, Active, Done }

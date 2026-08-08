@@ -8,18 +8,24 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using LocalAI.Client.I18n;
+using LocalAI.Admin.Services;
 using LocalAI.Client.Services;
+using LocalAI.Client.Views;
 using LocalAI.Client.Theme;
 
-namespace LocalAI.Client.Views;
+namespace LocalAI.Admin.Views;
 
 public sealed class ModelsView : UserControl
 {
-    static App TheApp => (App)Application.Current;
+    // ★★ V21:`TheApp.Settings` 换成管理端自己那份(`AdminSettings`)。
+    //   纪律③:`settings.json` 拆两份 —— 这一页写的 `ModelStorePath` / `AutoUnloadIdle`
+    //   从此落在 `%LOCALAPPDATA%\LocalAIdmin\settings.json`,**不碰客户端那份**。
+    //   理由与那次一次性读迁写在 `AdminSettings.cs` 文件头。
+    static AppSettings Settings => AdminSettings.Current;
 
     public ModelsView()
     {
-        var s = TheApp.Settings;
+        var s = Settings;
 
         // ① 统一模型存放路径
         var path = new TextBox
@@ -37,7 +43,7 @@ public sealed class ModelsView : UserControl
         void Commit()
         {
             var v = string.IsNullOrWhiteSpace(path.Text) ? null : path.Text.Trim();
-            if (v != s.ModelStorePath) { s.ModelStorePath = v; s.Save(); }
+            if (v != s.ModelStorePath) { s.ModelStorePath = v; AdminSettings.Save(); }
         }
         path.LostFocus += (_, _) => Commit();
         Unloaded += (_, _) => Commit();
@@ -71,8 +77,8 @@ public sealed class ModelsView : UserControl
         //    ★ 今天的真实行为不再是"什么都没发生":按需装载的成员**确实**会空闲自动卸。
         // ══════════════════════════════════════════════════════════════
         var idle = new CheckBox { Content = Strings.Get("model.idle_unload"), IsChecked = s.AutoUnloadIdle, Margin = new Thickness(0, 6, 0, 0), IsEnabled = false };
-        idle.Checked += (_, _) => { s.AutoUnloadIdle = true; s.Save(); };
-        idle.Unchecked += (_, _) => { s.AutoUnloadIdle = false; s.Save(); };
+        idle.Checked += (_, _) => { s.AutoUnloadIdle = true; AdminSettings.Save(); };
+        idle.Unchecked += (_, _) => { s.AutoUnloadIdle = false; AdminSettings.Save(); };
 
         Content = Ui.Page(
             Ui.Title(Strings.Get("nav.model")),

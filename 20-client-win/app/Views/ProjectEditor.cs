@@ -171,13 +171,23 @@ public static class ProjectEditor
     /// ★ 诚实:没配对(或拿不到设备表)就只有本机 —— 不摆一个假的远程列表。
     ///   远程机器上的项目文件夹要真正可读写,还需要中枢侧的文件访问(P4+),接入前只作标记。
     /// </summary>
+    /// <summary>
+    /// 「文件夹所在机器」下拉的选项。
+    ///
+    /// <para>★★★ V21 如实交代:**今天只有「本机」一项**,而这不是回归 —— 它一直就只有一项。
+    /// V19 实测过:`HubClient.KnownDevices` 的唯一写入点在主机侧的设备列表里,
+    /// 而那条路径**从来没有被调用过**(`RenderDevices` 零调用方)⇒ 这个下拉
+    /// **从写下的那天起**就只有「本机」,只是那条断言一直绿着(它 grep 的是两个**名字**,
+    /// 不是有没有人调)。</para>
+    ///
+    /// <para>★★ V21 把那一族(`/admin/*`,副机结构上永远 404)整组删掉之后,
+    /// 客户端连一个假的写入点都没有了 —— 所以这里**明说**这件事,而不是留一个
+    /// 「看起来会有别的机器、其实永远不会有」的空下拉。
+    /// 要真正支持跨机,需要中枢在**业务口**上下发设备表(还没有);
+    /// 那条路由做出来之前,这里说实话。</para>
+    /// </summary>
     static List<(string? Key, string Label)> MachineOptions()
-    {
-        var list = new List<(string?, string)> { (ProjectCenter.LocalMachine, $"本机({Environment.MachineName})") };
-        foreach (var d in TheApp.Hub.KnownDevices)
-            if (!string.IsNullOrWhiteSpace(d.DeviceId)) list.Add((d.DeviceId, d.DisplayName));
-        return list;
-    }
+        => new() { (ProjectCenter.LocalMachine, $"本机({Environment.MachineName})") };
 
     static TextBlock FieldLabel(string text)
     {

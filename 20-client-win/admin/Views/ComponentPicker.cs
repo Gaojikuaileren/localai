@@ -41,14 +41,20 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using LocalAI.Admin.Services;
 using LocalAI.Client.Services;
+using LocalAI.Client.Views;
 using LocalAI.Client.Theme;
 
-namespace LocalAI.Client.Views;
+namespace LocalAI.Admin.Views;
 
 public sealed class ComponentPicker : UserControl
 {
-    static App TheApp => (App)Application.Current;
+    // ★★★ V21:GPU 面从客户端的 `TheApp.Gpu`(HubGpu,要先判主机/副机再决定拨哪儿)
+    //   换成管理端的 `AdminGpu`(**只走回环**)。理由见 AdminGpu.cs 文件头:
+    //   这个 exe 只装在主机上,所以「拨哪儿」这个问题在本进程里不存在。
+    //   ★ 解析仍然是**同一份**(`HubGpu.ParseCatalog` / `ParseOutcome`,GpuWire.cs)。
+    static AdminGpu Gpu => AdminGpu.Instance;
 
     readonly StackPanel _list = new();
     readonly TextBlock _sumLine = new();
@@ -135,14 +141,14 @@ public sealed class ComponentPicker : UserControl
         _list.Children.Clear();
         try
         {
-            var cat = await TheApp.Gpu.FetchCatalogAsync();
+            var cat = await Gpu.FetchCatalogAsync();
             if (cat is null)
             {
                 // ★ 取不到就**什么都不列**。列一份本地兜底清单等于回到"第三套词汇",
                 //   而且用户会以为那就是中枢的真实清单。
                 _catalog = null;
                 SetStatus("取不到中枢的组件清单 —— 这里【不显示】任何清单,"
-                          + "因为唯一权威在中枢。" + (TheApp.Gpu.LastError is { } e ? "(" + e + ")" : ""),
+                          + "因为唯一权威在中枢。" + (Gpu.LastError is { } e ? "(" + e + ")" : ""),
                           danger: true);
                 _apply.IsEnabled = false;
                 return;
@@ -334,9 +340,9 @@ public sealed class ComponentPicker : UserControl
         {
             // ★ 世代号取【当前推送流里那份】,不是面板加载时那份 —— 用户挑选期间中枢可能已经变了。
             //   拿旧号提交会稳定收到 409,而那本可以避免:409 该留给"真的有人同时改了"。
-            var gen = TheApp.Gpu.Snapshot?.Generation ?? _catalog.Generation;
+            var gen = Gpu.Snapshot?.Generation ?? _catalog.Generation;
             SetStatus("正在提交…");
-            var res = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen, interruptRunning: false,
+            var res = await Gpu.ApplyAsync(_checked.ToList(), gen, interruptRunning: false,
                                                   permittedOnDemand: PermittedPayload());
             if (res.Ok)
             {
@@ -363,8 +369,8 @@ public sealed class ComponentPicker : UserControl
                     confirmText: "优雅中断", cancelText: "等它跑完");
                 if (ok)
                 {
-                    var gen2 = TheApp.Gpu.Snapshot?.Generation ?? gen;
-                    var res2 = await TheApp.Gpu.ApplyAsync(_checked.ToList(), gen2, interruptRunning: true,
+                    var gen2 = Gpu.Snapshot?.Generation ?? gen;
+                    var res2 = await Gpu.ApplyAsync(_checked.ToList(), gen2, interruptRunning: true,
                                                            permittedOnDemand: PermittedPayload());
                     SetStatus((res2.Ok ? "✔ " : "") + res2.Advice, danger: !res2.Ok);
                 }

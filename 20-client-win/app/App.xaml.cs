@@ -23,8 +23,11 @@ public partial class App : Application
 
     public AppSettings Settings { get; private set; } = new();
     public HubClient Hub { get; private set; } = new();
-    /// <summary>主机本地管理面(仅回环)—— 配对审批与设备管理走它,见 HubAdmin 的说明。</summary>
-    public HubAdmin HubAdmin { get; } = new();
+    // ★★★ V21:`HubAdmin`(回环管理面通道)**整个搬进管理端**。
+    //   它打的是 `/admin/*`,而按 D37/D48 那组路由只在主机的回环口上存在 ——
+    //   通用客户端(主副机同一个 exe)里留着它,等于留一段副机结构上永远 404 的死代码,
+    //   而它同时是「主机上才显示」那些分支的**唯一**数据源。
+    //   ⇒ 客户端里从此**一个 `/admin/*` 调用都没有**(元断言钉着,已红测)。
     /// <summary>全局任务中心:底部横条与全局抽屉共用同一份状态(用户裁定抽屉是全局的)。</summary>
     public TaskCenter Tasks { get; } = new();
     /// <summary>显存实时监视(左导航的显存条)。2 秒轮询,窗口不可见时自动停表。</summary>
@@ -55,8 +58,12 @@ public partial class App : Application
     public ReplyState Reply { get; } = new();            // 回信(D61)
     /// <summary>聊天:普通会话 + 项目会话。AI 未接入,发送只记录不伪造回复。</summary>
     public ChatCenter Chat { get; } = new();
-    /// <summary>记忆库:AI 生成的摘要/事实。★ AI 未接入(P4)前不会有任何内容,界面如实说明。</summary>
-    public MemoryCenter Memory { get; } = new();
+    // ★★★ V21(用户裁定「搬干净」):记忆库**整个搬进管理端** —— 数据(`memory.json`)
+    //   与界面一起走,客户端里**连读都不留**。
+    //   ★ 留一个「只读」也不行:那还是两个进程碰同一个文件(纪律③:一个 json 一个写者),
+    //     而下一个人会顺手把它改成可写。
+    //   ★★ 「副机看不到记忆」**≠**「副机上的 AI 没有记忆」—— 模型与检索都在主机上,
+    //     这台上与 AI 对话时它照常用记忆。这一条写在 `admin/Services/MemoryCenter.cs` 头上。
     /// <summary>翻译工作空间:目标语言池 + 详细程度(每台设备各自的偏好)。</summary>
     public TranslationState Translation { get; } = new();
     /// <summary>学习笔记:翻译结果的收藏,按目标语言分类。</summary>
@@ -374,8 +381,11 @@ public partial class App : Application
     /// <summary>开机分流的结论。界面读它显示那一行;null = 还在判。</summary>
     public static HostSetup.BootDecision? Boot { get; private set; }
 
-    /// <summary>起栈的逐组件结果(只有主机路径会有);null = 没起过。</summary>
-    public static HostSetup.StackResult? Stack { get; private set; }
+    // ★★★ V21:`Stack`(起栈的逐组件结果)跟着起栈一起搬进管理端。
+    //   客户端不再起栈,也就不再有「起栈结果」可存 —— 留一个永远为 null 的属性,
+    //   会让读它的界面永远显示「没起过」,而那是一句**看起来有信息量的假话**。
+    //   ⇒ 起栈的进度与失败原因在**管理端面板**上说;客户端这边只说
+    //     `BootHeadline`(「已请管理端启动网关与 LAN Edge」)。
 
     /// <summary>界面上那一行开机状态。★ 空字符串 = 一切正常,不该占一行。</summary>
     public static string BootHeadline { get; private set; } = "";
@@ -437,23 +447,16 @@ public partial class App : Application
                 RaiseBootChanged();
             });
 
-            // ★★★ 起栈的**唯一**入口,而且被 MayStartStack 挡着 ——
-            //   副机的四条路径结构上都取不到它(见 HostSetup.BootDecision)。
-            if (decision.MayStartStack)
-            {
-                var res = await HostSetup.EnsureStackAsync();
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    Stack = res;
-                    BootHeadline = res.AllUp
-                        ? ""
-                        : res.HalfUp
-                            // ★ 半套是最坏的中间态 —— 必须单独说,别混进"起失败了"
-                            ? $"⚠ 栈只起来一半:{res.Gateway.Name}={Say(res.Gateway)} · {res.Edge.Name}={Say(res.Edge)}"
-                            : $"✗ 栈没起来:{res.Gateway.Name}={Say(res.Gateway)} · {res.Edge.Name}={Say(res.Edge)}";
-                    RaiseBootChanged();
-                });
-            }
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V21:这里原来是**客户端的起栈入口**(`if (decision.MayStartStack)`)。
+            //  它连同 `MayStartStack`、`EnsureStackAsync` 一起搬进了管理端
+            //  (V10 §7:两个 exe 都想起 Edge ⇒ 只保留管理端这一个入口)。
+            //
+            //  ★ 承接它的是**上面那一行** `EnsureAdminAppRunning(decision.Role.IsHost)`:
+            //    主机上客户端把管理端拉起来,管理端自己去起栈。副机上那个 exe 根本不在。
+            //  ★★ 顺序也是承重的,别调:`NoteRole` → 拉管理端 → 起流。
+            //    拉管理端排在起流之前,主机上那两条流第一次拨号时栈更可能已经在起了。
+            // ══════════════════════════════════════════════════════════════
 
             // ★ 无论哪条路都要起流:副机要连中枢,主机起完栈也要连自己那套。
             //   起栈失败也照起 —— 流自己会重试,而界面上那行已经说清是哪一步没起来。
@@ -464,14 +467,6 @@ public partial class App : Application
             });
         });
     }
-
-    static string Say(SetupStep s) =>
-        s.Outcome switch
-        {
-            SetupOutcome.Ok => "已起",
-            SetupOutcome.Skipped => "本来就在跑",
-            _ => "没起来(" + s.Detail + ")",
-        };
 
     // 崩溃日志:追加到 {state}\crash.log(带时间/来源/完整堆栈)。写日志本身绝不能再抛。
     static void LogCrash(string source, Exception? ex)
@@ -610,7 +605,7 @@ public partial class App : Application
                 .ToList();
             if (saved.Count > 0) Services.CalendarGroups.SetFromApple(saved!);
         }
-        SafeImport(ClientStore.MemoryPath, () => Memory.Import(ClientStore.Load<List<MemoryEntry>>(ClientStore.MemoryPath)));
+        // ★ V21:`memory.json` 归管理端 —— 这里不再导入它(连路径都没有了)。
         SafeImport(ClientStore.NotesPath, () => Notes.Import(ClientStore.Load<List<StudyNote>>(ClientStore.NotesPath)));
         SafeImport(ClientStore.HistoryFavPath, () => History.Import(ClientStore.Load<List<string>>(ClientStore.HistoryFavPath)));
         SafeImport(ClientStore.InterpretPath, () => Interpret.Import(ClientStore.Load<InterpretState.Snapshot>(ClientStore.InterpretPath)));
@@ -670,7 +665,6 @@ public partial class App : Application
         // ★ 天气缓存也要落盘 —— 不接这一行的话,缓存只活在内存里,
         //   重启/断网时"显示上次那份 + 它的时间"根本无从谈起(设计 §8 第 6 条的整个意义就没了)。
         Services.Weather.Changed += Touch;
-        Memory.Changed += Touch;
         Notes.Changed += Touch;
         History.Changed += Touch;
         Interpret.Changed += Touch;
@@ -687,7 +681,6 @@ public partial class App : Application
         S(ClientStore.ChatPath, Chat.Export());
         S(ClientStore.CalendarPath, Views.CalendarData.Export());
         S(ClientStore.WeatherPath, Services.Weather.Export());
-        S(ClientStore.MemoryPath, Memory.Export());
         S(ClientStore.NotesPath, Notes.Export());
         S(ClientStore.HistoryFavPath, History.Export());
         S(ClientStore.InterpretPath, Interpret.Export());
