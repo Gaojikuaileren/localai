@@ -295,7 +295,7 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     ("lan-edge", "GET", "/admin/ping"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.ping",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "消费者 Services/HubAdmin.cs:125 —— pairingWindowOpen 从这里来;"
                 "读错就退回'本地布尔替中枢记配对窗口开没开'(Selftest.cs:5923 明令禁止的那件事)"
                 " **已还(V4)**。",
@@ -303,35 +303,35 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     ("lan-edge", "GET", "/admin/pairing/pending"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.pending",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "消费者 Services/HubAdmin.cs:197"
                 " **已还(V4)**:顶层 + 元素两层都钉(六个词在元素那一层)。",
     },
     ("lan-edge", "POST", "/admin/pairing/approve"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.approve",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "消费者 Services/HubAdmin.cs:220"
                 " **已还(V4)**:200 与 **409 失败分支**都钉。",
     },
     ("lan-edge", "POST", "/admin/pairing/deny"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.deny",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "消费者 Services/HubAdmin.cs:223"
                 " **已还(V4)**。",
     },
     ("lan-edge", "POST", "/admin/pairing/window"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.window",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "消费者 Services/HubAdmin.cs:230"
                 " **已还(V4)**:应答里中枢自报的窗口状态现在真的被读了(此前只能拿本地布尔猜)。",
     },
     ("lan-edge", "GET", "/admin/devices"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.devices",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "**两个**消费者:Services/HubAdmin.cs:238 与 Services/HubClient.cs:310 —— "
                 "★ 两处各自解析同一个形状,漂移时只会有一处被发现"
                 " **已还(V4)**,并且那个**双解析器缺陷已收**:HubClient.ParseDevices 现在委派给 HubAdmin.ParseDevices,全客户端只剩一处解析;顶层 + 元素两层都钉。",
@@ -339,7 +339,7 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     ("lan-edge", "POST", "/admin/devices/revoke"): {
         "state": "paired", "cid": "CONTRACT:cert.admin.revoke",
         "lane": "证书/配对切片",
-        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/app/Selftest.cs",
+        "server_file": "10-core/lan-edge/Program.cs", "client_file": "20-client-win/admin/SelftestMoved.cs",
         "note": "**两个**消费者:Services/HubAdmin.cs:255 与 Services/HubClient.cs:328(同上)"
                 " **已还(V4)**,并且那个**两个调用方都不看应答体的缺陷已收**:两处共用 HubAdmin.ParseRevokeBody,ok=false 或 generation 不是正数都会记进 LastError(此前失败的吊销与成功的长得一模一样)。",
     },
@@ -759,6 +759,11 @@ if _peer_src is not None:
     #   · app/Selftest.cs 里还剩 gpu.* / sync.* 那些 ⇒ `len > 0` 照样成立 ⇒ **绿**;
     #   · 于是"管理端那半边的契约号一个都解析不出来"这种事,这条判据**结构上说不出来**。
     #   ⇒ 判据跟着登记表走:**每一个被声明为客户端半边的文件**都各自零命中判红。
+#
+#   ★★★ V21(2026-08-08)后记:**它真的搬了**。那 7 条的客户端半边现在在
+#     `20-client-win/admin/SelftestMoved.cs`,登记表已成对改到那儿。
+#     ★ 这条判据在改之前**先红了一次**(旧登记指着 app/Selftest.cs,而那儿一条都不剩)
+#       —— 也就是说 V19 写下的那句预判,今天被它自己抓到了。
     #     声明一个新工程的文件而正则在那儿失灵 ⇒ 红,不再是"反正别处还有命中"。
     _declared_client_files = sorted({
         rel for m in CONTRACTS.values()
