@@ -304,7 +304,7 @@ public sealed class MemoryView : UserControl
                 box.Children.Add(Ui.Caption("· " + sid));
             if (ids.Count > 8) box.Children.Add(Ui.Caption($"…另有 {ids.Count - 8} 条"));
             // ★ 说清为什么这里点不动 —— 一个点不动的链接比没有链接更让人困惑。
-            box.Children.Add(Ui.Caption("★ 原文在**客户端**的会话里(记忆与会话分属两个程序)。"
+            box.Children.Add(Ui.Caption("★ 原文在【客户端】的会话里(记忆与会话分属两个程序)。"
                                         + "到客户端里按这个 id 找那条会话 —— 管理端不去读它的 chat.json。"));
         }
         return box;

@@ -546,18 +546,18 @@ public sealed class HostHubView : UserControl
         stack.Children.Add(new Border { Height = 10 });
         if (ClientProfilePeek.ClientPaired())
         {
-            stack.Children.Add(Ui.Body("这台上的客户端:**已配对**(" + (ClientProfilePeek.Dial() ?? "地址未记录") + ")"));
-            stack.Children.Add(Ui.Caption("★ 它现在连得上连不上,看**客户端**自己的「设备」页 —— "
+            stack.Children.Add(Ui.Body("这台上的客户端:【已配对】(" + (ClientProfilePeek.Dial() ?? "地址未记录") + ")"));
+            stack.Children.Add(Ui.Caption("★ 它现在连得上连不上,看【客户端】自己的「设备」页 —— "
                                           + "那是它自己的状态,这里不复述(两份会漂)。"));
         }
         else
         {
-            stack.Children.Add(Ui.Body("这台上的客户端:**还没配对**。"));
-            stack.Children.Add(Ui.Caption("★ 走法和任何一台副机**完全一样**,只是两块屏幕在同一张桌子上:\n"
+            stack.Children.Add(Ui.Body("这台上的客户端:【还没配对】。"));
+            stack.Children.Add(Ui.Caption("★ 走法和任何一台副机【完全一样】,只是两块屏幕在同一张桌子上:\n"
                                           + "  ① 打开这台的客户端 →「设备」→ 点「开始寻找主机」;\n"
                                           + "  ② 它屏幕上会出现六个词;\n"
                                           + "  ③ 回到这一页下面的「＋ 添加一台新电脑」,逐字核对那六个词,再批准。"));
-            stack.Children.Add(Ui.Caption("★★ 这里**不提供**「一键自己配自己」。旧版有,而它明文跳过了六词比对 —— "
+            stack.Children.Add(Ui.Caption("★★ 这里【不提供】「一键自己配自己」。旧版有,而它明文跳过了六词比对 —— "
                                           + "跨进程之后没法既保住那条捷径又保住纪律,\n"
                                           + "  而在两者之间,逐字比对是不能让的那一个(D47)。"));
             if (!ClientLink.IsClientRunning())

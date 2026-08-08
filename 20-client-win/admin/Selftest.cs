@@ -21,7 +21,7 @@ using LocalAI.Client.Services;
 
 namespace LocalAI.Admin;
 
-public static class Selftest
+public static partial class Selftest
 {
     static int _pass, _fail, _skip;
 
@@ -50,6 +50,7 @@ public static class Selftest
         {
             RunPure();
             RunWiring();
+            RunMoved();     // ★ V21:跟着 3100 行一起搬过来的那批(admin/SelftestMoved.cs)
             RunLive();
         }
         catch (Exception ex) { _fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }

@@ -104,7 +104,7 @@ public static class MemoryStore
             {
                 LastError = $"迁移校验没过:复制出来的 {Path_} 与原件内容不一致"
                           + $"(原件 {srcHash[..12]}… / 副本 {dstHash[..12]}…)。"
-                          + "**原件没有删**,请把它手动复制过去后再启动管理端。";
+                          + "【原件没有删】,请把它手动复制过去后再启动管理端。";
                 return LastResult = MemoryMigration.Failed;
             }
             var (okSrc, nSrc) = CountEntries(LegacyPath);
@@ -113,7 +113,7 @@ public static class MemoryStore
             {
                 LastError = $"迁移校验没过:条目数对不上(原件 {(okSrc ? nSrc.ToString() : "读不懂")}"
                           + $" / 副本 {(okDst ? nDst.ToString() : "读不懂")})。"
-                          + "**原件没有删**,请先确认 " + LegacyPath + " 的内容。";
+                          + "【原件没有删】,请先确认 " + LegacyPath + " 的内容。";
                 return LastResult = MemoryMigration.Failed;
             }
 
@@ -123,7 +123,7 @@ public static class MemoryStore
             catch (Exception ex)
             {
                 LastError = "记忆已经迁好并验过了,但旧文件删不掉(" + ex.Message + ")—— "
-                          + "它现在是一份**不会再被读的**残留:" + LegacyPath;
+                          + "它现在是一份【不会再被读的】残留:" + LegacyPath;
             }
             return LastResult = MemoryMigration.MigratedNow;
         }
@@ -133,7 +133,7 @@ public static class MemoryStore
             LastError = "记忆库迁移失败(" + ex.GetType().Name + "):" + ex.Message
                       + "\n★ 旧文件在:" + LegacyPath
                       + "\n★ 新落点应为:" + Path_
-                      + "\n在这条修好之前,管理端**不会**拿一个空记忆库冒充你的记忆。";
+                      + "\n在这条修好之前,管理端【不会】拿一个空记忆库冒充你的记忆。";
             return LastResult = MemoryMigration.Failed;
         }
     }
@@ -166,9 +166,9 @@ public static class MemoryStore
     /// <summary>给人看的一句话;null = 不必打扰。★ 只有"要人管"的两档才说话。</summary>
     public static string? Notice => LastResult switch
     {
-        MemoryMigration.Failed => "★★ 记忆库没能迁过来,现在**读不到**你的记忆:\n" + (LastError ?? "(没有记下原因)"),
+        MemoryMigration.Failed => "★★ 记忆库没能迁过来,现在【读不到】你的记忆:\n" + (LastError ?? "(没有记下原因)"),
         MemoryMigration.BothPresentKeptTarget =>
-            "★ 新旧两处都有 `memory.json`。已**以管理端这份为准**,"
+            "★ 新旧两处都有 `memory.json`。已【以管理端这份为准】,"
             + "旧的那份改名留在原处(不会被读,也没有删)。",
         _ => LastError,   // MigratedNow 时若旧文件删不掉,这里会带出那句
     };

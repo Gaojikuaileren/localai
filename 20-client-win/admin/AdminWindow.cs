@@ -145,7 +145,7 @@ public sealed class AdminWindow : Window
         // ── 起栈那一格(V21:客户端不再起栈,入口只有这一个)─────────
         stack.Children.Add(Ui.Panel("启动网关与 LAN Edge",
             Ui.Stack(
-                Ui.Body("★★ 全仓**唯一**的起栈入口在管理端(V10 §7:两个 exe 都想起 Edge ⇒ 只留一个)。"),
+                Ui.Body("★★ 全仓【唯一】的起栈入口在管理端(V10 §7:两个 exe 都想起 Edge ⇒ 只留一个)。"),
                 Ui.Caption("客户端在主机上开机时会把管理端拉起来;起栈的进度与失败原因在「主机中枢」那一页。"),
                 Ui.Secondary("去「主机中枢」看", (_, _) => Go("hub"))),
             IconName.Model));

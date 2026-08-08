@@ -155,7 +155,7 @@ public sealed class HubAdmin
     /// </summary>
     public string? ServerCertWarning => ServerCert is { NeedsAttention: true } s
         ? $"主机的服务器证书还有 {s.DaysLeft:0.#} 天到期,自动续签"
-          + (s.ConsecutiveFailures > 0 ? $"**已连续失败 {s.ConsecutiveFailures} 次**" : "尚未把它续上")
+          + (s.ConsecutiveFailures > 0 ? $"【已连续失败 {s.ConsecutiveFailures} 次】" : "尚未把它续上")
           + (string.IsNullOrWhiteSpace(s.LastError) ? "" : $"(最后一次的错误:{s.LastError})")
           + " —— 请在主机上执行 localai-identity renew-server。"
           + "★ 不必重新配对:CA 不变,已配对的设备全部照常有效。"

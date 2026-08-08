@@ -289,16 +289,20 @@ public sealed class DevicesView : UserControl
                 {
                     find_host.Children.Clear();
                     // ★ 这是已配对卡上唯一一个看起来能修连接的按钮,人会先点它 —— 远早于滚到第三张卡。
-                    //   所以这条失败路径必须和另外两条(SelfPairAsync / HubDownCard)说同一套话,
-                    //   否则它会把人支去查路由器/网段/防火墙,而真正要做的只是把本机的 Edge 起起来。
-                    var hd = Services.HubAdmin.HostToolsDir();
-                    find_host.Children.Add(Ui.Caption(hd is not null
+                    //   所以这条失败路径必须说一句**可执行的下一步**,
+                    //   否则它会把人支去查路由器/网段/防火墙,而真正要做的可能只是把本机的中枢起起来。
+                    // ★★ V21:判据从「旁边有没有 host 工具目录」换成「**这台装没装管理端**」——
+                    //   起中枢那件事现在只有管理端做得到(客户端里连那个入口都没有了),
+                    //   所以指路要指到**管理端**去,而不是让人自己去双击一个 .cmd。
+                    //   ★ `StartEdgeCmd()` 跟着 `HubAdmin` 搬走了,这一句因此也**不再提那个 .cmd** ——
+                    //     留着它会把人指向一条这个程序已经不负责的路。
+                    var hasAdmin = Services.AdminApp.AdminAppPath() is not null;
+                    find_host.Children.Add(Ui.Caption(hasAdmin
                         ? "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
-                          + " —— 而本机装着主机端程序,多半是这台的 Edge 还没启动。去双击 "
-                          + (Services.HubAdmin.StartEdgeCmd() ?? Path.Combine(hd, "启动Edge.cmd"))
-                          + "。"
+                          + " —— 而这台装着管理端,多半是本机的中枢还没起来。"
+                          + "到设置最下面点「打开管理端面板」→「主机中枢」,那一页会把它起起来。"
                         : "没找到:" + (TheApp.Hub.LastError ?? "未知原因")
-                          + " —— 确认主机那台的 Edge 起着、两台在同一网段、防火墙放行了 8443。"));
+                          + " —— 确认主机那台的中枢起着、两台在同一网段、防火墙放行了 8443。"));
                 }
             });
         });

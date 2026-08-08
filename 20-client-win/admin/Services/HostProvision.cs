@@ -243,7 +243,7 @@ public static class HostProvision
             // 仓库形态:dist\admin\ → ..\..\10-core\gateway(与 dist\client\ 同一层深度)
             var gwDir = Path.GetFullPath(Path.Combine(here, "..", "..", "10-core", "gateway"));
             if (!File.Exists(Path.Combine(gwDir, "gateway.py")))
-                return (null, $"找不到网关源码({gwDir})—— ★ 网关**没有随包发布**,"
+                return (null, $"找不到网关源码({gwDir})—— ★ 网关【没有随包发布】,"
                             + "它只存在于仓库里(dist\\host 里只有 lan-edge 与 identity)");
             // 解释器:从 paths.toml 的 models 根推出 <AI 根>\venvs\gateway
             //  ★ 这一步**沿用了 start-stack.ps1 的推导**(models 的父目录 = AI 根),
@@ -319,7 +319,7 @@ public static class HostProvision
             return new SetupStep(name, SetupOutcome.Ok, "已起并探到 /health");
         return new SetupStep(name, SetupOutcome.Failed,
             $"进程起了,但 20 秒内探不到 http://127.0.0.1:{HostSetup.GatewayPort}/health —— "
-            + "**不当作成功**(端口被占?venv 缺依赖?)");
+            + "【不当作成功】(端口被占?venv 缺依赖?)");
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -369,7 +369,7 @@ public static class HostProvision
 
         // ③ 多个候选而路由表又没给出答案 ⇒ **不替他挑**。
         why = $"本机有 {locals.Count} 个网卡地址({string.Join("、", locals)}),"
-            + "而路由表没能指出该用哪一个 —— **不替你挑**:挑错会把一个连不上的地址写进配对档案。"
+            + "而路由表没能指出该用哪一个 —— 【不替你挑】:挑错会把一个连不上的地址写进配对档案。"
             + "★ 请到「主机中枢」那一页里手动选一张网卡。";
         return null;
     }
@@ -468,7 +468,7 @@ public static class HostProvision
             return new SetupStep(name, SetupOutcome.Ok,
                 $"已起(业务口 {ip}:{EdgePort},管理面 127.0.0.1:{HubAdmin.AdminPort})并探到管理面。{whyIp}");
         return new SetupStep(name, SetupOutcome.Failed,
-            $"进程起了,但 20 秒内连不上回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— **不当作成功**。"
+            $"进程起了,但 20 秒内连不上回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— 【不当作成功】。"
             + ExitNote(_edgeProc) + " 中枢自己打印的话在:" + EdgeLogPath);
     }
 
@@ -493,17 +493,17 @@ public static class HostProvision
         {
             if (p is null) return "(没拿到子进程句柄,读不到它的退出状态。)";
             if (!p.HasExited)
-                return "(进程**还活着**,只是端口没开 —— 多半是它卡在某一步,"
+                return "(进程【还活着】,只是端口没开 —— 多半是它卡在某一步,"
                      + "或者绑的地址不对。手动双击 `localai-lan-edge.exe` 能看到它到底说了什么。)";
             // ★ 这几个数字来自 `10-core/lan-edge/Program.cs` 的 RunLan;
             //   对不上的表现是"给了一句自信而错误的原因",比不给还坏 ⇒ 未登记的码**如实说不认识**。
-            return " 子进程**已经退出**,退出码 " + p.ExitCode + p.ExitCode switch
+            return " 子进程【已经退出】,退出码 " + p.ExitCode + p.ExitCode switch
             {
                 1 => ":这台还没有中枢身份(要先 `localai-identity init`)。",
                 2 => ":lan-edge 说命令行不对 —— 我们传的绑定地址它不认。",
-                3 => ":**打不开身份密钥(CA)**。★ TPM/CNG 用户密钥绑定【铸造时】的完整性等级 —— "
+                3 => ":【打不开身份密钥(CA)】。★ TPM/CNG 用户密钥绑定【铸造时】的完整性等级 —— "
                    + "这套身份多半是用另一个等级(普通/管理员)铸的。",
-                4 => $":{EdgePort} 已被占用 —— 多半是中枢**已经在跑了**(另一个窗口),那就不用再开一个。",
+                4 => $":{EdgePort} 已被占用 —— 多半是中枢【已经在跑了】(另一个窗口),那就不用再开一个。",
                 _ => "(这个码没有登记过,我不知道它是什么意思 —— 手动双击那个 exe 看它自己怎么说)。",
             };
         }

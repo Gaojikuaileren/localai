@@ -598,7 +598,12 @@ public sealed class HubClient
             State = HubState.Offline;
             LastError = $"这台是中枢主机,业务口是回环网关 {route.EndPoint},而它没有应答:{ex.Message}"
                       + " —— 这**不是**配对/证书/防火墙的问题(回环不过防火墙),是**网关没起来**。"
-                      + "看「设备」页那行起栈结果,或 " + HostSetup.EdgeLogPath;
+                      // ★★ V21:起栈搬进管理端了,客户端**不再有** `EdgeLogPath` ——
+                      //   指路也跟着改到管理端。★ 不在这里写死那个日志路径:
+                      //   那是管理端的产物,写死一份会在它改路径的那天变成一句假话
+                      //   (ASSERTION-PITFALLS 第 16 条:别替外部世界的专名作保)。
+                      + "起栈归管理端 —— 打开管理端面板的「主机中枢」那一页,"
+                      + "它会说清网关起到哪一步、以及中枢自己打印了什么。";
             throw;
         }
         catch (Exception ex)

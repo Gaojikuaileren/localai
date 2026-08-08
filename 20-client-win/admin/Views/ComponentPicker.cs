@@ -201,7 +201,7 @@ public sealed class ComponentPicker : UserControl
             IsChecked = _checked.Contains(c.Id),
             VerticalAlignment = VerticalAlignment.Center,
             // ★ 两列必须能一眼分清是哪一列 —— 只靠位置的话,勾错的那次没人看得出来。
-            ToolTip = "常驻:一直装着。★ 系统**不会**自动改这一列 —— 一个字节都不会。",
+            ToolTip = "常驻:一直装着。★ 系统【不会】自动改这一列 —— 一个字节都不会。",
         };
         check.Checked += (_, _) => { _checked.Add(c.Id); Recompute(); };
         check.Unchecked += (_, _) => { _checked.Remove(c.Id); Recompute(); };
@@ -214,7 +214,7 @@ public sealed class ComponentPicker : UserControl
             Margin = new Thickness(0, 0, 18, 0),
             ToolTip = "按需:授权系统在你用到它的时候自动装、空闲 10 分钟后自动卸。\n"
                       + "★ 不勾就没有按需 —— 没有这次授权,系统就是在你没同意的情况下自己动显存。\n"
-                      + "★ 这一列只能在**主机**上改。",
+                      + "★ 这一列只能在【主机】上改。",
         };
         onDemand.Checked += (_, _) => { _permitted.Add(c.Id); Recompute(); };
         onDemand.Unchecked += (_, _) => { _permitted.Remove(c.Id); Recompute(); };
@@ -289,7 +289,7 @@ public sealed class ComponentPicker : UserControl
         if (overStatic > 1e-9)
             Danger(_wallStatic, $"你的桌面预留　desktop_floor {cat.DesktopFloor:0.00} → vram_budget {cat.VramBudget:0.00}"
                                 + $"(总量 {cat.TotalGiB:0.00} − 预留 {cat.DesktopFloor:0.00} − 安全余量 {cat.SafetyMargin:0.00})"
-                                + $"　★ 超 {overStatic:0.00} GiB。→ 这堵墙**可以**靠调小桌面预留让开,或者少选几个。");
+                                + $"　★ 超 {overStatic:0.00} GiB。→ 这堵墙【可以】靠调小桌面预留让开,或者少选几个。");
         else
             Muted(_wallStatic, $"你的桌面预留　desktop_floor {cat.DesktopFloor:0.00} → vram_budget {cat.VramBudget:0.00}"
                                + $"(还余 {cat.VramBudget - sum:0.00})");
@@ -316,16 +316,16 @@ public sealed class ComponentPicker : UserControl
                 Muted(_headroom, $"可以确定 ✓　　还能让桌面再涨 {headroom:0.00} GiB 才会出问题");
             else if (overStatic > 1e-9)
                 // 撞的是预算墙 —— 这一行不谈"再涨多少",谈了会把人支去关程序(而那没用)。
-                Danger(_headroom, $"不能确定 ✗　　撞的是**显存预算**(超 {overStatic:0.00} GiB)—— "
+                Danger(_headroom, $"不能确定 ✗　　撞的是【显存预算】(超 {overStatic:0.00} GiB)—— "
                                   + "改桌面预留有用,关程序没有用。");
             else
-                Danger(_headroom, $"不能确定 ✗　　此刻**已经**差 {-headroom:0.00} GiB —— "
-                                  + "撞的是物理墙,**改桌面预留没有用**,得关掉正在占显存的程序。");
+                Danger(_headroom, $"不能确定 ✗　　此刻【已经】差 {-headroom:0.00} GiB —— "
+                                  + "撞的是物理墙,【改桌面预留没有用】,得关掉正在占显存的程序。");
         }
         else
         {
             Danger(_wallDynamic, "此刻实际可用　中枢这一轮没读到实时可用显存 —— 装不装得下"
-                                 + "**现在算不出来**(不拿旧值冒充)。点确定时中枢会重新求值。");
+                                 + "【现在算不出来】(不拿旧值冒充)。点确定时中枢会重新求值。");
             // ★ 读不到 free 就**不显示**那一行 —— 它需要 free 才算得出来,
             //   编一个"还能再涨 N"比不说更坏(那正是这一行存在要防的事:让人以为自己知道离墙多远)。
             Muted(_headroom, "还能让桌面再涨多少　—— 读不到实时可用显存,这一行现在算不出来。");
@@ -407,14 +407,19 @@ public sealed class ComponentPicker : UserControl
     {
         _status.Text = text;
         _status.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
-        if (danger) _status.Foreground = new SolidColorBrush(Color.FromRgb(0xD9, 0x30, 0x25));
-        else _status.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+        // ★★ V21:这里原来是写死的 `Color.FromRgb(0xD9,0x30,0x25)`。搬进管理端之后被那条
+        //   「管理端里不得出现颜色字面量」的断言当场抓住 —— 而它抓得对:
+        //   写死的颜色**换肤时不跟着变**,而两个 exe 各自渲染,漂了不会有任何东西红。
+        //   ★ 这段代码在客户端里躲过了那条断言,只是因为那条断言的范围是 admin/ ——
+        //     不是因为它在客户端里就没问题。搬家把一个一直存在的问题照出来了。
+        _status.SetResourceReference(TextBlock.ForegroundProperty, danger ? "RiskDanger" : "FgMuted");
     }
 
     static void Danger(TextBlock t, string s)
     {
         t.Text = s;
-        t.Foreground = new SolidColorBrush(Color.FromRgb(0xD9, 0x30, 0x25));
+        // ★ 同上:颜色走令牌(RiskDanger),不写死 —— 见 SetStatus 上方那段。
+        t.SetResourceReference(TextBlock.ForegroundProperty, "RiskDanger");
     }
 
     static void Muted(TextBlock t, string s)
