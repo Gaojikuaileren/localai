@@ -8807,7 +8807,15 @@ public static class Selftest
                 var probe = AppContext.BaseDirectory;
                 for (int i = 0; i < 8 && probe is not null; i++)
                 {
-                    if (File.Exists(Path.Combine(probe, "Selftest.cs")))
+                    // ★★ 锚点必须是【两个】文件（同 TryReadAllSources）。
+                    //   ★ 这一处是 2026-08-08 出包时**漏改的第三处** —— 当时只改了
+                    //     TryReadAllSources 与 SourceRootPresent，把它落下了。后果是：
+                    //     「换个安装位置」那一趟里它拿 %TEMP%\Selftest.cs 当源码根，
+                    //     算出一个不存在的 admin 目录 ⇒ 下面那条元断言当场红，
+                    //     而它报的“找不到管理端源码”**理由是假的**（那趟本来就没有源码）。
+                    //   ⇒ 同一个修法漏改一处，就把缺陷留在那一处；改完要**把同形状的地方都数一遍**。
+                    if (File.Exists(Path.Combine(probe, "Selftest.cs"))
+                        && File.Exists(Path.Combine(probe, "localai-client.csproj")))
                     { appRoot = probe; winRoot = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar)); break; }
                     probe = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar));
                 }
