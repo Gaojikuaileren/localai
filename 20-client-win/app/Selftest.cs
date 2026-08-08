@@ -315,7 +315,14 @@ public static class Selftest
             var mwStatus = TryReadSource("MainWindow.xaml.cs");
             if (mwStatus is not null)
             {
-                Assert(mwStatus.Contains("ThisMachineIsHub"), "状态块显示本机是否为主机");
+                // ★ V19:针脚从 `ThisMachineIsHub`(看拨号地址的启发式)改成角色判定。
+                //   ★★ 换的是**针脚**,不是判词 —— 这一格仍然要回答「本机是不是主机」。
+                //     `ThisMachineIsHub` 已删(零调用方),而 `DecideRole` 拿的是**同一个输入**
+                //     (Profile.Dial)、走的是更严的 `ResolvesToThisMachine`
+                //     (IPv6 不会被切坏;「解析不出」与「解析到别人」分开)。
+                //   ★ 判词跟着口径微调:它答的是**角色**,不是「中枢在不在跑」——
+                //     后者由 V19 那组断言单独钉(见「左下角那一格」那一节)。
+                Assert(mwStatus.Contains("App.Boot?.Role"), "状态块显示本机的【角色】(主机/副机)");
                 Assert(mwStatus.Contains("OnOpenUsage") && mwStatus.Contains("usage.title"), "点状态块弹出 token 用量表");
                 // 用户裁定(2026-07-30):token 块左边加【当前使用者】显示栏,未连接中枢时显示"未连接中枢"
                 Assert(mwStatus.Contains("MemberText.Text") && mwStatus.Contains("IdentityGuess.Current"),
@@ -2966,10 +2973,70 @@ public static class Selftest
                 Assert(peDup.Contains("已删除项目") && peDup.Contains("已完成项目"), "提示里说明该项目当前在哪(进行中/已完成/已删除)");
                 Assert(peDup.Contains("MachineOptions") && peDup.Contains("本机"), "可选择文件夹所在机器(本机 / 已配对电脑)");
             }
-            var hubDev = TryReadSource(Path.Combine("Services", "HubClient.cs"));
-            if (hubDev is not null)
-                Assert(hubDev.Contains("KnownDevices") && hubDev.Contains("CacheDevices"),
-                       "★ 远程机器清单只来自【真的拿到过】的设备表(拿不到就只有本机,不摆假列表)");
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★ V19(2026-08-08)· 这一条**换掉了一条假绿**。
+            //
+            //  原来写的是:在 `HubClient.cs` 里 grep 到 "KnownDevices" 和 "CacheDevices"
+            //  这两个**名字**就算过。可那两个名字是**声明**,不是**调用** ——
+            //  于是它测的是"这个字段存在吗",而判词说的是"远程机器清单只来自真的拿到过的设备表"。
+            //
+            //  实测(V19):`CacheDevices` 的唯一调用点在 `DevicesView.RenderDevices` 里,
+            //  而 `RenderDevices` **一个调用方都没有**。⇒ `KnownDevices` 结构性恒空,
+            //  项目「文件夹所在机器」那个下拉从来只有「本机」一项 —— **而这条断言一直是绿的**。
+            //  功能没了、判据照绿,整整绿了多久没人知道。
+            //
+            //  ⇒ 新判据问的是**有没有人调**,而且那个调用方**自己得被调**:
+            //    ① 至少一处 `CacheDevices(` 的调用点(声明所在的 HubClient.cs 不算);
+            //    ② 那处调用落在 `LoadDevicesAsync` 里 —— 那是主机侧真的会跑的拉取路径;
+            //    ③ `LoadDevicesAsync` 自己被调(名字出现 ≥2 次 = 声明 + 调用);
+            //    ④ 消费端还连着:`ProjectEditor.MachineOptions` 仍然读 `KnownDevices`。
+            //  ★★ 四条**每一条都能为假**,而且是**下一轮迁移会踩的那种假**:
+            //    主机侧那一段搬进管理端之后,客户端就再也没有写入点 ⇒ ① 与 ② 当场红。
+            //    那时要做的是**做决定**(接回来 / 连同下拉一起撤掉),不是把判据改宽。
+            // ══════════════════════════════════════════════════════════════════
+            {
+                var hubDev = TryReadSource(Path.Combine("Services", "HubClient.cs"));
+                var devView = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                var projEd = TryReadSource(Path.Combine("Views", "ProjectEditor.cs"));
+                // ★ 元断言:三份源码都读得到。读不到就整段跳过,而"零断言"与"全过了"
+                //   在终端上长得一模一样(ASSERTION-PITFALLS 第 11 条)。
+                if (hubDev is not null && devView is not null && projEd is not null)
+                {
+                    Assert(hubDev.Contains("public void CacheDevices("),
+                           "★ 元断言:`CacheDevices` 的声明还在 HubClient.cs —— "
+                           + "它要是改了名,下面数调用点的判据会静默数到 0 而报一个假原因");
+
+                    var dvNoComments = NoComments(devView);
+                    var callSites = System.Text.RegularExpressions.Regex
+                        .Matches(dvNoComments, @"CacheDevices\s*\(").Count;
+                    Assert(callSites >= 1,
+                           "★★★ `CacheDevices` 必须**真的有人调** —— 只有声明不算。"
+                           + "上一版判据 grep 的是名字,而实测那时唯一的调用点在一段"
+                           + "**没有任何调用方**的死代码里:功能早就没了,判据一直绿。"
+                           + $"(现数到 {callSites} 处)");
+
+                    var loadFn = Slice(devView, "async Task LoadDevicesAsync", "// ═════");
+                    Assert(loadFn is not null && loadFn.Contains("CacheDevices("),
+                           "★★★ 写入点必须落在 `LoadDevicesAsync` 这条**活**路径上 —— "
+                           + "落在一段没人调的方法里,`KnownDevices` 就是结构性恒空,"
+                           + "而那个下拉会永远只有「本机」");
+
+                    var loadRefs = System.Text.RegularExpressions.Regex
+                        .Matches(dvNoComments, @"\bLoadDevicesAsync\b").Count;
+                    Assert(loadRefs >= 2,
+                           "★★ `LoadDevicesAsync` 自己也得**被调**(声明 + 至少一处调用)—— "
+                           + "否则写入点是挪到了另一段死代码里,而上面那两条照样绿。"
+                           + $"(现数到 {loadRefs} 处引用)");
+
+                    Assert(projEd.Contains("KnownDevices"),
+                           "★★ 消费端还连着:项目「文件夹所在机器」下拉仍然读 `KnownDevices` —— "
+                           + "消费端断了的话,上面那条写入点就成了写给没人看的地方");
+
+                    // ★ 反过来钉住那条**诚实**的兜底:拿不到就只有本机,不摆假的远程列表。
+                    Assert(projEd.Contains("ProjectCenter.LocalMachine"),
+                           "★ 拿不到设备表时**只有本机** —— 不编一个假的远程列表(判词的另一半)");
+                }
+            }
             var appMerge = TryReadSource("App.xaml.cs");
             if (appMerge is not null)
                 Assert(appMerge.Contains("MergeDuplicateFolders"), "启动加载存档后合并同路径重复项目");
@@ -6328,15 +6395,124 @@ public static class Selftest
                            "★★ 「添加一台新电脑」默认收起 —— 只有主机没有副机的人才不会无意中开窗;"
                            + "展开这个动作本身就是明确意图");
 
-                    // ⑤ 六词比对【不许】被一键化掉
-                    var approveDlg = Slice(dv4, "async Task ShowApprovalDialogAsync", "// ============");
-                    Assert(approveDlg is not null && approveDlg.Contains("六个词逐字一样"),
+                    // ══════════════════════════════════════════════════════════
+                    //  ⑤ 六词比对【不许】被一键化掉
+                    //
+                    //  ★★★ V19(2026-08-08):这三条**原来钉在死代码上**。
+                    //    它们切的是 `ShowApprovalDialogAsync`,而那条路 2026-08-08 前就废了
+                    //    (DevicesView 里那段注释白纸黑字:enroll 是**匿名**的,自动弹窗
+                    //     等于「局域网上任何人都能触发的动作」⇒ 改成不自动弹)。
+                    //    真正在跑的是 `PendingRow` 上的批准/拒绝按钮。
+                    //    ⇒ **今天测的是死代码**:把活路径上的六词比对整个删掉,这三条照样绿。
+                    //
+                    //  ★ 修法不是"把针脚挪过去就完事" —— 判据要**能扛住那两种去留**:
+                    //    弹窗接回来(由人主动点某一条才弹)也好、彻底删掉也好,
+                    //    「批准之前必须逐字比过六个词」这条判词都得成立。
+                    //    ⇒ 所以下面第三条是**遍历所有批准入口**,不是钉某一个函数。
+                    // ══════════════════════════════════════════════════════════
+                    var pendRow = Slice(dv4, "UIElement PendingRow", "UIElement DeviceRow");
+                    Assert(pendRow is not null,
+                           "★ 元断言:切得到 `PendingRow`(活的批准路径)—— "
+                           + "切不到的话下面三条会**静默变成零断言**");
+                    Assert(pendRow is not null && pendRow.Contains("逐字核对过了,批准"),
                            "★★ 批准按钮的文字本身就是那句断言,不是中性的「确定」—— "
                            + "六个词管的是「这条请求是不是你发的」,displayName 是自报的可以随便写");
-                    Assert(approveDlg is not null && approveDlg.Contains("DenyAsync"),
-                           "★ 弹窗要有拒绝这条路,不能只有批准和关掉");
-                    Assert(approveDlg is not null && !approveDlg.Contains("跳过"),
-                           "★★ 不提供任何「跳过比对」的快捷方式");
+                    Assert(pendRow is not null && pendRow.Contains("DenyAsync"),
+                           "★ 批准那一行要有拒绝这条路,不能只有批准和无视");
+                    Assert(pendRow is not null && pendRow.Contains("p.Sas"),
+                           "★★ 六个词要**摆在屏幕上**给人对 —— 只写一句「请核对」而不显示词,"
+                           + "那句话就没有对象可核");
+
+                    // ★★★ 遍历**所有**批准入口:每一处 `ApproveAsync(` 之前都得有六词比对的字样。
+                    //   ★ 这条**不挑函数** —— 挑函数的判据会随那个函数的去留一起失效,
+                    //     而这正是上面那三条栽过的地方。
+                    //
+                    //   ★★★ 有**一个**登记在册的例外:`SelfPairAsync`(本机自配对)。
+                    //     它写这条判据时**当场把我抓了一次** —— 第一版不认例外,
+                    //     于是对着一条项目**深思熟虑决定不比六个词**的路径判红。
+                    //     那种红是误红,而本仓的经验是:**误红的护栏很快就没人看**。
+                    //     ⇒ 例外要**登记**,而且例外自己的那道闸要被单独钉住
+                    //       (与契约门禁里 `_SUBSHAPE_CIDS` 逐条写明"为什么不抵消欠债"同款手法)。
+                    //     它凭什么免:同机走回环,没有中间人可防;能调回环管理面的人已经在这台机器上,
+                    //     他本来就能批准任何请求。⇒ 免的是**②确认请求来源**,不是①防中间人(那层仍在)。
+                    {
+                        var dvCode = NoComments(dv4);
+                        var selfPair = Slice(dv4, "async Task SelfPairAsync", "UIElement HostDevicesCard");
+                        var selfPairCode = selfPair is null ? "" : NoComments(selfPair);
+
+                        var allSites = System.Text.RegularExpressions.Regex
+                            .Matches(dvCode, @"ApproveAsync\s*\(").Count;
+                        Assert(allSites >= 2,
+                               $"★ 元断言:数得到批准入口(现 {allSites} 处)—— "
+                               + "数到 0/1 时下面的判据会静默恒真或把例外算成全部");
+
+                        // ★ 把登记在册的那个例外**整段挖掉**再扫剩下的。
+                        var scanned = selfPairCode.Length > 0 ? dvCode.Replace(selfPairCode, "") : dvCode;
+                        var scannedSites = System.Text.RegularExpressions.Regex
+                            .Matches(scanned, @"ApproveAsync\s*\(").Count;
+                        // ★★ 挖掉的**必须恰好是 1 个** —— 挖 0 个说明切片没匹配上(判据白扫),
+                        //   挖 ≥2 个说明例外的范围悄悄变大了(那才是真正危险的方向:
+                        //   有人把新的批准入口塞进自配对那一段来躲开这条判据)。
+                        Assert(allSites - scannedSites == 1,
+                               $"★★★ 登记在册的例外必须**恰好挖掉一个**批准入口"
+                               + $"(全部 {allSites} · 挖后 {scannedSites})—— "
+                               + "挖 0 个 = 切片没匹配上,这条判据在空扫;"
+                               + "挖 ≥2 个 = 有人把新的批准入口塞进自配对那一段来躲开它");
+
+                        var bad = 0;
+                        foreach (System.Text.RegularExpressions.Match m in
+                                 System.Text.RegularExpressions.Regex.Matches(scanned, @"ApproveAsync\s*\("))
+                        {
+                            var from = Math.Max(0, m.Index - 1200);
+                            if (!scanned[from..m.Index].Contains("逐字")) bad++;
+                        }
+                        Assert(bad == 0,
+                               $"★★★ 除登记的自配对例外外,**每一个**批准入口之前都必须有六词【逐字】比对"
+                               + $"({bad} 处没有)—— 这条判据不挑函数:弹窗接回来也好、彻底删掉也好,"
+                               + "「批准之前逐字比过六个词」都得成立。"
+                               + "上一版把它钉在一个具体函数上,而那个函数早就没人调了");
+
+                        // ★★★ 例外**自己的那道闸**:免了六词,就必须当场重探管理面并确认 hubId。
+                        //   不能拿几分钟前的探测结果当通行证 —— 那期间中枢可能换了、Edge 可能重起过。
+                        //   ⇒ 免六词的**全部依据**就是"这是同一台机器的回环",这条一松,例外就不成立了。
+                        Assert(selfPairCode.Length > 0,
+                               "★ 元断言:切得到 `SelfPairAsync` —— 切不到的话下面那条会静默零断言,"
+                               + "而上面那条「恰好挖掉一个」也会同时红(两条互相兜)");
+                        Assert(selfPairCode.Contains("admin.ProbeAsync(TheApp.Hub.Profile?.HubId)")
+                               && selfPairCode.Contains("admin.LastProbe != Services.AdminProbeResult.Ok"),
+                               "★★★ 自配对免比六个词的**前提**:必须【当场重探】回环管理面并确认 hubId 一致。"
+                               + "拿旧结论当通行证,那段免除的理由就不成立了 —— "
+                               + "免的是「确认请求来源」,凭的是「这确实是本机的回环」,"
+                               + "而那件事只有刚刚探过才知道");
+                    }
+
+                    // ★★★ 安全判据:**轮询那条路不许自动弹窗**。
+                    //   enroll 是匿名的 ⇒ 自动弹窗 = 局域网上任何人都能决定你屏幕上跳出什么,
+                    //   由对方的到达时机说了算。这条与「弹窗要不要回来」**无关**:
+                    //   就算接回来,也只能是**人主动点某一条**才弹,不能由轮询触发。
+                    //   ★★★ V19(用户裁定 A 之后)判据**换了形状**:
+                    //     上一版钉的是「轮询里不许出现 `ShowApprovalDialogAsync`」——
+                    //     而那个方法当天被删了 ⇒ 那条判据**永远为真**,成了一条恒真断言,
+                    //     而它守的是一条**安全**性质。一条守着安全性质的恒真断言,
+                    //     比没有更坏:它会让人以为那件事有人看着。
+                    //   ⇒ 改钉**行为**:轮询那一段里不许出现**任何**弹窗调用。
+                    //     这样无论将来那个弹窗叫什么名字、由谁写,只要它被轮询触发就会红。
+                    var pollForPopup = Slice(dv4, "async Task PollPendingAsync", "// ═════");
+                    Assert(pollForPopup is not null,
+                           "★ 元断言:切得到 `PollPendingAsync` —— 切不到的话下面那条会静默零断言");
+                    {
+                        var pollCode = pollForPopup is null ? "" : NoComments(pollForPopup);
+                        // ★ 判据是「有没有开窗这个动作」,不认具体名字:
+                        //   ConfirmDialog.Show / MessageBox.Show / .ShowDialog() 全算。
+                        var popups = System.Text.RegularExpressions.Regex
+                            .Matches(pollCode, @"ConfirmDialog\.Show|MessageBox\.Show|\.ShowDialog\s*\(").Count;
+                        Assert(pollForPopup is not null && popups == 0,
+                               $"★★★ 待批准**轮询**里不许弹窗(现数到 {popups} 处)—— enroll 是匿名的,"
+                               + "「新请求一到就自动弹」等于把「你屏幕上跳出什么」交给局域网上的任何人,"
+                               + "准入的节奏必须归你,不归发起方。"
+                               + "★ 判据钉的是**开窗这个动作**,不是某个方法名 —— "
+                               + "上一版钉名字,而那个名字被删掉之后判据就恒真了");
+                    }
 
                     // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
                     var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
@@ -6462,7 +6638,14 @@ public static class Selftest
                     Assert(devRow is not null && devRow.Contains("if (!isSelf)"),
                            "★★ 已配对列表里【看得到自己但不能移除自己】—— 自己就是主机,"
                            + "解除自己等于让这台机器把自己踢出去");
-                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "void RenderDevices");
+                    // ★ 下界原来是 `void RenderDevices` —— 那个方法**一个调用方都没有**,已随 V19 删掉。
+                    //   ★★ 顺带记一条:拿一段**死代码**当切片边界,等于让一条活断言的范围
+                    //     由一段没人调的代码来定 —— 它被删掉的那天,`Slice` 返回 null,
+                    //     而 `is not null &&` 会让整条断言**静默变成恒假**…… 不,更糟:
+                    //     写成 `x is not null && x.Contains(...)` 时它判红(还好);
+                    //     写成 `x?.Contains(...) != false` 那种就会静默转绿。
+                    //     ⇒ 边界要挑**结构上不会消失**的东西。这里改用类的收尾分节注释。
+                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "// ═════");
                     Assert(isSelfFn is not null && isSelfFn.Contains("CertShort") && isSelfFn.Contains("SHA256"),
                            "★★ 认「是不是自己」要按证书指纹,不按名字 —— 同名设备很常见,而名字还是自报的");
                     // ㉓ 副机侧:只允许「开始寻找主机」+ 网络选择(仅多网)+ 角色检测
@@ -6477,13 +6660,38 @@ public static class Selftest
                            + "绝不假装敲门已经发出去了(那会让人在副机这边干等一个不会来的响应)");
 
                     // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
-                    Assert(body4.Contains("rst == 409") && body4.Contains("重新点一次「开始配对」"),
+                    //
+                    // ★★★ V19(2026-08-08 用户裁定 A):这一条**也是钉在死代码上的**。
+                    //   上一版的针脚是 `rst == 409` —— 而 `rst` 这个名字**只存在于**
+                    //   `ShowApprovalDialogAsync` 里,那个方法零调用方、当天被删。
+                    //   ⇒ 删掉它的那一刻这条断言当场红,而它守的那件事(409 要说话)
+                    //     在活路径上**一直是成立的** —— 也就是说:这条断言此前一直在
+                    //     替死代码作证,活路径上那份是"顺便也对",不是被它测出来的。
+                    //   ★ 这是同一天里发现的**第 2 条**寄生在这个死方法上的断言
+                    //     (另 3 条是六词比对那组)。⇒ 针脚改钉活路径,并且**不依赖变量名**。
+                    Assert(pendRow is not null && pendRow.Contains("409")
+                           && pendRow.Contains("重新点一次「开始配对」"),
                            "★★ 请求过期时 Approve 回 409,以前两处都丢掉返回值 —— "
                            + "人点了批准、什么反馈都没有,那一行只是悄悄消失");
+                    // ★ 批准与拒绝**两条**都要看返回码,不是只看批准那条。
+                    //   ★★ 数 `!= 200` 的出现次数,不认变量名 —— 上一版栽的就是认了名字。
+                    {
+                        var notOk = pendRow is null ? 0 : System.Text.RegularExpressions.Regex
+                            .Matches(pendRow, @"!=\s*200").Count;
+                        Assert(notOk >= 2,
+                               $"★★ 批准与拒绝**各自**都要核返回码(现数到 {notOk} 处 `!= 200`)—— "
+                               + "只核一条的话,另一条失败时界面一个字都不说,"
+                               + "而失败的吊销/拒绝与成功的长得一模一样");
+                    }
                     // ⑰ 不许"一有请求就自动弹窗" —— enroll 是匿名的,那等于把弹窗交给局域网上任何人触发
-                    Assert(!body4.Contains("_popped.Add(p.RequestId)"),
-                           "★★ 待批准的只进列表,由人主动点某一条才弹确认 —— "
-                           + "自动弹框 = 你屏幕上跳出什么由对方的到达时机决定");
+                    //   ★ 上一版针脚是 `_popped.Add(p.RequestId)`(自动弹窗那条路的去重集合)。
+                    //     那个字段随弹窗一起删了 ⇒ 这条判据会**永远为真**,变成一条恒真断言。
+                    //     ⇒ 改成钉**行为**:轮询那一段里不许出现任何弹窗调用。见下面「轮询里不许弹窗」那条。
+                    Assert(!body4.Contains("_popped"),
+                           "★ 自动弹窗那条路的伴生状态(_popped)不许回来 —— "
+                           + "它一回来就说明有人在按到达时机弹窗。"
+                           + "★ 这条只是**顺带**:真正的判据是下面那条「轮询里不许弹窗」,"
+                           + "它钉的是行为,不是某个字段名");
                     // ⑱ 自报显示名不许决定窗口尺寸
                     Assert(body4.Contains("SafeDisplayName("),
                            "★ 自报的显示名要截断 + 剔控制字符再上界面");
@@ -8507,6 +8715,74 @@ public static class Selftest
                 }
 
                 // ════════════════════════════════════════════════════════
+                //  ★★★ V19 · 左下角那一格:数据源换了,**口径也必须跟着换**
+                //
+                //  它以前靠 `HubAdmin.ProbeAsync` 探本机回环管理面 —— 那答的是
+                //  【中枢正在这台上跑吗】。而 `HubAdmin` 整个要搬进管理端:
+                //  ★ 它是 V10 §2.1 那六个文件**之外**的一处漏网运行期主机分支。
+                //  改读 `App.Boot?.Role.IsHost` 之后,它答的变成【这台是不是主机】——
+                //  依据是**安装事实**(装没装管理端 / 铸没铸身份 / 地址解析到谁)。
+                //
+                //  ★★ 两者差别正好落在最会骗人的那一处:管理端装着、身份也在,
+                //    而网关/Edge 没起来 —— 新口径写「主机」(对),
+                //    照旧口径读它的人却会以为「中枢在跑」(错)。
+                //    ⇒ 只换数据源不换文案 = 拿新证据说旧结论。
+                //      本项目判词:**给错原因的提示比不给更坏**。
+                //  ⇒ 所以下面这几条钉的不只是"读了哪个字段",还钉**那句话有没有说出来**。
+                // ════════════════════════════════════════════════════════
+                {
+                    var mwV19 = TryReadSource("MainWindow.xaml.cs");
+                    if (mwV19 is not null)
+                    {
+                        var code = NoComments(mwV19);
+
+                        Assert(code.Contains("App.Boot?.Role"),
+                               "★★★ 左下角那一格读**角色判定**(App.Boot?.Role),"
+                               + "不再探回环管理面 —— HubAdmin 要整个搬进管理端");
+
+                        // ★ 反向:客户端外壳里不许再留那条运行期主机分支(纪律②)。
+                        //   ★★ 判据看的是**去掉注释后**的正文 —— 上面那段墓碑注释里
+                        //     写着 `HubAdmin.ProbeAsync` 这几个字,按裸 Contains 会把注释算成代码
+                        //     (ASSERTION-PITFALLS 第 1 条,已踩 10 次)。
+                        Assert(!code.Contains("HubAdmin.ProbeAsync")
+                               && !code.Contains("AdminProbeResult"),
+                               "★★★ 主窗口里**一处** HubAdmin 探测都不许留 —— "
+                               + "「每 20 秒探一次本机回环管理面」正是纪律②要清掉的运行期角色分支,"
+                               + "而且 HubAdmin 搬走那天它会当场编不过(或者被顺手改成恒 false,那是静默退化)");
+
+                        // ★★★ 口径那句话本身就是判据 —— 这一条守的是"别给错原因"。
+                        //
+                        // ★★★ 这三条一律读 `code`(**去掉注释**的正文),不读 `mwV19` 原文。
+                        //   写第一版时它们读的是原文,而红测当场抓到:上面那段 `EnsureHostProbe`
+                        //   的墓碑注释里也写着「右上角那颗状态点」⇒ 把界面文案整句删掉,
+                        //   断言**照样绿** —— 它被自己旁边的一句注释喂饱了。
+                        //   这正是 ASSERTION-PITFALLS 第 1 条(注释不算,已踩 10 次)的第 11 次,
+                        //   而这一次是**在一条专门用来防"给错原因"的断言上**踩的。
+                        //   ⇒ 判据要问"界面上说了吗",就只能读**会被编进界面的那部分**。
+                        Assert(code.Contains("不代表中枢正在跑"),
+                               "★★★ 那一格的说明必须**明说它不代表中枢在跑** —— "
+                               + "换成安装事实之后,「装了管理端」≠「中枢正在跑」,"
+                               + "不说这一句就是拿新证据说旧结论");
+                        Assert(code.Contains("右上角那颗状态点"),
+                               "★★ 还要说清【去哪儿看中枢跑没跑】 —— "
+                               + "只说「这里不回答那件事」而不给去处,等于把人晾在原地");
+                        Assert(code.Contains("依据:") && code.Contains("role!.Why"),
+                               "★★ 结论旁边要摆**依据原文**(RoleVerdict.Why)—— "
+                               + "`RoleVerdict` 的约定就是「为真必须说清凭什么,为假也要说清哪种拿不准」,"
+                               + "把它丢掉就退回成一个没法追问的二值标签");
+
+                        // ★★ 判定还没落定时不许先默认成副机 —— 那是个会自己消失的谎。
+                        Assert(code.Contains("status.role_deciding"),
+                               "★★ `App.Boot` 还是 null(角色判定还在跑)时如实写「判定中…」,"
+                               + "**不先默认成副机** —— 默认一个结论再悄悄改掉,比不显示更坏");
+                        Assert(code.Contains("App.BootChanged"),
+                               "★★★ 必须订阅 `App.BootChanged` —— 角色判定是异步的,"
+                               + "窗口建好时 Boot 还是 null。没有这条订阅,那一格会**永远停在「判定中…」**,"
+                               + "而「永远停在中间态」和判错一样是在给错信息,只是看起来更无辜");
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
                 //  ★★★★ V13 · **那条路由的输入是怎么来的** —— 生产触发点必须被钉住
                 //
                 //  ══ 2026-08-08 对抗式复核抓出的 A 级缺口 ══
@@ -9298,12 +9574,29 @@ public static class Selftest
                                 //   `notLinked` 一声不吭,只有那条元断言(数够不够 12 条)红了。
                                 //   ⇒ 而"复制到本地"恰恰就长这个样子 —— 判据正好漏掉了它要防的那一种。
                                 var segs = v.Split('\\', '/');
-                                var isThemeOrUi = segs.Any(sg =>
+                                // ★★★ V19(2026-08-08)把范围从 Theme/Views **扩到 Services 与 identity**。
+                                //   上一版只看 Theme/Views 两个段 ⇒ 管理端 csproj 里那 8 条
+                                //   `..\app\Services\*.cs`(AppSettings / Vocab / AppPaths / Languages /
+                                //   InstanceLock / SingleInstance / Elevation …)与 `10-core\identity\Ca.cs`
+                                //   **一条都不在判据视野里** —— 把它们中任何一条换成本地副本,
+                                //   `notLinked` 一声不吭。而 phase 2 要往这一栏里加的正是
+                                //   `ProcRun.cs`(切成两半的那个私有方法)——
+                                //   它恰恰是**最该防复制**的那一份:两份漂了不会有任何东西红。
+                                //   ⇒ 判据的范围要跟着"哪些东西是共用的"走,不是跟着最初写它时想到的那两个目录走。
+                                var isShared = segs.Any(sg =>
                                     sg.Equals("Theme", StringComparison.OrdinalIgnoreCase) ||
-                                    sg.Equals("Views", StringComparison.OrdinalIgnoreCase));
-                                if (!isThemeOrUi) continue;
+                                    sg.Equals("Views", StringComparison.OrdinalIgnoreCase) ||
+                                    sg.Equals("Services", StringComparison.OrdinalIgnoreCase) ||
+                                    sg.Equals("identity", StringComparison.OrdinalIgnoreCase));
+                                if (!isShared) continue;
                                 themeUi.Add(v);
-                                if (!v.StartsWith(@"..\app\", StringComparison.OrdinalIgnoreCase)) notLinked.Add(v);
+                                // ★ 两个允许的 link 前缀:客户端源码 `..\app\`,以及 10-core 的共用身份代码
+                                //   `..\..\10-core\`(D93 裁定④:WireContracts.cs / Ca.cs / HubId.cs 由多个 csproj 编同一份)。
+                                //   ★★ 除此之外一律算**本地副本** —— 包括 `Services\Foo.cs` 这种
+                                //     不带前导反斜杠的写法(既有注释里记着:红测当场抓到过这个窄判据)。
+                                if (!v.StartsWith(@"..\app\", StringComparison.OrdinalIgnoreCase)
+                                    && !v.StartsWith(@"..\..\10-core\", StringComparison.OrdinalIgnoreCase))
+                                    notLinked.Add(v);
                             }
                             Assert(themeUi.Count >= 12,
                                 $"★★ 元断言:csproj 里真的数到了 Theme/UI 条目(数到 {themeUi.Count} 条)——"
@@ -9327,6 +9620,27 @@ public static class Selftest
                             })
                                 Assert(proj.Contains(@"Include=""" + must + @""""),
                                     $"★★ 裁定④点名要 link 的这一份必须在:{must}");
+
+                            // ── ★★★ V19 · phase 2 迁移的前置:这几份必须**现在就是 link** ──
+                            //   ★ 逐条说明它为什么在这张名单上 —— 一条只写"必须在"的断言,
+                            //     下一个人看不出撤掉它会坏什么,于是它很容易被当成洁癖删掉。
+                            //   ★★ 判据是**反向**的:少 link 一份不会有任何东西红,
+                            //     只会让管理端在搬迁那天悄悄用上另一份实现(或者干脆被复制一份)。
+                            foreach (var (must, why) in new[]
+                            {
+                                (@"..\app\Services\ProcRun.cs",
+                                 "RunCapturedAsync:HostSetup 一切两半,留下的 IdentityExistsAsync 与"
+                                 + "搬走的 EnsureIdentityAsync 都用它 —— 复制出来的两份漂了不会有任何东西红"),
+                                (@"..\app\Views\ConfirmDialog.cs",
+                                 "批准弹窗与删除确认;它同时是**六词比对**那句判词的载体(按钮文字本身就是断言)"),
+                                (@"..\app\Services\BuildInfo.cs", "DevicesView 里显示本机客户端版本"),
+                                (@"..\app\Services\VramBudget.cs", "ComponentPicker 的显存预算判据"),
+                                (@"..\app\Services\HubDiscovery.cs", "HubAdmin 与 DevicesView **两边都用**"),
+                                (@"..\..\10-core\identity\HubId.cs",
+                                 "HubDiscovery 要它;单链 HubDiscovery 会 CS0234,**成对**才闭合"),
+                            })
+                                Assert(proj.Contains(@"Include=""" + must + @""""),
+                                    $"★★ V19 前置:这一份必须是 link —— {must}({why})");
                         }
                     }
                 }

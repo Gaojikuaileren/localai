@@ -38,6 +38,7 @@
   "status.role_host":     { "zh-CN": "本机:主机",           "en-US": "This PC: Hub",            "ja-JP": "このPC:ハブ" },
   "status.role_client":   { "zh-CN": "本机:副机",           "en-US": "This PC: Client",         "ja-JP": "このPC:クライアント" },
   "status.role_unpaired": { "zh-CN": "未连接中枢",          "en-US": "Not connected",           "ja-JP": "未接続" },
+  "status.role_deciding": { "zh-CN": "本机:判定中…",       "en-US": "This PC: checking…",      "ja-JP": "このPC:判定中…" },
   "usage.title":          { "zh-CN": "Token 用量",          "en-US": "Token usage",             "ja-JP": "トークン使用量" },
   "usage.this_week":      { "zh-CN": "本周 token",          "en-US": "Tokens this week",        "ja-JP": "今週のトークン" },
   "usage.pending":        { "zh-CN": "待接入",              "en-US": "not tracked yet",         "ja-JP": "集計は未接続" },

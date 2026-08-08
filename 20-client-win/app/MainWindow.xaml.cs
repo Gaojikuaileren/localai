@@ -172,6 +172,14 @@ public partial class MainWindow : Window
         //   以前只刷顶栏,这一格会一直停在上一轮的旧结论。
         TheApp.Hub.Changed += () => Dispatcher.Invoke(() => { RefreshStatus(); RefreshMember(); TheApp.UpdateTrayTooltip(); });
 
+        // ★★★ V19:开机角色判定落定时也要刷左下角那一格。
+        //   角色判定是**异步**的(App.StartAfterBootDecision 在后台跑),窗口先建好、
+        //   `App.Boot` 那时还是 null。没有这一条订阅,那一格会**永远停在「判定中…」** ——
+        //   而"永远停在中间态"和"判错了"一样是在给错信息,只是它看起来更无辜。
+        //   ★ 这条订阅在 V19 之前不存在,因为那一格原来靠自己每 20 秒探一次回环管理面;
+        //     摘掉那个探测(它是六个文件之外的漏网运行期主机分支)就必须补上这一条。
+        App.BootChanged += () => Dispatcher.Invoke(RefreshMember);
+
         // 显存条:实时(2 秒)更新。★ 不可见就停表 —— 省电远比调长间隔有效。
         VramHost.Content = _vram;
         // ★ 用 BeginInvoke(非阻塞)而不是 Invoke:2026-08-05 起 VramMonitor 还会被
@@ -832,30 +840,24 @@ public partial class MainWindow : Window
         RefreshMember();   // 状态块随收起/展开切换长短文案
     }
 
-    bool _hostProbeRunning;
-    DateTime _hostProbeAt = DateTime.MinValue;
-
-    /// <summary>
-    /// 给左下角那一格拿【肯定证据】:ping 一次本机回环管理面(见 HubAdmin)。
-    /// ★ 20 秒内不重复探 —— 这个方法在每次 RefreshMember 里被调,不设窗口就会每次刷新都打一枪。
-    /// ★ 探完再刷一次(不再触发新探测:窗口还没到点),所以不会自激。
-    /// </summary>
-    void EnsureHostProbe()
-    {
-        if (_hostProbeRunning || (DateTime.UtcNow - _hostProbeAt).TotalSeconds < 20) return;
-        _hostProbeRunning = true;
-        _hostProbeAt = DateTime.UtcNow;
-        _ = System.Threading.Tasks.Task.Run(async () =>
-        {
-            try { await TheApp.HubAdmin.ProbeAsync(TheApp.Hub.Profile?.HubId); }
-            catch { /* 探不到就是没证据,不是错误 */ }
-            finally
-            {
-                _hostProbeRunning = false;
-                Dispatcher.BeginInvoke(new Action(RefreshMember));
-            }
-        });
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ `EnsureHostProbe` 已删(V19 · 2026-08-08)。
+    //
+    //  它每 20 秒 ping 一次**本机回环管理面**(`HubAdmin.ProbeAsync`),给左下角那一格
+    //  拿「中枢正在这台上跑」的肯定证据。而 `HubAdmin` 整个要搬进管理端 ——
+    //  ★ 这是 V10 §2.1 那六个文件**之外**的一处漏网运行期主机分支:
+    //    地图上没有它,搬迁那天它会**当场编不过**(还算好),
+    //    或者被顺手改成恒 false(那就是静默退化)。
+    //
+    //  ★★ 摘掉它**换来的不只是编得过** —— 纪律②说客户端里不留运行期角色分支,
+    //    而"每 20 秒探一次回环管理面"正是一条。
+    //  ★★★ 但代价要如实记下:客户端从此**没有**「中枢跑没跑」的活证据了。
+    //    ⇒ 那一格的**口径**必须跟着改(见 RefreshMember):它现在答的是【角色】,
+    //      不是【中枢在不在跑】。文案不跟着改就是给错原因,而本项目的判词是
+    //      **给错原因的提示比不给更坏**。
+    //    ⇒ 「中枢跑没跑」现在由右上角那颗状态点回答(它是真的连过),
+    //      那一格的 ToolTip 里明说了去哪儿看。
+    // ════════════════════════════════════════════════════════════════════════
 
     public void RefreshStatus()
     {
@@ -913,30 +915,53 @@ public partial class MainWindow : Window
     public void RefreshMember()
     {
         var paired = TheApp.Hub.IsPaired;
-        // ★★ 这一格是全客户端唯一【始终在屏幕上】回答"这台是不是中枢主机"的地方,以前写成事实句,
-        //   而它的全部依据只是 ThisMachineIsHub():拿配对档案里的拨号 IP 跟本机网卡 IP 比一遍。
-        //   两个方向都会说谎:
-        //     · 主机换了网/换了 IP ⇒ 真主机上写「副机」,人据此跑去另一台找中枢,或点解除重配 —— 那会删掉本机私钥;
-        //     · 主机上 Edge 没启动 ⇒ 照样写「主机」,人从头到尾不会想到"中枢没起来"(2026-08-03 就是这样)。
-        //   ⇒ 只有回环管理面答过话(且 hubId 对得上)才算【肯定证据】,那时才敢写成定论;
-        //     否则照同一格 MemberText 对"推测的使用者"的成例:弱化字色 + 明说是推测。
-        var confirmedHub = TheApp.HubAdmin.LastProbe == Services.AdminProbeResult.Ok;
-        var guessHub = paired && TheApp.Hub.ThisMachineIsHub();
-        var isHub = confirmedHub || guessHub;
-        EnsureHostProbe();   // 没探过就探一次(回环,便宜),探完自己再刷一遍
+        // ════════════════════════════════════════════════════════════════════
+        //  ★★★ V19(2026-08-08)· 这一格**换了口径**,不只是换了数据源。
+        //
+        //  以前:`confirmedHub = HubAdmin.LastProbe == Ok` —— 探本机回环管理面答不答话。
+        //        那答的是【中枢正在这台上跑吗】,而且是**活证据**(每 20 秒一探)。
+        //  现在:`App.Boot?.Role.IsHost` —— D36 的角色判定(地址解析到本机,
+        //        或者「装着管理端 + 铸过身份」这条安装事实)。
+        //        那答的是【这台机器是不是主机】,是**安装事实**,不是运行状态。
+        //
+        //  ★★ 这两件事**不是一回事**,而且差别正好落在最容易骗到人的那一处:
+        //     装着管理端、身份也在,但网关/Edge 没起来 —— 新口径写「主机」(对),
+        //     而按旧口径读它的人会以为「中枢在跑」(错)。
+        //     ⇒ 所以文案必须**明说它不代表中枢在跑**,并指出去哪儿看。
+        //       只改数据源不改文案,就是拿新证据说旧结论 ——
+        //       **给错原因的提示比不给更坏**(本项目判词)。
+        //
+        //  ★ 为什么非换不可:旧依据 `HubAdmin.ProbeAsync` 整个要搬进管理端。
+        //    见上面 `EnsureHostProbe` 那段墓碑。
+        //  ★ 「(推测)」那个后缀一并去掉:`RoleVerdict` 不是一个关于运行状态的猜测,
+        //    它是一条**有依据的判定**,而依据(`Role.Why`)现在原样摆在 ToolTip 里 ——
+        //    那比一个"推测/确认"的二值标签说得多。
+        //    ★★ 保留弱化字色的**另一种**用法:判定还没落定时(`Boot` 还是 null)。
+        //      那时说什么都是编的,所以如实写「判定中…」而不是先默认成副机。
+        // ════════════════════════════════════════════════════════════════════
+        var role = App.Boot?.Role;
+        var deciding = role is null;
+        var isHub = role?.IsHost == true;
         if (_collapsed)
-            HostText.Text = !paired ? "—" : isHub ? "主" : "副";   // 收起时只留一个字
+            HostText.Text = !paired ? "—" : deciding ? "…" : isHub ? "主" : "副";   // 收起时只留一个字
         else
-            HostText.Text = Strings.Get(!paired ? "status.role_unpaired" : isHub ? "status.role_host" : "status.role_client")
-                            + (paired && !confirmedHub ? "(推测)" : "");
+            HostText.Text = Strings.Get(!paired ? "status.role_unpaired"
+                                        : deciding ? "status.role_deciding"
+                                        : isHub ? "status.role_host" : "status.role_client");
         HostText.SetResourceReference(TextBlock.ForegroundProperty,
-                                      !paired || confirmedHub ? "FgPrimary" : "FgSecondary");
+                                      deciding && paired ? "FgSecondary" : "FgPrimary");
         HostText.ToolTip = !paired
             ? null
-            : (confirmedHub
-                ? "已确认:本机的回环管理面答话了,而且 hub id 与本机配对档案一致。"
-                : "只是推测 —— 依据仅是配对时记下的拨号地址看起来属于本机,不代表中枢正在这台上运行。"
-                  + "换了网/换了 IP,或 Edge 没启动,这一格都可能说反。到「设备」页看确切结论。")
+            : (deciding
+                ? "开机角色判定还在跑 —— 判完这一格就会写定。现在不显示结论,是因为这时候说什么都是编的。"
+                : "本机角色:" + (isHub ? "主机" : "副机")
+                  + Environment.NewLine + "依据:" + (role!.Why)
+                  + Environment.NewLine + Environment.NewLine
+                  + "★ 这一格说的是【这台机器的角色】,依据是安装事实"
+                  + "(装没装管理端 · 铸没铸中枢身份 · 中枢地址解析到谁)。"
+                  + Environment.NewLine
+                  + "★★ 它【不代表中枢正在跑】—— 管理端装着、身份也在,而网关/Edge 没起来时,"
+                  + "这一格照样写「主机」。想知道中枢跑没跑,看右上角那颗状态点(它是真的连过)。")
               // ★★ V13(D?):把**业务调用实际走哪条路**也摆出来。
               //   这两条路决定的是档位(回环 ⇒ trusted-local,能改驻留集合;
               //   经 Edge ⇒ lan-device,改不动),而 2026-08-07 那天之所以查了一整天,

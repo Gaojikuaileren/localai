@@ -68,6 +68,38 @@
          Elevation 要 Ca.TlsKeyProvider,所以把 Ca.cs 一并链进来 —— 和客户端 csproj 的做法一致。 -->
     <Compile Include="..\app\Services\Elevation.cs"><Link>Services\Elevation.cs</Link></Compile>
     <Compile Include="..\..\10-core\identity\Ca.cs"><Link>Identity\Ca.cs</Link></Compile>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         V19(2026-08-08)· phase 2 迁移的**前置**:这两份现在就链好,
+         不等搬到一半才发现编不过。
+
+         ★ ProcRun.cs:`RunCapturedAsync` 原是 HostSetup 的私有方法,而拆分会把
+           HostSetup 切成两半(IdentityExistsAsync 留客户端 / EnsureIdentityAsync 搬过来),
+           **两半都用它**。不提出来的话,切分那天最省事的写法就是复制一份 ——
+           而两份漂了不会有任何东西红。理由全文在 ProcRun.cs 顶部。
+         ★ ConfirmDialog.cs:批准弹窗与删除确认(DevicesView / StorageView)全靠它,
+           搬过去就编不过。★ 它同时是**六词比对**那句断言的载体
+           (按钮文字本身就是判词),复制一份过来 = 那句判词从此可以各改各的。
+         ★★ 两条都是 `<Compile Link>`,**不许复制**(裁定④ / D93 裁定④同款手法)。
+              链了之后再往 admin\ 里放一份同名同 namespace 的副本 ⇒ CS0101 编译失败,
+              那一层是结构性的,不靠判断挡住。
+         ══════════════════════════════════════════════════════════════════════ -->
+    <Compile Include="..\app\Services\ProcRun.cs"><Link>Services\ProcRun.cs</Link></Compile>
+    <Compile Include="..\app\Views\ConfirmDialog.cs"><Link>Views\ConfirmDialog.cs</Link></Compile>
+
+    <!-- ★ 「除 ConfirmDialog 外还缺哪些」核了一遍,判官是 **dotnet build**,不是 grep ——
+           第一版正则清单里 15 个候选,实测有 4 个是误报(Snapshot / Kind / Page 等)。
+         下面三条是**实测链得动、且闭合**的(加进来 0 error):
+           · BuildInfo    —— DevicesView:624 `BuildInfo.Display`;
+           · VramBudget   —— ComponentPicker:271 `VramBudget.PeakSumGiB`;
+           · HubDiscovery —— HubAdmin:531/545 与 DevicesView:1172 **两边都用**,
+             它要 `LocalAI.Identity.HubId`,所以那一份**成对链进来**(单链会 CS0234)。
+         ★★ 还有 7 个**链不动** —— 它们不是 csproj 缺条目,是迁移本身要先裁的依赖。
+            逐个实测的错误已写进 decision-packets/admin-app-phase2-prereqs-2026-08-08.md §A3。 -->
+    <Compile Include="..\app\Services\BuildInfo.cs"><Link>Services\BuildInfo.cs</Link></Compile>
+    <Compile Include="..\app\Services\VramBudget.cs"><Link>Services\VramBudget.cs</Link></Compile>
+    <Compile Include="..\app\Services\HubDiscovery.cs"><Link>Services\HubDiscovery.cs</Link></Compile>
+    <Compile Include="..\..\10-core\identity\HubId.cs"><Link>Identity\HubId.cs</Link></Compile>
   </ItemGroup>
 
   <ItemGroup>

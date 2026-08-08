@@ -345,8 +345,44 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
     },
 }
 
-# ── 客户端源码根:算"这条契约有没有消费者"用的。零命中判红(见第 ⑤ 组)──────
-CLIENT_ROOTS = ["20-client-win/app", "20-client-win/transport"]
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 客户端 C# 工程登记表 —— **反向全表**,不是一份手写清单
+#
+#  ★ 为什么这一段存在(V19 · 2026-08-08):
+#    上一版这里只有一行 `CLIENT_ROOTS = ["…/app", "…/transport"]`。
+#    管理端拆分(`20-client-win/admin`)一落地,这一行就**静默漏掉**了第三个工程:
+#      · 第 ⑤ 组「这条契约有没有消费者」按 CLIENT_ROOTS 扫源码 ⇒ 消费者搬进 admin/
+#        之后被算成**没有消费者**,而那是一个"看起来很有信息量的假答案"
+#        (本文件第 ⑤ 组自己的原话)—— 它不判红,只是**印错**;
+#      · 而印错的那一栏,正是人用来决定"这条债要不要还"的那一栏。
+#
+#  ⇒ 改成**登记表 + 反向全表**:扫 `20-client-win/` 下所有 `.csproj`,
+#    每一个都必须**要么**登记成客户端源码根、**要么**登记成"不是客户端"并写明理由。
+#    新开一个工程而不登记 ⇒ **判红**。这与本文件顶部那条
+#    「加了路由不登记 ⇒ 红」是同一条纪律,只是管的东西从路由换成工程。
+#
+#  ★ 反问过一遍:**新开一个工程而不登记,默认落哪边?** —— 落**判红**侧。
+# ══════════════════════════════════════════════════════════════════════════
+_CLIENT_WIN = "20-client-win"
+
+#  ① 客户端源码根:算"这条契约有没有消费者"用的。零命中判红(见第 ⑤ 组)。
+#  ★ `admin` 在册的理由:管理端与客户端**编译同一批源码**(`<Compile Link>`),
+#    而 `/admin/*` 那 7 条契约的消费者(`Services/HubAdmin.cs`)正要搬进它。
+#    先让门禁认得这个工程,搬的时候才不会把"消费者没了"和"消费者搬家了"混成一件事。
+_CLIENT_PROJECT_DIRS = ["app", "transport", "admin"]
+
+#  ② 明确**不是**客户端的工程:逐个写明为什么。★ 不许写通配 —— 通配等于不登记。
+_NON_CLIENT_PROJECT_DIRS = {
+    "spikes/b17-tpm-tls": "技术尖刀,不出包、不参与任何跨进程契约",
+    "spikes/s1-cert-rotation": "技术尖刀,同上",
+    "spikes/s1-kestrel-mtls": "技术尖刀,同上",
+    "spikes/s1-named-pipe": "技术尖刀,同上",
+    "spikes/s1-resource-bounds": "技术尖刀,同上",
+    "spikes/s1-revocation": "技术尖刀,同上",
+    "spikes/s1-streaming": "技术尖刀,同上",
+}
+
+CLIENT_ROOTS = [f"{_CLIENT_WIN}/{d}" for d in _CLIENT_PROJECT_DIRS]
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ★★★ 与 GPU 车道那张契约号登记表的**双向**反向全表
@@ -551,11 +587,56 @@ print("\n=== 3. paired 的两半都在(锚点=断言那一行,不是它旁边的
 _VALID_STATES = {"paired", "server-only", "client-only", "none"}
 
 
+#  ★★★ V19(2026-08-08)· 本文件**自己**踩了它写在第 ⑤ 组里的那条前缀陷阱。
+#
+#  上一版是 `text.count(cid)` —— **裸子串**。而本表里有四对**前缀关系**:
+#      CONTRACT:cert.admin.ping     ⊂ CONTRACT:cert.admin.ping.servercert
+#      CONTRACT:cert.admin.devices  ⊂ CONTRACT:cert.admin.devices.item
+#      CONTRACT:cert.admin.pending  ⊂ CONTRACT:cert.admin.pending.item
+#      CONTRACT:gpu.intended        ⊂ CONTRACT:gpu.intended.blocking
+#  ⇒ 把**父契约的那一半整个删掉**,只要子形状那几行还在,`.count()` 照样 ≥ 1,
+#    「0 次 = 这一半被删了」**永远不会红**。实测:cert.admin.ping 的 6 次命中里
+#    有 3 次只是 `.servercert` 的前缀 —— 也就是说那条判据的一半是**借来的**。
+#
+#  ★★ 最刺眼的是:这正是本文件第 ⑤ 组已经写明并已经防住的那条
+#    (「判据要**恰好**这条路径,不能是它的前缀:`/v1/gpu/lease` 是
+#     `/v1/gpu/lease/renew` 的前缀」,ASSERTION-PITFALLS 第 4 条第 1 例)——
+#    **在消费者那一栏防住了,在承重的锚点那一栏没防**。而且 `gpu.intended` 那条 note
+#    里白纸黑字写着「注意它与 gpu.intended.blocking 是**前缀关系**」:
+#    **知道**这件事,和**判据里防住**这件事,是两回事。
+#
+#  ⇒ 收尾加边界:契约号后面不许再跟 `[a-z0-9_.]`(那就成了另一个更长的契约号)。
+_CID_CHAR = r"[a-z0-9_.]"
+
+
 def _anchor_count(rel: str, needle: str) -> int | None:
     f = REPO / rel
     if not f.exists():
         return None
-    return f.read_text(encoding="utf-8", errors="replace").count(needle)
+    return _count_exact(f.read_text(encoding="utf-8", errors="replace"), needle)
+
+
+def _count_exact(text: str, cid: str) -> int:
+    """数 cid **本身**出现了几次,不把它当成更长契约号的前缀算进来。"""
+    return len(re.findall(re.escape(cid) + r"(?!" + _CID_CHAR + r")", text))
+
+
+#  ★★ 一半可以住在**多个文件**里(V19 · 2026-08-08)。
+#
+#  为什么加这个:管理端拆分会把 `cert.admin.*` 那 7 条的客户端半边从
+#  `app/Selftest.cs` 搬进 `admin/Selftest.cs`。搬的那一刻,登记表要能如实说出
+#  "它现在在哪" —— 而**搬到一半**(代码搬了、断言没搬,或反过来)必须判红。
+#
+#  ★★★ 判据**一个字都没弱化**:
+#    · 列出来的文件**每一个都必须存在**(少一个 ⇒ 红,与以前逐条查存在同强度);
+#    · 契约号在这一族文件里的**总出现次数仍然必须 ≥ 1** ——
+#      「0 次 = 这一半被删了而登记表还说它在」原样保留,只是"这一半"现在可以横跨两个工程。
+#  ★ 反过来说清**它不管什么**:它不保证"只在一个文件里"。
+#    真要防"两个工程各留一份"(MOVE 变成 COPY),靠的是纪律②那条
+#    「同一段代码只存在一处」与它自己的断言,不是这里。**明写,不静默少盖。**
+def _as_files(v) -> list[str]:
+    """把 server_file / client_file 归一成文件名列表。★ 单个字符串仍然照旧。"""
+    return [v] if isinstance(v, str) else list(v)
 
 
 for key, meta in sorted(CONTRACTS.items()):
@@ -573,18 +654,34 @@ for key, meta in sorted(CONTRACTS.items()):
     #   两边用同一个锚点,就不会出现"我以为钉的是这处、他钉的是那处"。
     # ★★ 两半各自住在哪个文件,可以逐条覆盖(V4 加)。默认仍是 GPU 车道那两个 ——
     #   不写 server_file/client_file 的条目行为**一个字节都没变**。
-    for side, rel in (("server", meta.get("server_file", _PEER_FILE)),
-                      ("client", meta.get("client_file", _CLIENT_PIN_FILE))):
-        n = _anchor_count(rel, cid)
-        check(f"[{tag}] {side} 半边的文件存在", n is not None, rel)
-        if n is None:
+    for side, decl in (("server", meta.get("server_file", _PEER_FILE)),
+                       ("client", meta.get("client_file", _CLIENT_PIN_FILE))):
+        rels = _as_files(decl)
+        # ★ 空列表要单独挡掉:`sum([])==0` 会让下面那条判据以"找不到"的形式判红,
+        #   而真正的毛病是**这一栏根本没填**。两种红要给不同的原因(本仓判词:
+        #   给错原因的提示比不给更坏)。
+        check(f"[{tag}] {side} 半边**声明了文件**(空清单 = 这一栏没填,不是找不到)",
+              len(rels) > 0, f"{side}_file={decl!r}")
+        total = 0
+        missing = []
+        for rel in rels:
+            n = _anchor_count(rel, cid)
+            if n is None:
+                missing.append(rel)
+            else:
+                total += n
+        # ★ 每一个列出来的文件都必须存在 —— 列了三个、只有一个在,那两个是过期登记。
+        check(f"[{tag}] {side} 半边列出的文件**都存在**", not missing, f"缺:{missing}")
+        if missing or not rels:
             continue
         # ★ 判据是**在不在**,不是"恰好一次":契约号会同时出现在分节注释与断言消息里,
         #   那是正常的(实测 gpu.lease.grant 在 Selftest.cs 里出现 2 次)。
         #   要"恰好一次"会造出一条**必然误红**的判据 —— 而误红的护栏很快就没人看。
         #   真正防漂移的是下面第 ④ 组那条双向对拍。
+        # ★★ 一半住在多个文件里时,数的是**总数** —— 判词仍然是「0 次 = 这一半被删了」,
+        #    只是"这一半"可以横跨两个工程(管理端拆分)。**判据强度没动。**
         check(f"[{tag}] {side} 半边有 {cid} —— 0 次 = 这一半被删了而登记表还说它在",
-              n >= 1, f"{rel} 里找不到 {cid}")
+              total >= 1, f"{rels} 里都找不到 {cid}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -614,8 +711,11 @@ if _peer_src is not None:
     #   那正是 D95 明写要防的「写着有防护、实际没有」。
     #   ⇒ 收窄的是**范围**,不是**判据**:GPU 那一族的双向对拍一个字节没松;
     #     别的车道由它们自己的 server_file 那一半去钉(第 ③ 组已按条目取文件)。
+    #  ★ `_PEER_FILE in _as_files(...)` 而不是 `== _PEER_FILE`:server_file 现在可以是清单。
+    #    今天全是单个字符串 ⇒ 行为**一个字节都没变**;将来某条的服务端半边横跨两处时,
+    #    只要 GPU 那个 peer 文件仍是其中之一,它就仍然该被对拍咬住(收窄的是范围,不是判据)。
     _peer_scoped = {k: m for k, m in CONTRACTS.items()
-                    if m.get("cid") and m.get("server_file", _PEER_FILE) == _PEER_FILE}
+                    if m.get("cid") and _PEER_FILE in _as_files(m.get("server_file", _PEER_FILE))}
     _mine_cids = {m["cid"] for m in _peer_scoped.values()}
     _theirs_only = sorted(_peer_cids - _mine_cids - set(_SUBSHAPE_CIDS))
     _mine_only = sorted(_mine_cids - _peer_cids)
@@ -625,7 +725,8 @@ if _peer_src is not None:
     check("★★ 对拍范围**非空**:仍有契约的服务端半边落在 GPU peer 文件里(收窄不等于清空)",
           len(_mine_cids) > 0, f"scoped={len(_mine_cids)}")
     _elsewhere = sorted({m["cid"] for m in CONTRACTS.values()
-                         if m.get("cid") and m.get("server_file", _PEER_FILE) != _PEER_FILE})
+                         if m.get("cid")
+                         and _PEER_FILE not in _as_files(m.get("server_file", _PEER_FILE))})
     check("★★ 被收窄排除掉的那些**逐个交代得出去处**(server_file 指向哪个文件由第 ③ 组逐条验)",
           all(CONTRACTS[k].get("server_file") for k in CONTRACTS
               if CONTRACTS[k].get("cid") in _elsewhere),
@@ -651,17 +752,81 @@ if _peer_src is not None:
 
     # ★ 客户端那半边也零命中判红 —— 他们的元断言靠 `cid in Selftest.cs`,
     #   而"读到的是一个空串"和"每条都找得到"在那种判据下同样绿。
-    _cf = REPO / _CLIENT_PIN_FILE
-    _client_cids = set(_CID_BARE.findall(_cf.read_text(encoding="utf-8", errors="replace"))) \
-        if _cf.exists() else set()
-    check(f"★★ 客户端半边的契约号**零命中判红**(实测 {len(_client_cids)} 条)",
-          len(_client_cids) > 0, f"{sorted(_client_cids)}")
+    #
+    # ★★★ V19(2026-08-08)把它从**一个写死的文件**改成**逐个登记在册的客户端半边文件**。
+    #   上一版只扫 `20-client-win/app/Selftest.cs`。管理端拆分后,`cert.admin.*` 那 7 条的
+    #   客户端半边会搬进 `20-client-win/admin/Selftest.cs` —— 而那个文件**从来不在这条判据的视野里**:
+    #   · app/Selftest.cs 里还剩 gpu.* / sync.* 那些 ⇒ `len > 0` 照样成立 ⇒ **绿**;
+    #   · 于是"管理端那半边的契约号一个都解析不出来"这种事,这条判据**结构上说不出来**。
+    #   ⇒ 判据跟着登记表走:**每一个被声明为客户端半边的文件**都各自零命中判红。
+    #     声明一个新工程的文件而正则在那儿失灵 ⇒ 红,不再是"反正别处还有命中"。
+    _declared_client_files = sorted({
+        rel for m in CONTRACTS.values()
+        for rel in _as_files(m.get("client_file", _CLIENT_PIN_FILE))
+    })
+    check("★★ 客户端半边文件清单**非空**(空清单会让下面那圈判据一条都不跑,而零条断言看起来像全过)",
+          len(_declared_client_files) > 0)
+    for _rel in _declared_client_files:
+        _cf = REPO / _rel
+        _client_cids = set(_CID_BARE.findall(_cf.read_text(encoding="utf-8", errors="replace"))) \
+            if _cf.exists() else set()
+        # ★ 这条红有**两种**原因,消息里都说出来 —— 只说一种就是在给错原因:
+        #   ① 正则/编码坏了(原来那条防的就是这个);
+        #   ② 这个文件被登记成"客户端半边",而它**一条契约号都没有** ——
+        #      登记跑在搬运前面了。② 在管理端拆分期间比 ① 常见得多。
+        check(f"★★ 客户端半边 {_rel} 的契约号**零命中判红**(实测 {len(_client_cids)} 条)—— "
+              "要么正则/编码坏了,要么这个文件还没真的拿到任何一半(登记跑在搬运前面)",
+              len(_client_cids) > 0, f"{sorted(_client_cids)}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ⑤ 欠债账 —— 逐条列出,绝不静默省略
 # ══════════════════════════════════════════════════════════════════════════
 print("\n=== 5. 欠债账(缺配对的逐条列出,并算出它有没有消费者) ===")
+
+#  ── ★★★ 先把「客户端有哪几个工程」反向全表一遍 ────────────────────────────
+#  这一段挡的是 V19 勘察记下的那件事:多了一个工程(`20-client-win/admin`),
+#  而 CLIENT_ROOTS 那一行**不会自己长出来** —— 漏掉它不判红,只让第 ⑤ 组的
+#  「有没有消费者」那一栏**印错**。印错的那一栏正是人用来决定要不要还债的。
+_found_projects: set[str] = set()
+_cw = REPO / _CLIENT_WIN
+if _cw.exists():
+    for _csproj in _cw.rglob("*.csproj"):
+        _rel = _csproj.parent.relative_to(_cw).as_posix()
+        if _rel.startswith("bin/") or _rel.startswith("obj/") \
+                or "/bin/" in _rel or "/obj/" in _rel:
+            continue
+        _found_projects.add(_rel)
+
+#  ★ 零命中判红:今天实测 10 个 .csproj。扫到 0 个只可能是路径/后缀写错,
+#    而"0 个工程"与"每个都登记了"在下面那条集合判据里长得一模一样(空集 - 任何集合 = 空集)。
+check(f"★★ `{_CLIENT_WIN}/` 下的 .csproj **零命中判红**(实测 {len(_found_projects)} 个工程)",
+      len(_found_projects) > 0, f"{_CLIENT_WIN} 存在={_cw.exists()}")
+
+_registered_projects = set(_CLIENT_PROJECT_DIRS) | set(_NON_CLIENT_PROJECT_DIRS)
+_unregistered_projects = sorted(_found_projects - _registered_projects)
+_ghost_projects = sorted(_registered_projects - _found_projects)
+
+check("★★★ 每个客户端 .csproj **都登记过** —— 要么是客户端源码根、要么写明为什么不是。"
+      "新开一个工程不登记,默认落【判红】侧(与顶部那条「加了路由不登记 ⇒ 红」同一条纪律)",
+      not _unregistered_projects, f"没登记:{_unregistered_projects}")
+check("★★ 登记了却**不存在**的工程(过期登记会让 CLIENT_ROOTS 指向空目录,"
+      "而空目录扫不出消费者 —— 那是个静默的假答案)",
+      not _ghost_projects, f"登记了但找不到:{_ghost_projects}")
+
+#  ★ 登记表里声明的**客户端半边文件**必须落在已登记的客户端源码根里。
+#    ★★ 只管 `20-client-win/` 开头的那些 —— speech 那 3 条的"客户端"是**网关(Python)**,
+#      它本来就不在客户端源码根下。不收窄的话会把它们误红,
+#      而"为了让护栏别误红就不登记"正是这类护栏最该防的事(同 ④ 组收窄那段的理由)。
+_stray_client_files = sorted({
+    rel for m in CONTRACTS.values()
+    for rel in _as_files(m.get("client_file", _CLIENT_PIN_FILE))
+    if rel.startswith(_CLIENT_WIN + "/")
+    and not any(rel.startswith(r + "/") for r in CLIENT_ROOTS)
+})
+check("★★ 声明在 `20-client-win/` 下的客户端半边文件,**都落在已登记的源码根里** —— "
+      "指到一个没登记的工程里去,第 ⑤ 组就扫不到它的消费者(而它照样绿)",
+      not _stray_client_files, f"越界:{_stray_client_files}")
 
 _client_src = ""
 _client_files = 0
@@ -760,6 +925,25 @@ _EXTRACTOR_CASES = [
 for _src, _want, _why in _EXTRACTOR_CASES:
     check(f"提取器:{_why}", lan_edge_endpoints(_src) == _want,
           f"实得 {sorted(lan_edge_endpoints(_src))} 期望 {sorted(_want)}")
+
+#  ── ★★★ 锚点计数器的**前缀边界**也两个方向各钉一次(V19)────────────────
+#  这条护栏刚刚抓到过一次真的:见 `_anchor_count` 上方那段。
+#  只钉"该数的数得到"是不够的 —— 上一版**正是**在"不该数的也数了"那个方向瞎的,
+#  而它瞎掉的方向是**多数了** ⇒ 一条被删空的契约半边看起来还在 ⇒ 静默放过。
+_PARENT = "CONTRACT" ":cert.admin.ping"
+_CHILD = "CONTRACT" ":cert.admin.ping.servercert"
+check("★★★ 锚点计数**不把子形状算成父契约** —— 只有 `.servercert` 那一行时,"
+      "父契约必须数出 0(上一版数出 1,于是父契约的那一半可以被整个删掉而门禁全绿)",
+      _count_exact(f"// -- {_CHILD} --", _PARENT) == 0,
+      f"实得 {_count_exact(f'// -- {_CHILD} --', _PARENT)}")
+check("★★ 反过来:父契约**自己**在场时必须数得到(判据不是恒 0 —— 恒 0 会让每条都误红,"
+      "而误红的护栏很快就被人放宽,那才是真正的损失)",
+      _count_exact(f"// -- {_PARENT} --\n{_CHILD}", _PARENT) == 1,
+      f"实得 {_count_exact(f'// -- {_PARENT} --{chr(10)}{_CHILD}', _PARENT)}")
+check("★★ 子形状自己也数得到(边界不许把正常命中挡掉)",
+      _count_exact(f"// -- {_CHILD} --", _CHILD) == 1)
+check("★ 引号紧贴也算命中(登记表里写的是 `\"CONTRACT:…\"`,断言消息里则不带引号)",
+      _count_exact('pinned.Add("' + _PARENT + '");', _PARENT) == 1)
 
 # ★ 最后那条是**如实登记的一处不足**,不是护栏:提取器不去注释。
 #   为什么今天不修:去注释器要么用第三方 C# 解析,要么再手写一份 ——

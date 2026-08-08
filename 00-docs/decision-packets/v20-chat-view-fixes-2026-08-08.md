@@ -1,7 +1,7 @@
 # V20 · 聊天区五条(D?)—— 2026-08-08
 
 > 车道:V20(`claude/mystifying-noether-510b11`)。与 V19 零交集。
-> **D 号未取**:当前已提交的最大号是 **D111**。本包里所有 `D?` 待并入 `DECISIONS.md` 时统一编号。
+> **D 号未取**:当前已提交的最大号是 **D113**(并 main 时 V19 车道刚取了 D112/D113;本包写就时看到的是 D111 —— 这一行按并入时的实际情况更正)。本包里所有 `D?` 待并入 `DECISIONS.md` 时统一编号。
 > 边界:`20-client-win/app/Views/ChatView.cs` · `Services/ChatClient.cs` · `Services/HubGpu.cs`
 > 为完成 ④⑤ 另外动了:`Services/ChatCenter.cs` · `Services/TokenBudget.cs` · `Services/VramMonitor.cs`
 > · `Views/VramBar.cs` · `Theme/Controls.xaml` · `App.xaml.cs` · 新增 `Services/MarkdownLite.cs` · `Views/MarkdownText.cs`
@@ -143,7 +143,7 @@ D101 裁定② 原文:自动起栈「只起 gateway 与 lan-edge,**绝不起 lla
 
 自检里配着 `Assert(S11Adv("backend_unavailable").Contains("start-stack"))`。
 它不是漏掉了这件事 —— **它在主动阻止这件事被改**:谁去改那句文案,门禁当场判红。
-⇒ 已记为 **ASSERTION-PITFALLS 第 15 条**(护栏可以把一句错话钉在原地),
+⇒ 已记为 **ASSERTION-PITFALLS 第 16 条**(护栏可以把一句错话钉在原地),
 并给出正解:断言别去钉一句话里的具体建议,钉"分得开";
 外部专名(脚本名/端口/路径)出现在断言里 = 它在替一个会烂掉的事实作保。
 
@@ -317,9 +317,9 @@ D101 裁定② 原文:自动起栈「只起 gateway 与 lan-edge,**绝不起 lla
 
 ## 并入 `DECISIONS.md` 时要做的
 
-1. 给本包五条取 D 号(当前最大 **D111**),`D?` 全部替换;
+1. 给本包五条取 D 号(当前最大 **D113**),`D?` 全部替换;
 2. `ChatView.cs` / `HubGpu.cs` / `ChatClient.cs` / `TokenBudget.cs` / `VramMonitor.cs` /
    `VramBar.cs` / `App.xaml.cs` / `MarkdownLite.cs` / `MarkdownText.cs` 里的 `V20-①..⑤(D?)`
    注释同步换成真号;
-3. ASSERTION-PITFALLS 第 15 条与 WPF-PITFALLS 第 14 条已就位,只需在 DECISIONS 里引一句;
+3. ASSERTION-PITFALLS 第 16 条与 WPF-PITFALLS 第 14 条已就位,只需在 DECISIONS 里引一句;
 4. STATE.md 的客户端自检基线 `2189` 已过期 —— 本轮实测 **2262**(worktree 形态)。
