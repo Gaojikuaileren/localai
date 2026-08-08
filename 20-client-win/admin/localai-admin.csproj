@@ -1,0 +1,85 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 与客户端同一个 TFM:两边编译**同一批**界面源码,框架版本不同会让"同一份文件"名不副实 -->
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>LocalAI.Admin</RootNamespace>
+    <AssemblyName>localai-admin</AssemblyName>
+    <!-- 自定义入口:先做单实例与提权判断,再进 WPF(同客户端 Program.cs 的理由) -->
+    <StartupObject>LocalAI.Admin.Program</StartupObject>
+  </PropertyGroup>
+
+  <!-- ══════════════════════════════════════════════════════════════════════════
+       裁定④ · UI 共享:**link 源码,不新建类库,也不复制**。
+
+       ★ 为什么不新建类库:结构断言靠**全仓扫源码**,而多一个程序集就多一层边界 ——
+         V12 刚踩过同族的一次(发布产物里读不到源码,ASSERTION-PITFALLS 第 11 条);
+         而且「客户端源码里不得出现停进程 API」这类判据要么漏掉那个类库、要么得记得扩范围,
+         **漏掉是静默的**。link 源码则两个 csproj 编译**同一批文件**,扫源码的判据自然覆盖到。
+       ★ 这与 D93 裁定④(WireContracts.cs 由三个 csproj 编译同一份)是同一条手法。
+
+       ★★ `<Link>` 不是排版:XAML 资源字典靠 `pack://application:,,,/Theme/X.xaml` 取,
+         而 MSBuild 对**项目目录之外**的文件默认只取文件名 ⇒ 会变成 `/X.xaml`,
+         运行时找不到、换肤当场炸。必须显式把逻辑路径写回 `Theme\X.xaml`。
+       ══════════════════════════════════════════════════════════════════════════ -->
+  <ItemGroup>
+    <!-- 皮肤字典(三皮肤)+ 令牌 + 控件样式。Tokens 里是禁改的风险/范围语义色。 -->
+    <Page Include="..\app\Theme\Tokens.xaml"><Link>Theme\Tokens.xaml</Link></Page>
+    <Page Include="..\app\Theme\Controls.xaml"><Link>Theme\Controls.xaml</Link></Page>
+    <Page Include="..\app\Theme\Breeze.xaml"><Link>Theme\Breeze.xaml</Link></Page>
+    <Page Include="..\app\Theme\Ink.xaml"><Link>Theme\Ink.xaml</Link></Page>
+    <Page Include="..\app\Theme\Warm.xaml"><Link>Theme\Warm.xaml</Link></Page>
+
+    <!-- 换肤与图标 -->
+    <Compile Include="..\app\Theme\ThemeManager.cs"><Link>Theme\ThemeManager.cs</Link></Compile>
+    <Compile Include="..\app\Theme\Icons.cs"><Link>Theme\Icons.cs</Link></Compile>
+
+    <!-- 704 行界面原语(裁定④逐个点名的那五个) -->
+    <Compile Include="..\app\Views\Ui.cs"><Link>Views\Ui.cs</Link></Compile>
+    <Compile Include="..\app\Views\Layout.cs"><Link>Views\Layout.cs</Link></Compile>
+    <Compile Include="..\app\Views\Flyout.cs"><Link>Views\Flyout.cs</Link></Compile>
+    <Compile Include="..\app\Views\MenuHost.cs"><Link>Views\MenuHost.cs</Link></Compile>
+    <Compile Include="..\app\Views\Overlay.cs"><Link>Views\Overlay.cs</Link></Compile>
+
+    <!-- 上面那些依赖的:Skin 枚举与设置读写(皮肤同步要读它)· 称谓(Ui.Title 等会过 Vocab)·
+         客户端状态目录(管理端要读客户端的 settings.json、也要探它的锁文件) -->
+    <Compile Include="..\app\Services\AppSettings.cs"><Link>Services\AppSettings.cs</Link></Compile>
+    <Compile Include="..\app\Services\Vocab.cs"><Link>Services\Vocab.cs</Link></Compile>
+    <Compile Include="..\app\Services\AppPaths.cs"><Link>Services\AppPaths.cs</Link></Compile>
+    <Compile Include="..\app\Services\Languages.cs"><Link>Services\Languages.cs</Link></Compile>
+
+    <!-- 三语文案:Ui.Title/Body 会过 Vocab.Apply,而 Vocab 按**界面语言**取称谓词对。
+         ★ 链 Strings.cs **并且**把 strings.json 一起嵌进来 —— 只链 .cs 的话它在运行时
+           找不到嵌入资源,表现是文案整片回退,而编译期一声不吭。 -->
+    <Compile Include="..\app\I18n\Strings.cs"><Link>I18n\Strings.cs</Link></Compile>
+    <EmbeddedResource Include="..\app\I18n\strings.json"><Link>I18n\strings.json</Link></EmbeddedResource>
+
+    <!-- 单实例:排他按用户(锁文件)、唤醒/退出按会话(命名事件)。与客户端**同一份**源码 ——
+         「请你优雅退出」那个事件的名字由这一个文件算出来,两边编译同一份 ⇒ 没法各持一份期望值。 -->
+    <Compile Include="..\app\Services\InstanceLock.cs"><Link>Services\InstanceLock.cs</Link></Compile>
+    <Compile Include="..\app\Services\SingleInstance.cs"><Link>Services\SingleInstance.cs</Link></Compile>
+
+    <!-- D46 提权护栏:与客户端**同一份**判据(先试着打开密钥,而不是问"我是不是管理员")。
+         Elevation 要 Ca.TlsKeyProvider,所以把 Ca.cs 一并链进来 —— 和客户端 csproj 的做法一致。 -->
+    <Compile Include="..\app\Services\Elevation.cs"><Link>Services\Elevation.cs</Link></Compile>
+    <Compile Include="..\..\10-core\identity\Ca.cs"><Link>Identity\Ca.cs</Link></Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 与客户端同款:UseWindowsForms 的隐式 using 会与 WPF 撞名(CS0104)。 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <!-- App.xaml 降为 Page:否则 WPF 自动生成的 Main 会与 Program.Main 冲突(CS0017) -->
+  <ItemGroup>
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
+</Project>

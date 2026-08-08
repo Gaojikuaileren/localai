@@ -41,6 +41,8 @@ public sealed class InstanceLock : IDisposable
     readonly FileStream? _lock;
     readonly EventWaitHandle? _wake;
     CancellationTokenSource? _listen;
+    EventWaitHandle? _quit;
+    CancellationTokenSource? _quitListen;
 
     /// <summary>本进程是不是那个唯一实例。</summary>
     public bool IsFirst { get; }
@@ -52,6 +54,63 @@ public sealed class InstanceLock : IDisposable
         => Path.Combine(stateDir, appKey + ".lock");
 
     static string WakeNameFor(string appKey) => @"Local\LocalAI." + appKey + ".Wake";
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  「请你优雅退出」信号(V14 · 裁定第 7 条)
+    //
+    //  ★★★ 管理端真正关闭时要**同时关掉主机客户端**,而且必须走客户端**既有的**
+    //    八步优雅退出(App.ExitApplication -> Lifecycle.RunOnceAsync),**不许强杀**。
+    //    D106 裁定②已经把那八步逐字钉住(SequenceEqual);管理端另写一套收尾的那一刻,
+    //    D106 那条断言就守不到真正会跑的那条路了 —— **它守的是那张表,不是"有没有收尾"**。
+    //  ★ 承重的是第 5 步 `end-session+release-vram`:强杀会让中枢那边的租约挂满整个 TTL,
+    //    而 client_session 是「有没有人在用」的判据 ⇒ 直接后果是**副机被判成"有人在用"而关不掉栈**,
+    //    或者反过来,显存被一份没人认领的租约占着。(审计 A1 那条的形状。)
+    //
+    //  ★★ 为什么这**不进** WireContracts:那张表登记的是「跨进程**响应**的顶层键集合」,
+    //    而这是一个**没有负载**的信号 —— 没有键可登记,硬塞进去是类别错误。
+    //    它的防漂手法与唤醒事件同款、而且更强:名字由**下面这一个函数**算出来,
+    //    客户端与管理端**编译同一份源码**(csproj link)⇒ 两边**没法**各持一份期望值,
+    //    也就没有"两边都绿而缝是坏的"那种组合。⇒ 跨进程响应契约总数保持 **30**。
+    // ══════════════════════════════════════════════════════════════════════════
+    static string QuitNameFor(string appKey) => @"Local\LocalAI." + appKey + ".Quit";
+
+    /// <summary>
+    /// 请那个应用**优雅退出**(不是杀它)。返回是否成功发出信号。
+    /// ★ 发得出去不等于它退了 —— 调用方要自己等 <see cref="IsRunning"/> 转假,
+    ///   而且要给一个**期限**:等不到就如实说"它没退",不许假装退了。
+    /// </summary>
+    public static bool SignalQuit(string appKey)
+    {
+        try
+        {
+            // OpenExisting:对面**不在**就不该凭空造一个事件出来(造了也没人听,
+            // 而调用方会以为信号发出去了 —— 那是一句谎)。
+            using var ev = EventWaitHandle.OpenExisting(QuitNameFor(appKey));
+            ev.Set();
+            return true;
+        }
+        catch (WaitHandleCannotBeOpenedException) { return false; }   // 对面没在跑
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>被管理的一方调用:后台等"请你优雅退出",收到就跑自己既有的退出路径。</summary>
+    public void ListenForQuit(string appKey, Action onQuit)
+    {
+        if (!IsFirst) return;
+        _quit = new EventWaitHandle(false, EventResetMode.AutoReset, QuitNameFor(appKey));
+        _quitListen = new CancellationTokenSource();
+        var token = _quitListen.Token;
+        var t = new Thread(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try { if (_quit.WaitOne(500)) onQuit(); }
+                catch { break; }
+            }
+        })
+        { IsBackground = true, Name = "localai-quit-listener" };
+        t.Start();
+    }
 
     /// <param name="stateDir">被保护的状态目录(客户端 = <see cref="AppPaths.StateDir"/>)。</param>
     /// <param name="appKey">应用键,进锁文件名与唤醒事件名(客户端 = <c>Client</c>,管理端 = <c>Admin</c>)。</param>
@@ -117,7 +176,9 @@ public sealed class InstanceLock : IDisposable
     public void Dispose()
     {
         _listen?.Cancel();
+        _quitListen?.Cancel();
         try { _lock?.Dispose(); } catch { }
         _wake?.Dispose();
+        _quit?.Dispose();
     }
 }

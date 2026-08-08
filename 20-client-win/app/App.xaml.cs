@@ -203,6 +203,12 @@ public partial class App : Application
 
         _instance.ListenForWake(() => Dispatcher.Invoke(ShowMainWindow));
 
+        // ★★★ V14 裁定第 7 条:管理端**真正关闭**时要连带关掉主机客户端,
+        //   而且必须走**这条既有路径** —— ExitApplication -> Lifecycle.RunOnceAsync 的八步善后。
+        //   管理端那边**没有**任何停进程 API:它只发一个信号,退不退、怎么退,由这里决定。
+        //   ⇒ D106 裁定②钉住的那张八步表,守的仍然是真正会跑的那条路。
+        _instance.ListenForQuit(() => Dispatcher.Invoke(() => ExitApplication("admin-quit")));
+
         // 启动即用已保存的档案连一次:配对过就自动连上,不再打扰用户(用户要求 3)。
         _ = Task.Run(async () => { await Hub.ProbeAsync(); Dispatcher.Invoke(UpdateTrayTooltip); });
     }
@@ -408,6 +414,14 @@ public partial class App : Application
             //   ★ 上面那个 catch 已经保证:判据自己炸了 ⇒ decision.Role.IsHost == false ⇒
             //     依旧落在【副机】那一边,不会去打一个没人听的回环口。
             Hub.NoteRole(decision.Role.IsHost, decision.Role.Why);
+
+            // ★★★ V14 裁定第 1 条:**主机客户端启动 ⇒ 起管理端并隐藏到托盘**。
+            //   裁定第 3 条(副机不起)在这里是双保险 —— 副机上根本没有那个 exe(裁定②),
+            //   所以"副机不起栈/不起管理端"是**结构性**的,不是靠这一行判断挡住的。
+            //   ★ 放在 NoteRole 之后:两者都只依赖 decision,顺序上互不影响;
+            //     而放在这里能保证判据自己炸掉时(catch 那一支)IsHost==false ⇒ 不会误起。
+            try { HostSetup.EnsureAdminAppRunning(decision.Role.IsHost); }
+            catch (Exception ex) { LogCrash("start-admin-app", ex); }   // 起不来不该拖垮客户端启动
 
             await Dispatcher.InvokeAsync(() =>
             {

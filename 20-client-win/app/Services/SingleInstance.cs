@@ -34,5 +34,15 @@ public sealed class SingleInstance : IDisposable
     /// <summary>第一个实例调用:后台等待"再次启动"信号,收到就把窗口显示出来。</summary>
     public void ListenForWake(Action onWake) => _inner.ListenForWake(onWake);
 
+    /// <summary>
+    /// 第一个实例调用:后台等待管理端的「请你优雅退出」。
+    /// ★★ 收到之后必须走**既有的** ExitApplication(= 八步善后),不许另写一套收尾 ——
+    ///   D106 裁定②钉住的是那张八步表本身,另写一套它就守不到真正会跑的那条路。
+    /// </summary>
+    public void ListenForQuit(Action onQuit) => _inner.ListenForQuit(AppKey, onQuit);
+
+    /// <summary>管理端调用:请客户端优雅退出。返回「信号有没有发出去」(不等于它已经退了)。</summary>
+    public static bool RequestClientQuit() => InstanceLock.SignalQuit(AppKey);
+
     public void Dispose() => _inner.Dispose();
 }

@@ -8790,6 +8790,169 @@ public static class Selftest
                 Assert(NoComments(drawerV14).Contains("Tasks.Count == 0"),
                     "★ 抽屉内容自己也分空态 —— 常驻的横条点开必须有话说");
             // ============ V14 任务抽屉段结束 ============
+
+            // ══════════ V14 · 任务 3:UI 高度嵌合的【三条反漂断言】 ══════════
+            //
+            // ★★★ 为什么必须有这三条:客户端与管理端是**两个 exe、各自渲染**。
+            //   界面漂了**不会有任何东西红** —— 没有哪个测试会同时打开两个窗口比对。
+            //   ⇒ 漂移只能靠"两边编译同一份文件"这个**结构事实**来防,而这三条钉的就是那个事实。
+            //
+            // ★ 先找到 20-client-win 根:锚点用 Selftest.cs 自己(它一定在客户端源码根下),
+            //   再上一级就是 20-client-win。**不写死相对层数** —— 既有那条皮肤分叉断言
+            //   正是写死了 `..\..\..\Views`,而在 Release/win-x64 下那条路径指向 `app\bin\Views`
+            //   (**不存在**)⇒ 整块 `if (Directory.Exists(...))` 被静默跳过,
+            //   而门禁跑的恰恰是 Release/win-x64 那一趟。零命中与全清白在终端上长得一模一样。
+            {
+                string? appRoot = null, winRoot = null;
+                var probe = AppContext.BaseDirectory;
+                for (int i = 0; i < 8 && probe is not null; i++)
+                {
+                    if (File.Exists(Path.Combine(probe, "Selftest.cs")))
+                    { appRoot = probe; winRoot = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar)); break; }
+                    probe = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar));
+                }
+
+                // 源码根不在(发布产物那一趟)⇒ 整段跳过,不判红(ASSERTION-PITFALLS 第 11 条)
+                if (appRoot is not null && winRoot is not null)
+                {
+                    var adminRoot = Path.Combine(winRoot, "admin");
+                    Assert(Directory.Exists(adminRoot),
+                        "★ 元断言:找得到管理端源码目录 —— 找不到的话下面三条会【静默不跑】");
+
+                    if (Directory.Exists(adminRoot))
+                    {
+                        var adminCs = Directory.GetFiles(adminRoot, "*.cs", SearchOption.AllDirectories)
+                            .Where(p => !p.Replace('\\', '/').Contains("/bin/") && !p.Replace('\\', '/').Contains("/obj/"))
+                            .ToList();
+                        var adminXaml = Directory.GetFiles(adminRoot, "*.xaml", SearchOption.AllDirectories)
+                            .Where(p => !p.Replace('\\', '/').Contains("/bin/") && !p.Replace('\\', '/').Contains("/obj/"))
+                            .ToList();
+                        Assert(adminCs.Count > 0 && adminXaml.Count > 0,
+                            $"★★ 元断言:管理端源码真的读到了(.cs={adminCs.Count} · .xaml={adminXaml.Count})—— "
+                            + "**零命中必须判红**:零命中与全清白在终端上长得一模一样");
+
+                        // ── ① 按皮肤分【结构】的地方一处都不许有 —— 扩到管理端 ──
+                        //    客户端那条既有断言只扫 app/Views,而且在 Release 下扫的是个不存在的目录。
+                        //    这里两边一起扫,并且**从源码根算路径**,不写死层数。
+                        var forkFiles = new List<string>();
+                        var scanForFork = new List<string>(adminCs);
+                        var appViews = Path.Combine(appRoot, "Views");
+                        if (Directory.Exists(appViews))
+                            scanForFork.AddRange(Directory.GetFiles(appViews, "*.cs", SearchOption.AllDirectories));
+                        Assert(scanForFork.Count > adminCs.Count,
+                            "★ 元断言:客户端 Views 也进了扫描范围(只扫到管理端 = 那条既有判据仍然是瞎的)");
+                        foreach (var f in scanForFork)
+                            foreach (var line in File.ReadAllLines(f))
+                            {
+                                var t = line.TrimStart();
+                                if (t.StartsWith("//")) continue;          // 注释不算(这个坑踩过 10 次)
+                                if (t.Contains("ThemeManager.Current =")) forkFiles.Add(Path.GetFileName(f));
+                            }
+                        var forkList = forkFiles.Distinct().OrderBy(x => x).ToList();
+                        Assert(forkList.Count == 0,
+                            "★★★ 按皮肤分【结构】的地方一处都不许有(**客户端与管理端一起算**)——"
+                            + "皮肤差异一律走颜色令牌,结构三套一致。"
+                            + (forkList.Count > 0 ? " 现有:" + string.Join(",", forkList) : ""));
+
+                        // ── ② 管理端里不得出现颜色字面量,颜色必须取自令牌 ──
+                        //    ★ 连 .xaml 一起扫 —— 假防护扫描器看不见 .xaml 是审计 B11 那条盲区,
+                        //      而颜色恰恰最爱躲在 .xaml 里。只扫 .cs 等于把最可能出事的那一半放过。
+                        var colorHits = new List<string>();
+                        var hexColor = new System.Text.RegularExpressions.Regex(
+                            @"#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})\b");
+                        foreach (var f in adminCs.Concat(adminXaml))
+                        {
+                            var raw = File.ReadAllText(f);
+                            // .cs 去注释(留字符串:颜色字面量就写在字符串/属性值里,用 CodeOnly 会恒真)
+                            var text = f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ? NoComments(raw) : raw;
+                            foreach (var needle in new[] { "Colors.", "Brushes.", "Color.FromRgb", "Color.FromArgb" })
+                                if (text.Contains(needle)) colorHits.Add(Path.GetFileName(f) + ":" + needle);
+                            if (hexColor.IsMatch(text)) colorHits.Add(Path.GetFileName(f) + ":#RRGGBB");
+                        }
+                        // ── ②b 顺带:界面文案里不许有字面 ** ──
+                        //    ★ 客户端早就有这条(只扫 Views/*.cs),而管理端在它的范围之外。
+                        //      本轮**真的靠它抓到了两处**(AdminWindow 的说明 + ClientLink 的退出说明)——
+                        //      那是我照着 prompt 的强调号直接写进 MessageBox 的,WPF 不渲染 markdown,
+                        //      用户看到的就是两个星号。⇒ 判词说"界面文案",判据的范围就得跟着走。
+                        //    ★★ 判据用 NoComments 整份剥注释,**不是**按行首 `//` 跳过 ——
+                        //      写完第一版当场被自己抓了一次:`App.xaml.cs` 有一行
+                        //      `if (...) return;   // 只在**真的变了**时换`,那是**行尾**注释,
+                        //      行首不是 `//` ⇒ 按行首跳过的写法把它当成了界面文案。
+                        //      ⇒ 这正是 ASSERTION-PITFALLS 第 1 条(已踩 10 次)。
+                        //      ★ 修法是**收紧判据**,不是把那句注释改写成绕开断言的样子 ——
+                        //        后者是把代价转嫁给下一个读代码的人,那条坑明文禁止。
+                        var mdHits = new List<string>();
+                        foreach (var f in adminCs)
+                            if (NoComments(File.ReadAllText(f)).Contains("**"))
+                                mdHits.Add(Path.GetFileName(f));
+                        var mdList = mdHits.Distinct().OrderBy(x => x).ToList();
+                        Assert(mdList.Count == 0,
+                            "★★ 管理端的界面文案里不许有字面 **(WPF 不渲染 markdown,写了就是画星号)"
+                            + (mdList.Count > 0 ? " 现有:" + string.Join(" · ", mdList) : ""));
+
+                        var colorList = colorHits.Distinct().OrderBy(x => x).ToList();
+                        Assert(colorList.Count == 0,
+                            "★★★ 管理端里不得出现**颜色字面量** —— 颜色一律取自令牌"
+                            + "(SetResourceReference / Ui.Dyn / DynamicResource)。"
+                            + "写死一个颜色,换肤时它就不跟着变,而**两个 exe 各自渲染,漂了不会有任何东西红**。"
+                            + (colorList.Count > 0 ? " 现有:" + string.Join(" · ", colorList) : ""));
+
+                        // ── ③ 钉住两边用的是【同一个文件】,而不是"内容相同" ──
+                        //    ★★ 判据写成"内容相同"会被**复制粘贴**骗过:复制出来的那一刻两份内容一样,
+                        //      而从此各改各的,分家那天两边都不会红。
+                        //    ⇒ 判据必须是「管理端 csproj 里每个 Theme/UI 条目都是 `..\app\` 开头的 link」。
+                        var csprojPath = Path.Combine(adminRoot, "localai-admin.csproj");
+                        Assert(File.Exists(csprojPath), "★ 元断言:找得到管理端 csproj");
+                        if (File.Exists(csprojPath))
+                        {
+                            var proj = File.ReadAllText(csprojPath);
+                            var inc = new System.Text.RegularExpressions.Regex(
+                                @"<(?:Compile|Page|EmbeddedResource)\s+Include=""([^""]+)""");
+                            var themeUi = new List<string>();
+                            var notLinked = new List<string>();
+                            foreach (System.Text.RegularExpressions.Match m in inc.Matches(proj))
+                            {
+                                var v = m.Groups[1].Value;
+                                // ★★ 按**路径段**判,不是按 `\Theme\` 这种带前导反斜杠的子串判。
+                                //   红测当场抓到了这个窄判据:把 link 改成本地副本 `Views\Ui.cs` 之后,
+                                //   它**不含** `\Views\`(前面没有反斜杠)⇒ 整条被**静默跳过**,
+                                //   `notLinked` 一声不吭,只有那条元断言(数够不够 12 条)红了。
+                                //   ⇒ 而"复制到本地"恰恰就长这个样子 —— 判据正好漏掉了它要防的那一种。
+                                var segs = v.Split('\\', '/');
+                                var isThemeOrUi = segs.Any(sg =>
+                                    sg.Equals("Theme", StringComparison.OrdinalIgnoreCase) ||
+                                    sg.Equals("Views", StringComparison.OrdinalIgnoreCase));
+                                if (!isThemeOrUi) continue;
+                                themeUi.Add(v);
+                                if (!v.StartsWith(@"..\app\", StringComparison.OrdinalIgnoreCase)) notLinked.Add(v);
+                            }
+                            Assert(themeUi.Count >= 12,
+                                $"★★ 元断言:csproj 里真的数到了 Theme/UI 条目(数到 {themeUi.Count} 条)——"
+                                + "正则一条都匹配不上时,下面那条会**静默变成零断言**"
+                                + "(ASSERTION-PITFALLS 第 4 条:判据太宽会静默变成零断言)");
+                            Assert(notLinked.Count == 0,
+                                "★★★ 管理端 csproj 里每个 Theme/UI 条目都必须是 `..\\app\\` 开头的 **link**,"
+                                + "而不是复制过来的副本 —— 判据**不写成【内容相同】**:那会被复制粘贴骗过,"
+                                + "复制的那一刻两份一样,从此各改各的,分家那天两边都不会红。"
+                                + (notLinked.Count > 0 ? " 不是 link 的:" + string.Join(" · ", notLinked) : ""));
+
+                            // ★ 逐个点名裁定④要求 link 的那 12 个(五个原语 + 五个皮肤字典 + ThemeManager + Icons)。
+                            //   ★ 用**反向**判据:少 link 一个不会有任何东西红,只会让管理端悄悄用上另一份实现。
+                            foreach (var must in new[]
+                            {
+                                @"..\app\Theme\Tokens.xaml", @"..\app\Theme\Controls.xaml",
+                                @"..\app\Theme\Breeze.xaml", @"..\app\Theme\Ink.xaml", @"..\app\Theme\Warm.xaml",
+                                @"..\app\Theme\ThemeManager.cs", @"..\app\Theme\Icons.cs",
+                                @"..\app\Views\Ui.cs", @"..\app\Views\Layout.cs", @"..\app\Views\Flyout.cs",
+                                @"..\app\Views\MenuHost.cs", @"..\app\Views\Overlay.cs",
+                            })
+                                Assert(proj.Contains(@"Include=""" + must + @""""),
+                                    $"★★ 裁定④点名要 link 的这一份必须在:{must}");
+                        }
+                    }
+                }
+            }
+            // ══════════ V14 任务 3 段结束 ══════════
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally

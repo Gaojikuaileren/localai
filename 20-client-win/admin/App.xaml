@@ -1,0 +1,8 @@
+<Application x:Class="LocalAI.Admin.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- 资源字典由 ThemeManager.Initialize 在启动时装载(皮肤在 slot 0,Tokens/Controls 在后),
+       与客户端**同一段代码、同一批 .xaml**。这里留空,不要在这儿再合并一次 —— 合并两次
+       会让换肤只换掉其中一份,表现是"改了皮肤但有些控件没跟着变"。 -->
+  <Application.Resources/>
+</Application>

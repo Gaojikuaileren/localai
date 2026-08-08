@@ -312,6 +312,83 @@ public static class HostSetup
         return DecideRole(new RoleEvidence(toolsPresent, identity, knownHubHost, resolvesLocal));
     }
 
+    // ---------------------------------------------------------------- 管理端(裁定第 1、3 条)
+    /// <summary>
+    /// 裁定第 1 条:**主机客户端启动 ⇒ 起管理端并隐藏到托盘**(不弹窗、不抢焦点)。
+    /// 裁定第 3 条:**副机客户端启动 ⇒ 不起管理端**。
+    ///
+    /// <para>★★ 第 3 条在这里是**双保险**:即使 <paramref name="isHost"/> 判错了,
+    /// 副机上也**根本没有那个 exe**(裁定②把角色判据的指向物换成了"管理端装没装")——
+    /// 也就是说,副机不起管理端是**结构性**的,不是靠这一行 if 挡住的。
+    /// 一条靠判断挡住的路,判断写错就通了;一条结构上不存在的路,写错也通不了。</para>
+    ///
+    /// <para>★ 只在它**没在跑**时起:起第二个的那一刻单实例锁会让它自己安静退出,
+    /// 而用户看到的是"点了没反应"。判据用锁文件(跨进程、跨会话、零特权)。</para>
+    ///
+    /// <para>★ 返回 (起了没有, 说明) —— **不起**有好几种原因,把它们分开说清,
+    /// 而不是笼统地返回 false(那会让界面没法解释发生了什么)。</para>
+    /// </summary>
+    public static (bool Started, string Why) EnsureAdminAppRunning(bool isHost)
+    {
+        if (!isHost) return (false, "这台不是主机 —— 副机不起管理端(裁定第 3 条)。");
+        var exe = HubAdmin.AdminAppPath();
+        if (exe is null) return (false, "这台没装管理端程序(`..\\admin\\localai-admin.exe` 不在)。");
+        if (InstanceLock.IsRunning(AppPaths.AdminStateDir, AppPaths.AdminAppKey))
+            return (false, "管理端已经在跑了。");
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = exe,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(exe)!,
+            };
+            psi.ArgumentList.Add("--tray");   // ★ 隐藏到托盘:不弹窗、不抢焦点
+            Process.Start(psi);
+            return (true, "已把管理端起到托盘。");
+        }
+        catch (Exception ex) { return (false, "管理端起不来:" + ex.Message); }
+    }
+
+    /// <summary>
+    /// 裁定第 5 条用:主机客户端的设置里要有「打开管理端面板」按钮,**副机没有**。
+    /// ★ 判据是「**装没装**」而不是「跑没跑」—— 与角色判据同一条形状:
+    ///   管理端没在跑时这个按钮**仍然要在**,点它就是把管理端起起来。
+    /// </summary>
+    public static bool AdminPanelButtonVisible(bool isHost)
+        => isHost && HubAdmin.AdminAppPath() is not null;
+
+    /// <summary>
+    /// 打开管理端面板(裁定第 5 条那个按钮)。没在跑就起一个**带界面**的,
+    /// 已经在跑就发唤醒信号让它把窗口显示出来。
+    /// ★ 注意与第 1 条的区别:那条起的是 `--tray`(隐藏),这条起的是**正常显示**。
+    /// </summary>
+    public static (bool Ok, string Why) OpenAdminPanel()
+    {
+        var exe = HubAdmin.AdminAppPath();
+        if (exe is null) return (false, "这台没装管理端程序。");
+        try
+        {
+            if (InstanceLock.IsRunning(AppPaths.AdminStateDir, AppPaths.AdminAppKey))
+            {
+                // 已经在跑(多半在托盘里)⇒ 叫醒它的窗口,而不是再起一个
+                using var wake = InstanceLock.Acquire(AppPaths.AdminStateDir, AppPaths.AdminAppKey);
+                wake.SignalExisting();
+                return (true, "已让管理端把面板显示出来。");
+            }
+            var psi = new ProcessStartInfo
+            {
+                FileName = exe,
+                UseShellExecute = false,
+                WorkingDirectory = Path.GetDirectoryName(exe)!,
+            };
+            Process.Start(psi);      // ★ 不带 --tray:这一次要正常显示界面
+            return (true, "已打开管理端面板。");
+        }
+        catch (Exception ex) { return (false, "打不开:" + ex.Message); }
+    }
+
     /// <summary>
     /// 这个主机名/地址解析到本机吗。null = **解析不了**(不是"不是本机")。
     /// ★ 开成 public 是诚实的测试缝:回环那几个字面量能确定性地测,DNS 那部分不能。
