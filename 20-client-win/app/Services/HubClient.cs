@@ -165,6 +165,356 @@ public sealed class HubClient
         !string.IsNullOrWhiteSpace(Profile?.Dial) ? Profile!.Dial
         : throw new InvalidOperationException("配对档案里没有拨号地址(P3c 之前的旧档案),请重新配对"));
 
+    // ════════════════════════════════════════════════════════════════════
+    //  ★★★ V13 · 主机的业务调用走【回环网关】(D?)—— 2026-08-08
+    //
+    //  ══ 实机症状(2026-08-07,两台真 PC)══
+    //    主机上组件面板点「确定」→「这台设备不能做这个操作」;敲字不起模型。
+    //    而面板上那句「只能在主机上改」当天是一句**没有任何设备能满足**的话。
+    //
+    //  ══ 根因(复核过,与协调层给的版本有一处出入,如实记下)══
+    //    客户端的每一次业务调用都是 `Transport.Send(profile, dial, …)` ⇒ 打 lan-edge 的
+    //    mTLS 业务口。lan-edge 会**注入验证过的证书指纹**,而网关的 `gpu_principal`
+    //    一见指纹就【封顶】`lan-device`(gateway.py:581)。
+    //    ⇒ 主机上的客户端**从来就是 `lan-device`**,不是 V12 才变成的:
+    //      V12 之前 `run` 把业务口绑在**回环**上,客户端拨 `127.0.0.1:8443` ——
+    //      那仍然是 lan-edge,仍然带指纹,仍然封顶 lan-device。
+    //    ⇒ 所以 `run → run-lan`(V12 改动 A)**不是**这个症状的成因,它只换了拨号地址;
+    //      单靠 V12 改动 B(`change_resident` 从 lan-device 拿掉)就足以让主机点不动确定。
+    //      ★ 这一条要如实写:把 A 也算成成因,会让人以为"把绑定改回回环就好了" ——
+    //        改回去之后主机**依旧**是 lan-device,依旧点不动,而自配对那条链会重新断掉。
+    //
+    //  ══ 修法 ══
+    //    已判定为主机的这台,业务调用**不再绕一圈经 lan-edge**,直接打本机回环网关
+    //    `127.0.0.1:8080`。网关的 `classify_caller` 判据是:回环连接 → 查拥有该 socket 的
+    //    进程 → 取 owner → 查 `config/caller-accounts.toml` 的 allowlist(含机主账户)
+    //    ⇒ 得 `trusted-local`,那正是规格里「只有主机变更面能写 intended_resident_set」
+    //    的那个"主机变更面"。★ 副机**一行都不受影响**:它判不成主机,照旧走 lan-edge。
+    //
+    //  ★★ 这不是临时脚手架:将来的管理端要走的也是这条回环路。
+    //  ★★ **绝不**给 `lan-device` 加回 `change_resident` —— 那会把副机的口子一起开回去。
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>业务调用的落点。★ 两条路的**信任来源完全不同**,所以它们是两个值而不是一个开关。</summary>
+    public enum BusinessPath
+    {
+        /// <summary>主机:直连本机回环网关(明文 HTTP,无 mTLS、无证书指纹)。身份来自 **OS 账户**。</summary>
+        HostLoopback,
+        /// <summary>副机:经 LAN Edge 的 mTLS 业务口。身份来自**证书指纹经成员表反查**。</summary>
+        LanEdge,
+    }
+
+    /// <summary>一次业务调用该打到哪儿。★ <c>Why</c> 是**必须**说得出来的 —— 见 <see cref="RouteNote"/>。</summary>
+    public sealed record BusinessTarget(BusinessPath Path, IPEndPoint EndPoint, string Why)
+    {
+        public bool ViaEdge => Path == BusinessPath.LanEdge;
+        public override string ToString() => $"{Path} {EndPoint}";
+    }
+
+    /// <summary>
+    /// 业务调用落点的**纯函数**判据。喂什么答什么,不碰 IO、不看档案 —— 这样两个方向
+    /// (主机 → 回环 / 副机 → Edge)才能各测一次,而只测一个方向等于没测。
+    /// </summary>
+    /// <param name="isHostMachine">D36 角色判定的结论(<see cref="HostSetup.DecideRole"/>)。
+    /// ★ 判不出来传 false —— 但**别把这条读成"误判成主机只是打一个没人听的口"**:
+    /// 同一个 <c>RoleVerdict</c> 还是 <c>MayStartStack</c> 的前件,它会让这台**真去起一套栈**
+    /// (`App.xaml.cs` 的 `EnsureStackAsync`)。所以判错成主机的代价是"起一套不该起的栈"
+    /// **加上**"业务口打到一个自己刚起的、身份不对的网关"。fail-closed 的方向仍然是 false,
+    /// 但理由是前者,不是后者。</param>
+    /// <param name="pairedDial">配对档案里的拨号地址;没配过对传 null。</param>
+    /// <param name="loopbackPort">回环网关端口(<see cref="HostSetup.GatewayPort"/>)。</param>
+    /// <param name="demotedWhy">
+    /// ★★★ 非 null = **回环那条路已被实测证明不适用于当前这个 OS 账户**,退回 Edge。
+    ///
+    /// <para>它修的是一个粒度错配:<paramref name="isHostMachine"/> 是**整机**事实,
+    /// 而回环那一端的档位是按**登录的 Windows 账户**判的
+    /// (`gateway.py` 查 `config/caller-accounts.toml` 的 allowlist)。
+    /// 主机上一个**不在 allowlist 里**的账户(该文件里明文记着访客账户 `Alle`,
+    /// 还给"第二位家庭成员"预留了位置)走回环拿到的是 `unregistered-local` ——
+    /// 它只有 `{read}`,**比它原来经 Edge 拿到的 `lan-device`(`{read, lease}`)还少一个 `lease`**
+    /// ⇒ 「意图即起」和 `client_session` 租约会一起没掉。那是 V13 引入的回归,不是修复。</para>
+    /// <para>★ 判据只能来自**服务端如实回带的 `error.tier`**(见 <see cref="NoteLoopbackDenial"/>)——
+    /// 客户端没有别的办法知道自己在网关眼里是谁:allowlist 是服务端配置,客户端不一定有那个文件。</para>
+    /// <para>★ 只有**有 Edge 可退**时降级才成立;没配过对就无路可退,那时如实说,不假装换了路。</para>
+    /// </param>
+    public static BusinessTarget? DecideBusinessTarget(bool isHostMachine, IPEndPoint? pairedDial,
+                                                       int loopbackPort, string? demotedWhy = null)
+    {
+        if (isHostMachine)
+        {
+            if (demotedWhy is { Length: > 0 } && pairedDial is not null)
+                return new BusinessTarget(
+                    BusinessPath.LanEdge, pairedDial,
+                    $"这台是主机,但**当前这个 Windows 账户在网关眼里不是机主** —— {demotedWhy}。"
+                    + $"已退回 LAN Edge 的 mTLS 业务口 {pairedDial}(档位 lan-device,与 V13 之前一致)。"
+                    + "★ 想让它拿主机档:把这个账户加进 config/caller-accounts.toml 的 trusted_local(要走决议)。");
+            return new BusinessTarget(
+                BusinessPath.HostLoopback, new IPEndPoint(IPAddress.Loopback, loopbackPort),
+                $"这台已判定为中枢主机 ⇒ 业务调用直接打本机回环网关 127.0.0.1:{loopbackPort},"
+                + "由网关按 OS 账户判成 trusted-local(绕开 lan-edge 那道会把档位封顶 lan-device 的指纹)"
+                + (demotedWhy is { Length: > 0 }
+                   ? $"。★★ 注意:{demotedWhy},本该退回 Edge —— 但这台**没有配对地址,无路可退**。"
+                   : ""));
+        }
+        if (pairedDial is null) return null;
+        return new BusinessTarget(
+            BusinessPath.LanEdge, pairedDial,
+            $"这台不是主机 ⇒ 业务调用照旧经 LAN Edge 的 mTLS 业务口 {pairedDial}(档位 lan-device)");
+    }
+
+    /// <summary>
+    /// D36 角色判定的结论。★ 默认 <c>false</c> 且**只由开机分流写入** ——
+    /// 判据本身在 <see cref="HostSetup.DecideRole"/>,这里只是把它记下来给拨号用。
+    /// <para>★★ 不用 <see cref="ThisMachineIsHub"/>:那是个看拨号地址的启发式,
+    /// 它自己的注释就写着「仅用于状态显示,不做权限判定」—— 而这里决定的是
+    /// 这次请求会拿到哪个档位,正是它明说自己不该管的那件事。</para>
+    /// </summary>
+    public bool IsHostMachine { get; private set; }
+
+    /// <summary>凭什么说这台是/不是主机(<see cref="HostSetup.RoleVerdict.Why"/> 原文)。</summary>
+    public string RoleWhy { get; private set; } = "开机角色判定还没跑完 —— 按【副机】走(fail-closed)";
+
+    /// <summary>开机分流判完角色后回填。★ 唯一写入点;在起任何一条流**之前**调。</summary>
+    public void NoteRole(bool isHost, string why)
+    {
+        var changed = IsHostMachine != isHost;
+        IsHostMachine = isHost;
+        RoleWhy = string.IsNullOrWhiteSpace(why) ? RoleWhy : why;
+        // ★★ 必须包住:这是**开机路上**的一次同步派发,而订阅方是界面
+        //   (`MainWindow` 那条 `Hub.Changed += … Dispatcher.Invoke(…)`)。
+        //   一个订阅者抛异常,异常会顺着这里冒回 `StartAfterBootDecision`,
+        //   于是它后面的 `Gpu.Start()` / `Lease.Start()` **一条都起不来** ——
+        //   而症状是"界面在、但显存和租约永远没有动静",查起来完全指不到这一行。
+        //   ★ 与 `App.RaiseBootChanged` 同款处理,理由逐字一样。
+        if (changed) { try { Changed?.Invoke(); } catch { } }
+    }
+
+    /// <summary>
+    /// 回环那条路**已被实测证明不适用于当前 OS 账户**的理由;null = 没有这回事。
+    /// ★ 只由 <see cref="NoteLoopbackDenial"/> 写入,而它的判据只有一个:
+    ///   服务端在 401/403 里如实回带的 <c>error.tier</c>。
+    /// </summary>
+    public string? LoopbackDemotedWhy { get; private set; }
+
+    /// <summary>
+    /// 看一眼回环那条路的应答,决定要不要**永久降级到 Edge**(本次运行内)。
+    ///
+    /// <para>★ 触发条件写得**尽量窄**:只有服务端明说了 <c>error.tier</c>、而且那个档位
+    /// **不是** <c>trusted-local</c> 时才降。机主账户永远拿 <c>trusted-local</c>,
+    /// 所以它一次都不会踩到这里;而 <c>denied_param</c> / <c>denied_quota</c>
+    /// (ttl 超上限、太快了)同样带 tier=trusted-local ⇒ **不会**被误判成"账户不对"。</para>
+    /// <para>★ 只降不升:降级之后本次运行不再回头试 —— 账户在一次运行里不会变,
+    /// 而反复试会让每一次业务调用都先撞一发 403。要复位就重开客户端。</para>
+    /// </summary>
+    /// <returns>这次是否**刚刚**发生降级(调用方据此决定要不要重发一遍)。</returns>
+    bool NoteLoopbackDenial(int status, string body)
+    {
+        if (LoopbackDemotedWhy is not null) return false;
+        if (status is not (401 or 403)) return false;
+        string? tier = null;
+        try
+        {
+            using var d = JsonDocument.Parse(body);
+            if (d.RootElement.TryGetProperty("error", out var e)
+                && e.ValueKind == JsonValueKind.Object
+                && e.TryGetProperty("tier", out var t) && t.ValueKind == JsonValueKind.String)
+                tier = t.GetString();
+        }
+        catch { return false; }        // ★ 读不出 tier 就**不降级**:降错了会静默退回旧档位
+        if (string.IsNullOrEmpty(tier) || tier == "trusted-local") return false;
+        LoopbackDemotedWhy = $"网关回话说这条回环连接的档位是 `{tier}`,不是 `trusted-local`"
+                           + "(这个 Windows 账户不在 config/caller-accounts.toml 的 trusted_local 里)";
+        try { Changed?.Invoke(); } catch { }
+        return true;
+    }
+
+    /// <summary>这次业务调用打到哪儿。null = 既不是主机、也没有配对地址 ⇒ 无处可打。</summary>
+    public BusinessTarget? BusinessRoute()
+        => DecideBusinessTarget(IsHostMachine, TryDial(), HostSetup.GatewayPort, LoopbackDemotedWhy);
+
+    /// <summary>界面/自检要的一句话:现在走哪条路、凭什么。</summary>
+    public string RouteNote =>
+        BusinessRoute() is { } t ? t.Why : "还没有可用的业务通道(没判成主机,也没有配对地址)";
+
+    // ── 配对通道(Edge 那条)单独的健康 ──────────────────────────────
+    /// <summary>
+    /// 配对通道(`Profile.Dial` 上那条 mTLS)现在**坏在哪**;null = 好的 / 没测过。
+    ///
+    /// <para>★★★ 为什么主机上必须**单独**有这一格(V13 引入的缺口,2026-08-08 对抗式复核抓出):
+    /// V13 之后主机的业务调用走回环,于是 <see cref="ProbeAsync"/> 不再碰 <c>Profile.Dial</c> ——
+    /// 而那个地址**仍然是**聊天(`ChatClient`)、内网同步(`SyncClient`)与
+    /// **90 天一次的设备证书续签**唯一的拨号目标。</para>
+    /// <para>后果很具体:在「设备」页把地址改错一位,`SetDial` 写盘后那句
+    /// 「立刻验一次」验的是回环网关 ⇒ 拿到 200 ⇒ 顶栏刷绿。**填错与填对长得一模一样**,
+    /// 而聊天/同步/续签此后全部打向一个不存在的地址。</para>
+    /// <para>★ 它**不合并进** <see cref="State"/>:那一格说的是"业务通道通不通"
+    /// (面板、显存、租约靠它),两者可以一真一假,合并会让其中一件被另一件盖住。</para>
+    /// </summary>
+    public string? PairingChannelError { get; private set; }
+
+    /// <summary>配对通道那一格给人看的一句话。</summary>
+    public string PairingChannelNote =>
+        PairingChannelError is { Length: > 0 } e
+            ? $"配对通道({Profile?.Dial})连不上:{e} —— 聊天、内网同步、设备证书续签走的都是它。"
+            : Profile is null ? "还没配过对" : $"配对通道({Profile.Dial})正常";
+
+    /// <summary>
+    /// 验一次**配对通道**(Edge 那条 mTLS),只写 <see cref="PairingChannelError"/>,**不碰** <see cref="State"/>。
+    /// <para>★ 主机上业务走回环之后,这条是「我还是不是有效成员 / 地址对不对 / 证书还好不好」
+    /// 唯一还问得到的地方。副机上业务通道本身就是它,不必重复问。</para>
+    /// </summary>
+    public async Task CheckPairingChannelAsync(CancellationToken ct = default)
+    {
+        if (Profile is null || TryDial() is not { } ep) { PairingChannelError = null; return; }
+        try
+        {
+            var (status, body) = await Transport.Send(Profile, ep, HttpMethod.Get, "/v1/models", null, ct);
+            PairingChannelError = status switch
+            {
+                401 when LooksRevoked(body) => "本设备已被主机解除,需要重新配对",
+                401 => "中枢在这条通道上拒绝了这次请求(401)—— 可能是权限或网关策略,先别重新配对",
+                >= 500 => $"中枢应答了,但返回 {status} —— 不是连不上,请看中枢日志",
+                _ => null,
+            };
+        }
+        catch (Exception ex)
+        {
+            // ★ 归因**全部**复用 Edge 那条既有的五分类 —— 这条路上它是对的(握手真的用本机证书)。
+            PairingChannelError = ClassifyTlsFailure(ex, Profile) switch
+            {
+                HubState.CertExpired          => TlsFailure.Explain(TlsFailureKind.ServerCertExpired),
+                HubState.HubIdentityChanged   => TlsFailure.Explain(TlsFailureKind.HubIdentityChanged),
+                HubState.LocalCertExpired     => TlsFailure.Explain(TlsFailureKind.LocalDeviceCertExpired),
+                HubState.LocalProfileUnusable => TlsFailure.Explain(TlsFailureKind.LocalProfileUnusable),
+                _ => ex.Message,
+            };
+        }
+    }
+
+    // ── 回环网关的明文 HTTP 通道 ────────────────────────────────────────
+    //  ★ UseProxy=false 是**承重**的,与网关自己 `trust_env=False` 同一条理由:
+    //    系统代理会把一条本该只走回环的业务调用(带着整段会话)改道送到一个我们不控制的端点。
+    //    回环不需要代理,关掉它零损失。
+    //  ★ Timeout 设无限,由 CancellationToken 决定生命周期 —— SSE 是无限长的响应,
+    //    默认 100 秒会把推送流掐断,而症状是"订阅了却每 100 秒断一次",很像服务端在踢人。
+    static readonly HttpClient LoopHttp =
+        new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
+        { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>回环网关的基址。★ 每次现算 —— 端口来自 <see cref="HostSetup.GatewayPort"/> 那**一个**数。</summary>
+    static string LoopBase(IPEndPoint ep) => $"http://{ep.Address}:{ep.Port}";
+
+    /// <summary>
+    /// 单次(非流式)回环调用的超时。
+    ///
+    /// <para>★★ 为什么必须显式给一个:<see cref="LoopHttp"/> 的 <c>Timeout</c> 是**无限**的
+    /// (SSE 要它,默认 100 秒会把推送流每 100 秒掐一次)。而无限超时用在**单次**调用上
+    /// 是一条真缺口:网关接了连接却不回话时,<c>ProbeAsync → CallAsync</c> 会**永远挂住**,
+    /// State 停在 <c>Connecting</c> —— 界面一直转圈,而"转圈"这个症状说不出任何原因。
+    /// 这与 <c>TryRenewDeviceCertAsync</c> 当年那个缺口是同一形状。</para>
+    /// <para>★ 取 100 秒是**对齐 Edge 那条路**(<c>HttpClient</c> 的默认值),
+    /// 让两条路在"等多久算等不到"上给出同一个答案 —— 两条路超时不一样的话,
+    /// 同一次故障在主机和副机上会表现成两种病。</para>
+    /// </summary>
+    public static readonly TimeSpan LoopUnaryTimeout = TimeSpan.FromSeconds(100);
+
+    /// <summary>
+    /// 组一条打回环网关的请求。
+    ///
+    /// <para>★★★ **一个 <c>X-LocalAI-*</c> 头都不带**,这一条是承重的:
+    /// 走 lan-edge 时,Edge 会先**剥掉客户端自带的 X-LocalAI-\*** 再写入它自己验过的指纹
+    /// (`lan-edge/Program.cs:1593,1598`)。回环这条路上**没有那个剥离者** ——
+    /// 客户端带什么,网关就原样看到什么。带一个 `X-LocalAI-Cert-Sha256` 过去,
+    /// `gpu_principal` 会当场把自己封顶回 `lan-device`(或者指纹认不出 ⇒
+    /// `remote-unauthenticated`),把这次修的东西原地退回去。
+    /// ⇒ 所以这里连 `X-LocalAI-Protocol` 也不发:与其记住"哪些头是安全的",
+    /// 不如让这条路上**根本没有**这个前缀的头。</para>
+    /// </summary>
+    static HttpRequestMessage LoopRequest(IPEndPoint ep, HttpMethod method, string path, object? body)
+    {
+        var req = new HttpRequestMessage(method, LoopBase(ep) + path);
+        if (body is not null)
+            req.Content = new StringContent(JsonSerializer.Serialize(body),
+                                            System.Text.Encoding.UTF8, "application/json");
+        return req;
+    }
+
+    /// <summary>回环版的 <c>SendWithHeaders</c> —— 形状与它逐字一致,好让 <see cref="CallAsync"/> 只有一处分叉。</summary>
+    static async Task<(int status, string body, Dictionary<string, string> headers)> LoopWithHeadersAsync(
+        IPEndPoint ep, HttpMethod method, string path, object? body, CancellationToken ct = default)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(LoopUnaryTimeout);
+        using var req = LoopRequest(ep, method, path, body);
+        using var r = await LoopHttp.SendAsync(req, cts.Token);
+        var hs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var h in r.Headers) hs[h.Key] = string.Join(",", h.Value);
+        return ((int)r.StatusCode, await r.Content.ReadAsStringAsync(cts.Token), hs);
+    }
+
+    /// <summary>
+    /// 发一次业务调用(自动选路)。不抛 HTTP 状态异常 —— 401/403 是有意义的答复,交调用方判读。
+    /// <para>★ 连不上时**抛**,与 <c>Transport.Send</c> 同款:那是"够不着中枢",归因要往上走。</para>
+    /// </summary>
+    public async Task<(int status, string body)> SendBusinessAsync(
+        HttpMethod method, string path, object? body, CancellationToken ct = default)
+    {
+        var t = BusinessRoute()
+                ?? throw new InvalidOperationException("尚未配对,而且这台也没被判成主机 —— 无处可发");
+        if (t.ViaEdge)
+            return await Transport.Send(Profile!, t.EndPoint, method, path, body, ct);
+        var (status, text, _) = await LoopWithHeadersAsync(t.EndPoint, method, path, body, ct);
+        // ★★ 回环拿到 401/403 且服务端点名了一个**不是 trusted-local** 的档位
+        //   ⇒ 这个 Windows 账户不是机主 ⇒ 降级到 Edge,并把**这一次**原样重发一遍。
+        //   重发是必要的:不重发的话,降级后的第一次调用仍然以那个 403 收场,
+        //   而调用方会把它当成业务失败去报给用户(「这台设备不能做这个操作」),
+        //   —— 那正是 V13 要消灭的那句话,只是换了个原因。
+        if (NoteLoopbackDenial(status, text) && BusinessRoute() is { ViaEdge: true } t2)
+            return await Transport.Send(Profile!, t2.EndPoint, method, path, body, ct);
+        return (status, text);
+    }
+
+    /// <summary>
+    /// 订阅一条 SSE(自动选路)。★ 回环那半边逐字对齐 <c>Transport.OpenStream</c> 的三条纪律:
+    /// <c>ResponseHeadersRead</c>(否则等一条**无限长**的响应体读完 = 永远收不到帧)、
+    /// 无限超时(由 ct 决定生命周期)、**非 2xx 先读正文再抛**(丢掉正文会把"后端没起"
+    /// 退化成"连不上",而这两件事的下一步完全不同)。
+    /// </summary>
+    public async Task OpenBusinessStreamAsync(string path, Func<string, Task> onLine,
+                                              CancellationToken ct, HttpMethod? method = null,
+                                              object? body = null,
+                                              Action<int, string>? onNonSuccess = null)
+    {
+        var t = BusinessRoute()
+                ?? throw new InvalidOperationException("尚未配对,而且这台也没被判成主机 —— 无处可订阅");
+        if (t.ViaEdge)
+        {
+            await Transport.OpenStream(Profile!, t.EndPoint, path, onLine, ct, method, body, onNonSuccess);
+            return;
+        }
+        using var req = LoopRequest(t.EndPoint, method ?? HttpMethod.Get, path, body);
+        req.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
+        using var r = await LoopHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!r.IsSuccessStatusCode)
+        {
+            var raw = await r.Content.ReadAsStringAsync(ct);
+            // ★★ 推送流也要认降级信号,否则「非机主账户」那一格会**永远重连不上**:
+            //   订阅被 403 拒 → 抛 → 退避重连 → 还是同一条回环路 → 再 403…… 一个死循环,
+            //   而界面只会说「中枢的推送流报错」。降级之后下一轮重连自然走 Edge。
+            NoteLoopbackDenial((int)r.StatusCode, raw);
+            onNonSuccess?.Invoke((int)r.StatusCode, raw);
+            throw new HttpRequestException($"流式请求被拒:{(int)r.StatusCode}");
+        }
+        using var stream = await r.Content.ReadAsStreamAsync(ct);
+        using var rd = new StreamReader(stream, System.Text.Encoding.UTF8);
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await rd.ReadLineAsync(ct);
+            if (line is null) break;          // 服务端关流 —— 交给调用方决定要不要重连
+            await onLine(line);
+        }
+    }
+
     /// <summary>
     /// 配对(一次性)。onSas 回调把六个词交给界面显示,由用户与主机屏幕**人工比对**后主机批准。
     /// ★ 六词带外比对是 P3b 的安全根基,界面化只是换了显示位置,**不得跳过**(D47)。
@@ -178,13 +528,27 @@ public sealed class HubClient
         LastError = null;
     }
 
-    /// <summary>用已保存的档案发一次业务调用。这也是"我还是不是有效成员"的探针。</summary>
+    /// <summary>
+    /// 发一次业务调用。这也是"我还是不是有效成员"的探针。
+    /// ★ 走哪条路由 <see cref="BusinessRoute"/> 定 —— 主机打回环网关,副机走 Edge。
+    /// </summary>
     public async Task<(int status, string body)> CallAsync(string path)
     {
-        if (Profile is null) throw new InvalidOperationException("尚未配对");
+        var route = BusinessRoute()
+                    ?? throw new InvalidOperationException("尚未配对");
         try
         {
-            var r = await Transport.SendWithHeaders(Profile, Dial(), HttpMethod.Get, path, null);
+            var r = route.ViaEdge
+                ? await Transport.SendWithHeaders(Profile!, route.EndPoint, HttpMethod.Get, path, null)
+                : await LoopWithHeadersAsync(route.EndPoint, HttpMethod.Get, path, null);
+            // ★ 与 SendBusinessAsync 同一条降级判据(见 NoteLoopbackDenial)——
+            //   两处各写一份判据必然漂开,所以判据只有那一个函数,这里只负责重发。
+            if (!route.ViaEdge && NoteLoopbackDenial(r.status, r.body)
+                && BusinessRoute() is { ViaEdge: true } r2)
+            {
+                route = r2;
+                r = await Transport.SendWithHeaders(Profile!, r2.EndPoint, HttpMethod.Get, path, null);
+            }
             NoteProtocol(r.headers);
             // ★ 协议对不上就到此为止:不能先把它当成 Online 再去解读正文 ——
             //   两边对格式的理解不一致时,解出来的东西本身就不可信。
@@ -215,6 +579,25 @@ public sealed class HubClient
                 LastError = null;
             }
             return (r.status, r.body);
+        }
+        catch (Exception ex) when (!route.ViaEdge)
+        {
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ 回环这条路上**一条 TLS 归因都不许跑**。
+            //
+            //  `TlsFailure.Classify` 的第一步是查【本机设备证书这个确定的本地事实】——
+            //  那在 Edge 那条路上是对的(握手确实要用它),但在回环上它与失败毫无因果:
+            //  网关没起来会被归成「本机证书过期,请重新配对」,而重新配对**先删本机私钥**。
+            //  ⇒ 为一件"网关没起"的事销毁一个完好的身份。分支必须在这里就岔开。
+            //
+            //  ★ 这条路上的失败只有一种意思:**本机回环网关没应答**。说清它,并说清
+            //    下一步不是重新配对、不是查防火墙(回环不过防火墙)、不是查副机。
+            // ══════════════════════════════════════════════════════════════
+            State = HubState.Offline;
+            LastError = $"这台是中枢主机,业务口是回环网关 {route.EndPoint},而它没有应答:{ex.Message}"
+                      + " —— 这**不是**配对/证书/防火墙的问题(回环不过防火墙),是**网关没起来**。"
+                      + "看「设备」页那行起栈结果,或 " + HostSetup.EdgeLogPath;
+            throw;
         }
         catch (Exception ex)
         {
@@ -247,11 +630,14 @@ public sealed class HubClient
     /// </summary>
     public async Task EndSessionAsync(CancellationToken ct = default)
     {
-        if (Profile is null) return;
+        if (BusinessRoute() is null) return;
         try
         {
-            await Transport.Send(Profile, Dial(), HttpMethod.Post, "/v1/session/end",
-                                 new { reason = "client-exit", device = Environment.MachineName }, ct);
+            // ★★ 必须与 LeaseKeeper 走**同一条路**:中枢按 `principal_device` 匹配持有者,
+            //   回环得 "local"、经 Edge 得 device_id —— 两条路各发一半,退出时就一条也放不掉。
+            //   (这正是审计 B3「同一台机器在两个面上叫两个名字」那个形状,不能再造一个。)
+            await SendBusinessAsync(HttpMethod.Post, "/v1/session/end",
+                                    new { reason = "client-exit", device = Environment.MachineName }, ct);
         }
         catch (Exception ex) { LastError = "结束会话通知失败(不影响退出): " + ex.Message; }
     }
@@ -322,6 +708,18 @@ public sealed class HubClient
         await TryRenewDeviceCertAsync();
         try { await CallAsync("/v1/models"); }
         catch { /* State 已在 CallAsync 里置为 Offline */ }
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V13 缺口的补丁(2026-08-08 对抗式复核抓出):
+        //  业务通道走回环之后,这次探测就**再也没碰过 `Profile.Dial`** ——
+        //  而那个地址仍然是聊天 / 内网同步 / 设备证书续签唯一的拨号目标。
+        //  于是「改错地址」与「改对地址」在界面上长得一模一样(顶栏照样刷绿)。
+        //  ⇒ 主机上**额外**验一次配对通道,结果单独放 PairingChannelError,不去盖 State。
+        //  ★ 副机不做:它的业务通道**就是**配对通道,再问一遍是白花一次握手。
+        // ══════════════════════════════════════════════════════════════════
+        if (BusinessRoute() is { ViaEdge: false })
+            try { await CheckPairingChannelAsync(); } catch { /* best-effort,绝不顶掉探测 */ }
+        else PairingChannelError = null;
+        Changed?.Invoke();
         return State;
     }
 

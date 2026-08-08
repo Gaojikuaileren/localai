@@ -7862,6 +7862,328 @@ public static class Selftest
                 }
 
                 // ════════════════════════════════════════════════════════
+                //  ★★★ V13(D?) · 主机客户端**实际拨到哪儿** —— 走真实连接路径的断言
+                //
+                //  ══ 这一条为什么必须存在(2026-08-07 实机,今天最贵的一课)══
+                //    那天 4197 条断言全绿,而主机上点「确定」直接吃「这台设备不能做这个操作」。
+                //    因为**没有任何一条断言问过「主机客户端实际拿到哪个档位」**:
+                //    服务端那套测试里 tier 是 `classify_caller` 被 monkeypatch **直接构造**的,
+                //    客户端这边则根本没测过拨号去了哪儿。两边各自自洽,中间那根线谁也没看。
+                //
+                //  ══ 所以这一条是【行为】判据,不是"源码里有没有那个词"(第 9 条坑)══
+                //    真开一个监听冒充回环网关,让**生产代码路径**(HubGpu.ApplyAsync /
+                //    RequestIntentAsync,就是面板点确定与敲字起模型那两格调的东西)真发一次请求,
+                //    看它**落在哪儿**。
+                //  ★★ 它**可以为假**:把 `DecideBusinessTarget` 里主机那一支改回走网卡(Edge),
+                //    这个监听就一个字节都收不到,下面第一条立刻红。
+                // ════════════════════════════════════════════════════════
+                {
+                    var seenReq = new List<string>();       // "METHOD PATH"
+                    var seenHead = new List<string>();      // 整个请求头块(用来查 X-LocalAI-*)
+                    // ★ 一份能同时喂饱两个解析器的应答:ParseOutcome 认 `result`,ParseIntent 认 `intent`。
+                    //   合成一份是有意的 —— 桩不该替服务端决定"这次是哪种请求"。
+                    var stubBody = System.Text.Encoding.UTF8.GetBytes(
+                        "{\"result\":{\"state\":\"ready\",\"message\":\"ok\"},"
+                        + "\"intent\":{\"alias\":\"assistant.fast\",\"component\":\"chat.8b\","
+                        + "\"plane\":\"transient\",\"code\":\"OK\",\"message\":\"\"},"
+                        + "\"snapshot\":{\"generation\":7}}");
+                    var stub = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                    stub.Start();
+                    var stubPort = ((System.Net.IPEndPoint)stub.LocalEndpoint).Port;
+                    var stubCts = new CancellationTokenSource();
+                    var envGw = Environment.GetEnvironmentVariable("LOCALAI_GATEWAY_PORT");
+
+                    static int HeadEnd(byte[] a)
+                    {
+                        for (var i = 0; i + 3 < a.Length; i++)
+                            if (a[i] == 13 && a[i + 1] == 10 && a[i + 2] == 13 && a[i + 3] == 10) return i;
+                        return -1;
+                    }
+
+                    var stubLoop = Task.Run(async () =>
+                    {
+                        while (!stubCts.IsCancellationRequested)
+                        {
+                            System.Net.Sockets.TcpClient cli;
+                            try { cli = await stub.AcceptTcpClientAsync(stubCts.Token); }
+                            catch { return; }
+                            using (cli)
+                            using (var ns = cli.GetStream())
+                            {
+                                var ms = new MemoryStream();
+                                var buf = new byte[4096];
+                                int he = -1, len = 0;
+                                while (true)
+                                {
+                                    var n = await ns.ReadAsync(buf, 0, buf.Length);
+                                    if (n <= 0) break;
+                                    ms.Write(buf, 0, n);
+                                    var arr = ms.ToArray();
+                                    if (he < 0 && (he = HeadEnd(arr)) >= 0)
+                                        foreach (var ln in System.Text.Encoding.UTF8
+                                                     .GetString(arr, 0, he).Split("\r\n"))
+                                            if (ln.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                                                int.TryParse(ln[15..].Trim(), out len);
+                                    // ★ 头读完还要**把正文收干净**再答:不收就关,HttpClient 那边
+                                    //   会拿到一个"写到一半被重置"的连接 —— 那会让断言以假红收场。
+                                    if (he >= 0 && arr.Length >= he + 4 + len) break;
+                                }
+                                var raw = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                                lock (seenReq)
+                                {
+                                    seenReq.Add(raw.Split("\r\n")[0]);
+                                    seenHead.Add(he >= 0 ? raw[..he] : raw);
+                                }
+                                var head = System.Text.Encoding.UTF8.GetBytes(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                    + stubBody.Length + "\r\nConnection: close\r\n\r\n");
+                                try
+                                {
+                                    await ns.WriteAsync(head);
+                                    await ns.WriteAsync(stubBody);
+                                    await ns.FlushAsync();
+                                }
+                                catch { /* 对面先撤了不算桩的错 */ }
+                            }
+                        }
+                    });
+
+                    try
+                    {
+                        Environment.SetEnvironmentVariable("LOCALAI_GATEWAY_PORT", stubPort.ToString());
+                        Assert(HostSetup.GatewayPort == stubPort,
+                            "★ 前提:**客户端这一侧**的回环网关端口只有一个来源(HostSetup.GatewayPort)—— "
+                            + "起网关、探 /health、和主机拨号读的必须是同一个数,"
+                            + "否则下面几条测的是「这台机器现在跑没跑网关」,与被测代码无关。"
+                            + "★★ 它**盖不住** lan-edge 的上游与 start-stack.ps1 里那两处 8080"
+                            + "(别的进程/别的语言,不跟这个环境变量走)—— 别读成「全仓唯一来源」");
+
+                        // ── ① 起栈那一步的"网关在不在"探的就是这个口(两处不许漂)──
+                        var probedGw = Task.Run(async () => await HostSetup.GatewayUpAsync(1500))
+                                           .GetAwaiter().GetResult();
+                        Assert(probedGw && seenReq.Any(x => x.StartsWith("GET /health", StringComparison.Ordinal)),
+                            "★★ GatewayUpAsync 探的是同一个回环口 —— 它与拨号读同一个数,"
+                            + "所以「探到了网关」与「业务调用打得到网关」不会一个真一个假");
+
+                        // ── ② ★★★ 主机:点「确定」真的落在回环网关上(实机第一格)──
+                        var v13Hub = new HubClient();       // 此刻状态目录是空的 ⇒ 未配对、无拨号地址
+                        Assert(!v13Hub.IsHostMachine,
+                            "★★ fail-closed:没人告诉过它角色之前,**默认不是主机** —— "
+                            + "副机误判成主机会去打一个根本没人听的回环口");
+                        Assert(v13Hub.BusinessRoute() is null,
+                            "★ 而且此时无处可打(没配对、也没判成主机)—— 不是"
+                            + "「悄悄退回某个默认地址」");
+
+                        // ★★★ 这一步是承重的:给它一份**带网卡拨号地址**的配对档案。
+                        //   实机上的主机**就是**配过对的(自配对),档案里存的正是
+                        //   `192.168.178.61:8443`。不给档案的话,"把主机那一支改回走网卡"
+                        //   这个反证在自检里根本复现不出来(没有网卡地址可退回去),
+                        //   于是下面那条最贵的断言会**假绿** —— 那正是 08-07 那天的形状。
+                        File.WriteAllText(AppPaths.ProfilePath, JsonSerializer.Serialize(new ClientProfile
+                        {
+                            EdgeUrl = "https://localai-test.local:8443", HubId = "hub-1", KeyName = "k",
+                            CaCertB64 = "", DeviceCertB64 = "", Dial = "192.168.178.61:8443",
+                        }));
+                        v13Hub.Reload();
+                        Assert(v13Hub.TryDial()?.Port == 8443
+                               && v13Hub.TryDial()!.Address.ToString() == "192.168.178.61",
+                            "★ 前提:这台**配过对**,档案里存的是网卡地址 —— "
+                            + "反证才有一个真的『退回去』可退");
+
+                        v13Hub.NoteRole(true, "自检:假装开机分流已判定这台是中枢主机");
+                        var route = v13Hub.BusinessRoute();
+                        Assert(route is { Path: HubClient.BusinessPath.HostLoopback }
+                               && route.EndPoint.Port == stubPort
+                               && System.Net.IPAddress.IsLoopback(route.EndPoint.Address),
+                            "★★★ 判定为主机 ⇒ 业务调用的落点是**回环网关**,而不是网卡上的 lan-edge"
+                            + " ⟨" + (route?.ToString() ?? "null") + "⟩");
+
+                        using (var v13Gpu = new HubGpu(v13Hub))
+                        {
+                            var ct5 = new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
+                            // ★ 退回 Edge 那条路时**会抛**(这份档案里没有真证书)——
+                            //   接住它,让判据以【红】收场而不是把整套自检掀翻:
+                            //   一条崩掉的自检只报"没有汇总行",看不出是哪条没守住。
+                            ApplyOutcome applied;
+                            try
+                            {
+                                applied = Task.Run(async () => await v13Gpu.ApplyAsync(
+                                        new[] { "chat.8b" }, 7, interruptRunning: false, null, ct5))
+                                    .GetAwaiter().GetResult();
+                            }
+                            catch (Exception ex)
+                            {
+                                applied = new ApplyOutcome(false, "threw", ex.Message, "",
+                                                           Array.Empty<BlockingLease>(), 0);
+                            }
+                            Assert(seenReq.Any(x => x.StartsWith("POST /v1/gpu/intended", StringComparison.Ordinal)),
+                                "★★★★ **组件面板点「确定」的那一次请求,真的打在了回环网关上** —— "
+                                + "这是 2026-08-07 实机那句「这台设备不能做这个操作」的判据:"
+                                + "走 lan-edge 会被注入证书指纹,网关把档位封顶 lan-device ⇒ 403。"
+                                + "★ 把主机那一支改回走网卡,这条立刻红"
+                                + " ⟨" + string.Join(" | ", seenReq) + "⟩");
+                            // ★★ 判据用 **Generation**,不用 Ok:`ParseOutcome` 对**任何** 200
+                            //   都回 Ok=true(那是有意的回落,正确性来自服务端"事务没成不得回 200")。
+                            //   ⇒ 拿 Ok 当"读得懂"的判据是**恒真**的 —— 桩回一句 `{}` 它照样绿。
+                            //   世代号 7 只可能来自真的把桩那份 JSON 解开了。
+                            Assert(applied.Ok && applied.Generation == 7,
+                                "★ 而且应答**真被解开了**(读出了 snapshot.generation=7)—— "
+                                + "不是「发出去就算」:Ok 对任何 200 都为真,拿它当判据是恒真的"
+                                + " ⟨" + applied.Code + " gen=" + applied.Generation + "⟩");
+
+                            IntentOutcome intent;
+                            try
+                            {
+                                intent = Task.Run(async () => await v13Gpu.RequestIntentAsync("assistant.fast", ct5))
+                                    .GetAwaiter().GetResult();
+                            }
+                            catch (Exception ex)
+                            {
+                                intent = new IntentOutcome(false, "threw", "assistant.fast", "", ex.Message, "");
+                            }
+                            Assert(seenReq.Any(x => x.StartsWith("POST /v1/gpu/intent ", StringComparison.Ordinal))
+                                   && intent.Ok,
+                                "★★★★ **敲字起模型那一格**(POST /v1/gpu/intent)走的是同一条回环路 —— "
+                                + "实机两格里的第二格"
+                                + " ⟨" + string.Join(" | ", seenReq) + "⟩");
+                        }
+
+                        // ── ③ ★★★ 回环这条路上**一个 X-LocalAI-\* 头都不许带** ──
+                        //   lan-edge 会先剥掉客户端自带的 X-LocalAI-* 再写它自己验过的指纹;
+                        //   回环上**没有那个剥离者**,带过去的指纹会被网关当真 ⇒ 自己把自己
+                        //   封顶回 lan-device,这次修的东西原地退回去。
+                        Assert(seenHead.Count > 0
+                               && !seenHead.Any(h => h.Contains("X-LocalAI-", StringComparison.OrdinalIgnoreCase)),
+                            "★★★ 回环请求里**没有任何 X-LocalAI-\\* 头** —— 绕开 lan-edge 就等于"
+                            + "绕开了那个剥离者,自带一个指纹过去会把档位自己封顶回 lan-device"
+                            + " ⟨" + string.Join(" / ", seenHead.SelectMany(h => h.Split("\r\n"))
+                                       .Where(l => l.StartsWith("X-LocalAI-", StringComparison.OrdinalIgnoreCase))) + "⟩");
+
+                        // ── ④ 副机方向:**一个字节都不许**落到回环网关上 ──
+                        //   ★ 只测主机那一个方向等于没测:一个"永远走回环"的实现也能让上面全绿。
+                        var before = seenReq.Count;
+                        var lanDial = new System.Net.IPEndPoint(
+                            System.Net.IPAddress.Parse("192.168.178.61"), 8443);
+                        var asClient = HubClient.DecideBusinessTarget(false, lanDial, stubPort);
+                        Assert(asClient is { Path: HubClient.BusinessPath.LanEdge }
+                               && Equals(asClient.EndPoint, lanDial),
+                            "★★★ 判定为**副机** ⇒ 照旧走 lan-edge 的 mTLS 业务口(档位 lan-device,"
+                            + "改不动驻留集合)—— 这次修的是主机那一条路,副机一行都不动"
+                            + " ⟨" + (asClient?.ToString() ?? "null") + "⟩");
+                        Assert(HubClient.DecideBusinessTarget(false, null, stubPort) is null,
+                            "★ 副机且没配过对 ⇒ **无处可打**,不是悄悄退回回环"
+                            + "(那会让一台没配对的副机去指挥它自己那台并不存在的中枢)");
+                        Assert(HubClient.DecideBusinessTarget(true, lanDial, stubPort)
+                                   is { Path: HubClient.BusinessPath.HostLoopback },
+                            "★★ 主机就算档案里存着网卡地址,业务调用也走回环 —— "
+                            + "拨号地址是配对的产物,不该反过来决定档位");
+                        Assert(seenReq.Count == before,
+                            "★★ 而且刚才那几次判定**一个请求都没发出去**(纯函数判据不碰网络)");
+
+                        // ── ⑤ ★★★★ 主机 + **非机主 Windows 账户** ⇒ 必须退回 Edge ──
+                        //   粒度错配:isHostMachine 是【整机】事实,而回环那头的档位按
+                        //   【登录账户】判。config/caller-accounts.toml 里明文记着访客账户 Alle
+                        //   被有意排除 ⇒ 它走回环拿到的是 unregistered-local,只有 {read} ——
+                        //   **比它原来经 Edge 拿到的 lan-device({read,lease}) 还少一个 lease**,
+                        //   「意图即起」与 client_session 租约会一起没掉。那是回归,不是修复。
+                        var demoted = HubClient.DecideBusinessTarget(true, lanDial, stubPort,
+                            "网关回话说档位是 `unregistered-local`");
+                        Assert(demoted is { Path: HubClient.BusinessPath.LanEdge }
+                               && Equals(demoted.EndPoint, lanDial),
+                            "★★★★ 主机 + 非机主账户(服务端回话点名档位不是 trusted-local)⇒ "
+                            + "**退回 Edge**,拿回 lan-device 的 lease —— 否则这个账户会比 V13 之前**更差**"
+                            + " ⟨" + (demoted?.ToString() ?? "null") + "⟩");
+                        Assert(demoted!.Why.Contains("不是机主", StringComparison.Ordinal)
+                               && demoted.Why.Contains("caller-accounts.toml", StringComparison.Ordinal),
+                            "★★ 而且说得出**为什么降**、以及**怎么改**(把账户加进 allowlist)—— "
+                            + "一句「权限不够」会让人去重新配对");
+                        var demotedNoDial = HubClient.DecideBusinessTarget(true, null, stubPort, "同上");
+                        Assert(demotedNoDial is { Path: HubClient.BusinessPath.HostLoopback }
+                               && demotedNoDial.Why.Contains("无路可退", StringComparison.Ordinal),
+                            "★★★ 降级但**没有配对地址** ⇒ 如实说「无路可退」,"
+                            + "**不假装换了路** —— 假装换路会让人去查 Edge,而那儿根本没有地址");
+                        Assert(HubClient.DecideBusinessTarget(false, lanDial, stubPort, "同上")
+                                   is { Path: HubClient.BusinessPath.LanEdge },
+                            "★ 副机本来就在 Edge 上,降级参数对它是空操作(不许把它推到别处去)");
+
+                        // ── ⑥ ★★★ 配对通道单独一格:主机上它**必须**还被问到 ──
+                        //   V13 之后业务走回环 ⇒ ProbeAsync 不再碰 Profile.Dial,
+                        //   而那个地址仍是聊天 / 内网同步 / 设备证书续签唯一的拨号目标。
+                        //   ⇒「改错一位」与「改对」会长得一模一样(顶栏照样绿)。
+                        Assert(v13Hub.PairingChannelNote.Contains("192.168.178.61:8443", StringComparison.Ordinal),
+                            "★★★ 配对通道那一格说的是**拨号地址**那条路,不是业务通道 —— "
+                            + "两条路在主机上已经分家,合并成一格会让其中一件被另一件盖住"
+                            + " ⟨" + v13Hub.PairingChannelNote + "⟩");
+                        Assert(v13Hub.PairingChannelNote.Contains("聊天", StringComparison.Ordinal)
+                               || v13Hub.PairingChannelError is null,
+                            "★ 坏掉时要说清**谁在用它**(聊天/同步/续签)—— 否则人不知道这一格重不重要");
+                    }
+                    finally
+                    {
+                        Environment.SetEnvironmentVariable("LOCALAI_GATEWAY_PORT", envGw);
+                        // ★ 把临时配对档案删掉 —— 自检**绝不留下真实状态**(本文件顶部那条纪律)
+                        try { if (File.Exists(AppPaths.ProfilePath)) File.Delete(AppPaths.ProfilePath); } catch { }
+                        try { stubCts.Cancel(); } catch { }
+                        try { stub.Stop(); } catch { }
+                        try { stubLoop.Wait(2000); } catch { }
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
+                //  ★★★★ V13 · **那条路由的输入是怎么来的** —— 生产触发点必须被钉住
+                //
+                //  ══ 2026-08-08 对抗式复核抓出的 A 级缺口 ══
+                //    上面那一整块量的是「给它 isHost=true,它会打到哪儿」——
+                //    而 `isHost` 是**自检自己喂进去的**。全仓唯一的生产写入点是
+                //    `App.xaml.cs` 里那一行 `Hub.NoteRole(decision.Role.IsHost, …)`。
+                //    ⇒ **把那一行删掉,或者把它挪到 `Gpu.Start()` 之后,上面 20 多条断言一条都不红**,
+                //      而出厂客户端在主机上会 `IsHostMachine==false` ⇒ 走 Edge ⇒ 点确定照旧被拒。
+                //    这与 08-07 那天的形状**一模一样**(判据全绿、功能开不起来),
+                //    只是缝从"档位怎么解出来"挪到了"角色怎么喂进去"。
+                //
+                //  ★ 这条只能写成**源码判据**:要变成行为判据就得真跑一遍 `App.OnStartup`
+                //    的后台分流(要角色探测、要起栈、要 Dispatcher),那不是自检该做的事。
+                //    ⇒ 如实标成结构判据,并且钉**顺序**而不只是"那个词在不在" ——
+                //      「挪到 Gpu.Start() 之后」正是它最可能的坏法。
+                //  ★★ 按第 11 条坑用 `if (src is not null)` 兜住:出厂产物旁边没源码时**跳过**,不判红。
+                // ════════════════════════════════════════════════════════
+                var v13AppSrc = TryReadSource("App.xaml.cs");
+                if (v13AppSrc is not null)
+                {
+                    var boot = Slice(v13AppSrc, "void StartAfterBootDecision", "static string Say(");
+                    Assert(boot is not null && boot.Contains("Hub.NoteRole(decision.Role.IsHost",
+                                                             StringComparison.Ordinal),
+                        "★★★★ 开机分流**必须**把 D36 的角色结论喂给 HubClient —— "
+                        + "没有这一行,出厂客户端在主机上 IsHostMachine 恒为 false ⇒ 业务调用走 Edge ⇒ "
+                        + "点「确定」照旧「这台设备不能做这个操作」,而上面那 20 多条断言一条都不会红");
+                    // ★★★ 必须先 `Body()` 去掉注释再比位置 —— 否则撞上**解释这条断言的那段注释**
+                    //   (ASSERTION-PITFALLS 第 1 条,已踩 9 次;这条第一版当场踩了第 10 次:
+                    //    我在 App.xaml.cs 的注释里写了「必须在 Gpu.Start() 之前」,
+                    //    `IndexOf` 就先命中了那句话,断言判红而代码是对的)。
+                    var bootCode = boot is null ? null : Body(boot);
+                    var iRole = bootCode?.IndexOf("Hub.NoteRole(", StringComparison.Ordinal) ?? -1;
+                    var iGpu = bootCode?.IndexOf("Gpu.Start()", StringComparison.Ordinal) ?? -1;
+                    var iLease = bootCode?.IndexOf("Lease.Start()", StringComparison.Ordinal) ?? -1;
+                    Assert(iRole >= 0 && iGpu > iRole && iLease > iRole,
+                        "★★★★ 而且必须喂在 `Gpu.Start()` / `Lease.Start()` **之前** —— "
+                        + "两条流一起来就要拨号,喂晚了它们会用 fail-closed 的那个 false 开一条"
+                        + "档位不够的流,而症状与没修过一模一样"
+                        + $" ⟨NoteRole@{iRole} · Gpu@{iGpu} · Lease@{iLease}⟩");
+                    Assert(iRole >= 0
+                           && iRole < (bootCode!.IndexOf("MayStartStack", StringComparison.Ordinal) is var iSt
+                                       && iSt >= 0 ? iSt : int.MaxValue),
+                        "★★ 也要喂在起栈之前:起栈起的就是那条回环通道要打的网关,"
+                        + "顺序反了会有一段「路由已定、网关还没起」的窗口");
+                    // ★ 退出那道闸也要跟着路由走,不能再看 IsPaired ——
+                    //   主机没配过对也会经回环持住 client_session,IsPaired 那道闸会把退出通知整个挡掉。
+                    var cleanup = Slice(v13AppSrc, "void RegisterCleanupSteps", "Lifecycle.Register(\"save-settings\"");
+                    Assert(cleanup is not null && cleanup.Contains("Hub.BusinessRoute() is null",
+                                                                   StringComparison.Ordinal),
+                        "★★★ 退出时「要不要通知中枢结束会话」的闸必须问**业务通道**,不是 `IsPaired` —— "
+                        + "主机没配过对照样经回环持着租约,用 IsPaired 挡掉的话那份租约要挂满整个 TTL");
+                }
+
+                // ════════════════════════════════════════════════════════
                 //  V6 · sync / chat 切片的跨进程契约(客户端那半边)
                 //
                 //  另一半在 `10-core/gateway/test_sync.py`(搜 CROSS_PROCESS_CONTRACTS),

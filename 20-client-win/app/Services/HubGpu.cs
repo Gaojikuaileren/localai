@@ -241,16 +241,17 @@ public sealed class HubGpu : IDisposable
         {
             try
             {
-                var ep = _hub.TryDial();
-                if (_hub.Profile is null || ep is null)
+                // ★ V13:路由由 HubClient 定 —— 主机打回环网关,副机走 Edge。
+                //   这里**不再自己拼 (Profile, dial)**:两处各判一次路由,迟早会岔开。
+                if (_hub.BusinessRoute() is null)
                 {
-                    // 还没配对 —— 不是错误,只是没有中枢可订阅。
+                    // 还没配对、也没判成主机 —— 不是错误,只是没有中枢可订阅。
                     Link = HubGpuLink.NeverConnected;
                     Notify();
                     await Task.Delay(TimeSpan.FromSeconds(5), ct);
                     continue;
                 }
-                await Transport.OpenStream(_hub.Profile, ep, "/v1/gpu/events", OnLine, ct);
+                await _hub.OpenBusinessStreamAsync("/v1/gpu/events", OnLine, ct);
                 // 正常读到流尾 = 服务端关了 -> 走重连
                 Link = HubGpuLink.Reconnecting;
                 LastError = "中枢关闭了推送流";
@@ -561,16 +562,21 @@ public sealed class HubGpu : IDisposable
                                                IReadOnlyList<string>? permittedOnDemand = null,
                                                CancellationToken ct = default)
     {
-        var ep = _hub.TryDial();
-        if (_hub.Profile is null || ep is null)
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V13(D?):这一次调用是整条修复的**落点**。
+        //  主机上它必须打回环网关 ⇒ 档位 trusted-local ⇒ `change_resident` 放行;
+        //  经 Edge 的话 lan-edge 会注入指纹,网关把档位封顶 lan-device ⇒ 403 denied_action,
+        //  界面上就是实机报的那句「这台设备不能做这个操作」。
+        //  ★ 副机仍然走 Edge、仍然是 lan-device、仍然改不动 —— 那是规格要的。
+        // ══════════════════════════════════════════════════════════════════
+        if (_hub.BusinessRoute() is null)
             return new ApplyOutcome(false, "not_paired", "尚未配对", "", Array.Empty<BlockingLease>(), 0);
         // ★ 省略 ≠ 空集合 —— 所以这里也**分两个载荷**,而不是给一个默认值。
         object payload = permittedOnDemand is null
             ? new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning }
             : new { if_generation = ifGeneration, components = ids, interrupt_running = interruptRunning,
                     permitted_on_demand = permittedOnDemand };
-        var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post,
-                                                  "/v1/gpu/intended", payload, ct);
+        var (status, body) = await _hub.SendBusinessAsync(HttpMethod.Post, "/v1/gpu/intended", payload, ct);
         return ParseOutcome(status, body);
     }
 
@@ -711,11 +717,11 @@ public sealed class HubGpu : IDisposable
     /// <summary>发一次意图并解析结果。★ 抽成公开方法是为了让自检能直接喂形状。</summary>
     public async Task<IntentOutcome> RequestIntentAsync(string alias, CancellationToken ct = default)
     {
-        var ep = _hub.TryDial();
-        if (_hub.Profile is null || ep is null)
+        // ★ V13:与「点确定」同一条路由 —— 敲字起模型这一格也归它管(实机第二格)。
+        if (_hub.BusinessRoute() is null)
             return new IntentOutcome(false, "not_paired", alias, "", "尚未配对", "");
-        var (status, body) = await Transport.Send(_hub.Profile, ep, HttpMethod.Post,
-                                                  "/v1/gpu/intent", new { alias }, ct);
+        var (status, body) = await _hub.SendBusinessAsync(HttpMethod.Post, "/v1/gpu/intent",
+                                                          new { alias }, ct);
         return ParseIntent(status, body);
     }
 

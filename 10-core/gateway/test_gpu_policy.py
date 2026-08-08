@@ -283,5 +283,149 @@ check('★ session_end 归 read 档 —— 它只释放自己的租约,不改驻
       '算成变更的话,一次正常退出就会吃掉用户的配额,而退出是每次都做的事',
       'gpu_guard(request, "read")' in _se, _se[:200])
 
+print("\n=== 9. ★★★★ V13(D?):主机客户端【真实连接路径】拿到的是哪个档位 ===")
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 这一节存在的全部理由 —— 2026-08-07 实机那一课
+#
+#  那天 4197 条断言全绿,而主机上点「确定」直接吃「这台设备不能做这个操作」。
+#  原因就在上面第 3/4 节的 `_probe`:它**把 `classify_caller` 整个换掉**,
+#  tier 是【直接构造】的。于是"档位表判得对不对"被测得很透,
+#  而**"主机客户端实际会走到哪一档"从头到尾没有一条断言问过**。
+#
+#  ⇒ 本节反过来:**不碰 `classify_caller`,也不碰 `gpu_principal`**。
+#    唯一替身是 `caller_identity.account_from_request` —— 那是"操作系统说这个 socket
+#    属于谁",合成请求没有真 socket,拿不到它;除此之外
+#    (回环判据 → allowlist 查表 → gpu_principal → 档位表 → HTTP 层)**全部真跑**。
+#
+#  ★ 两个方向都测,而且两边**只差一个证书指纹头**:
+#      · 无指纹(= 主机客户端直连回环网关)⇒ trusted-local ⇒ 改驻留集合**过权限层**;
+#      · 带指纹(= 经 lan-edge,今天主机与副机走的都是这条)⇒ 封顶 lan-device ⇒ 403/tool。
+#    只测一个方向等于没测:一个"永远放行"或"永远拒绝"的实现都能让单向断言恒绿。
+# ══════════════════════════════════════════════════════════════════════════
+_ident_orig = gateway.caller_identity.account_from_request
+_lan_orig2 = gateway.resolve_lan_principal
+#: 机主账户从**配置文件真读**(config/caller-accounts.toml 的 allowlist),不写死在测试里 ——
+#  写死的话,把机主从 allowlist 里删掉这件事在这里不会变红,而它恰恰是这条路的开关。
+_owner = sorted(gateway.TRUSTED_LOCAL_ACCOUNTS)[0]
+
+
+def _probe_real(account, *, with_fp=False):
+    """按【真实连接路径】打一次 GPU 面。★ 只替换 OS 身份解析,其余全真跑。"""
+    try:
+        gateway.caller_identity.account_from_request = \
+            lambda req, a=account: None if a is None else (f"HOST\\{a}", a)
+        if with_fp:
+            gateway.resolve_lan_principal = lambda fp: {"tier": "lan-device", "device_id": "d1"}
+        gpu_policy.reset_quota()
+        h = {"x-localai-cert-sha256": "aa"} if with_fp else {}
+        with TestClient(gateway.app, client=("127.0.0.1", 5555)) as c:
+            snap = c.get("/v1/gpu/snapshot", headers=h)
+            g = snap.json().get("generation", 0) if snap.status_code == 200 else 0
+            chg = c.post("/v1/gpu/intended",
+                         json={"if_generation": g, "components": ["speech.lite"]}, headers=h)
+            return snap, chg
+    finally:
+        gateway.caller_identity.account_from_request = _ident_orig
+        gateway.resolve_lan_principal = _lan_orig2
+
+
+class _ReqLike:
+    """给 classify_caller / principal_device 用的最小请求(与本文件其它 stub 同款)。"""
+
+    def __init__(self, host="127.0.0.1", headers=None):
+        self.client = type("C", (), {"host": host, "port": 5555})()
+        self.headers = headers or {}
+
+
+# ── ① 主机这条路(回环 + 机主账户 + **无指纹**)──
+# ★★★ 这里**不写**「allowlist 非空」那种前提 —— 它恒真:`load_caller_accounts`
+#   对空表直接 raise,`import gateway` 那一刻就炸了,断言根本跑不到
+#   (2026-08-08 对抗式复核指出的恒绿,已删)。要证明「判据真的是那张表」,
+#   得**把机主从表里拿掉再打一次**,见下面 ⑤。
+gateway.caller_identity.account_from_request = lambda req: (f"HOST\\{_owner}", _owner)
+try:
+    _tier_host = gateway.gpu_principal(_ReqLike())
+    _dev_host = gateway.principal_device(_ReqLike())
+finally:
+    gateway.caller_identity.account_from_request = _ident_orig
+check("★★★★ **回环 + allowlist 账户 + 无证书指纹 ⇒ trusted-local**(整条链真跑,没有构造 tier)—— "
+      "这正是主机客户端 V13 之后走的那条路",
+      _tier_host == "trusted-local", _tier_host)
+check("★★★ 检查①:trusted-local **不需要证书指纹也解得出设备身份**(= LOCAL_DEVICE)—— "
+      "绕开 lan-edge 就没有那个注入者,若还有哪条路径要指纹才认人,退出时就放不掉租约",
+      _dev_host == gateway.LOCAL_DEVICE, _dev_host)
+
+_s9, _c9 = _probe_real(_owner)
+check("★★★★ 主机这条路上「点确定」**过了权限层**(不是 401/403)—— "
+      "2026-08-07 实机那句「这台设备不能做这个操作」就是这里回的 403",
+      _c9.status_code not in (401, 403), f"{_c9.status_code}/{_dim(_c9)}")
+check("★ 而且读得到快照", _s9.status_code == 200, _s9.status_code)
+
+# ── ② 同一账户、只多一个证书指纹(= 经 lan-edge)⇒ 封顶 lan-device ──
+#   ★★ 这一条同时是【检查②:副机不受影响】的行为判据:副机的每一次请求都带指纹。
+_s9b, _c9b = _probe_real(_owner, with_fp=True)
+check("★★★★ **只多一个证书指纹就封顶 lan-device ⇒ 改驻留集合 403 / 工具维** —— "
+      "副机走的正是这条(它永远带指纹),所以副机**仍然改不动驻留集合**;"
+      "同时这条也证明上面那条不是恒绿",
+      _c9b.status_code == 403 and _dim(_c9b) == "tool", f"{_c9b.status_code}/{_dim(_c9b)}")
+check("★ 副机仍然读得到快照(改不动 ≠ 断连)", _s9b.status_code == 200, _s9b.status_code)
+
+# ── ③ 反向:回环但**不在 allowlist 里**的账户 ⇒ 拿不到主机档 ──
+#   ★ 没有这一条,「回环就是主机」会是一条谁都能走的路 —— 本机上真实存在
+#     两个外部 AI 沙箱账户(见 config/caller-accounts.toml 的账目那一节)。
+_s9c, _c9c = _probe_real("CodexSandboxOffline")
+check("★★★ 回环但账户不在 allowlist ⇒ **改不动**(unregistered-local)—— "
+      "「走回环」不等于「是机主」,判据始终是那张 allowlist",
+      _c9c.status_code == 403 and _dim(_c9c) == "tool", f"{_c9c.status_code}/{_dim(_c9c)}")
+_s9d, _c9d = _probe_real("ai-asset")
+check("★★★ 隔离服务账户即使走回环也 403(§6.8『绝不放行』在这条路上照样成立)",
+      _c9d.status_code == 403 and _dim(_c9d) == "user", f"{_c9d.status_code}/{_dim(_c9d)}")
+_s9e, _c9e = _probe_real(None)
+check("★★ 解析不出 OS 身份 ⇒ 降档改不动(fail-closed,不是『解析不到就当机主』)",
+      _c9e.status_code == 403, f"{_c9e.status_code}/{_dim(_c9e)}")
+
+# ── ④ 结构:`lan-device` 那一档**没有**被偷偷加回 change_resident ──
+#   ★ 这次修的是客户端走哪条路,**不是**放宽副机的权限。两者长得很像,
+#     而后者会把副机的口子一起开回去(用户在 V13 里明令禁止的那一条)。
+check("★★★ `lan-device` 依旧没有 change_resident / unload_all / permit_on_demand —— "
+      "V13 修的是【主机走哪条路】,不是【放宽副机】",
+      gpu_policy.TIER_CAPS["lan-device"].actions == frozenset({"read", "lease"}),
+      sorted(gpu_policy.TIER_CAPS["lan-device"].actions))
+check("★ 而 trusted-local 仍然是唯一拿满全套动作的档位(主机变更面就是它)",
+      gpu_policy.TIER_CAPS["trusted-local"].actions == frozenset(gpu_policy.ACTIONS))
+
+# ── ⑤ ★★★ 判据真的是那张 allowlist —— 把机主从表里拿掉,同一条连接立刻改不动 ──
+#   ★ 没有这一条,上面 ① 的 `_owner` 取自被测的那张表本身,「这条路的开关是 allowlist」
+#     这句话在这里**不可能为假**(2026-08-08 对抗式复核指出)。
+_saved_allow = gateway.TRUSTED_LOCAL_ACCOUNTS
+try:
+    gateway.TRUSTED_LOCAL_ACCOUNTS = frozenset({"nobody-by-this-name"})
+    _s9f, _c9f = _probe_real(_owner)
+finally:
+    gateway.TRUSTED_LOCAL_ACCOUNTS = _saved_allow
+check("★★★★ 把机主从 allowlist 里拿掉 ⇒ **同一个账户、同一条回环连接**立刻改不动 —— "
+      "这条路的开关确实是 config/caller-accounts.toml,不是「走回环就是机主」",
+      _c9f.status_code == 403, f"{_c9f.status_code}/{_dim(_c9f)}")
+check("★ 而且拿掉之后再放回去,上面那条仍然成立(没有把全局状态改坏)",
+      gateway.classify_caller(_ReqLike()) in ("trusted-local", "unregistered-local"))
+
+# ── ⑥ ★★★★ 主机上【非机主 Windows 账户】比它原来经 Edge 拿到的**还少** ──
+#   这是 V13 客户端那一侧必须有「档位不对就退回 Edge」的**理由**:
+#   DecideBusinessTarget 只看 isHostMachine 这个【整机】事实,而回环那头的档位按
+#   【登录账户】判 —— 两者粒度不一样。config/caller-accounts.toml 里明文记着
+#   访客账户 Alle 被有意排除,还给「第二位家庭成员」预留了位置。
+_unreg = gpu_policy.TIER_CAPS["unregistered-local"]
+_lan = gpu_policy.TIER_CAPS["lan-device"]
+check("★★★★ `unregistered-local`(主机上非机主账户走回环拿到的)**比 `lan-device` 还少一个 lease** —— "
+      "所以客户端不能只凭『这台是主机』就把业务口改到回环:那会让访客账户上的"
+      "「意图即起」与 client_session 租约一起没掉(比 V13 之前更差)",
+      "lease" in _lan.actions and "lease" not in _unreg.actions,
+      f"lan-device={sorted(_lan.actions)} unregistered-local={sorted(_unreg.actions)}")
+_s9g, _c9g = _probe_real("Alle")
+check("★★★ 行为面同一条:回环 + 非 allowlist 账户 ⇒ 连**申请租约**都不行 "
+      "(客户端据此降级回 Edge —— 服务端在 error.tier 里如实回带了档位名)",
+      _c9g.status_code == 403 and "tier" in (_c9g.json().get("error") or {}),
+      f"{_c9g.status_code}/{(_c9g.json().get('error') or {}).get('tier')}")
+
 print(f"\n=== 权限档位六元组:{_pass} PASS · {_fail} FAIL ===")
 sys.exit(1 if _fail else 0)

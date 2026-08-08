@@ -363,14 +363,45 @@ public static class HostSetup
                                   || Edge.Outcome != SetupOutcome.Failed);
     }
 
-    public const int GatewayPort = 8080;
+    /// <summary>网关默认端口(与 `90-ops/start-stack.ps1`、README 一致)。</summary>
+    public const int DefaultGatewayPort = 8080;
+
+    /// <summary>
+    /// 回环网关端口。★ 可被 `LOCALAI_GATEWAY_PORT` 覆盖(与 <c>HubAdmin.AdminPort</c> 同款)。
+    ///
+    /// <para>★★ 2026-08-08(D?)从 <c>const</c> 改成属性,理由不是"将来可能要换端口",
+    /// 而是**这个数在本进程里有了第三个消费者**:起网关的那一行、探 <c>/health</c> 的那一行,
+    /// 以及【主机客户端业务调用的拨号】(<c>HubClient.DecideBusinessTarget</c>)。
+    /// 三处各写一个字面量的话,自检里换一个假网关只换得掉其中一个 —— 另外两处仍打真 8080,
+    /// 于是那条断言测的是「这台机器现在有没有跑网关」,而不是「客户端拨到哪儿去了」。
+    /// 一条**永远绿或永远红、与被测代码无关**的断言,比没有断言更坏。</para>
+    /// <para>★★★ **如实说清它盖不住什么**(2026-08-08 对抗式复核):这**不是**全仓
+    /// 「网关端口的唯一来源」。至少还有两处写死 8080,而且都在**别的进程/别的语言**里:
+    /// `10-core/lan-edge/Program.cs` 的上游地址 <c>"http://127.0.0.1:8080"</c>,
+    /// 与 `90-ops/start-stack.ps1`。它们**不跟这个环境变量走**。
+    /// ⇒ 改这个变量只改得动"客户端这一侧的三处";真要换端口,那两处得一起改。
+    /// 把它说成"唯一来源"会让下一个人以为改一处就够了。</para>
+    /// </summary>
+    public static int GatewayPort
+    {
+        get
+        {
+            var s = Environment.GetEnvironmentVariable("LOCALAI_GATEWAY_PORT");
+            return int.TryParse(s, out var n) && n is > 0 and < 65536 ? n : DefaultGatewayPort;
+        }
+    }
 
     /// <summary>网关在不在(探 /health,**不看进程**)。</summary>
     public static async Task<bool> GatewayUpAsync(int timeoutMs = 1500)
     {
         try
         {
-            using var c = new HttpClient { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
+            // ★ UseProxy=false:与 `HubClient.LoopHttp` 逐字对齐。自检里有一条断言说
+            //   「探 /health 与业务拨号读同一个数」,而如果这一个走系统代理、那一个不走,
+            //   在配了代理的机器上「探到了网关」与「业务打得到网关」会**一真一假** ——
+            //   那条断言就成了一句在开发机上恒真、在真实环境里说谎的话。
+            using var c = new HttpClient(new SocketsHttpHandler { UseProxy = false })
+                { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
             var r = await c.GetAsync($"http://127.0.0.1:{GatewayPort}/health");
             return (int)r.StatusCode is >= 200 and < 300;
         }

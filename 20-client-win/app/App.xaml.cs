@@ -400,6 +400,15 @@ public partial class App : Application
                     "开机角色判定出错(已记 crash.log)—— 按副机处理,不会去起栈。");
             }
 
+            // ★★★ V13(D?):把角色结论交给 HubClient —— 它据此决定**业务调用打到哪儿**。
+            //   主机 ⇒ 回环网关(档位 trusted-local,点得动确定);副机 ⇒ 照旧走 Edge。
+            //   ★ 必须在 `Gpu.Start()` / `Lease.Start()` **之前**:那两条流一起来就要拨号,
+            //     拨号前没人告诉过 HubClient 角色的话,它按 fail-closed 走副机那条 ——
+            //     主机上就会开一条档位不够的流,而症状(点确定被拒)与没修过一模一样。
+            //   ★ 上面那个 catch 已经保证:判据自己炸了 ⇒ decision.Role.IsHost == false ⇒
+            //     依旧落在【副机】那一边,不会去打一个没人听的回环口。
+            Hub.NoteRole(decision.Role.IsHost, decision.Role.Why);
+
             await Dispatcher.InvokeAsync(() =>
             {
                 Boot = decision;
@@ -677,7 +686,11 @@ public partial class App : Application
         //      副机退出绝不能把另一个人正在用的模型干掉(引用计数归零才真卸载,主机侧负责)。
         Lifecycle.Register("end-session+release-vram", async ct =>
         {
-            if (!Hub.IsPaired) return;
+            // ★★ V13(D?):闸从 `IsPaired` 换成「有没有业务通道」。
+            //   主机就算**没配过对**也会经回环持住 `client_session` 租约(LeaseKeeper 走的是
+            //   同一条路由),而 `IsPaired` 那道闸会把退出通知整个挡掉 ⇒ 那份租约挂满 TTL,
+            //   中枢在这期间一直以为"有人在用",空闲收割碰不到它。
+            if (Hub.BusinessRoute() is null) return;
             await Hub.EndSessionAsync(ct);
         });
 

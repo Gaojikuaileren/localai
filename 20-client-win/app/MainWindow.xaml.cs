@@ -905,10 +905,15 @@ public partial class MainWindow : Window
                                       !paired || confirmedHub ? "FgPrimary" : "FgSecondary");
         HostText.ToolTip = !paired
             ? null
-            : confirmedHub
+            : (confirmedHub
                 ? "已确认:本机的回环管理面答话了,而且 hub id 与本机配对档案一致。"
                 : "只是推测 —— 依据仅是配对时记下的拨号地址看起来属于本机,不代表中枢正在这台上运行。"
-                  + "换了网/换了 IP,或 Edge 没启动,这一格都可能说反。到「设备」页看确切结论。";
+                  + "换了网/换了 IP,或 Edge 没启动,这一格都可能说反。到「设备」页看确切结论。")
+              // ★★ V13(D?):把**业务调用实际走哪条路**也摆出来。
+              //   这两条路决定的是档位(回环 ⇒ trusted-local,能改驻留集合;
+              //   经 Edge ⇒ lan-device,改不动),而 2026-08-07 那天之所以查了一整天,
+              //   正是因为**屏幕上没有任何一处说得出这次请求是从哪条路发出去的**。
+              + "\n\n业务通道:" + TheApp.Hub.RouteNote;
 
         // ---- 当前使用者(推测)----
         // ★ 用户裁定:这一格显示【推测的使用者身份】,不是连接状态 —— 连接状态只在右边 token 块里说,

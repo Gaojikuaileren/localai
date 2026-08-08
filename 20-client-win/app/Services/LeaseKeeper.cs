@@ -137,10 +137,16 @@ public sealed class LeaseKeeper : IDisposable
         //   (或我们的状态已经不可信)。自动重新申请 = 换个 id 继续双持有。
         //   ⇒ 停在这里,等下一次 Start()(即用户重开客户端)。
         if (State == LeaseState.Fenced) return false;
-        var ep = _hub.TryDial();
-        if (_hub.Profile is null || ep is null) return false;
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V13(D?):路由改由 `HubClient.BusinessRoute()` 定(主机 → 回环网关)。
+        //  这里**必须**跟着改,而不是"只改 GPU 面那两条":中枢按 `principal_device`
+        //  认持有者 —— 回环得 `local`,经 Edge 得 device_id。租约在一条路上拿、
+        //  `/v1/session/end` 在另一条路上还,退出时**一条也匹配不上** ⇒ 租约挂满 TTL。
+        //  那正是审计 B3 记过的形状(同一台机器在两个面上叫两个名字),不许再造一个。
+        // ══════════════════════════════════════════════════════════════════
+        if (_hub.BusinessRoute() is null) return false;
         // ★ if_generation 必填(与 lease 端点的既有规矩一致)—— 先取一次快照。
-        var (gs, gb) = await Transport.Send(_hub.Profile, ep, HttpMethod.Get, "/v1/gpu/snapshot", null, ct);
+        var (gs, gb) = await _hub.SendBusinessAsync(HttpMethod.Get, "/v1/gpu/snapshot", null, ct);
         if (gs != 200) { LastError = $"取快照失败({gs})"; Notify(); return false; }
         if (!TryParseGeneration(gb, out var gen))
         {
@@ -158,8 +164,8 @@ public sealed class LeaseKeeper : IDisposable
             return false;
         }
 
-        var (st, body) = await Transport.Send(
-            _hub.Profile, ep, HttpMethod.Post, "/v1/gpu/lease",
+        var (st, body) = await _hub.SendBusinessAsync(
+            HttpMethod.Post, "/v1/gpu/lease",
             new
             {
                 if_generation = gen,
@@ -183,7 +189,7 @@ public sealed class LeaseKeeper : IDisposable
             //   于是**没有任何人能续它、也没有任何人会释放它**,它要在中枢挂满整个 TTL。
             //   续租每 30 秒试一次 ⇒ 稳态并存约 3 份**没人认领的幽灵租约**。
             //   ⇒ 拿到了却记不住,就必须当场还回去。
-            await ReleaseByHolderAsync(ep, "lease-parse-failed", ct);
+            await ReleaseByHolderAsync("lease-parse-failed", ct);
             LeaseId = null; _fence = null;
             LastError = "中枢给的租约解析不出 lease_id / fence_token —— 已把刚拿到的那份放掉";
             Notify();
@@ -328,12 +334,12 @@ public sealed class LeaseKeeper : IDisposable
     /// 那一个的续租会拿到 410 并在下一轮重新申请,**不会双持有**。
     /// </para>
     /// </summary>
-    async Task ReleaseByHolderAsync(System.Net.IPEndPoint ep, string reason, CancellationToken ct)
+    async Task ReleaseByHolderAsync(string reason, CancellationToken ct)
     {
         try
         {
-            await Transport.Send(_hub.Profile!, ep, HttpMethod.Post, "/v1/session/end",
-                                 new { reason }, ct);
+            // ★ V13:与申请那次走同一条路由 —— 否则"按持有者匹配"匹配的是另一个名字。
+            await _hub.SendBusinessAsync(HttpMethod.Post, "/v1/session/end", new { reason }, ct);
         }
         catch
         {
@@ -344,12 +350,11 @@ public sealed class LeaseKeeper : IDisposable
 
     async Task RenewAsync(CancellationToken ct)
     {
-        var ep = _hub.TryDial();
-        if (_hub.Profile is null || ep is null) return;
+        if (_hub.BusinessRoute() is null) return;
         // ★ 同 AcquireAsync:不再自报 holder(审计 B1)。续租的条件是 fence_token,
         //   而限流桶的 key 由中枢自己解析 —— 自报只会让"每换个名字就是一个新桶"。
-        var (st, _) = await Transport.Send(
-            _hub.Profile, ep, HttpMethod.Post, "/v1/gpu/lease/renew",
+        var (st, _) = await _hub.SendBusinessAsync(
+            HttpMethod.Post, "/v1/gpu/lease/renew",
             new { lease_id = LeaseId, fence_token = _fence, ttl_s = Ttl.TotalSeconds }, ct);
         if (st == 200) { State = LeaseState.Held; LastError = null; Notify(); return; }
         if (st == 409)

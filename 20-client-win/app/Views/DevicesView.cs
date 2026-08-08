@@ -676,6 +676,22 @@ public sealed class DevicesView : UserControl
                 return;
             }
             await TheApp.Hub.ProbeAsync();     // 立刻验一次,免得人以为改完就好了
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V13(D?)之后这一行**必须**看配对通道那一格,不能只看 State。
+            //
+            //  主机上业务调用已经改走回环网关 ⇒ `ProbeAsync` 里那次 `/v1/models`
+            //  打的是 127.0.0.1,**与刚填进去的地址完全无关**,永远 200 ⇒ State=Online。
+            //  而这个框改的 `Profile.Dial` 仍然是聊天、内网同步、**90 天一次的设备证书续签**
+            //  唯一的拨号目标。⇒ 只看 State 的话,「填错一位」与「填对」长得一模一样,
+            //  人拿着一个绿点走开,三样东西在背后静默地打向一个不存在的地址。
+            //  ★ 这条不是理论:2026-08-08 的对抗式复核就是照着这条路把它走出来的。
+            // ══════════════════════════════════════════════════════════════
+            if (TheApp.Hub.PairingChannelError is { Length: > 0 })
+                ConfirmDialog.Show("地址存下了,但这条通道连不上",
+                    TheApp.Hub.PairingChannelNote
+                    + "\n\n★ 中枢本身可能是好的(这台是主机时,面板和显存走的是另一条回环通道,"
+                    + "所以顶栏可能仍然显示已连接)—— 但上面那三样东西走的是你刚填的这个地址。",
+                    confirmText: "知道了", cancelText: "关闭");
             Build();
             (Application.Current.MainWindow as MainWindow)?.RefreshStatus();
         });
