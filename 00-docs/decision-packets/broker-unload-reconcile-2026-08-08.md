@@ -1,10 +1,11 @@
-# `D?` · Broker 的卸载与启动重整 —— 三条今天第一次可达的缺陷(V16 · 2026-08-08)
+# `D109` · Broker 的卸载与启动重整 —— 三条今天第一次可达的缺陷(V16 · 2026-08-08)
 
 > 车道:**V16 · Broker 卸载与启动重整**(分支 `claude/broker-unload-reconcile-db2d03`)
 > 来源:**V13 收工报告**(提交 `0474d8c`,packet `host-loopback-business-route-2026-08-08.md` §4.2)
-> D 号:草案写 `D?`,并入那刻取号(落笔时仓库里**已提交**的最大号 = **D107**;
-> 同时在排队的还有 `host-loopback-business-route` 与 `sync-snapshot-pull-on-connect` 两包,
-> 取号顺序由第 0 条车道定)。
+> ★ **D 号已取:`D109`**(2026-08-08 由第 0 条车道在并入 `DECISIONS.md` 那一刻分配;
+> 取号时仓库里已提交的最大号 = **D107**)。
+> ★★ 本包提到「同时在排队的还有 `host-loopback-business-route` 与 `sync-snapshot-pull-on-connect`」——
+> **那两包本轮仍未取号**(用户本轮点名的是 V14 / V16 / V11b 三份)。第 0 条车道已第二次报出这笔欠账。
 > 边界:本包**只动** `10-core/gateway/{gpu_broker,model_loader}.py`、`gateway.py` 的 GPU 段、
 > `test_gpu_broker.py`。`config/vram-budget.toml`、`10-core/speech/**`、`20-client-win/**`、
 > `sync_*.py`、中央四文档**一个字节都没动**(第 7 节列出因此没做的事)。
