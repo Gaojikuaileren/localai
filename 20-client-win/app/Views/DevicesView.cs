@@ -51,8 +51,10 @@ public sealed class DevicesView : UserControl
     TextBlock? _addStatus;
     Button? _addToggle;
     System.Windows.Threading.DispatcherTimer? _pendTimer;
-    readonly HashSet<string> _popped = new(StringComparer.Ordinal);
-    bool _dialogOpen;
+    // ★ `_popped`(已弹过哪些请求)与 `_dialogOpen`(弹窗开着没有)随自动弹窗一起删
+    //   —— 用户裁定 A(2026-08-08)。两个都是那条路的伴生状态,那条路没了它们就只写不读。
+    //   ★★ 防它复活的判据**不靠这两个字段还在不在**:见 Selftest 里
+    //     「轮询里不许弹窗」+「每个 ApproveAsync 入口之前都要有六词逐字比对」那两条。
 
     readonly StackPanel _root = new();
     readonly TextBlock _sasBlock;
@@ -1069,67 +1071,28 @@ public sealed class DevicesView : UserControl
         //     由你主动点某一条才弹确认。准入的节奏归你,不归发起方。
     }
 
-    /// <summary>
-    /// 有新请求进来时弹一次。
-    ///
-    /// ★★★ 【当前不可达 —— 去留待用户裁定(V19 · 2026-08-08)】
-    ///   全仓**零调用方**:自动弹窗那条路已废(见上面 PollPendingAsync 收尾那段注释),
-    ///   真正在跑的是 <see cref="PendingRow"/> 上的批准/拒绝按钮。
-    ///   ★ 它的伴生字段 <c>_dialogOpen</c> 也只在这里写、**从没有人读**
-    ///     (编译器 CS0414 一直在说这件事)。
-    ///
-    ///   ★★ 为什么留着而不是顺手删:那是**产品决定**,不是清理 ——
-    ///     「批准弹窗要不要回来(由人主动点某一条才弹)」得用户裁。已交回。
-    ///   ★★★ 但**不许原样搬进管理端**:此前有 3 条自检断言钉在这个方法上,
-    ///     也就是说**测的是死代码** —— 把它连同断言一起搬过去,
-    ///     等于把一条假绿搬进新工程。那 3 条已改钉活路径(PendingRow),
-    ///     并补了一条**不挑函数**的:每一个 ApproveAsync 入口之前都得有六词逐字比对。
-    ///     ⇒ 这个方法今天没有任何断言在守它。要么接回来(那时它会被上面那条自动咬住),
-    ///       要么删掉。**别让它就这么躺着搬家。**
-    ///
-    /// ★★ 这一步【不能一键化】,也不许提供"跳过比对":
-    ///   客户端自己已经会独立算一遍 SAS 和主机返回的比(对不上就中止)—— 中间人那一层是自动挡住的。
-    ///   六个词在这里管的是**另一件事**:确认【你批准的这条请求就是你那台机器发的】。
-    ///   局域网上任何人都能往待批准队列里塞一条,而 displayName 是**自报**的,可以写成"Zori 的笔记本"。
-    ///   没有这一比,弹窗就退化成"来了个请求,点批准" —— 准入就交给了谁先按弹窗。
-    /// ★ 所以按钮文字本身就是那句断言(「逐字一样」),不是一个中性的"确定"。
-    /// </summary>
-    async Task ShowApprovalDialogAsync(PendingPair p)
-    {
-        _dialogOpen = true;
-        try
-        {
-            // ★ displayName 是**自报**的,而且服务端目前不限长(core 那半已写进决议包)。
-            //   客户端这一侧先自保:截断 + 剔掉控制字符 —— 任何来自网络的文本都不该能决定窗口尺寸。
-            var safeName = SafeDisplayName(p.DisplayName);
-            var yes = ConfirmDialog.Show(
-                $"「{safeName}」请求配对",
-                "这台请求配对的电脑上应该显示着同样的六个词:\n\n"
-                + "    " + string.Join("   ", p.Sas) + "\n\n"
-                + "请走到那台电脑前,把六个词【逐字】对一遍。\n"
-                + "★ 设备名是对方自报的,可以随便写 —— 能证明「这条请求是你发的」的只有这六个词。\n"
-                + $"(还剩 {p.SecondsLeft} 秒过期)",
-                confirmText: "六个词逐字一样 —— 批准",
-                cancelText: "不一样 / 先不批",
-                danger: false);
-            // ★★ 要读返回值。以前两处都是 `await ApproveAsync(...)` 丢掉结果:
-            //   请求过期(主机侧 5 分钟)时 Approve 回 409,而界面一个字都不说,那一行只是悄悄消失 ——
-            //   人点了批准、什么反馈都没有,连失败都不知道。
-            var (rst, rbody) = yes
-                ? await TheApp.HubAdmin.ApproveAsync(p.RequestId)
-                : await TheApp.HubAdmin.DenyAsync(p.RequestId);
-            if (rst != 200)
-                Dispatcher.Invoke(() => ConfirmDialog.Show(
-                    yes ? "没能批准" : "没能拒绝",
-                    rst == 409
-                        ? "这条请求已经过期或已被处理了。请让对方在那台电脑上重新点一次「开始配对」。"
-                          + Environment.NewLine + Environment.NewLine + "(中枢原话:" + rbody + ")"
-                        : $"中枢回了 {rst}。" + Environment.NewLine + Environment.NewLine + rbody,
-                    confirmText: "知道了", cancelText: "关闭"));
-        }
-        finally { _dialogOpen = false; }
-        await PollPendingAsync();
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ `ShowApprovalDialogAsync` 已删(用户裁定 A · 2026-08-08)。
+    //
+    //  它是"新请求一到就自动弹框"那条路的弹窗。那条路先被停掉(见上面 PollPendingAsync
+    //  收尾那段:enroll 是**匿名**的 ⇒ 自动弹窗等于把「你屏幕上跳出什么」交给
+    //  局域网上的任何人,由对方的到达时机说了算),弹窗本体就此**零调用方**。
+    //  它的伴生字段 `_dialogOpen` 也只写不读(编译器 CS0414 一直在说这件事),一并删。
+    //
+    //  ★★ 它躺了多久没人知道,而**期间有 3 条自检断言钉在它身上** ——
+    //    也就是说那 3 条**测的是死代码**:把活路径上的六词比对整个删掉,它们照样绿。
+    //    ⇒ 判据已改钉活路径 `PendingRow`,并补了一条**不挑函数**的:
+    //      DevicesView 里**每一个** `ApproveAsync` 入口之前都必须有六词【逐字】比对
+    //      (只有 `SelfPairAsync` 是登记在册的例外,且它自己那道闸被单独钉住)。
+    //
+    //  ★ 准入的六词判词**一个字都没少** —— 它现在写在真正会跑的那条路上:
+    //    `PendingRow` 的按钮是「词一致,批准」,确认框是「逐字核对过了,批准」,
+    //    六个词由 `p.Sas` 摆在屏幕上,旁边就是拒绝。
+    //
+    //  ★★★ 要再做「点某一条才弹确认」的话:那是**新写一条活路径**,
+    //    上面那条不挑函数的判据会自动咬住它(弹窗里必须出现「逐字」)。
+    //    **不要**把这段历史当模板复活 —— 它的价值在这段注释里,不在那 36 行代码里。
+    // ════════════════════════════════════════════════════════════════════════
 
     // ================================================================ 副机侧
     /// <summary>

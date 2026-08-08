@@ -6113,12 +6113,29 @@ public static class Selftest
                     //   enroll 是匿名的 ⇒ 自动弹窗 = 局域网上任何人都能决定你屏幕上跳出什么,
                     //   由对方的到达时机说了算。这条与「弹窗要不要回来」**无关**:
                     //   就算接回来,也只能是**人主动点某一条**才弹,不能由轮询触发。
-                    var pollForPopup = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
-                    Assert(pollForPopup is not null
-                           && !NoComments(pollForPopup).Contains("ShowApprovalDialogAsync"),
-                           "★★★ 待批准**轮询**里不许弹窗 —— enroll 是匿名的,"
-                           + "「新请求一到就自动弹」等于把「你屏幕上跳出什么」交给局域网上的任何人,"
-                           + "准入的节奏必须归你,不归发起方");
+                    //   ★★★ V19(用户裁定 A 之后)判据**换了形状**:
+                    //     上一版钉的是「轮询里不许出现 `ShowApprovalDialogAsync`」——
+                    //     而那个方法当天被删了 ⇒ 那条判据**永远为真**,成了一条恒真断言,
+                    //     而它守的是一条**安全**性质。一条守着安全性质的恒真断言,
+                    //     比没有更坏:它会让人以为那件事有人看着。
+                    //   ⇒ 改钉**行为**:轮询那一段里不许出现**任何**弹窗调用。
+                    //     这样无论将来那个弹窗叫什么名字、由谁写,只要它被轮询触发就会红。
+                    var pollForPopup = Slice(dv4, "async Task PollPendingAsync", "// ═════");
+                    Assert(pollForPopup is not null,
+                           "★ 元断言:切得到 `PollPendingAsync` —— 切不到的话下面那条会静默零断言");
+                    {
+                        var pollCode = pollForPopup is null ? "" : NoComments(pollForPopup);
+                        // ★ 判据是「有没有开窗这个动作」,不认具体名字:
+                        //   ConfirmDialog.Show / MessageBox.Show / .ShowDialog() 全算。
+                        var popups = System.Text.RegularExpressions.Regex
+                            .Matches(pollCode, @"ConfirmDialog\.Show|MessageBox\.Show|\.ShowDialog\s*\(").Count;
+                        Assert(pollForPopup is not null && popups == 0,
+                               $"★★★ 待批准**轮询**里不许弹窗(现数到 {popups} 处)—— enroll 是匿名的,"
+                               + "「新请求一到就自动弹」等于把「你屏幕上跳出什么」交给局域网上的任何人,"
+                               + "准入的节奏必须归你,不归发起方。"
+                               + "★ 判据钉的是**开窗这个动作**,不是某个方法名 —— "
+                               + "上一版钉名字,而那个名字被删掉之后判据就恒真了");
+                    }
 
                     // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
                     var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
@@ -6266,13 +6283,38 @@ public static class Selftest
                            + "绝不假装敲门已经发出去了(那会让人在副机这边干等一个不会来的响应)");
 
                     // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
-                    Assert(body4.Contains("rst == 409") && body4.Contains("重新点一次「开始配对」"),
+                    //
+                    // ★★★ V19(2026-08-08 用户裁定 A):这一条**也是钉在死代码上的**。
+                    //   上一版的针脚是 `rst == 409` —— 而 `rst` 这个名字**只存在于**
+                    //   `ShowApprovalDialogAsync` 里,那个方法零调用方、当天被删。
+                    //   ⇒ 删掉它的那一刻这条断言当场红,而它守的那件事(409 要说话)
+                    //     在活路径上**一直是成立的** —— 也就是说:这条断言此前一直在
+                    //     替死代码作证,活路径上那份是"顺便也对",不是被它测出来的。
+                    //   ★ 这是同一天里发现的**第 2 条**寄生在这个死方法上的断言
+                    //     (另 3 条是六词比对那组)。⇒ 针脚改钉活路径,并且**不依赖变量名**。
+                    Assert(pendRow is not null && pendRow.Contains("409")
+                           && pendRow.Contains("重新点一次「开始配对」"),
                            "★★ 请求过期时 Approve 回 409,以前两处都丢掉返回值 —— "
                            + "人点了批准、什么反馈都没有,那一行只是悄悄消失");
+                    // ★ 批准与拒绝**两条**都要看返回码,不是只看批准那条。
+                    //   ★★ 数 `!= 200` 的出现次数,不认变量名 —— 上一版栽的就是认了名字。
+                    {
+                        var notOk = pendRow is null ? 0 : System.Text.RegularExpressions.Regex
+                            .Matches(pendRow, @"!=\s*200").Count;
+                        Assert(notOk >= 2,
+                               $"★★ 批准与拒绝**各自**都要核返回码(现数到 {notOk} 处 `!= 200`)—— "
+                               + "只核一条的话,另一条失败时界面一个字都不说,"
+                               + "而失败的吊销/拒绝与成功的长得一模一样");
+                    }
                     // ⑰ 不许"一有请求就自动弹窗" —— enroll 是匿名的,那等于把弹窗交给局域网上任何人触发
-                    Assert(!body4.Contains("_popped.Add(p.RequestId)"),
-                           "★★ 待批准的只进列表,由人主动点某一条才弹确认 —— "
-                           + "自动弹框 = 你屏幕上跳出什么由对方的到达时机决定");
+                    //   ★ 上一版针脚是 `_popped.Add(p.RequestId)`(自动弹窗那条路的去重集合)。
+                    //     那个字段随弹窗一起删了 ⇒ 这条判据会**永远为真**,变成一条恒真断言。
+                    //     ⇒ 改成钉**行为**:轮询那一段里不许出现任何弹窗调用。见下面「轮询里不许弹窗」那条。
+                    Assert(!body4.Contains("_popped"),
+                           "★ 自动弹窗那条路的伴生状态(_popped)不许回来 —— "
+                           + "它一回来就说明有人在按到达时机弹窗。"
+                           + "★ 这条只是**顺带**:真正的判据是下面那条「轮询里不许弹窗」,"
+                           + "它钉的是行为,不是某个字段名");
                     // ⑱ 自报显示名不许决定窗口尺寸
                     Assert(body4.Contains("SafeDisplayName("),
                            "★ 自报的显示名要截断 + 剔控制字符再上界面");
