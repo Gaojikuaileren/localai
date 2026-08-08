@@ -36,9 +36,26 @@ public sealed record ChatOutcome(bool Ok, string Code, string Message, string Pa
     {
         "" => "",
         "not_paired" => "还没有配对到中枢。到「设备」里完成配对再试。",
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ V20-③(D?):这一句原来说的是
+        //    「目前后端要在主机上手动启动:跑 90-ops\start-stack.ps1」。
+        //
+        //  它有**两层**错,而且第二层比第一层坏得多:
+        //   ① 过期:那是「按需装载」落地之前的话。
+        //   ② ★ **给的是错原因,而且那条建议现在会把人引向一个被明令禁止的动作**——
+        //      D101 裁定② 原文:自动起栈「只起 gateway 与 lan-edge,**绝不起 llama-server**:
+        //      按需装载(S14/S16-b)已经落地,静态起会和 transient 平面打架」。
+        //      而 `start-stack.ps1` **恰恰会**静态起 llama-server(该脚本第 117 行)。
+        //      ⇒ 照着这句话做,等于亲手制造一个与 transient 平面打架的后端。
+        //
+        //  ★ 「给错原因比不给更坏」是这个项目自己的判词(ChatCenter 里那条 2026-08-05 审计),
+        //    而这一条正在犯。⇒ 这里**只说事实、不点原因**;
+        //    真原因由 `BackendUnavailableAdvice` 拿**中枢的回答**分因(见下面)。
+        // ══════════════════════════════════════════════════════════════
         "backend_unavailable" =>
-            "中枢在,但模型后端没有起来。★ 目前后端要在主机上手动启动:"
-            + "跑 90-ops\\start-stack.ps1(它会先过显存闸再起 llama-server)。",
+            "中枢在,但模型后端没有应答。★ 这一句说不出是哪一种 —— "
+            + "没授权按需装载 / 正在装载中 / 显存装不下 / 后端进程自己的问题,"
+            + "四种的下一步完全不同,要问过中枢才知道是哪一种。",
         "backend_error" =>
             "模型后端应答了,但返回了错误。★ 不是连不上 —— 去主机看 upstream_problem.jsonl。",
         "denied_tier" or "denied_action" or "denied_param" =>
@@ -56,6 +73,56 @@ public sealed record ChatOutcome(bool Ok, string Code, string Message, string Pa
 
 public static class ChatClient
 {
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ V20-③:「后端没应答」的**分因**——判据是**中枢自己的回答**,不是一句写死的话
+    //
+    //  链路上的事实(2026-08-08 查实,不是推断):
+    //   · `/v1/chat/completions` **不做按需装载**:它解析别名就直接转发给 `backend`,
+    //     连不上就 `httpx.RequestError` → 503 `backend_unavailable`(gateway.py 那段 except)。
+    //   · 真正会把模型起起来的是 `/v1/gpu/intent`(D87①「意图即起」),
+    //     而它的失败**已经分得很细**:`NOT_PERMITTED`(机主还没勾「允许按需装载」)、
+    //     `GATE`(闸拦住 = 装不下)、`LOADER_ABSENT`、`LOAD_FAILED`,
+    //     以及 `ALREADY_RESIDENT` + `plane:"loading"`(正在装)。
+    //   ⇒ 所以「后端没应答」的**原因几乎总在 intent 那一侧**,而客户端本来就有一个
+    //     解析得懂它的 `IntentOutcome.Advice` —— 缺的只是**去问一次**。
+    //
+    //  ★ 为什么是纯静态函数:它要能被自检逐种形状喂进来对答案。
+    //    去问中枢那一下是 I/O,留在调用方(见 ChatCenter.SendAndAskAsync)。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 拿「再问一次意图」的结果,给出 <c>backend_unavailable</c> 这一次的**真实**下一步。
+    /// <param name="probe">中枢对同一个别名的最新回答;null = 那次追问自己也没成功。</param>
+    /// </summary>
+    public static string BackendUnavailableAdvice(IntentOutcome? probe)
+    {
+        // ★ 追问都失败了 —— 就说追问失败,不要退回猜一个原因(猜错比不说坏)。
+        if (probe is null)
+            return "模型后端没有应答,而且**向中枢追问原因这一步自己也失败了** —— "
+                   + "先确认主机在线、lan-edge 在跑;主机上的诊断在 upstream_problem.jsonl。";
+
+        // ★ 中枢明说了起不来的理由 —— 原样用它那一句(IntentOutcome.Advice 已经逐种分好)。
+        if (!probe.Ok)
+            return "模型没有起来 —— " + (probe.Advice is { Length: > 0 } a ? a : probe.Message);
+
+        // ★ 正在装:这不是失败,是**还没到**。说成失败会让人去改配置,而他只需要等几秒。
+        if (string.Equals(probe.Plane, "loading", StringComparison.Ordinal))
+            return "模型**正在装载**(中枢说它在起了)—— 第一次装要把几 GiB 权重读进显存。"
+                   + "等一会儿再发一次,这一条不用改任何设置。";
+
+        // ★ 这一次追问把它装上了 = 上次发送时它确实还没起来。下一步就是"再发一次"。
+        if (probe.Code == "OK")
+            return "刚刚已经为你把模型装上了(上一次发送时它还没起来)。**再发一次**就有回答了。";
+
+        // ★★ 中枢说它在跑,后端却仍然不应答 ⇒ **这才是**「后端进程本身的问题」那一种,
+        //   也是唯一一种该去主机侧查的。★ 而且明确写清**不要**去静态起它(D101②)。
+        var who = probe.Component is { Length: > 0 } c ? c : probe.Alias;
+        return $"中枢说模型**在跑**({who}),可后端仍然没有应答 ⇒ 问题在后端进程本身,"
+               + "既不是授权、也不是显存。去主机看 upstream_problem.jsonl 里这一条的归因。"
+               + "★ **不要**用 start-stack.ps1 去静态起它 —— 这个组件已经归按需装载管,"
+               + "静态再起一个会和按需平面打架(D101②)。";
+    }
+
     /// <summary>
     /// 发一次对话,流式。`onDelta` 每收到一段就回调一次(在后台线程,调用方负责切回 UI)。
     ///

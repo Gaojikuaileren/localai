@@ -122,12 +122,17 @@ public sealed class ChatView : UserControl
         //   只刷按钮状态,不重建整个会话区 —— 重建会打断正在打的字。
         TheApp.Translation.Changed += RefreshSendEnabled;
         TheApp.History.JumpRequested += OnJumpToHistory;
+        // ★ V20-②:「意图即起」的结果有新话要说时刷那一行提示。
+        //   ★★ 接的是 IntentChanged 而**不是** Gpu.Changed:后者跟着显存快照每秒一帧,
+        //   拿它当刷新信号会把输入框每秒重建一次 —— 打字当场被打断(见 HubGpu 里那段说明)。
+        TheApp.Gpu.IntentChanged += OnIntentChanged;
         Unloaded += (_, _) =>
         {
             TheApp.Chat.Changed -= OnChatChanged;
             TheApp.Projects.Changed -= UpdateContext;
             TheApp.Translation.Changed -= RefreshSendEnabled;
             TheApp.History.JumpRequested -= OnJumpToHistory;
+            TheApp.Gpu.IntentChanged -= OnIntentChanged;
             if (_wsKey == "chat")
             {
                 TheApp.Reply.Changed -= OnReplyChanged;
@@ -147,6 +152,95 @@ public sealed class ChatView : UserControl
     }
 
     void OnChatChanged() { BuildSessions(); BuildConversation(); }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ V20(D?):流式增量【不再整块重建会话面板】
+    //
+    //  用户实测:「每次生成都先跳到顶端再拉回底部」。根因不是动画、不是 ScrollToEnd 的时机 ——
+    //  是**每来一段增量就把整块面板换掉**:
+    //    onTick → BuildConversation → BuildConversationCore → `_conv.Content = BuildConvPanel(…)`
+    //  新面板里的 ScrollViewer 是【另一个对象】,偏移天生是 0(= 顶端);
+    //  DockWithInput 排在 Loaded 优先级的那个 ScrollToEnd 随后把它拉回底 ——
+    //  用户看到的那一帧就是这两者之间。
+    //
+    //  ★ 而且不只是难看:一条 200 条消息的热层会话,**每个 token 重建 200 个气泡**
+    //    外加一个新 TextBox(还要把焦点还回去)。会话越长越卡,和用户的描述一致。
+    //
+    //  ⇒ 分成两条路,判据是【结构变了没有】:
+    //    · 只是某一条消息的正文在长  → 只改那一条的 Text,面板一个都不换(下面的快路径);
+    //    · 新增/删除消息、换会话、跨过折叠阈值 → 照旧整块重建(不许偷偷少画东西)。
+    //
+    //  ★★ 顺带修掉同一处的第二个缺陷:整块重建**无条件** ScrollToEnd。
+    //    用户在生成过程中滚上去看前文时,每一帧都会被拽回底部 —— 等于没法往上看。
+    //    ⇒ 走 _carryOffset:本来贴着底才跟着走,不贴底就把偏移还回去。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>当前挂在树上的【消息滚动壳】。每次整块重建都会换成新的一个。</summary>
+    ScrollViewer? _msgScroll;
+    /// <summary>正在流式接收的那条消息的正文控件(快路径只改它的 Text)。</summary>
+    TextBox? _liveText;
+    /// <summary>_liveText 对应的 MessageId。★ 与 ChatCenter.StreamingMessageId 对不上就不走快路径。</summary>
+    string? _liveMsgId;
+    /// <summary>建这块面板时的会话与消息条数 —— 快路径的**结构指纹**。</summary>
+    string? _liveSession;
+    int _liveCount;
+    /// <summary>上一块面板被换掉时的滚动偏移;null = 当时本来就贴着底(或没得滚)。</summary>
+    double? _carryOffset;
+
+    /// <summary>判"贴到底了"的容差(像素)。布局取整会差一点,严格相等会恒为 false。</summary>
+    const double AtBottomEpsilon = 2.0;
+
+    /// <summary>自检用:当前挂着的消息滚动壳。★ 只读 —— 断言要量的是它**真实的**偏移。</summary>
+    internal ScrollViewer? MessageScrollForSelftest => _msgScroll;
+
+    /// <summary>
+    /// 这一块面板挂上去【之后】要做的定位。由 DockWithInput 填,BuildConversationCore 挂完就跑。
+    /// ★ 非空 = 有一次定位还没落地;跑完必须清掉,否则下一次重建会拿着旧闭包再定位一次
+    /// (那个闭包指着已经被丢弃的 ScrollViewer —— 定位到一个看不见的东西上,静默无效)。
+    /// </summary>
+    Action? _afterMount;
+
+    /// <summary>
+    /// 流式增量到了。走得通快路径就只改一条正文,否则整块重建。
+    /// <para>★ 返回值只给自检看(它要能区分"真的走了快路径"和"还是重建了一遍")——
+    /// 生产调用方不看。这不是复制品:自检调的就是这个方法本身。</para>
+    /// </summary>
+    internal bool OnStreamTick()
+    {
+        if (TryStreamTextInPlace()) return true;
+        BuildConversation();
+        return false;
+    }
+
+    /// <summary>
+    /// 只改流式那一条消息的正文。★ 一切"结构可能变了"的迹象都返回 false 交回整块重建 ——
+    /// 快路径的正确性判据是**它画出来的东西与整块重建一模一样**,拿不准就别走。
+    /// </summary>
+    bool TryStreamTextInPlace()
+    {
+        if (_liveText is null || _msgScroll is null || _liveMsgId is null) return false;
+        if (_sessionId is null || _liveSession != _sessionId) return false;
+        // ★ 中枢那边已经收尾(StreamingMessageId 清空)⇒ 交回整块重建:
+        //   收尾时会补系统说明 / 删掉空回复,那都是结构变化。
+        if (TheApp.Chat.StreamingMessageId != _liveMsgId) return false;
+        var all = TheApp.Chat.MessagesOf(_sessionId).ToList();
+        if (all.Count != _liveCount) return false;                     // 新增/删除了消息
+        var m = all.FirstOrDefault(x => x.MessageId == _liveMsgId);
+        if (m is null) return false;
+        // ★ 跨过折叠阈值那一下要长出「展开全部」那颗按钮 = 结构变了。整场最多发生一次。
+        if (m.Text.Split('\n').Length > CollapseLines) return false;
+
+        // ★ 先量"当时贴没贴底",再改文字 —— 改完 ScrollableHeight 就变了,那时再问已经晚了。
+        var wasAtBottom = _msgScroll.ScrollableHeight <= AtBottomEpsilon
+                          || _msgScroll.VerticalOffset >= _msgScroll.ScrollableHeight - AtBottomEpsilon;
+        _liveText.Text = m.Text;
+        if (!wasAtBottom) return true;   // 用户滚上去看前文了 —— 别拽他
+        // ★ 必须先排一次版:文字刚变长,ScrollableHeight 还是旧的,
+        //   直接 ScrollToEnd 会停在"上一帧的底"—— 表现是每次都差半行,越滚越差。
+        _msgScroll.UpdateLayout();
+        _msgScroll.ScrollToEnd();
+        return true;
+    }
 
     /// <summary>
     /// 同传的进行态变了(开始/结束)—— 只有翻译空间关心。
@@ -530,17 +624,27 @@ public sealed class ChatView : UserControl
         {
             // 跨空间:转到它自己的空间去开,而不是在这儿打开(理由见 JumpToOwnWorkspace)
             if (foreign) { JumpToOwnWorkspace(s); return; }
-            _sessionId = s.SessionId;
-            TheApp.Chat.PurgeGhosts();
-            // ★ 同一空间内也分模块(文字翻译 / 同声传译):点开就把界面切到这条会话自己那一套,
-            //   两个方向都切 —— 详见 ApplySessionScene。
-            ApplySessionScene(s);
-            // 聊天空间同规:回信会话 <-> 普通聊天,点开双向切场景(D61)
-            if (_wsKey == "chat") TheApp.Reply.SetScene(s.ReplyLetter);
-            BuildSessions();
-            BuildConversation();
+            OpenSession(s);
         };
         return host;
+    }
+
+    /// <summary>
+    /// 打开一条【本空间的】会话 —— 点会话行走的就是这条路。
+    /// <para>★ 抽成方法是为了让自检能真的走一遍它(而不是照抄一份点击处理的躯体去测):
+    /// ASSERTION-PITFALLS 第 12 条 —— 测的必须是最终会跑的那个东西。</para>
+    /// </summary>
+    internal void OpenSession(ChatSession s)
+    {
+        _sessionId = s.SessionId;
+        TheApp.Chat.PurgeGhosts();
+        // ★ 同一空间内也分模块(文字翻译 / 同声传译):点开就把界面切到这条会话自己那一套,
+        //   两个方向都切 —— 详见 ApplySessionScene。
+        ApplySessionScene(s);
+        // 聊天空间同规:回信会话 <-> 普通聊天,点开双向切场景(D61)
+        if (_wsKey == "chat") TheApp.Reply.SetScene(s.ReplyLetter);
+        BuildSessions();
+        BuildConversation();
     }
 
     FrameworkElement SessionDots(ChatSession s)
@@ -915,6 +1019,25 @@ public sealed class ChatView : UserControl
             off.Margin = new Thickness(2, 0, 2, 6);
             area.Children.Add(off);
         }
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V20-②(D?):「意图即起」失败的**落点**就是这一行。
+        //
+        //  改之前:HubGpu.NoteIntent 里 `catch { }`,而 `LastIntent` 一个读者都没有 ——
+        //  「这个模型还没被授权按需装载」这句中枢**明确说过**的话,客户端一个字都不显示。
+        //  用户唯一能察觉的时刻是按了发送、等了很久、然后收到一句归错因的"后端没起"。
+        //
+        //  ★ 位置选在输入框上方而不是弹窗/任务抽屉:
+        //    意图的触发点就是**打字**,所以人此刻正看着输入框;
+        //    而弹窗会打断打字 —— 那恰恰是"不许把输入框掀翻"要防的事。
+        //  ★★ 没配对 / 主机不在线时**不画这一行**:上面两行已经在说同一件事,
+        //    同一屏两句话讲一件事会让人以为出了两个问题(见 IntentHintText)。
+        // ══════════════════════════════════════════════════════════════════
+        _intentHint = Ui.Caption("");
+        _intentHint.SetResourceReference(TextBlock.ForegroundProperty, "RiskWarning");
+        _intentHint.Margin = new Thickness(2, 0, 2, 6);
+        area.Children.Add(_intentHint);
+        RefreshIntentHint();
         if (attachmentsBelow)
         {
             area.Children.Add(inputRow);
@@ -944,6 +1067,39 @@ public sealed class ChatView : UserControl
     Func<string, bool>? _answerPending;
     /// <summary>发不出去时的原因(显示在输入框上方)。目标池一变或下次成功发送就清掉。</summary>
     string? _sendBlockedHint;
+
+    /// <summary>「意图即起」失败时那一行提示。null = 输入区还没建(占位工作空间)。</summary>
+    TextBlock? _intentHint;
+
+    /// <summary>
+    /// 意图的说法变了 -> **只刷那一行**,不重建会话区。
+    /// <para>★★ 这条提示恰恰是在**打字过程中**出现的(意图的触发点就是 TextChanged),
+    /// 而重建会话区会换掉输入框、打断正在打的字 —— 与 Translation.Changed 那处同一条纪律。</para>
+    /// </summary>
+    void OnIntentChanged()
+        => Dispatcher.BeginInvoke(new Action(RefreshIntentHint));
+
+    void RefreshIntentHint()
+    {
+        if (_intentHint is null) return;
+        var say = IntentHintText();
+        // ★ 记号剃掉:这是一行小字,画不了粗体 —— 而 IntentOutcome.Advice 里就有 `**主机**`。
+        _intentHint.Text = say is null ? "" : MarkdownLite.ToPlainText(say);
+        _intentHint.Visibility = say is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// 输入框上方要不要说一句「模型没起来」。null = 什么都不说。
+    /// <para>★ 没配对 / 主机不在线时返回 null —— 上面两行已经在说这件事了。</para>
+    /// <para>★★ 成功时也返回 null:**没有坏消息就不该占一行**。常驻的提示会被当成背景噪声,
+    /// 真出事那天也就没人看了(与输入框那三层提示同一条判据)。</para>
+    /// </summary>
+    internal string? IntentHintText()
+    {
+        if (!TheApp.Hub.IsPaired || TheApp.Hub.State != HubState.Online) return null;
+        if (TheApp.Gpu.LastIntent is not { Ok: false } bad) return null;
+        return bad.Advice is { Length: > 0 } a ? a : null;
+    }
 
     /// <summary>按当前条件刷新发送键的可用状态。目标池一变就会被叫到。</summary>
     void RefreshSendEnabled()
@@ -998,11 +1154,38 @@ public sealed class ChatView : UserControl
         var refocus = _input.IsKeyboardFocusWithin || _justSent;
         _justSent = false;
         BuildConversationCore();
+        // ★★ 面板已经挂上去了 —— 现在【同步】排一次版并定位。
+        //   见 DockWithInput 里那段说明:排进 DispatcherPriority.Loaded(6 < Render 7)的定位
+        //   比渲染更晚跑,于是"偏移还是 0"的那一帧真的会被画出来 = 用户看到的跳顶。
+        if (_afterMount is { } mount)
+        {
+            _afterMount = null;
+            _conv.UpdateLayout();
+            mount();
+        }
         if (refocus) Dispatcher.BeginInvoke(new Action(FocusInputIfPresent), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     void BuildConversationCore()
     {
+        // ★★ 换掉整块面板【之前】把滚动位置记下来:新面板的 ScrollViewer 是另一个对象,
+        //   偏移天生是 0。不接住的话每次重建都闪一帧顶端 —— 流式时每个 token 闪一次,
+        //   那正是用户实测的「先跳到顶再拉回底部」。
+        //   ★ 只在【当时没贴着底】时才记:贴着底的本来就该继续贴底(照旧 ScrollToEnd)。
+        _carryOffset = _msgScroll is { } old && old.ScrollableHeight > AtBottomEpsilon
+                       && old.VerticalOffset < old.ScrollableHeight - AtBottomEpsilon
+            ? old.VerticalOffset
+            : null;
+        // ★ 快路径的三个引用一律先清空:它们指着即将被丢弃的可视树。
+        //   留着 = 往一个已经不在树上的 TextBox 里写字,用户什么都看不到(静默失效)。
+        _msgScroll = null;
+        _liveText = null;
+        _liveMsgId = null;
+        _liveSession = null;
+        // ★ 上一次的定位闭包如果还没跑过就作废:它指着即将被丢弃的 ScrollViewer。
+        //   不清的话这一支若不重新设置(空态 / 占位空间),挂完会拿旧闭包定位一个看不见的东西。
+        _afterMount = null;
+
         // ★★ 顺序不能动:只读是【数据状态】,和在哪个工作空间无关,所以必须排在工作空间分流【之前】。
         //   排在后面出过事:翻译空间(以及其余占位空间)先 return 掉,只读判断永远轮不到 ——
         //   于是在已删除/已完成的项目里,输入框照样能编辑、回车照样把消息写进去
@@ -1328,7 +1511,9 @@ public sealed class ChatView : UserControl
         {
             var msgs = new StackPanel();
             FillMessages(msgs, _sessionId!, animate: true);
-            inner = DockWithInput(MessageScroller(msgs), inputArea, slideFromCenter: _wasEmptyState);
+            // ★ 记住这一块的滚动壳:流式快路径要拿它判"贴没贴底"、要拿它 ScrollToEnd。
+            _msgScroll = MessageScroller(msgs);
+            inner = DockWithInput(_msgScroll, inputArea, slideFromCenter: _wasEmptyState);
         }
 
         if (spec.ModeSwitch)
@@ -1388,9 +1573,31 @@ public sealed class ChatView : UserControl
 
         var skipEnd = _suppressScrollToEnd;
         _suppressScrollToEnd = false;
+        var carry = _carryOffset;
+        _carryOffset = null;
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V20:定位**改成同步的**,不再排进 Dispatcher 队列。
+        //
+        //  DispatcherPriority 的数值是 Loaded=6 < Render=7 —— 也就是说排在 Loaded 的回调
+        //  比渲染**更晚**跑。于是「新 ScrollViewer 偏移=0」的那一帧**真的会被画出来**,
+        //  下一帧才跳到底 —— 那就是用户实测的「先跳到顶端再拉回底部」。
+        //  这不是推测:把它排到 Loaded 正是为了等布局算完,而代价恰恰是多画了那一帧。
+        //
+        //  ⇒ 在本次调用内 UpdateLayout() 把版排完(要的就是那个"布局算完"),当场定位。
+        //    ★ 由 BuildConversationCore 在挂上 _conv.Content **之后**调 ——
+        //      这里的 dock 还没进树,现在排版排不出高度。
+        // ══════════════════════════════════════════════════════════════════
+        _afterMount = () =>
+        {
+            if (skipEnd) return;
+            // ★★ 有 carry = 重建之前用户【没贴在底】(他滚上去看前文了)—— 把他放回原处,
+            //   不要拽到底。原先是无条件 ScrollToEnd:生成过程中往上翻,每一帧都被拽回去,
+            //   等于在生成期间根本没法看前文。
+            if (carry is { } y) scroll.ScrollToVerticalOffset(y);
+            else scroll.ScrollToEnd();
+        };
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (!skipEnd) scroll.ScrollToEnd();   // ★ 必须排在下面那句 return 之前
             if (!slideFromCenter) return;
             // ★ 从"空会话居中输入框"变成"底部输入框"时给一段动画,而不是硬切(用户裁定):
             //   输入框从原来的居中位置【滑到底部】,消息区同时淡入。
@@ -1442,6 +1649,10 @@ public sealed class ChatView : UserControl
             msgs.Children.Add(bubble);
         }
         if (animate) _seenMsgCount[sessionId] = all.Count;
+        // ★ 快路径的结构指纹:哪个会话、当时几条消息。
+        //   ★★ 只在 animate 这一支登记 —— 只读浏览(已删/已完成项目)一个字都不许改,
+        //   给它一个"可以就地改正文"的入口就是给它一条写路径。
+        if (animate && _liveMsgId is not null) { _liveSession = sessionId; _liveCount = all.Count; }
 
         // 从翻译历史跳过来的:滚到那一条并闪一下,不然用户不知道自己落在哪
         if (_jumpToKey is { } want)
@@ -1682,7 +1893,11 @@ public sealed class ChatView : UserControl
     {
         if (m.Role == ChatRole.System)
         {
-            var sys = Ui.Caption(m.Text);
+            // ★★ V20-⑤:系统说明是**一行居中的小字**,不走富文本(居中的富文本会散);
+            //   但它自己的文案里就有 `**`(ChatOutcome.Advice / IntentOutcome.Advice 都有)——
+            //   ⇒ 剃掉记号,留内容。自检里那条「界面文案不许有字面 **」只扫了四个视图文件,
+            //     而真正把星号画给用户看的正是这一处。
+            var sys = Ui.Caption(MarkdownLite.ToPlainText(m.Text));
             sys.HorizontalAlignment = HorizontalAlignment.Center;
             sys.TextAlignment = TextAlignment.Center;
             sys.Margin = new Thickness(0, 6, 0, 6);
@@ -1711,6 +1926,11 @@ public sealed class ChatView : UserControl
             return box;
         }
         var user = m.Role == ChatRole.User;
+        // ★ 这条正在流式接收吗?两件事都取决于它:
+        //   ① 正文控件**即使此刻还是空的也要建**(否则第一段增量到达时要长出一个 TextBox =
+        //      结构变了 = 整块重建,快路径从第二段才生效,第一帧照旧闪一下顶端);
+        //   ② 建好之后把它登记成 _liveText —— 快路径只改它。
+        var streaming = m.MessageId is { } liveId && liveId == TheApp.Chat.StreamingMessageId;
         var stack = new StackPanel();
         // 附件预览(图片缩略图 / 文件卡)—— 展示给用户看的"发过去的东西"
         if (m.Attachments is { Count: > 0 })
@@ -1719,20 +1939,53 @@ public sealed class ChatView : UserControl
             foreach (var a in m.Attachments) wrap.Children.Add(AttachChip(a, onRemove: null));
             stack.Children.Add(wrap);
         }
-        if (m.Text.Length > 0)
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V20-⑤:模型吐的 markdown 要真的渲染出来
+        //
+        //  用户实测:回答里的 `**"Come for dinner tomorrow."**` 原样把星号画给了人看。
+        //  模型**一定**会输出 markdown —— 它就是那么被训出来的。
+        //
+        //  ★ 三条边界,每条都有具体理由:
+        //    ① **用户自己发的消息不渲染**:他打了什么就该看到什么。把他输入的星号吃掉,
+        //       等于界面告白"你发出去的是粗体",而发给模型的是原文。
+        //    ② **正在流式接收的那条不渲染**:半截的 `**` 是没配对的,渲染出来会在
+        //       "还是星号 / 忽然变粗"之间来回跳一整段;而且富文本重排比改一行 Text 贵得多
+        //       (V20-① 的快路径正是靠"只改 Text")。⇒ 说完之后那次整块重建自然会渲染。
+        //    ③ **一个记号都没有的照走纯文本**:绝大多数消息如此,给它套富文本是白花钱。
+        //  ★★ 折叠(CollapseLines)与渲染**互不影响**:折叠决定"显示哪几行",
+        //    渲染决定"这几行怎么画"。绑在一起会让长回答连记号也不渲染 —— 而长回答记号最多。
+        // ══════════════════════════════════════════════════════════════════
+        if (m.Text.Length > 0 || streaming)
         {
-            var tb = MessageText(user);
-
             // ★ 超长文本【默认折叠】(用户裁定):只显示前 N 行,点一下展开,再点收起。
             //   ——【只是显示折叠】。给 AI 的永远是全文(m.Text 一个字都没少),折叠不影响数据。
+            //   ★★ 折叠与渲染是**两件独立的事**:此前把两者绑在一起写过一版,
+            //     结果是"超过 30 行的回答连记号也不渲染了" —— 而长回答恰恰是记号最多的那些。
             var lines = m.Text.Split('\n');
-            if (lines.Length > CollapseLines)
-            {
-                var key = BubbleKey(m);
-                var expanded = _expandedBubbles.Contains(key);
-                tb.Text = expanded ? m.Text : string.Join("\n", lines.Take(CollapseLines));
-                stack.Children.Add(tb);
+            var collapsed = lines.Length > CollapseLines;
+            var key = collapsed ? BubbleKey(m) : "";
+            var expanded = collapsed && _expandedBubbles.Contains(key);
+            var shown = collapsed && !expanded ? string.Join("\n", lines.Take(CollapseLines)) : m.Text;
 
+            // ★ 走富文本的三个条件(边界理由见上面那段)
+            var rich = !user && !streaming && MarkdownText.NeedsRendering(shown);
+            if (rich)
+            {
+                stack.Children.Add(MarkdownText.Build(shown, user));
+            }
+            else
+            {
+                var tb = MessageText(user);
+                tb.Text = shown;
+                stack.Children.Add(tb);
+                // ★ 只在【没折叠】这一支登记快路径落点:折叠支旁边还有一颗「展开全部(N 行)」按钮,
+                //   它的文案随行数变 —— 那不是"只改一条正文"能覆盖的,
+                //   所以 TryStreamTextInPlace 跨过阈值就交回整块重建。
+                if (streaming && !collapsed) { _liveText = tb; _liveMsgId = m.MessageId; }
+            }
+
+            if (collapsed)
+            {
                 var toggle = new TextBlock
                 {
                     Text = expanded ? "收起" : $"展开全部({lines.Length} 行)",
@@ -1748,11 +2001,6 @@ public sealed class ChatView : UserControl
                     BuildConversation();
                 };
                 stack.Children.Add(toggle);
-            }
-            else
-            {
-                tb.Text = m.Text;
-                stack.Children.Add(tb);
             }
         }
         return BubbleShell(stack, user);
@@ -1930,13 +2178,24 @@ public sealed class ChatView : UserControl
         }
 
         var sid = _sessionId;
-        // ★ 中枢当前驻留的组件 → 上下文窗口。读不到就由 TokenBudget 按最小档保守估(见那边的说明)。
-        var committed = TheApp.Gpu.Snapshot?.Committed;
+        // ★ 中枢此刻装着的组件 → 上下文窗口。读不到就由 TokenBudget 按最小档保守估(见那边的说明)。
+        // ★★ V20-④:这里原来只取 `Snapshot?.Committed` —— 于是按需装上的模型对客户端不存在,
+        //   窗口退回 8192 兜底值,**真的少带了历史**(用户实测:模型已装载而回答里还挂着那句估算)。
+        //   并集算法只在 TokenBudget.ResidentOf 一处,理由见那边。
+        var resident = TokenBudget.ResidentOf(TheApp.Gpu.Snapshot);
         _ = TheApp.Chat.SendAndAskAsync(
-                sid, text, TheApp.Hub, committed, atts,
+                sid, text, TheApp.Hub, resident, atts,
                 // ★ onTick 在后台线程被调 —— 必须切回 UI 线程再刷,
                 //   而且用 BeginInvoke(非阻塞):流式一秒能来几十帧,同步 Invoke 会把它自己堵死。
-                onTick: () => Dispatcher.BeginInvoke(new Action(BuildConversation)))
+                // ★★ V20:刷的是 OnStreamTick 而**不是** BuildConversation ——
+                //   后者每个 token 换掉整块面板(ScrollViewer 归零 + N 个气泡重建),
+                //   那正是用户实测的「先跳到顶再拉回底部」和"会话越长越卡"。
+                onTick: () => Dispatcher.BeginInvoke(new Action(() => OnStreamTick())),
+                // ★★★ V20-③:后端没应答时**再问一次中枢**,拿它的回答分因。
+                //   走的是与「意图即起」/「再开」完全同一条端点 —— 恢复不是新语义,
+                //   它就是"我现在又要用它了"(见 HubGpu.ResumeTaskAsync 那段)。
+                //   ⇒ 顺带的好处:这次追问本身就可能把模型装上,于是那句话变成"再发一次就行"。
+                probeBackend: async pct => await TheApp.Gpu.RequestIntentAsync("assistant.fast", pct))
             .ContinueWith(_ => Dispatcher.BeginInvoke(new Action(BuildConversation)),
                           TaskScheduler.Default);
     }

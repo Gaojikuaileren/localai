@@ -701,16 +701,52 @@ public sealed class ChatCenter
     /// <summary>正在流式接收的那条回复的 MessageId(null = 没有在进行的请求)。</summary>
     public string? StreamingMessageId { get; private set; }
 
+    // ══════════════════════════════════════════════════════════════
+    //  流式落点的三个原语。★★ 抽出来是为了让**界面侧的流式断言**能驱动
+    //  「真的会跑的那三行」,而不是在自检里照抄一份 onDelta 的躯体 ——
+    //  ASSERTION-PITFALLS 第 12 条:测的必须是最终会跑的那个东西。
+    //  SendAndAskAsync 自己也走它们,所以只有一份实现,漂不了。
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 占一条空 Assistant 消息作为流式落点并标成「正在说」,返回它的 MessageId。
+    /// ★ 它**不是伪造**:是"正在说"的容器;一个字都没收到时会被删掉(见 SendAndAskAsync 收尾)。
+    /// </summary>
+    internal string OpenStreamSink(string sessionId)
+    {
+        var replyId = NewMsgId();
+        _messages.Add(new ChatMessage(sessionId, ChatRole.Assistant, "", DateTime.Now, null, replyId));
+        StreamingMessageId = replyId;
+        return replyId;
+    }
+
+    /// <summary>把"到目前为止收到的全文"写进流式落点。</summary>
+    internal void AppendStreamText(string replyId, string soFar)
+    {
+        var k = _messages.FindIndex(m => m.MessageId == replyId);
+        if (k >= 0) _messages[k] = _messages[k] with { Text = soFar };
+    }
+
+    /// <summary>流式收尾:不再「正在说」。★ 必须走 finally —— 抛异常也要清掉。</summary>
+    internal void CloseStreamSink() => StreamingMessageId = null;
+
     /// <summary>
     /// 发一条用户消息并向中枢请求回复(流式)。返回本轮结局。
     /// ★ 与 <see cref="Send"/> 的分工:Send 是"模型没接入"那条路径上的诚实占位,
     ///   本方法是真链路。两者都**不伪造回复**。
     /// </summary>
+    /// <param name="probeBackend">
+    /// ★ V20-③:后端没应答时**再问一次中枢**「这个别名到底怎么了」。返回 null = 那次追问也失败。
+    /// <para>传委托而不是让本类去摸 <c>HubGpu</c>:对话中心不该知道"显存面"这回事,
+    /// 而分因的判据必须来自中枢的真实回答(见 ChatClient.BackendUnavailableAdvice)。</para>
+    /// </param>
     public async Task<ChatOutcome> SendAndAskAsync(
         string sessionId, string text, HubClient hub,
         IEnumerable<string>? committedComponents,
         IReadOnlyList<ChatAttachment>? attachments = null,
-        Action? onTick = null, CancellationToken ct = default)
+        Action? onTick = null,
+        Func<CancellationToken, Task<IntentOutcome?>>? probeBackend = null,
+        CancellationToken ct = default)
     {
         text = text?.Trim() ?? "";
         var hasAtt = attachments is { Count: > 0 };
@@ -731,9 +767,7 @@ public sealed class ChatCenter
 
         // ★ 先占一条空的 Assistant 消息作为流式落点。★ 它**不是伪造** ——
         //   它是"正在说"的容器;失败时会被删掉,绝不留下一条空回复冒充回答。
-        var replyId = NewMsgId();
-        _messages.Add(new ChatMessage(sessionId, ChatRole.Assistant, "", DateTime.Now, null, replyId));
-        StreamingMessageId = replyId;
+        var replyId = OpenStreamSink(sessionId);
         _sessions[i] = _sessions[i] with
         {
             LastActive = DateTime.Now,
@@ -749,13 +783,25 @@ public sealed class ChatCenter
                 delta =>
                 {
                     buf.Append(delta);
-                    var k = _messages.FindIndex(m => m.MessageId == replyId);
-                    if (k >= 0) _messages[k] = _messages[k] with { Text = buf.ToString() };
+                    AppendStreamText(replyId, buf.ToString());
                     onTick?.Invoke();
                     return Task.CompletedTask;
                 }, ct);
         }
-        finally { StreamingMessageId = null; }
+        finally { CloseStreamSink(); }
+
+        // ★★★ V20-③:失败说明用**分过因**的那一句。
+        //   只有 backend_unavailable 需要追问 —— 别的失败码自己就说清了(见 ChatOutcome.Advice)。
+        //   ★ 追问失败也照样出说明:BackendUnavailableAdvice(null) 会如实说"追问也失败了",
+        //     绝不因为追问挂了就让这一轮变得静默。
+        var advice = res.Advice;
+        if (!res.Ok && res.Code == "backend_unavailable")
+        {
+            IntentOutcome? probe = null;
+            if (probeBackend is not null)
+                try { probe = await probeBackend(ct); } catch { /* 追问也挂了 -> 下面按 null 说 */ }
+            advice = ChatClient.BackendUnavailableAdvice(probe);
+        }
 
         var idx = _messages.FindIndex(m => m.MessageId == replyId);
         if (res.Ok)
@@ -766,14 +812,14 @@ public sealed class ChatCenter
         {
             // ★ 半截保留(模型真说过),后面补一条说明它没说完
             if (idx >= 0) _messages[idx] = _messages[idx] with { Text = res.Partial };
-            _messages.Add(new ChatMessage(sessionId, ChatRole.System, res.Advice,
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System, advice,
                                           DateTime.Now, null, NewMsgId()));
         }
         else
         {
             // ★★ 一个字都没有 ⇒ **把那条空回复删掉**,不留一条空 Assistant 冒充回答
             if (idx >= 0) _messages.RemoveAt(idx);
-            _messages.Add(new ChatMessage(sessionId, ChatRole.System, res.Advice,
+            _messages.Add(new ChatMessage(sessionId, ChatRole.System, advice,
                                           DateTime.Now, null, NewMsgId()));
         }
         // ★ 截断了就说出来 —— 静默丢历史 = 用户以为它记得,而它没有。

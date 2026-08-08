@@ -56,17 +56,52 @@ public static class TokenBudget
         return int.TryParse(tail, out var k) && k > 0 ? k * 1024 : 0;
     }
 
+    // ══════════════════════════════════════════════════════════════════
+    //  ★★★ V20-④(D?):驻留是**两层**的 —— 这里以前只看见一层
+    //
+    //  D90 把驻留拆成 `committed`(机主勾的常驻)与 `transient_resident`(按需装上的)。
+    //  **服务端分了,这一侧没跟上**:本函数只吃 committed,于是用户实测 ——
+    //  `assistant.8b@8k` 已经按需装载、显存 1.5→6.8 GiB,而每条回答下面还挂着
+    //  「中枢的驻留组件读不到,窗口按最小的 8192 估」。★ 那不只是显示难看:
+    //  窗口按 8192 估 ⇒ **真的少带历史**,回答质量跟着掉。
+    //
+    //  ★★ 判据不是照用户的话写,是照 **Broker 自己的语义**:
+    //    `gpu_broker.py` 算显存闸时写的是
+    //      `loaded = list(self._committed) + list(self._transient_resident)`
+    //    收割时保留的也是这两者的并集(`keep = list(self._committed) + list(self._transient_resident)`)。
+    //    ⇒ 「此刻显存里真的装着什么」= **两个集合的并**。这里问的正是这个问题。
+    //
+    //  ★ 那条「两个字段永不合并」的纪律(HubGpuSnapshot 第 37 行)**没有被违反**:
+    //    它禁的是**在界面上把两层说成一层**(会让用户以为自己勾过它)。
+    //    而"上下文窗口有多大"是一个纯事实问题,与谁勾过它无关。
+    //    ⇒ 合并发生在**这个算窗口的函数里**,快照上那两个字段照旧分开。
+    // ══════════════════════════════════════════════════════════════════
+
     /// <summary>
-    /// 从中枢当前驻留的组件推出上下文窗口。
+    /// 从中枢**此刻真的装着**的组件推出上下文窗口(常驻 ∪ 按需驻留)。
     /// ★ 多个 llm 组件同时驻留时取**最小**的那个:请求会落到哪一个由中枢的别名路由决定,
     ///   客户端猜不了 —— 按最小算才不会撞窗口。
     /// ★ 一个都推不出来 → (FallbackWindow, isGuess: true),而不是拿个大数蒙混。
     /// </summary>
-    public static (int window, bool isGuess) WindowFrom(IEnumerable<string>? committed)
+    public static (int window, bool isGuess) WindowFrom(IEnumerable<string>? residentComponents)
     {
-        var wins = (committed ?? Array.Empty<string>())
+        var wins = (residentComponents ?? Array.Empty<string>())
             .Select(WindowOf).Where(w => w > 0).ToList();
         return wins.Count > 0 ? (wins.Min(), false) : (FallbackWindow, true);
+    }
+
+    /// <summary>
+    /// 「此刻显存里真的装着哪些组件」= 常驻 ∪ 按需驻留。
+    /// <para>★★ 这是**唯一**一处做这个并集的地方 —— 三个调用点(算窗口 / 发请求 / 显存条)
+    /// 各写一遍的话,漂的那天只有一处会被发现。判据见上面那段(拄 gpu_broker 自己的算法)。</para>
+    /// </summary>
+    public static IReadOnlyList<string> ResidentOf(HubGpuSnapshot? snapshot)
+    {
+        if (snapshot is null) return Array.Empty<string>();
+        var all = new List<string>(snapshot.Committed);
+        foreach (var t in snapshot.TransientResident)
+            if (!all.Contains(t, StringComparer.Ordinal)) all.Add(t);
+        return all;
     }
 
     /// <summary>
@@ -128,7 +163,9 @@ public static class TokenBudget
         var note = isGuess
             ? $"★ 中枢的驻留组件读不到,上下文窗口按最小的 {FallbackWindow} 估 —— "
               + "宁可少带两条,也不撞窗口"
-            : $"上下文窗口 {window}(来自中枢当前驻留的组件)";
+            // ★ V20-④:措辞从「当前驻留的组件」改成「此刻装着的组件」——
+            //   现在它包含按需装上的那一层,而"驻留"这个词在 D90 之后专指 committed。
+            : $"上下文窗口 {window}(来自中枢此刻装着的组件)";
         return new BudgetPlan(picked, candidates.Count, used, budget, window, truncated, isGuess, note);
     }
 }

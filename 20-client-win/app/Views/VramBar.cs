@@ -185,11 +185,28 @@ public sealed class VramBar : UserControl
         _pct.Text = $"{s.UsedRatio * 100:0}%";
         _pct.Foreground = danger ? DesktopDanger : warn ? WarnBrush : (Brush)FindResource("FgSecondary");
 
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V20-④:模型段现在含**按需装载**那一层(见 VramMonitor 里那段)。
+        //  用户实测:模型已按需装好、显存 6.8 GiB,这一行却写着「暂无已启用模型」——
+        //  与底部横条那条「按需模型 · 进行中」当场自相矛盾。
+        //
+        //  ★★ 但措辞**必须分得开**:D90 裁定③ 禁的是让用户以为按需那一层是他勾的。
+        //    「已启用」= 他在组件面板上勾过的;按需装上的**不是**。
+        //    ⇒ 有按需成分就把它单独说出来:「模型 6.8(含按需 5.3)」。
+        // ══════════════════════════════════════════════════════════════════
         var used = s.ModelReservedGiB + s.DesktopUsedGiB;
+        var onDemand = s.TransientGiB > 0.01 ? $"(含按需 {s.TransientGiB:0.0})" : "";
         _caption.Text = s.ModelReservedGiB > 0.01
-            ? $"模型 {s.ModelReservedGiB:0.0} + 桌面 {s.DesktopUsedGiB:0.0} / {s.TotalGiB:0.0} GiB"
+            ? $"模型 {s.ModelReservedGiB:0.0}{onDemand} + 桌面 {s.DesktopUsedGiB:0.0} / {s.TotalGiB:0.0} GiB"
             : $"已用 {used:0.0} / {s.TotalGiB:0.0} GiB · 暂无已启用模型";
-        ToolTip = $"启用的模型 max:{s.ModelReservedGiB:0.00} GiB\n当前桌面占用:{s.DesktopUsedGiB:0.00} GiB\n未占用:{s.FreeGiB:0.00} GiB\n总计:{s.TotalGiB:0.00} GiB"
+        // ★ 提示框里把两层**逐行**分开:「已启用」是你勾的常驻,「按需装载」是系统按你的授权临时装的。
+        //   合成一行会把 D90 裁定③ 那个亏(让人以为自己勾过它)搬到这里来。
+        ToolTip = $"装着的模型 max:{s.ModelReservedGiB:0.00} GiB"
+                  + (s.TransientGiB > 0.01
+                        ? $"\n  ├ 你勾的常驻:{Math.Max(0, s.ModelReservedGiB - s.TransientGiB):0.00} GiB"
+                          + $"\n  └ 按需装载(空闲会自动卸):{s.TransientGiB:0.00} GiB"
+                        : "")
+                  + $"\n当前桌面占用:{s.DesktopUsedGiB:0.00} GiB\n未占用:{s.FreeGiB:0.00} GiB\n总计:{s.TotalGiB:0.00} GiB"
                   + (danger ? "\n\n⚠ 已逼近显存上限" : "");
 
         _clip.Visibility = Visibility.Visible;

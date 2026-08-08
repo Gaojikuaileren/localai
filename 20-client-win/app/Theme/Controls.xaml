@@ -438,6 +438,36 @@
     </Setter>
   </Style>
 
+  <!-- V20-⑤:渲染过 markdown 的消息正文。与 PlainTextBox 逐条同构 ——
+       两者会在同一屏里并排出现(有记号的走这个、没记号的走那个),
+       只要有一条设置不一样,用户就会看到两种长得不同的气泡。
+       ★ 模板里两个方向都 Disabled:RichTextBox 自带的 ScrollViewer 会把滚轮吃掉,
+         而它就住在会话区那个 ScrollViewer 里面(嵌套滚动 = 滚轮落在气泡上时整屏不动)。 -->
+  <Style x:Key="PlainRichTextBox" TargetType="RichTextBox">
+    <Setter Property="IsTabStop" Value="False"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+    <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+    <Setter Property="FontFamily" Value="{DynamicResource FontUI}"/>
+    <Setter Property="IsReadOnly" Value="True"/>
+    <Setter Property="IsReadOnlyCaretVisible" Value="False"/>
+    <!-- ★ 富文本里不要出现"可点的东西":这段文字是模型生成的,
+         让它带着可激活的超链接等于让模型决定打开哪个网站(见 MarkdownText.Fill)。 -->
+    <Setter Property="IsDocumentEnabled" Value="False"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RichTextBox">
+          <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                        VerticalScrollBarVisibility="Disabled"
+                        HorizontalScrollBarVisibility="Disabled"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- 复选框:自绘方框 + 勾,不用系统外观 -->
   <Style TargetType="CheckBox">
     <!-- 同 Button:纯鼠标件,退出焦点体系(空格勾选随之取消,鼠标不受影响) -->

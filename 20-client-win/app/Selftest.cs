@@ -980,8 +980,12 @@ public static class Selftest
                 Assert(cvFold.Contains("展开全部(") && cvFold.Contains("\"收起\""), "可展开、可再次收起");
                 Assert(cvFold.Contains("_expandedBubbles"), "展开状态按会话+序号记住(重建后不丢)");
                 // ★ 折叠只影响显示 —— 发送与存储用的都是 m.Text 全文;截行只发生在渲染那一句
-                Assert(cvFold.Contains("expanded ? m.Text : string.Join(\"\\n\", lines.Take(CollapseLines))"),
+                // ★★ V20-⑤ 把"折叠"与"渲染"拆成两件事之后这一句换了形状,但钉的是同一件事:
+                //   截行只发生在**算显示内容**那一句上,`m.Text` 从头到尾没被改过。
+                Assert(cvFold.Contains("var shown = collapsed && !expanded ? string.Join(\"\\n\", lines.Take(CollapseLines)) : m.Text;"),
                        "★ 折叠只截【显示】的行,原文一个字没少(给 AI 的是全文)");
+                Assert(!CodeOnly(cvFold).Contains("m.Text = "),
+                       "★★ 反向钉:渲染路径【一次都不写】m.Text —— 折叠/渲染都只能读它");
                 Assert(cvFold.Contains("只是显示折叠"), "代码里写明折叠不影响发给 AI 的内容");
             }
 
@@ -1363,7 +1367,11 @@ public static class Selftest
             var cvJump = TryReadSource(Path.Combine("Views", "ChatView.cs"));
             if (cvJump is not null)
             {
-                Assert(cvJump.Contains("_suppressScrollToEnd = true;") && cvJump.Contains("if (!skipEnd) scroll.ScrollToEnd()"),
+                // ★ V20 改了定位的形状(同步定位 + 不贴底就还回原偏移),所以这条判据跟着改:
+                //   钉的仍然是同一件事 ——「跳转这一次不许被滚到底覆盖」,即 skipEnd 要真的短路掉定位。
+                Assert(cvJump.Contains("_suppressScrollToEnd = true;")
+                       && cvJump.Contains("if (skipEnd) return;")
+                       && cvJump.Contains("else scroll.ScrollToEnd();"),
                        "★ 从历史跳过去时不再滚到底(否则跳转结果会被 ScrollToEnd 覆盖)");
                 Assert(cvJump.Contains("all[i].StableKey != want"),
                        "★ 按消息的稳定标识定位,不按下标(归档来回一次下标就全变了)");
@@ -4430,8 +4438,55 @@ public static class Selftest
                                        "denied_quota", "hub_offline", "stream_broken", "e1_blocked" };
                 Assert(s11codes.Select(S11Adv).Distinct().Count() == s11codes.Length,
                        "★★ 七种失败七种说法 —— 合并成「发送失败」会让用户无从判断下一步");
-                Assert(S11Adv("backend_unavailable").Contains("start-stack"),
-                       "★★ 后端没起要说清【怎么起】,而不是只说连不上");
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ V20-③:这条断言**换了钉的东西** —— 它原来钉的是
+                //    `S11Adv("backend_unavailable").Contains("start-stack")`,
+                //    也就是说:**护栏本身在把一句错话按在原地**。
+                //
+                //  查实(不是推断):
+                //   · `start-stack.ps1` 会**静态起 llama-server**(该脚本 [1] 那一段);
+                //   · 而 D101 裁定② 明写:自动起栈「绝不起 llama-server:按需装载已经落地,
+                //     静态起会和 transient 平面打架」。
+                //   ⇒ 那句建议今天会把人引向一个被明令禁止的动作。
+                //     「给错原因比不给更坏」是本项目自己的判词,而它正在犯。
+                // ══════════════════════════════════════════════════════════
+                Assert(!S11Adv("backend_unavailable").Contains("start-stack"),
+                       "★★★ 「后端没应答」这一句里【不再】叫人去跑 start-stack —— "
+                       + "那会静态起 llama-server,与 D101② 明令禁止的事撞在一起");
+                Assert(S11Adv("backend_unavailable").Contains("说不出是哪一种"),
+                       "★★ 说不出原因就【承认说不出】,并列出那几种可能 —— 不挑一个当结论");
+                {
+                    // ---- 分因表:每一种中枢回答给一条**不同**的下一步 ----
+                    IntentOutcome Iv(string code, bool ok, string plane = "", string msg = "x")
+                        => new(ok, code, "assistant.fast", "llm.assistant.8b@8k", msg, plane);
+                    string Bua(IntentOutcome? p) => Services.ChatClient.BackendUnavailableAdvice(p);
+
+                    var buaNotPermitted = Bua(Iv("NOT_PERMITTED", false));
+                    var buaGate = Bua(Iv("GATE", false, msg: "装不下:预留不够"));
+                    var buaLoading = Bua(Iv("ALREADY_RESIDENT", true, plane: "loading"));
+                    var buaJustLoaded = Bua(Iv("OK", true, plane: "transient"));
+                    var buaRunning = Bua(Iv("ALREADY_RESIDENT", true, plane: "committed"));
+                    var buaNoProbe = Bua(null);
+
+                    var buaAll = new[] { buaNotPermitted, buaGate, buaLoading, buaJustLoaded, buaRunning, buaNoProbe };
+                    Assert(buaAll.Distinct().Count() == buaAll.Length,
+                           "★★★ 六种中枢回答 = 六种说法。合并成「后端没起」就是把用户支去错的地方 —— "
+                           + "没授权要去主机勾一次,正在装只要等几秒,两者天差地别");
+                    Assert(buaNotPermitted.Contains("允许按需装载"),
+                           "★★★ 用户猜的那一种(**没勾过「按需」**)真的说得出来 —— "
+                           + "中枢的 NOT_PERMITTED 一路带到了这句话上");
+                    Assert(buaGate.Contains("装不下"),
+                           "★ 显存装不下:原样用闸给的理由(它自己就写好了该怎么办)");
+                    Assert(buaLoading.Contains("正在装载") && !buaLoading.Contains("没有起来"),
+                           "★★ 正在装载**不是失败** —— 说成失败会让人去改设置,而他只需要等");
+                    Assert(buaJustLoaded.Contains("再发一次"),
+                           "★ 这次追问顺手把它装上了 ⇒ 下一步就是再发一次(追问走的是与「意图即起」同一条端点)");
+                    Assert(buaRunning.Contains("后端进程本身") && buaRunning.Contains("不要"),
+                           "★★ 只有【中枢说它在跑而后端仍不应答】这一种才去主机侧查,"
+                           + "而且明确写清不要静态起它(D101②)");
+                    Assert(buaNoProbe.Contains("追问") && !buaNoProbe.Contains("没有起来"),
+                           "★★★ 追问自己失败时**承认追问失败**,不退回猜一个原因 —— 猜错比不说坏");
+                }
                 Assert(S11Adv("backend_error").Contains("不是连不上"),
                        "★ 后端应答了但报错 ≠ 连不上:前者去看日志,后者去看进程");
                 Assert(S11Adv("stream_broken").Contains("真的说过") && S11Adv("stream_broken").Contains("没说完"),
@@ -4476,6 +4531,328 @@ public static class Selftest
                 var s11tr = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
                 Assert(s11tr is null || s11tr.Contains("onNonSuccess"),
                        "★★ 流式非 2xx 时先把正文读出来 —— 丢掉它等于把「后端没起」退化成「连不上」");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V20-②:「意图即起」失败**要有落点** —— 原先整条静默
+            //
+            //  改之前有两层静默,第二层更坏:
+            //    ① `NoteIntent` 里 `catch { }` —— 抛异常时连 LastIntent 都不写,
+            //       于是它停在**上一次的成功**上(一个过期的成功比空值糟得多);
+            //    ② `LastIntent` **一个读者都没有** —— 它自己的文档注释写着
+            //       「界面据此显示…」,而那句话是假的。
+            // ══════════════════════════════════════════════════════════════
+            {
+                var gpuSrc = TryReadSource(Path.Combine("Services", "HubGpu.cs"));
+                if (gpuSrc is not null)
+                {
+                    // ★ 切片只到 NoteIntent 自己为止:后面 SetLastIntent 里那个 `catch { }`
+                    //   是**事件广播的护栏**(与 Notify() 同款,订阅方抛异常不该反噬发布方),
+                    //   与本条要禁的"把失败整条吞掉"是两件事。切宽了会把它误判成红。
+                    var noteBody = Slice(gpuSrc, "public void NoteIntent(string alias)", "记下最后一次意图的结果");
+                    Assert(noteBody is not null && !CodeOnly(noteBody).Contains("catch { }"),
+                           "★★★ NoteIntent 里不再有 `catch { }` —— 「不掀翻输入框」≠「不说」");
+                    Assert(noteBody is not null && noteBody.Contains("intent_unreachable"),
+                           "★★ 连问都没问到时写一条**它自己的**失败码,而不是让 LastIntent "
+                           + "停在上一次的成功上(过期的成功会让任何读它的人显示「好着呢」)");
+                }
+                // ---- 落点真的存在:ChatView 读它,而且只在【有坏消息】时占那一行 ----
+                var app2 = (App)System.Windows.Application.Current;
+                var cvHint = new Views.ChatView("chat");
+                // 没配对 -> 这一行不画(输入框上方已经有一句「还没配对」了,两句讲一件事会读成两个问题)
+                Assert(cvHint.IntentHintText() is null,
+                       "★ 没配对时**不画**这一行 —— 上面那句「还没配对到中枢」已经在说同一件事");
+                // 有失败的意图 + 中枢在线 -> 说出中枢那一句
+                app2.Gpu.SetLastIntentForSelftest(new Services.IntentOutcome(
+                    false, "NOT_PERMITTED", "assistant.fast", "llm.assistant.8b@8k", "", ""));
+                var sayPaired = cvHint.IntentHintText();
+                // ★ 自检里 Hub 没配对,所以这一格拿到的仍是 null —— 如实断言"判据是配对+在线",
+                //   而不是假装它会显示。真正把两者接起来的那一格由上面的源码反向钉守着。
+                Assert(sayPaired is null,
+                       "★ 判据是【配对 + 主机在线】两条都成立才说话(自检环境两条都不成立)");
+                Assert(Services.MarkdownLite.ToPlainText(app2.Gpu.LastIntent!.Advice).Contains("允许按需装载")
+                       && !Services.MarkdownLite.ToPlainText(app2.Gpu.LastIntent!.Advice).Contains("**"),
+                       "★★ 那一行是小字(画不了粗体)⇒ 记号剃掉、内容留下。"
+                       + "IntentOutcome.Advice 里就有 `**主机**`,不剃就是把星号画给用户看");
+                var intentEvents = 0;
+                void OnIc() => intentEvents++;
+                app2.Gpu.IntentChanged += OnIc;
+                app2.Gpu.SetLastIntentForSelftest(new Services.IntentOutcome(
+                    false, "NOT_PERMITTED", "assistant.fast", "llm.assistant.8b@8k", "", ""));
+                Assert(intentEvents == 0,
+                       "★★ 同一句话【不重复广播】—— 意图每 20 秒可能来一次,"
+                       + "每次都弹等于训练人忽略它(D85 第 5 条)");
+                app2.Gpu.SetLastIntentForSelftest(new Services.IntentOutcome(
+                    false, "GATE", "assistant.fast", "llm.assistant.8b@8k", "装不下", ""));
+                Assert(intentEvents == 1, "★ 说法真的变了才广播一次");
+                app2.Gpu.IntentChanged -= OnIc;
+
+                // ---- ★ 反向钉:聊天界面接的是 IntentChanged,**不是** Gpu.Changed ----
+                var cvGpu = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                Assert(cvGpu is not null && cvGpu.Contains("TheApp.Gpu.IntentChanged += OnIntentChanged")
+                       && !CodeOnly(cvGpu).Contains("TheApp.Gpu.Changed +="),
+                       "★★★ 接 IntentChanged 而不是 Gpu.Changed —— 后者跟着显存快照每秒一帧,"
+                       + "拿它当刷新信号会把输入框每秒重建一次(打字当场被打断)");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V20-④:驻留是两层的 —— 客户端三处以前只看见 committed
+            //
+            //  用户实测:`assistant.8b@8k` 已按需装载、显存 1.5→6.8 GiB,而客户端仍然
+            //   ① 每条回答挂「驻留组件读不到,窗口按最小 8192 估」;
+            //   ② 左下角说「暂无已启用模型」(与底部横条「按需模型 · 进行中」自相矛盾);
+            //   ③ 因此**真的少带历史** —— 不只是显示问题。
+            //
+            //  ★ 判据拄 `gpu_broker.py` 自己的算法:算显存闸用的是
+            //    `loaded = list(self._committed) + list(self._transient_resident)`。
+            // ══════════════════════════════════════════════════════════════
+            {
+                HubGpuSnapshot Snap(string[] committed, string[] transient)
+                    => new(1, "READY", 24, 17.2, 20, 2, null, committed, committed, false, null,
+                           transient, null);
+
+                // ① 上下文窗口:按需装着的那一层算进去
+                var onlyTransient = Snap(Array.Empty<string>(), new[] { "llm.assistant.8b@8k" });
+                var resid = Services.TokenBudget.ResidentOf(onlyTransient);
+                var (winT, guessT) = Services.TokenBudget.WindowFrom(resid);
+                Assert(!guessT && winT == 8 * 1024,
+                       $"★★★ 只有【按需装载】的模型时,窗口读出真值 8192 而不是兜底估算(实得 {winT},估={guessT})—— "
+                       + "估算那一档会真的少带历史,回答质量跟着掉");
+                var (winNone, guessNone) = Services.TokenBudget.WindowFrom(
+                    Services.TokenBudget.ResidentOf(Snap(Array.Empty<string>(), Array.Empty<string>())));
+                Assert(guessNone && winNone == Services.TokenBudget.FallbackWindow,
+                       "★ 两层都空时仍然如实说「读不到、按最小估」—— 兜底那条路没被顺手删掉");
+                // 两层都有 -> 取最小(请求落到哪一个由中枢的别名路由决定,客户端猜不了)
+                var both = Snap(new[] { "llm.assistant.8b@16k" }, new[] { "llm.assistant.8b@8k" });
+                Assert(Services.TokenBudget.WindowFrom(Services.TokenBudget.ResidentOf(both)).window == 8 * 1024,
+                       "★★ 两层同时装着时取**最小**窗口 —— 按大的算会撞窗口");
+                Assert(Services.TokenBudget.ResidentOf(Snap(new[] { "a@8k" }, new[] { "a@8k" })).Count == 1,
+                       "★ 并集去重(同一个组件同时出现在两个集合里时不许算两遍)");
+                // ★ 反向钉:并集只有一处实现
+                var cvRes = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                Assert(cvRes is not null && cvRes.Contains("TokenBudget.ResidentOf(TheApp.Gpu.Snapshot)")
+                       && !CodeOnly(cvRes).Contains("Snapshot?.Committed"),
+                       "★★ 发请求那一处也走同一个并集函数,不再单取 Committed(三处各写一遍的话,"
+                       + "漂的那天只有一处会被发现)");
+
+                // ② 显存条:数字要合(都真的占显存),措辞要分(不许让人以为按需那层是他勾的)
+                var vs20 = new Services.VramSnapshot(24, 6.8, 1.5, true, null,
+                                                     Services.VramSource.Hub, true, "READY", 5.3);
+                Assert(vs20.ModelReservedGiB > 0.01 && vs20.TransientGiB > 0.01,
+                       "★ 快照能同时说出「装着多少」和「其中多少是按需的」");
+                var vmSrc = TryReadSource(Path.Combine("Services", "VramMonitor.cs"));
+                Assert(vmSrc is not null && vmSrc.Contains("TokenBudget.ResidentOf(hs)")
+                       && !CodeOnly(vmSrc).Contains("PeakSumGiB(hs.Committed"),
+                       "★★★ 模型段算的是两层的并 —— 只算 committed 就是「模型明明装着,"
+                       + "左下角却说暂无已启用模型」那个自相矛盾的来源");
+                var vbSrc = TryReadSource(Path.Combine("Views", "VramBar.cs"));
+                Assert(vbSrc is not null && vbSrc.Contains("含按需"),
+                       "★★ 有按需成分时**单独说出来**(「模型 6.8(含按需 5.3)」)—— "
+                       + "D90 裁定③:不许让用户以为按需那一层是他勾的");
+                Assert(vbSrc is not null && vbSrc.Contains("你勾的常驻"),
+                       "★ 提示框里两层逐行分开:「你勾的常驻」与「按需装载(空闲会自动卸)」");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V20-⑤:markdown 要真的渲染 —— 而且**不只** `**`
+            //
+            //  用户实测:回答里的 `**"Come for dinner tomorrow."**` 原样把星号画给了人看。
+            //  ★ 解析是纯函数,所以这里逐种记号喂进去对答案(能为假);
+            //    "画出来好不好看"没法自动断言,如实不测(第 14 条:少一条诚实的判据,
+            //    好过多一条假的)。
+            // ══════════════════════════════════════════════════════════════
+            {
+                string Plain(string s) => Services.MarkdownLite.ToPlainText(s);
+                IReadOnlyList<Services.MdSpan> Inl(string s) => Services.MarkdownLite.ParseInline(s);
+
+                // ---- 用户报的那一条,原样 ----
+                var reported = Inl("她说 **\"Come for dinner tomorrow.\"** 就走了");
+                Assert(reported.Any(x => x.Bold && x.Text.Contains("Come for dinner")),
+                       "★★★ 用户实测那一句里的 `**…**` 认成了粗体(引号、句点、空格都在里面)");
+                Assert(!string.Concat(reported.Select(x => x.Text)).Contains("*"),
+                       "★★★ 星号**不再出现在正文里** —— 那正是用户看到的东西");
+
+                // ---- 别的记号:一条条都要认(用户点名"别只修 **")----
+                Assert(Inl("*斜*").Any(x => x.Italic), "单个 * = 斜体");
+                Assert(Inl("_斜_").Any(x => x.Italic), "单个 _ = 斜体");
+                Assert(Inl("__粗__").Any(x => x.Bold), "__ = 粗体");
+                Assert(Inl("`code`").Any(x => x.Code), "反引号 = 内联代码");
+                Assert(Inl("~~删~~").Any(x => x.Strike), "~~ = 删除线");
+                Assert(Inl("[名字](https://x/y)").Any(x => x.Href == "https://x/y"),
+                       "[文字](地址) = 链接(地址进 Href,不画出来)");
+                Assert(!string.Concat(Inl("[名字](https://x/y)").Select(x => x.Text)).Contains("https"),
+                       "★ 链接地址不画进正文 —— 否则一屏全是 URL");
+                Assert(Inl("**`x`**").Any(x => x.Bold && x.Code),
+                       "★ 样式可叠加(既粗又是代码)—— 用四个 bool 而不是一个枚举正是为了这个");
+
+                // ---- ★★★ 不许误伤:这个仓库里到处是下划线标识符 ----
+                var snake = Inl("看 vram_budget_toml 和 _transient_resident 两处");
+                Assert(!snake.Any(x => x.Italic) && string.Concat(snake.Select(x => x.Text)).Contains("vram_budget_toml"),
+                       "★★★ 词里的下划线【不是】斜体记号 —— `vram_budget_toml` 必须原样,"
+                       + "而这个仓库的文案里到处都是这种名字");
+                Assert(!Inl("2 * 3 * 4").Any(x => x.Italic),
+                       "★★ `2 * 3` 是乘法不是强调(开始记号后面紧跟空白的不算)");
+                Assert(string.Concat(Inl("剩一个孤星 * 在这").Select(x => x.Text)).Contains("*"),
+                       "★★★ 配不上对的记号**原样留着** —— 半吞半留会把模型说过的字弄丢,"
+                       + "那比原样显示星号坏得多");
+                Assert(string.Concat(Inl("未闭合 `code").Select(x => x.Text)).Contains("`"),
+                       "★ 没配对的反引号也原样留着");
+
+                // ---- 块级 ----
+                var blocks = Services.MarkdownLite.Parse("# 标题\n\n- 甲\n- 乙\n\n1. 一\n\n> 引\n\n---\n\n```py\nx=1\n**不解析**\n```");
+                Assert(blocks.Any(b => b.Kind == Services.MdBlockKind.Heading && b.Level == 1), "# = 一级标题");
+                Assert(blocks.Count(b => b.Kind == Services.MdBlockKind.Bullet) == 2, "两条无序列表项");
+                Assert(blocks.Any(b => b.Kind == Services.MdBlockKind.Numbered && b.Ordinal == "1"), "有序列表记住序号原文");
+                Assert(blocks.Any(b => b.Kind == Services.MdBlockKind.Quote), "> = 引用");
+                Assert(blocks.Any(b => b.Kind == Services.MdBlockKind.Rule), "--- = 分隔线");
+                var code = blocks.FirstOrDefault(b => b.Kind == Services.MdBlockKind.Code);
+                Assert(code is not null && code.CodeText.Contains("**不解析**") && code.CodeLang == "py",
+                       "★★★ 围栏代码块里的 `**` 就是两个星号(代码里的记号不是记号),语言标记也留着");
+                Assert(!Services.MarkdownLite.Parse("*斜*开头的一句").Any(b => b.Kind == Services.MdBlockKind.Bullet),
+                       "★★ `*斜*开头的一句` 不是列表项 —— 列表记号必须带空格,否则很常见的一句话会被吃掉");
+                var unclosed = Services.MarkdownLite.Parse("```\nhalf");
+                Assert(unclosed.Any(b => b.Kind == Services.MdBlockKind.Code && b.CodeText == "half"),
+                       "★ 没收尾的围栏(流式还没吐完)照样当代码块 —— 否则已吐出的代码会中途换一次样式");
+
+                // ---- ToPlainText:给画不了富文本的落点 ----
+                Assert(Plain("请到**主机**的「系统 › 模型」里勾一次") == "请到主机的「系统 › 模型」里勾一次",
+                       "★★★ 纯文本落点把记号剃掉、内容一字不少 —— 本项目自己的 Advice 文案里就有 `**`");
+                Assert(!Plain("- 甲\n- 乙").Contains("- "), "列表在纯文本里换成「· 」而不是留着减号");
+                Assert(Plain("`x_y`") == "x_y", "内联代码在纯文本里只留内容");
+
+                // ---- 渲染开关:没有记号就不套富文本 ----
+                Assert(!Views.MarkdownText.NeedsRendering("就是一句普通的话。"),
+                       "★ 一个记号都没有的消息走原来那条纯文本路(绝大多数消息如此,套富文本是白花钱)");
+                Assert(Views.MarkdownText.NeedsRendering("有 **记号** 的"), "有记号的才走富文本");
+                Assert(!Views.MarkdownText.NeedsRendering(""), "空文本不需要渲染");
+
+                // ---- ★ 反向钉:三条边界 ----
+                var cvMd = TryReadSource(Path.Combine("Views", "ChatView.cs"));
+                Assert(cvMd is not null && cvMd.Contains("!user && !streaming && MarkdownText.NeedsRendering(shown)"),
+                       "★★★ 三条边界都在:用户自己发的不渲染(他打了什么就该看到什么)· "
+                       + "正在流式的不渲染(半截的 ** 会来回跳,而且富文本重排比改一行 Text 贵得多)· "
+                       + "没记号的不渲染");
+                var mdvSrc = TryReadSource(Path.Combine("Views", "MarkdownText.cs"));
+                Assert(mdvSrc is not null && mdvSrc.Contains("PlainRichTextBox"),
+                       "★★ 走 PlainRichTextBox 样式 —— RichTextBox 自带的 ScrollViewer 会吃掉滚轮,"
+                       + "而它就住在会话区那个 ScrollViewer 里面(嵌套滚动)");
+                Assert(mdvSrc is not null && !CodeOnly(mdvSrc).Contains("new Hyperlink"),
+                       "★★★ 链接**不做成能点的** —— 这段文字是模型生成的,"
+                       + "带可激活的超链接等于让模型决定打开哪个网站");
+                var ctrlsSrc = TryReadSource(Path.Combine("Theme", "Controls.xaml"));
+                Assert(ctrlsSrc is null || (ctrlsSrc.Contains("x:Key=\"PlainRichTextBox\"")
+                                            && Slice(ctrlsSrc, "x:Key=\"PlainRichTextBox\"", "</Style>") is { } prtb
+                                            && prtb.Contains("VerticalScrollBarVisibility=\"Disabled\"")
+                                            && prtb.Contains("IsTabStop\" Value=\"False\"")),
+                       "★★ PlainRichTextBox 与 PlainTextBox 同构:不吃滚轮 + 退出 Tab 序 —— "
+                       + "两者会在同一屏并排出现,有一条不一样用户就会看到两种气泡");
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V20 ①:流式时**滚动偏移不许归零** —— 这是一条**行为**断言
+            //
+            //  用户实测:「每次生成都先跳到顶端再拉回底部」。
+            //  ★★ 为什么必须真量偏移,而不能扫源码:ASSERTION-PITFALLS 第 14 条 ——
+            //    「onTick 接的是哪个方法名」这种判据,在实现被改回整块重建那天**照样绿**。
+            //    这里造一条真会话、真排版、真喂增量,读的是 ScrollViewer 自己的 VerticalOffset。
+            //  ★ 红测(第 14 条要求的那次自查)已经做过:把 onTick 改回
+            //    `BuildConversation`,下面第一条当场红(偏移逐帧归零)。
+            //
+            //  ★★★ 诚实边界:这里【没有】跑消息循环 —— 排在 DispatcherPriority.Loaded 的
+            //    那个 ScrollToEnd 在自检里不会执行。这恰好是本条要测的东西:
+            //    真机上它**会**执行,于是"归零 → 拉回底"两帧都发生;自检里只留下归零那一帧,
+            //    而归零本身就是缺陷。⇒ 判据比真机更严,不是更松。
+            // ══════════════════════════════════════════════════════════════
+            {
+                const double AtBottomEps20 = 2.0;            // 与 ChatView.AtBottomEpsilon 同一容差
+                Theme.ThemeManager.Initialize(Skin.Breeze);   // ChatView 的会话行用 FindResource,缺字典会抛
+                var app20 = (App)System.Windows.Application.Current;
+                var cv20 = new Views.ChatView("chat");
+                var host20 = new System.Windows.Controls.Grid { Width = 900, Height = 620 };
+                host20.Children.Add(cv20);
+                host20.Measure(new System.Windows.Size(900, 620));
+                host20.Arrange(new System.Windows.Rect(0, 0, 900, 620));
+                host20.UpdateLayout();
+
+                // 造一条【长会话】:偏移只有在真的滚得动时才有话可说
+                var sess20 = app20.Chat.NewSession(null, "chat");
+                for (int i = 0; i < 60; i++)
+                    app20.Chat.SeedMessage(sess20.SessionId,
+                                           i % 2 == 0 ? Services.ChatRole.User : Services.ChatRole.Assistant,
+                                           $"第 {i} 条消息 —— 让会话真的长到滚得动。", DateTime.Now);
+                cv20.OpenSession(sess20);            // ★ 走点会话行那条真路径
+                host20.UpdateLayout();
+
+                var sc20 = cv20.MessageScrollForSelftest;
+                Assert(sc20 is not null, "★ 有消息的会话建出了消息滚动壳(后面几条全靠它)");
+                if (sc20 is not null)
+                {
+                    sc20.ScrollToEnd();
+                    host20.UpdateLayout();
+                    Assert(sc20.ScrollableHeight > AtBottomEps20,
+                           $"★ 造出来的会话真的滚得动(可滚 {sc20.ScrollableHeight:0.0}px)—— "
+                           + "滚不动的话下面那条断言恒真,等于没测");
+
+                    // ---- 真的流式喂一段:走 ChatCenter 的流式原语 + ChatView 的 onTick 入口 ----
+                    // ★ 开流那一下必然是结构变化(多了一条空 Assistant),所以第一次 OnStreamTick
+                    //   一定退回整块重建 —— 那一次顺手把 _liveText 认下来。之后每段都该走快路径。
+                    var reply20 = app20.Chat.OpenStreamSink(sess20.SessionId);
+                    Assert(!cv20.OnStreamTick(),
+                           "★ 开流那一下【退回整块重建】—— 多了一条消息就是结构变了,快路径不许硬撑");
+                    host20.UpdateLayout();
+                    Assert((cv20.MessageScrollForSelftest?.VerticalOffset ?? -1) > AtBottomEps20,
+                           "★★ 连**整块重建**那一次也不留归零帧 —— 定位是同步做的,"
+                           + "不是排在 DispatcherPriority.Loaded(6 < Render 7,那样会真的画出偏移=0 的一帧)");
+
+                    var offsets = new List<double>();
+                    var fastPath = 0;
+                    var sb20 = new System.Text.StringBuilder();
+                    for (int i = 0; i < 40; i++)
+                    {
+                        sb20.Append("这是第 ").Append(i).Append(" 段增量。");
+                        app20.Chat.AppendStreamText(reply20, sb20.ToString());
+                        if (cv20.OnStreamTick()) fastPath++;    // ★ 生产入口本身
+                        host20.UpdateLayout();
+                        offsets.Add(cv20.MessageScrollForSelftest?.VerticalOffset ?? -1);
+                    }
+                    app20.Chat.CloseStreamSink();
+
+                    Assert(offsets.Count > 0 && offsets.All(o => o > AtBottomEps20),
+                           "★★★ 流式全程滚动偏移【一次都没有归零】—— "
+                           + $"最小 {(offsets.Count > 0 ? offsets.Min() : -1):0.0}px。"
+                           + "归零那一帧就是用户看到的「跳到顶端」");
+                    Assert(fastPath == 40,
+                           $"★★ 40 段增量【全部】走了只改一条正文的快路径(实走 {fastPath})—— "
+                           + "退回整块重建的那些帧就是每个 token 重建 N 个气泡的那些帧");
+                    Assert(offsets.Last() >= offsets.First(),
+                           "★ 一直贴着底:偏移随内容变长而变大,不是停在旧的底上");
+
+                    // ---- 用户滚上去看前文:流式【不许】把他拽回底部 ----
+                    var reply20b = app20.Chat.OpenStreamSink(sess20.SessionId);
+                    cv20.OnStreamTick();                       // 结构变了 -> 整块重建,重新认 _liveText
+                    host20.UpdateLayout();
+                    var sc20b = cv20.MessageScrollForSelftest!;
+                    sc20b.ScrollToVerticalOffset(30);          // 用户往上翻
+                    host20.UpdateLayout();
+                    var parked = sc20b.VerticalOffset;
+                    var sb20b = new System.Text.StringBuilder();
+                    for (int i = 0; i < 10; i++)
+                    {
+                        sb20b.Append("又长了一段。");
+                        app20.Chat.AppendStreamText(reply20b, sb20b.ToString());
+                        cv20.OnStreamTick();
+                        host20.UpdateLayout();
+                    }
+                    Assert(Math.Abs(sc20b.VerticalOffset - parked) < 1.0,
+                           $"★★ 用户滚上去看前文时,流式增量【不把他拽回底部】"
+                           + $"(停在 {parked:0.0},十段之后仍在 {sc20b.VerticalOffset:0.0})—— "
+                           + "原先每帧一次 ScrollToEnd,等于生成期间根本没法往上看");
+                    app20.Chat.CloseStreamSink();
+                    // ★ 收干净:这条会话是自检造的,别留给后面的断言当"用户数据"
+                    app20.Chat.Delete(sess20.SessionId);
+                    app20.Chat.PurgeDeleted(sess20.SessionId);
+                }
+                host20.Children.Clear();
             }
 
             // ══════════════════════════════════════════════════════════════

@@ -78,7 +78,11 @@ public sealed record VramSnapshot(
     //   它落在"没有主机数据"这边 —— 落错边的代价是拿一份来路不明的数字当主机的。
     VramSource Source = VramSource.HostUnreachable,
     bool DesktopIsInferred = false,
-    string? HubState = null)
+    string? HubState = null,
+    // ★★ V20-④:ModelReservedGiB 里**属于按需装载那一层**的部分。
+    //   与总数分开报是 D90 裁定③那条纪律的落点:数字要合(它们都真的占显存),
+    //   但**措辞不许让用户以为按需那一层是他勾的**。0 = 这一刻没有按需装着的组件。
+    double TransientGiB = 0)
 {
     /// <summary>
     /// 标题栏那一行。★★ 这个属性**必须被界面读**(VramBar.Update 里)——
@@ -200,8 +204,24 @@ public sealed class VramMonitor : IDisposable
             //   客户端装在仓库外时读不到 vram-budget.toml,整张 peak 表是空的,
             //   于是模型段静默算成 0,而条子照常显示"一切正常"。
             //   (ComponentPicker 早就在收这个了,只有显存条这一处漏了。)
+            // ══════════════════════════════════════════════════════════════
+            //  ★★★ V20-④:模型段要算**两层**(常驻 ∪ 按需驻留)。
+            //
+            //  用户实测:`assistant.8b@8k` 已按需装载、显存 1.5→6.8 GiB,而左下角还写着
+            //  「暂无已启用模型」—— 它与底部横条那条「按需模型 · 进行中」**自相矛盾**,
+            //  同一屏两处说反话。根因就是这里只喂了 `hs.Committed`。
+            //  ★ 判据拄 Broker 自己的算法(算闸用 committed + transient_resident),
+            //    见 TokenBudget.ResidentOf —— 并集只有那一处实现。
+            //
+            //  ★★ 但 D90 裁定③那条纪律仍然成立:**不许让用户以为按需那一层是他勾的**。
+            //    ⇒ 数字合并(它们真的都占着显存),**措辞分开**:
+            //      多出来的那部分单独报,见 TransientGiB 与 VramBar 的说明。
+            // ══════════════════════════════════════════════════════════════
             var unknown = new List<string>();
-            var modelHub = VramBudget.PeakSumGiB(hs.Committed, unknown);
+            var resident = TokenBudget.ResidentOf(hs);
+            var modelHub = VramBudget.PeakSumGiB(resident, unknown);
+            // ★ 按需那一层单独再算一遍 —— 界面要说得出"这里面有多少不是你勾的"。
+            var transientHub = VramBudget.PeakSumGiB(hs.TransientResident, new List<string>());
             _unknownComponents = unknown;
             // ★ 桌面段是**推算**的:total - free - 模型。WDDM 不暴露逐进程显存,
             //   说不出占用者是谁 —— DesktopIsInferred=true 让界面必须如实标注。
@@ -213,13 +233,13 @@ public sealed class VramMonitor : IDisposable
                                         unknown.Count > 0
                                             ? $"有 {unknown.Count} 个组件认不出({string.Join("、", unknown.Take(3))}),模型段可能偏低"
                                             : hs.SamplerError,
-                                        VramSource.Hub, true, hs.State);
+                                        VramSource.Hub, true, hs.State, transientHub);
             // 主机连着,但它自己这一轮没采到 NVML ⇒ 如实说是**主机读不到**。
             // ★ 这一种**不能**说成"未连接":它连着,坏的是主机上的采样器。
             //   说成未连接会把人支去查网络,而问题在显卡那头 —— 下一步完全不同。
             return new VramSnapshot(hs.TotalGiB, modelHub, 0, false,
                                     hs.SamplerError ?? "主机这一轮没读到显存",
-                                    VramSource.HostNoReading, true, hs.State);
+                                    VramSource.HostNoReading, true, hs.State, transientHub);
         }
     }
 

@@ -244,6 +244,50 @@ KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None);
 
 ---
 
+## 14. ★★★ `DispatcherPriority.Loaded` 比 `Render` **更晚**跑 ⇒ 排在它上面的定位会**多画一帧**
+
+**症状**(2026-08-08 V20 实测,用户报的原话是「每次生成都先跳到顶端再拉回底部」)
+
+整块换掉一个 `ScrollViewer` 之后,把 `ScrollToEnd()` 排进
+`Dispatcher.BeginInvoke(…, DispatcherPriority.Loaded)`。
+看起来无懈可击 —— 排到 `Loaded` 正是为了"等布局算完再定位"。
+而屏幕上会闪一下顶端。
+
+**为什么**
+
+枚举值本身就是答案:
+
+```
+Background = 4 · Input = 5 · Loaded = 6 · Render = 7 · DataBind = 8 · Normal = 9
+```
+
+`Loaded`(6)**低于** `Render`(7)。⇒ 那一帧先按"偏移还是 0"渲染出去,
+**之后**才轮到 `ScrollToEnd`。等布局的代价就是多画一帧,两者是同一件事的两面。
+
+★ 流式场景下这个代价会被放大成用户能看见的缺陷:每来一段增量重建一次,
+就闪一次;而**它恰好只在有内容变化时发生**,所以静态截图和手工点几下都复现不出来。
+
+**正确写法**
+
+挂上去之后**在同一次调用里**同步排版并定位:
+
+```csharp
+_conv.Content = BuildConvPanel(spec);   // 先进树
+if (_afterMount is { } mount) { _afterMount = null; _conv.UpdateLayout(); mount(); }
+```
+
+`UpdateLayout()` 给的就是"布局算完"这个前提,而它在渲染**之前**。
+★ 与第 13 条(`BringIntoView` 在 `Loaded` 下还没有布局)是同一族:
+**`Loaded` 既不够早也不够晚** —— 要布局就自己 `UpdateLayout`,要"之后再说"就用 `ContextIdle`。
+
+**护栏**
+
+`client --selftest` 里有一条**真量偏移**的行为断言(造长会话 · 真流式喂增量 ·
+读 `ScrollViewer.VerticalOffset`,断言全程不出现 0)。
+★ 已做过反向验证:把定位改回 `BeginInvoke(…, Loaded)`,那两条当场红,报的是 `最小 0,0px`。
+
+---
+
 ## 附:提交前的自问清单
 
 - [ ] 改了版面 → 跑过 `--wheeltest` 并**真的看了图**了吗?
@@ -251,3 +295,4 @@ KeyboardNavigation.SetDirectionalNavigation(this, KeyboardNavigationMode.None);
 - [ ] 新加的顶层视图有没有进构造冒烟?(第 2 条)
 - [ ] 动画结束后停在哪个值,确认过吗?(第 10 条)
 - [ ] 悬停/焦点相关的改动,有没有"布局在光标底下重排"?(第 11 条)
+- [ ] 排进 Dispatcher 的定位/滚动 —— 优先级比 `Render` 高还是低?(第 14 条)

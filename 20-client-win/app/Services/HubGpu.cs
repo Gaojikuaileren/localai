@@ -106,6 +106,12 @@ public sealed record IntentOutcome(bool Ok, string Code, string Alias, string Co
             "中枢的装载器没有接上,这次没有真的装载。" + Message,
         "LOAD_FAILED" or "load_failed" => "模型起不来:" + Message,
         "unknown_alias" => "中枢不认识这个功能名 —— 客户端与中枢的版本可能对不上。",
+        // ★ V20-②:意图**根本没送出去**(网络/证书/中枢没起)。
+        //   与 LOAD_FAILED 有意分开:那一种是中枢试过了起不来,这一种是我们连问都没问到。
+        "not_paired" => "还没有配对到中枢,所以没法先把模型起起来。到「设备」里完成配对。",
+        "intent_unreachable" =>
+            "没能把「我要用模型」这句话送到中枢,所以这一次**不会**自动装载模型。"
+            + "现在发出去也许还能成(如果它本来就在跑),但更可能等不到回答。原因:" + Message,
         _ => Message,
     };
 }
@@ -700,19 +706,64 @@ public sealed class HubGpu : IDisposable
                 && DateTime.UtcNow - last < IntentCooldown) return;
             _lastIntent[alias] = DateTime.UtcNow;
         }
-        // ★ 不 await:意图是"顺手说一声",不是用户在等的操作。
-        //   异常一律吞在里面 —— 一次起不来的模型不该把输入框掀翻。
+        // ══════════════════════════════════════════════════════════════════
+        //  ★ 不 await:意图是"顺手说一声",不是用户在等的操作。
+        //    一次起不来的模型**不该把输入框掀翻** —— 这条意图仍然成立,一个字没改。
+        //
+        //  ★★★ V20-②(D?):但「不掀翻」**不等于**「不说」。
+        //    改之前这里是 `catch { }`,而 `LastIntent` **一个读者都没有**
+        //    (它自己的文档注释写着「界面据此显示…」—— 那句话是假的)。
+        //    ⇒ 于是「模型没起来」这件事在客户端**完全静默**:
+        //      用户打完字按发送,才由 chat 那一路以 503 的形式撞出来,
+        //      而那时它说的是"后端没起",不是"你还没授权按需装载"。
+        //
+        //  ★★ 更坏的一层:抛异常时连 `LastIntent` 都不写 —— 它会停在**上一次的成功**上。
+        //    一个过期的成功比一个空值糟得多:任何读它的人都会显示"好着呢"。
+        //    ⇒ 失败也写,写成一条**它自己的失败码**。
+        // ══════════════════════════════════════════════════════════════════
         _ = Task.Run(async () =>
         {
+            IntentOutcome res;
             try
             {
-                LastIntent = await RequestIntentAsync(alias);
-                RegisterIntentTask(alias, LastIntent);
-                Notify();
+                res = await RequestIntentAsync(alias);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // ★ 连问都没问到(网络/证书/中枢没起)。★ 这**不是** backend_unavailable:
+                //   那一种是"问到了,后端没应答";这一种是"这句话根本没送出去"。下一步不同。
+                res = new IntentOutcome(false, "intent_unreachable", alias, "",
+                                        $"{ex.GetType().Name}: {ex.Message}", "");
+            }
+            SetLastIntent(res);
+            RegisterIntentTask(alias, res);
+            Notify();
         });
     }
+
+    /// <summary>自检用:走**同一个** SetLastIntent —— 自检里再写一遍去重逻辑就是第二套口径。</summary>
+    internal void SetLastIntentForSelftest(IntentOutcome res) => SetLastIntent(res);
+
+    /// <summary>
+    /// 记下最后一次意图的结果,并在【说法真的变了】时广播。
+    /// <para>★ 只在变化时广播:意图每 20 秒可能来一次,而"还是那句话"不是新闻。
+    /// 每轮重复同一句的后果不是更透明,是**训练人忽略它**(D85 第 5 条)。</para>
+    /// </summary>
+    void SetLastIntent(IntentOutcome res)
+    {
+        var before = LastIntent;
+        LastIntent = res;
+        if (before is not null && before.Code == res.Code && before.Advice == res.Advice) return;
+        try { IntentChanged?.Invoke(); } catch { }
+    }
+
+    /// <summary>
+    /// 最后一次意图的**说法**变了(不是每次意图都触发 —— 见 <see cref="SetLastIntent"/>)。
+    /// <para>★★ 与 <see cref="Changed"/> 分开是有代价考虑的:<c>Changed</c> 跟着显存快照
+    /// 每秒一帧,聊天界面拿它当重建信号会把输入框每秒重建一次(打字当场被打断)。
+    /// 这条**只在有新话要说时**响,所以界面可以老老实实接它。</para>
+    /// </summary>
+    public event Action? IntentChanged;
 
     /// <summary>发一次意图并解析结果。★ 抽成公开方法是为了让自检能直接喂形状。</summary>
     public async Task<IntentOutcome> RequestIntentAsync(string alias, CancellationToken ct = default)

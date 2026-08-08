@@ -33,7 +33,12 @@ public partial class App : Application
     /// 中枢 GPU 状态副本(P4-S9)。★ 全进程**只有这一条**推送流 ——
     /// 谁需要 GPU 状态都从这里读,不各自去订阅;两条流会让"哪份是权威"没有答案。
     /// </summary>
-    public HubGpu Gpu { get; private set; } = null!;
+    // ★★ V20-②:从 `null!` + OnStartup 里赋值,改成**在构造函数里**建(与 History 同一手法)。
+    //   它的构造是 `_hub = hub` 一句、完全惰性(真去连中枢的是 Gpu.Start(),仍留在 OnStartup),
+    //   所以本来就没有理由等到 OnStartup。而那个 `null!` 不是没有代价的:
+    //   任何在 OnStartup 之前碰到 Gpu 的代码都会 NRE ——
+    //   V20 给聊天界面接「意图即起」的提示行时当场撞上(自检里 ChatView 一构造就炸)。
+    public HubGpu Gpu { get; }
     /// <summary>★ P4-S16b:这台客户端在中枢那边的"有人在用"凭据。见 LeaseKeeper 文件头。</summary>
     public LeaseKeeper Lease { get; private set; } = null!;
     /// <summary>
@@ -67,6 +72,8 @@ public partial class App : Application
     public App(SingleInstance instance, bool startHidden)
     {
         History = new TranslationHistory(Chat);
+        // ★ V20-②:与 History 同一手法,在构造里建(不再等 OnStartup)。理由见 Gpu 的声明。
+        Gpu = new HubGpu(Hub);
         _instance = instance;
         _startHidden = startHidden;
         // 窗口全关也不退出 —— 退出只能由用户显式触发(托盘「退出」)或系统关机。
@@ -103,7 +110,7 @@ public partial class App : Application
 
         // ★ P4-S9:中枢 GPU 状态订阅。必须在建窗口【之前】接好并注入 VramMonitor ——
         //   否则第一帧界面会走本机回退路径,显存条先闪一下「本机显卡」再跳成「中枢显存」。
-        Gpu = new HubGpu(Hub);
+        // ★ V20-②:`Gpu` 自己已经在字段初始化器里建好了(见它的声明)—— 这里只做注入。
         Vram.Hub = Gpu;
         // ══════════════════════════════════════════════════════════════
         //  ★★★ V9(D?):**先判角色,再起流。** 用户裁定 2026-08-07 ——
