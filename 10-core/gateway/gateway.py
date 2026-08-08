@@ -130,6 +130,34 @@ def log_upstream_problem(alias: str, backend: str, kind: str, detail: str) -> No
         pass  # 诊断落盘失败不能反过来把请求搞挂
 
 
+def log_gpu_reconcile(event: str, payload) -> None:
+    """★★★ V16:把「中枢进/出 RECONCILING」这件事**落盘**。
+
+    ★ 为什么非有这个不可(V13 实测 + V16 复现):一次失败的事务把中枢打进
+      `RECONCILING`,而 `_transition(to, why)` 在**成功路径上把 `why` 整个丢掉**
+      —— 它只出现在 IllegalTransition 的消息里。`gpu_broker` 模块自己没有任何
+      日志与文件 I/O(那是它的设计:Broker 只管状态)。
+      ⇒ 结果是「为什么进的 RECONCILING」**连重启之前都查不到**,重启之后更是一片空白。
+
+    ★★ 落的是**事件**,不是**状态**。这条区分是决议包 p4-broker-shape 的边界:
+      Broker 的状态(租约、世代号)有意**不挺过重启**,那条一个字不改;
+      而"发生过什么"是审计材料,本来就该落在 `{state}/logs` 这套强 ACL 的落点里,
+      与 upstream_problem / gate_rejection / denied_access 同一个地方、同一套纪律。
+    """
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "event": event,
+        "payload": payload,
+    }
+    try:
+        d = _logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "gpu_reconcile.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass  # ★ 落盘失败不能反过来把中枢搞挂(与 upstream_problem 同款)
+
+
 def log_gate_rejection(session_id: str, categories, outcome: str) -> None:
     """E1 命中记账。§6.9.8:【只】记 类别 · 时间 · 会话id · 结果,
     绝不记 body / 片段 / 哈希(定长凭证的哈希可爆破)。
@@ -811,6 +839,27 @@ async def _start_gpu_broker():
         await gpu_broker.BROKER.finish_startup()
     except Exception:                                        # noqa: BLE001
         pass   # 同上:留在 STARTING 比谎称 READY 安全,快照里看得见
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ V16:开机就落在 RECONCILING 的话,**在这里以现实为准对齐一次**。
+    #
+    #  为什么这一条必须存在:V16 实机复现证明 `RECONCILING` 今天是一个**死锁态** ——
+    #  `ACCEPTS_TRANSACTION` 不含它 ⇒ 一切「点确定」退 busy,而全模块没有任何代码
+    #  走过 `RECONCILING → READY` 那条**已经写在白名单里**的边。开机就进去的话,
+    #  重启也救不出来(finish_startup 只认 STARTING)—— 那才是真的只能改代码。
+    #
+    #  ★ 为什么这里可以自动对齐,而运行期不行:开机这一刻 `committed` **本来就是
+    #    从现实推出来的**(上一句 adopt_running 刚做过),它还没有承载任何用户意图;
+    #    与 `adopt_running` 同一条原则 —— **以现实为准,不以账本为准**。
+    #  ★ 它**不动 `intended`**(用户勾了什么),见 reconcile_to_actual 的说明。
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        if gpu_broker.BROKER.snapshot().state == gpu_broker.STATE_RECONCILING:
+            _rec = await gpu_broker.BROKER.reconcile_to_actual()
+            log_gpu_reconcile("startup_realign", _rec)
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 对不齐也不该拖垮启动 —— 但**原因不许丢**(与上面装载器那条同款处理)。
+        log_upstream_problem("(broker)", "-", "reconcile_failed",
+                             f"开机对齐失败,Broker 留在 RECONCILING:{e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1784,6 +1833,18 @@ async def gpu_intended(request: Request):
     #   409 = 状态冲突(有人在跑 / 忙),422 = 这次请求本身过不去(闸拒 / 装载器缺席)。
     code = 409 if res.code in ("busy", "needs_user_choice") else 422
     payload["error"] = {"message": res.message, "type": res.code}
+    # ★★★ V16:落进 RECONCILING / DEGRADED_SAFE 的那几次**必须落盘**。
+    #   V13 实测那条卡死路径事后一片空白:Broker 不写日志,而这条 422 只回给了
+    #   触发它的那一个调用方 —— 重启之后连"发生过什么"都查不到。
+    #   ★ 判据落在**结果状态**上,不是错误码上:错误码将来会加,而"进了哪个状态"
+    #     才是这条记录真正要回答的问题。
+    if res.state in (gpu_broker.STATE_RECONCILING, gpu_broker.STATE_DEGRADED_SAFE):
+        log_gpu_reconcile("entered_" + res.state.lower(), {
+            "code": res.code, "message": res.message, "device": _who,
+            "requested": components,
+            "reconcile_log": payload.get("snapshot", {}).get("reconcile_log"),
+            "residency_truth": payload.get("snapshot", {}).get("residency_truth"),
+        })
     return JSONResponse(status_code=code, content=payload)
 
 
