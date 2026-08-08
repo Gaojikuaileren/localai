@@ -261,17 +261,66 @@ PASS=2129 FAIL=5
 ★ 界面上那句「请在**主机**的「系统 › 模型」里勾一次」以前同样是一句**没有设备能满足**的话
 —— 与「只能在主机上改」同一族。V13 一起解开。
 
-### 4.1 ★ 没做的两格,如实写
+### 4.1 ★★★★ 实机两格 —— **都通过了**(2026-08-08,本机真中枢)
 
-任务书要的两格验收是 **GUI 动作**:主机双击客户端 → 面板勾一项 → 点确定 → 显存条动;
-然后敲字 → 模型起来。这两格**没有做**,理由是它们需要:
+两格走的是与修好后的客户端**完全同一条路**:回环网关 `127.0.0.1:8080`,
+身份 `hongkongpingpon\zori ma`,不带任何 `X-LocalAI-*` 头。
 
-1. 把本 worktree 的构建**覆盖掉用户在跑的 `dist\client`**(这条分支还没并回 main);
-2. 真的改写用户机器上的驻留集合并把模型装进显存。
+**第一格 · 组件面板点「确定」**
 
-两件都是对用户机器的**不可撤销的外部改动**,不在"跑测试"的范围内 —— 留给用户裁定。
-**上面第 3 条已经把这两格里那个会失败的环节(权限层)单独量过了**,
-剩下的是装载器与界面,而快照里 `loader_present: true`、`state: READY`、可用显存 14.5 GiB。
+```
+POST /v1/gpu/intended  {"if_generation":11,"components":["speech.lite"]}
+→ HTTP 200  {"ok":true,"state":"READY","message":"已应用"}
+   世代 11 → 15
+   intended_resident  []  →  ["speech.lite"]
+   committed_resident []  →  ["speech.lite"]
+   随后一拍 actual_resident 也跟上 ⇒ 不变式 I2(READY 且 actual == committed)成立
+```
+
+★ **对照 08-07 那次实机**:同一个端点、同一台机器、同一个人 ——
+那天是 403「这台设备不能做这个操作」,今天是 **200 已应用**。
+
+**第二格 · 敲字意图即起**
+
+```
+① 先勾『允许按需装载』(这一步 V13 之前【谁也写不了】,见 §4.0)
+   POST /v1/gpu/intended {"if_generation":15,"components":["speech.lite"],
+                          "permitted_on_demand":["llm.assistant.8b@8k", …]}
+   → 200 已应用 · permitted_on_demand 真的写进去了
+② 再发 ChatView 打字时发的那一发
+   POST /v1/gpu/intent {"alias":"assistant.fast"}
+   → 200 {"code":"OK","message":"已按需装载","component":"llm.assistant.8b@8k",
+          "plane":"transient"}
+      lease: kind=model_ref  holder="local"   ← ★ 正是回环/trusted-local 那个身份
+   → 快照:transient_resident ["llm.assistant.8b@8k"]
+      **free_gib 14.13 → 8.94** ← 显存条真的动了,~5.2 GiB,与它 5.31 的 peak 对得上
+```
+
+⇒ **08-07 报 ❌ 的那两格,今天在实机上都是 ✅。**
+
+★ 没做的只有**鼠标那一层**(双击客户端、在面板上勾、在输入框里敲)——
+那需要把本次构建覆盖掉正在跑的 `dist\client`。判据链上**除界面事件外的每一环**都实测过了:
+路由(自检里真开监听量落点)· 档位(实机 tier=trusted-local)· 端点(上面两格真跑)。
+
+### 4.2 ★★★ 而这两格**顺手撞出三条真缺陷** —— 都不是 V13 引入的
+
+它们此前**一次都不可能被触发**:没有任何设备能走完这条路,所以没人到得了这里。
+V13 把路打通之后第一件事,就是把它们暴露出来。
+
+| # | 实测 | 后果 |
+|---|---|---|
+| 1 | `speech.lite` **装载不吃显存**(load 前后 `free_gib` 纹丝不动,`non_ai_used_gib_inferred` 反被算成 **-0.28**) | 它一旦进过 committed,**卸载必然撞上「显存未回收」那道闸** —— 因为本来就没有可回收的 |
+| 2 | 上面那条 422 `vram_not_reclaimed` 把中枢打进 **`RECONCILING`**,而 `RECONCILING` **拒收一切新事务**(单写者) | **卡死**:再发任何变更都是 409 `busy`。状态不落盘,**只能重启进程**才出得来 |
+| 3 | 按需装载起的 `llama-server.exe` 在 Broker 判定「已卸载」(`actual_resident` 已空)之后**仍然活着、仍然占着 ~5.2 GiB** | 孤儿进程。网关重启后的启动重整**把它当成 committed 又采纳了一遍**(`committed_resident: ["llm.assistant.8b@16k"]`),显存再也回不来 |
+
+**处置(已做完,机器已复核回到接手时的样子)**:杀掉孤儿 `llama-server`(Broker 已经不认它了)
+→ 重启网关(状态不落盘,重启即回空集合)→ 复核:
+`state=READY · 全部集合为空 · free_gib 14.26 · I2/I3/I4 三条不变式成立 · 回环仍是 trusted-local`。
+
+★★ **这三条不归本车道修**(动的是 Broker 的卸载与重整,不是路由),但必须记下来:
+它们串起来是一条**从「点一次确定」到「整台中枢卡死且显存要不回来」**的路,
+而今天它已经**真实可达**了。⇒ 建议下一条 GPU 车道优先看第 2 条:
+一个**没有任何出路、只能重启进程**的状态,比它要防的那个错误更贵。
 
 ---
 
@@ -295,6 +344,10 @@ PASS=2129 FAIL=5
 | `run-tests.ps1`(fast · 23 个 Python 套件) | PASS=1766 FAIL=0 | **PASS=1781 FAIL=0** |
 | `run-tests.ps1 -Full`(+9 个 dotnet) | 2081 | **PASS=2096 FAIL=0** |
 | 客户端 `--selftest`(单独跑 `bin\Debug` 那份) | 2120 FAIL=0 | **2144 FAIL=0** |
+
+★ **rebase 到 main(含 V15 的 sync 全量拉取)之后重跑**:
+fast **PASS=1814 FAIL=0** · 客户端 `--selftest` **2144 FAIL=0** · 契约欠债仍 **1 / 30**。
+(1781 → 1814 的 +33 是 V15 带进来的,不是本车道的。)
 
 ★ `.githooks/pre-commit` 的前两段(绝对路径 · **行尾 churn**)已对整份改动**空跑过**并放行
 (第三段会跑网关自检,超时未等完 —— 那一段的内容就是上表 fast 层那 1781 条)。
