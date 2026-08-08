@@ -272,13 +272,23 @@ public partial class MainWindow : Window
         var tasks = TheApp.Tasks.Tasks;
         if (tasks.Count == 0)
         {
-            TaskBar.Visibility = Visibility.Collapsed;   // 空闲自动隐藏,不留空横条
+            // ★ 用户裁定(2026-08-07):任务抽屉**没有任务也常驻**。
+            //   原来这里是 Collapsed + 「有任务才出现」,而 TaskCenter 到 2026-08-06 才有
+            //   第一个生产写入方 ⇒ 横条从来没出现过,用户的原话是"完全没有这个抽屉"。
+            // ★★ 常驻**不等于**留一条空横条:空态必须**说清此刻没有任务**。
+            //   留一段看不懂的空白,与"置灰但不说原因"是同一类毛病(D99 裁定④那条规矩)。
+            // ★ 抽屉开着时**不再强关**:裁定要的正是"没有任务也打得开"。
+            //   ——— 强关那一行还有一个副作用:任务跑完的瞬间会把用户正在看的抽屉抽走。
+            TaskBar.Visibility = Visibility.Visible;
             _taskRotate.Stop();
-            if (_drawerKind == "tasks") CloseDrawer();
+            _taskIndex = 0;
+            ShowNoTasks();
+            if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
             return;
         }
 
         TaskBar.Visibility = Visibility.Visible;
+        TaskBarProgress.Visibility = Visibility.Visible;
         _taskRotate.Interval = TaskDwell;
         // 多个任务才轮播;单个固定显示。★ 不可见/最小化时停表(审计 2026-07-31)——
         //   与显存条同一条纪律(见 VramMonitor 头部)。暂停时【不重置 _taskIndex】,
@@ -289,6 +299,24 @@ public partial class MainWindow : Window
 
         ShowTask(tasks[_taskIndex % tasks.Count], tasks.Count, animate: false);
         if (_drawerKind == "tasks") TaskDrawerHost.Content = new TaskDrawerView();
+    }
+
+    /// <summary>
+    /// 空态:横条常驻,但要**说清现在没有任务**。
+    /// ★ 进度条整条藏掉 —— 一条停在 0 的进度条会被读成「有个任务卡住了」,
+    ///   那比不显示更坏(它是在**伪造**一件没发生的事)。
+    /// </summary>
+    void ShowNoTasks()
+    {
+        TaskBarSlideT.BeginAnimation(TranslateTransform.YProperty, null);
+        TaskBarSlideT.Y = 0;
+        TaskBarTitle.Text = "没有正在进行的任务";
+        TaskBarDetail.Text = "有任务时会显示在这里 · 点这条打开任务抽屉";
+        TaskBarPercent.Text = "";
+        TaskBarCount.Text = "";
+        TaskBarProgress.IsIndeterminate = false;
+        TaskBarProgress.Value = 0;
+        TaskBarProgress.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>轮到下一条:先把当前这条向上滑走,换完内容再从下方滑入。</summary>

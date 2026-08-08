@@ -195,9 +195,14 @@
 
       <!-- 右侧:页面顶栏 + 内容 + 底部任务横条 -->
       <DockPanel Grid.Column="1">
-        <!-- 底部任务横条:有任务才出现,空闲自动隐藏(设计 §3)。只显示简要 + 进度;
-             多个任务随时间自动轮播;点整条打开【全局】任务抽屉。 -->
-        <Border x:Name="TaskBar" DockPanel.Dock="Bottom" Height="48" Visibility="Collapsed"
+        <!-- 底部任务横条:**没有任务也常驻**(用户裁定 2026-08-07)。只显示简要 + 进度;
+             多个任务随时间自动轮播;点整条打开【全局】任务抽屉。
+             ★ 原来这里写死 Visibility="Collapsed",注释引的是旧裁定「空闲自动隐藏(设计 §3)」。
+               而 TaskCenter 直到 2026-08-06 才有第一个生产写入方(HubGpu 按需装载),
+               在那之前它零调用点 ⇒ 横条**从来没出现过**,用户看到的就是"完全没有这个抽屉"。
+             ★ 常驻 ≠ 留一条空横条:空态由 RefreshTaskBar 写明"现在没有任务",
+               而不是留一段看不懂的空白(与"置灰但不说原因"是同一类毛病)。 -->
+        <Border x:Name="TaskBar" DockPanel.Dock="Bottom" Height="48"
                 Background="{DynamicResource BgSurface}"
                 BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0"
                 Cursor="Hand" MouseLeftButtonUp="OnToggleTaskDrawer">

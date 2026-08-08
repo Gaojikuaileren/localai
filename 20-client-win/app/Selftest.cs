@@ -8729,6 +8729,67 @@ public static class Selftest
                 }
             }
             // ============ V14 裁定②段结束 ============
+
+            // ============ V14 · 任务抽屉【没有任务也常驻】(用户裁定 2026-08-07)============
+            // 背景:横条原来写死 Collapsed,而 TaskCenter 直到 2026-08-06 才有第一个生产写入方
+            //   ⇒ 它**从来没出现过**。用户原话:「完全没有这个抽屉」。
+            // ★ 这一格是 2026-08-07 实机三格 ❌ 里最后一格。
+            var mwXamlV14 = TryReadSource("MainWindow.xaml");
+            if (mwXamlV14 is not null)
+            {
+                // ★ 从 x:Name="TaskBar" 起切 —— 起点落在**注释之后**,
+                //   而那段注释里正写着 Visibility="Collapsed"(解释它为什么被删掉)。
+                //   照整份文件搜会把这条最负责任的写法判红(ASSERTION-PITFALLS 第 1 条)。
+                var barTag = Slice(mwXamlV14, "x:Name=\"TaskBar\"", ">");
+                Assert(barTag is not null, "★ 元断言:切得到 TaskBar 那个 Border 的开标签");
+                if (barTag is not null)
+                    Assert(!barTag.Contains("Collapsed"),
+                        "★★★ 任务横条**不许**写死 Visibility=\"Collapsed\" —— 用户裁定它没有任务也常驻。"
+                        + "写死 Collapsed 的那一版,横条从来没在任何一台机器上出现过");
+            }
+
+            var mwCsV14 = TryReadSource("MainWindow.xaml.cs");
+            if (mwCsV14 is not null)
+            {
+                var refreshV14 = Slice(mwCsV14, "public void RefreshTaskBar()", "void ShowNoTasks()");
+                Assert(refreshV14 is not null, "★ 元断言:切得到 RefreshTaskBar 的正文");
+                if (refreshV14 is not null)
+                {
+                    var refreshCodeV14 = CodeOnly(refreshV14);
+                    Assert(!refreshCodeV14.Contains("Visibility.Collapsed"),
+                        "★★ 没有任务时**不许**把横条收起来 —— 那正是裁定要改掉的行为");
+                    Assert(refreshCodeV14.Contains("ShowNoTasks()"),
+                        "★★ 空态要走 ShowNoTasks —— 常驻**不等于**留一条空横条:"
+                        + "留一段看不懂的空白,与【置灰但不说原因】是同一类毛病");
+                    Assert(!refreshCodeV14.Contains("CloseDrawer()"),
+                        "★★★ 任务清零时**不许**强关抽屉:裁定要的正是【没有任务也打得开】。"
+                        + "而且强关还有个副作用 —— 最后一条任务跑完的瞬间,"
+                        + "会把用户正在看的抽屉从眼前抽走");
+                }
+
+                // ★ 空态**说了话**才算数。用 NoComments(留字符串)—— 查的是文案,
+                //   用 CodeOnly 会把字面量整个换成 "",那个方向是恒真(第 3c 条)。
+                var emptyV14 = Slice(mwCsV14, "void ShowNoTasks()", "void RotateTask()");
+                Assert(emptyV14 is not null, "★ 元断言:切得到 ShowNoTasks 的正文");
+                if (emptyV14 is not null)
+                {
+                    var emptyLiveV14 = NoComments(emptyV14);
+                    Assert(emptyLiveV14.Contains("TaskBarTitle.Text =")
+                           && !emptyLiveV14.Contains("TaskBarTitle.Text = \"\""),
+                        "★★ 空态必须**说清此刻没有任务**,而不是把标题留空 —— "
+                        + "不伪造,也不留看不懂的空白");
+                    Assert(emptyLiveV14.Contains("TaskBarProgress.Visibility = Visibility.Collapsed"),
+                        "★★ 空态要把进度条整条藏掉:一条停在 0 的进度条会被读成"
+                        + "【有个任务卡住了】—— 那比不显示更坏,它在伪造一件没发生的事");
+                }
+            }
+
+            // ★ 抽屉自己那一侧也要有空态(横条常驻却点开一片空白,等于没做完)
+            var drawerV14 = TryReadSource(Path.Combine("Views", "TaskDrawerView.cs"));
+            if (drawerV14 is not null)
+                Assert(NoComments(drawerV14).Contains("Tasks.Count == 0"),
+                    "★ 抽屉内容自己也分空态 —— 常驻的横条点开必须有话说");
+            // ============ V14 任务抽屉段结束 ============
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally
