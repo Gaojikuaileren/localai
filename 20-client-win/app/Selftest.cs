@@ -9037,22 +9037,16 @@ public static class Selftest
             //   (**不存在**)⇒ 整块 `if (Directory.Exists(...))` 被静默跳过,
             //   而门禁跑的恰恰是 Release/win-x64 那一趟。零命中与全清白在终端上长得一模一样。
             {
-                string? appRoot = null, winRoot = null;
-                var probe = AppContext.BaseDirectory;
-                for (int i = 0; i < 8 && probe is not null; i++)
-                {
-                    // ★★ 锚点必须是【两个】文件（同 TryReadAllSources）。
-                    //   ★ 这一处是 2026-08-08 出包时**漏改的第三处** —— 当时只改了
-                    //     TryReadAllSources 与 SourceRootPresent，把它落下了。后果是：
-                    //     「换个安装位置」那一趟里它拿 %TEMP%\Selftest.cs 当源码根，
-                    //     算出一个不存在的 admin 目录 ⇒ 下面那条元断言当场红，
-                    //     而它报的“找不到管理端源码”**理由是假的**（那趟本来就没有源码）。
-                    //   ⇒ 同一个修法漏改一处，就把缺陷留在那一处；改完要**把同形状的地方都数一遍**。
-                    if (File.Exists(Path.Combine(probe, "Selftest.cs"))
-                        && File.Exists(Path.Combine(probe, "localai-client.csproj")))
-                    { appRoot = probe; winRoot = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar)); break; }
-                    probe = Path.GetDirectoryName(probe.TrimEnd(Path.DirectorySeparatorChar));
-                }
+                // ★ 锚点走 ClientSourceRoot() —— 全文件唯一那一处(2026-08-08 抽取)。
+                //   ★★ 这一处正是当天**漏改的第三处**:只改了 TryReadAllSources 与 SourceRootPresent,
+                //     把它落下了 ⇒ 那一趟拿 %TEMP%\Selftest.cs 当源码根、算出一个不存在的 admin 目录,
+                //     下面那条元断言当场红,**而它报的"找不到管理端源码"理由是假的**
+                //     (那一趟本来就没有源码,该走的是整段跳过)。
+                //   ⇒ 现在三处共用一个函数,**这种漏改在结构上不可能再发生**。
+                var appRoot = ClientSourceRoot();
+                var winRoot = appRoot is null
+                    ? null
+                    : Path.GetDirectoryName(appRoot.TrimEnd(Path.DirectorySeparatorChar));
 
                 // 源码根不在(发布产物那一趟)⇒ 整段跳过,不判红(ASSERTION-PITFALLS 第 11 条)
                 if (appRoot is not null && winRoot is not null)
@@ -9258,6 +9252,47 @@ public static class Selftest
             $"★★★ 源码根在旁边时不得有读不到的:源码根={( _srcRoot ? "在" : "不在")} · "
             + $"命中 {_srcHit} 次 · 落空 {_srcMiss} 次"
             + (_srcRoot && _srcMiss > 0 ? " —— 有路径写错了,那几条断言正在【静默不跑】" : ""));
+
+        // ★★★ 上面那条**盖不住一整格**:源码根在,而**一次都没命中**(_srcHit == 0)。
+        //   那一格里 _srcMiss 也是 0 ⇒ 上面那条**照样绿**,而实际情况是
+        //   **一条源码断言都没跑过**。
+        //   ⇒ 「零命中」与「全清白」在终端上长得一模一样 —— 本仓 2026-08-08 已经栽过两次:
+        //     一次是 scan_fake 的盘符写死 D: 而项目在 E:(扫描器零命中,输出「未发现问题」);
+        //     一次是同一天 pre-commit 那条串行闸(case 若写坏,命中集合为空 ⇒ 闸照样放行)。
+        //   ★★ 而这一格**恰恰是源码根被骗时的样子**:锚点认到了一个不是本仓的目录 ⇒
+        //     SourceRootPresent() 说"在",而按仓库相对路径去读一个也读不到。
+        //     换句话说,这条断言守的正是 08-08 那次 %TEMP% 事故的**下游**——
+        //     锚点收紧是防它发生,这一条是**万一又发生了要能当场看见**。两者不互相替代。
+        //   ★ 源码根不在(发布产物那一趟)⇒ 不判红:那一趟本来就该整段跳过(第 11 条)。
+        Assert(!_srcRoot || _srcHit > 0,
+            $"★★★ 源码根在旁边、却【一次都没命中】—— 命中 {_srcHit} 次 · 落空 {_srcMiss} 次。"
+            + "这说明锚点认到的根不是本仓,或者所有源码断言被整段跳过了;"
+            + "而此时上面那条(落空==0)是绿的 —— **零命中与全清白长得一模一样**");
+
+        // ★★★ 源码根锚点**只许有一处**(2026-08-08 抽成 ClientSourceRoot() 之后配的反向钉)
+        //   ★ 为什么需要它:抽取只解决了"今天有三份拷贝",挡不住"明天有人再复制一份"。
+        //     而复制出来的那一份**不会报错、不会告警** —— 它只在下一次改锚点时静默地留住缺陷。
+        //   ★★ 针**拼出来**,不写成字面量:否则这条断言自己就成了它要找的第二处
+        //     (ASSERTION-PITFALLS 第 1 条,本仓已踩 9 次)。
+        //   ★ 用 NoComments 而不是 CodeOnly:锚点是**字符串字面量**,
+        //     CodeOnly 会把它整个抹掉 ⇒ 判据恒真(第 3c 条)。
+        //   ★ 读不到源码就跳过,不判红(第 11 条:发布产物那一趟旁边没有源码)。
+        var _selfSrc = TryReadSource("Selftest.cs");
+        if (_selfSrc is not null)
+        {
+            var _anchorNeedle = "localai-client" + ".csproj";
+            var _anchorCode = NoComments(_selfSrc);
+            var _anchorN = 0;
+            for (int _i = _anchorCode.IndexOf(_anchorNeedle, StringComparison.Ordinal); _i >= 0;
+                 _i = _anchorCode.IndexOf(_anchorNeedle, _i + 1, StringComparison.Ordinal)) _anchorN++;
+            Assert(_anchorN == 1,
+                $"★★★ 源码根锚点只许出现在 SourceRootAnchors 一处,实测 {_anchorN} 处 —— "
+                + "又开始各写各的了。2026-08-08 那次「同一个修法漏改一处」就是这么来的");
+            // ★ 元断言:提取器没有静默失灵。0 处也会让上面那条红,但理由会指错方向 ——
+            //   「有人删了锚点」和「NoComments 把它吃掉了」是两回事,必须分得开。
+            Assert(_anchorN > 0,
+                "★★ 元断言:在自己的源码里找得到锚点字面量(找不到说明提取方式坏了,不是锚点没了)");
+        }
 
         Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
         // ★★ 口径必须跟着数字走。发布产物里源码不可读 ⇒ 一批结构/接线断言整段跳过,
@@ -9480,36 +9515,20 @@ public static class Selftest
     /// </summary>
     static IReadOnlyList<(string Path, string Text)> TryReadAllSources()
     {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir is not null; i++)
+        // ★ 锚点走 ClientSourceRoot() —— 全文件唯一那一处(2026-08-08 抽取,理由见该函数上方)。
+        //   ★★ 此前这里自带一份拷贝,而那正是「同一个修法漏改一处」的土壤。
+        var dir = ClientSourceRoot();
+        if (dir is null) return Array.Empty<(string, string)>();
+
+        var outp = new List<(string, string)>();
+        foreach (var f in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
         {
-            // ★★ 锚点必须是【两个】文件同时在:Selftest.cs **且** localai-client.csproj。
-            //   ★ 只看 Selftest.cs 是一个**代理指标**，而 2026-08-08 出包时它真的认错了家:
-            //     %TEMP% 里躺着另一个会话拷出来的 Selftest.cs（757 KB），
-            //     而「换个安装位置」那一趟把 exe 放在 %TEMP%\localai-gate-<guid>\client\ 下，
-            //     往上走一步就碰到它 ⇒ 把 **%TEMP% 整个当成了客户端源码根**，
-            //     递归扫进了 1218 个不相干的 .cs（别的会话的 scratchpad）⇒ 文案护栏当场 4 条红，
-            //     而那四条报的文件名根本不在本仓里。
-            //   ★★ 反方向更坏：假如那些临时文件里恰好**没有**针，一条「全仓不得出现 X」
-            //     就会在一个根本不是本仓的目录上**假绿**。
-            //   ⇒ csproj 只存在于真正的源码根；两个一起看，才是在问「这儿是不是客户端源码根」，
-            //     而不是「这儿有没有一个叫这个名字的文件」（ASSERTION-PITFALLS 第 9 条）。
-            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
-                && File.Exists(Path.Combine(dir, "localai-client.csproj")))
-            {
-                var outp = new List<(string, string)>();
-                foreach (var f in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
-                {
-                    var rel = Path.GetRelativePath(dir, f).Replace('\\', '/');
-                    if (rel.StartsWith("bin/") || rel.StartsWith("obj/")) continue;
-                    try { outp.Add((rel, File.ReadAllText(f))); }
-                    catch (IOException) { /* 读不到就跳过这一个:少扫一个文件好过整套自检崩掉 */ }
-                }
-                return outp;
-            }
-            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+            var rel = Path.GetRelativePath(dir, f).Replace('\\', '/');
+            if (rel.StartsWith("bin/") || rel.StartsWith("obj/")) continue;
+            try { outp.Add((rel, File.ReadAllText(f))); }
+            catch (IOException) { /* 读不到就跳过这一个:少扫一个文件好过整套自检崩掉 */ }
         }
-        return Array.Empty<(string, string)>();
+        return outp;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -9549,18 +9568,49 @@ public static class Selftest
     /// </para>
     /// ★ 本探测**不计入** SRCHIT/SRCMISS —— 它是判据的前提,不是被判的对象。
     /// </summary>
-    static bool SourceRootPresent()
+    static bool SourceRootPresent() => ClientSourceRoot() is not null;
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★ 源码根锚点:**全文件只有这一处**(2026-08-08 抽取)
+    //
+    //  起因:锚点原本是**三份各自为政的拷贝**(Run() / TryReadAllSources() / SourceRootPresent())。
+    //  2026-08-08 把它从"一个文件"收紧成"两个文件"时**漏改了其中一处**,
+    //  缺陷就完整地留在那一处 —— V14b 在 5ae762e 的留痕逐字是:
+    //    「一个修法漏改一处,缺陷就完整地留在那一处。改完要**把同形状的地方都数一遍**。」
+    //  ⇒ 抽成一个函数,让「把同形状的地方都数一遍」这件事**不再需要人去数**。
+    //    ★ 记住那次是**它自己的断言**替人数出来的,而不是人看出来的 ——
+    //      下一次未必还有一条断言正好站在漏掉的那一处。
+    //
+    //  ★ 为什么锚点是【两个】文件而不是一个:只看 Selftest.cs 是一个**代理指标**,
+    //    而 %TEMP% 里躺着别的会话拷出去的 Selftest.cs ⇒ 那一趟就把 %TEMP% 当成了源码根,
+    //    递归扫进 1218 个不相干的 .cs。csproj 只存在于真正的源码根;
+    //    两个一起看,才是在问「这儿**是不是**客户端源码根」,
+    //    而不是「这儿有没有一个叫这个名字的文件」(ASSERTION-PITFALLS 第 9 条)。
+    //
+    //  ★★ 而**有意不再加第三个锚点**(例如兄弟目录的管理端 csproj):
+    //    锚点越多,「找不到源码根」就越容易发生,而找不到的后果是**整段静默跳过**(第 11 条)
+    //    —— 那是 **fail-open** 的方向,比误判源码根更难发现。
+    //    两个**内在于客户端工程自身**的锚点已经足够排除 %TEMP% 那一类;
+    //    第三个锚点会把本判据的成败挂在**另一个工程**的位置上,而那个工程是会搬家的。
+    // ══════════════════════════════════════════════════════════════════════════
+    static readonly string[] SourceRootAnchors = { "Selftest.cs", "localai-client.csproj" };
+
+    /// <summary>
+    /// 找客户端源码根;找不到返回 null —— **发布产物那一趟就是 null,那不是错误**。
+    /// ★ 本探测不计入 SRCHIT/SRCMISS:它是判据的前提,不是被判的对象。
+    /// </summary>
+    static string? ClientSourceRoot()
     {
         var dir = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && dir is not null; i++)
         {
-            // ★ 与 TryReadAllSources 同一个锚点（两个文件）—— 两处分家的那天，
-            //   SourceRootPresent 会说「源码根在」而 TryReadAllSources 一个文件都读不到。
-            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
-                && File.Exists(Path.Combine(dir, "localai-client.csproj"))) return true;
+            var allHere = true;
+            foreach (var a in SourceRootAnchors)
+                if (!File.Exists(Path.Combine(dir, a))) { allHere = false; break; }
+            if (allHere) return dir;
             dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
         }
-        return false;
+        return null;
     }
 
     /// <summary>

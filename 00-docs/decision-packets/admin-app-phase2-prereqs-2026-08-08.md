@@ -7,7 +7,7 @@
 > ★ 行号全部是**今天实测**。地图(`admin-app-phase2-migration-map-2026-08-08.md`)记的是
 >   `main@88414c3`,已经漂了 —— 例如 `HostSetup.cs` 那时 963 行,今天 978 行;
 >   `CLIENT_ROOTS` 那时 :335,今天 :349;「0 次 = 被删了」那时 :568,今天 :586。
-> ★ D 号待并入 `DECISIONS.md` 那一刻分配(**当前最大 D111**;地图里写的 D107 已过期)。
+> ★ D 号待并入 `DECISIONS.md` 那一刻分配(**当前最大 D113** —— 合并 main 时又漂了一次:本包写完时是 D111,而 main 上 `daa9a0e` 取了 D112/D113;地图里写的 D107 更早就过期了)。
 
 ---
 
@@ -59,7 +59,7 @@ CONTRACT:gpu.intended        ⊂ CONTRACT:gpu.intended.blocking
 
 ★ **它是怎么被发现的**:A1 的红测说「删掉 `cert.admin.ping` 的锚点,门禁必须红」,
 而门禁是**绿的**。当时有两条路 —— 把期望值改宽收工,或者去查。
-详见 `ASSERTION-PITFALLS` 第 14 条那条推论。
+详见 `ASSERTION-PITFALLS` 第 15 条那条推论。
 
 ---
 
