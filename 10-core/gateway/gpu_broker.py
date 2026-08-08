@@ -212,6 +212,39 @@ BLOCKING_SET = frozenset({BLOCKING_USER, BLOCKING_ASYNC, BLOCKING_RESIDENT})
 DRAIN_WINDOW_S          = 5.0    # 方案书 §8.1.6:先给 5 秒排空窗口
 RECLAIM_TIMEOUT_S       = 10.0   # 行 1507:超时 10 s 报 vram_not_reclaimed
 RECLAIM_TOLERANCE_GIB   = 0.2    # 行 1507:free 回升到预期 ±0.2 GiB
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ V16 · 「显存未回收」的期望值**不再来自 peak**(D? · 2026-08-08)
+#
+#  V16 实机复现(两条路径,无任何故障注入):
+#    · 勾 speech.lite → 确定 → 装上 → 取消勾选 → 确定
+#      实测 NVML free:装载前 14.559 → 装载后 14.557 GiB ⇒ **实测足迹 0.002 GiB**,
+#      而 config/vram-budget.toml 声称 peak = 2.07。
+#      旧判据要求 free 回升到 `free + 2.07 - 0.2` ⇒ 差 1.87 GiB,**恒不可能满足**
+#      ⇒ 10 秒后 vram_not_reclaimed → RECONCILING → 中枢拒收一切新事务。
+#
+#  ★★★ 根因**不是**「speech 不吃显存」这一条,那只是它最先撞上来的那个形状。
+#    根因是:`peak` 是**准入**量 —— 一个**有意偏保守**的上界
+#    (vram-budget.toml :105-108 自己写着「5.31 > 5.0,闸变更保守」是 fail-safe 方向)。
+#    把一个**上界**当成卸载后**必须等额回吐**的等式,方向恰好反过来:
+#    准入上多算是安全的,回收上多算就是**必然误报**。
+#  ⇒ 这条对**任何**组件都成立,不是语音专有:
+#      · 认领来的孤儿按边界不杀(model_loader.unload)—— 却照样被要求吐出全额 peak;
+#      · comfyui.sdxl 的 8.14 是**出图时**的峰值,不是驻留量;
+#      · 30b-a3b 的 11.9 是 38% offload 下的 GPU 侧峰值。
+#    llm 只是因为 llama.cpp 在装载时就把权重+定长 KV 一次分配完,
+#    才碰巧 resident ≈ peak —— 那是 llama.cpp 的偶然,不是这个公式的性质。
+#
+#  ⇒ V16 的判据分成**两条,按顺序**:
+#    ① **结构判据(硬,能为假)**:卸完之后端口上还有人吗?
+#       有 → `unload_not_effective`。这条与显存无关,是"进程真的没了吗"。
+#    ② **算术判据(软,只在有可信期望时才判)**:期望值取**装载时实测的足迹**
+#       (`_footprint`),不是 peak。没测过的成员**不产生期望**(如实标为 unknown),
+#       而不是拿 peak 顶上去 —— 拿一个上界顶上去正是本条要修的那件事。
+#    ★ 期望值小于容差 ⇒ **没什么可等的**,直接过。speech.lite 走的就是这一条。
+# ══════════════════════════════════════════════════════════════════════
+#: 期望回吐量低于这个数就认为「没什么可等的」。★ 取容差本身 —— 比容差还小的期望,
+#  连"回没回来"都判不出来,等 10 秒只会把一次成功的卸载判成失败。
+RECLAIM_MIN_EXPECT_GIB  = RECLAIM_TOLERANCE_GIB
 ADMISSION_GUARD_WINDOW_S = 5.0   # 行 1623:5 s 内
 ADMISSION_GUARD_DROP_GIB = 1.0   # 行 1623:降幅 > 1.0 GiB
 FREE_HISTORY_MAX        = 32     # 1 Hz 采样,够覆盖 5 s 窗口且不无界增长
@@ -388,6 +421,16 @@ class Snapshot:
     #: 当前是否处在压力态(连续采样都在阈值以下)。★ 观测量,与 notice 分开:
     #  notice 说"刚才让了什么",这个说"现在还紧不紧"。
     pressure_active: bool = False
+    # ★★★ V16 · 驻留真相探针的结果(见 model_loader.residency_truth)。
+    #   None = **还没探过** —— 与"探过且没有孤儿"是两件事,界面不得把前者显示成"正常"。
+    residency_truth: Optional[Dict] = None
+    # ★★★ V16 · 进/出 RECONCILING 的可查记录。此前 `_transition` 把 why 整个丢掉,
+    #   而本模块没有任何日志 ⇒ 「为什么进的 RECONCILING」连重启之前都查不到。
+    reconcile_log: Tuple[Dict, ...] = ()
+    # ★★★ V16 · 装载时**实测**的显存足迹(GiB)。卸载的回收判据用它,**不用 peak** ——
+    #   peak 是准入上界,拿上界当回收等式必然误报(见 RECLAIM_MIN_EXPECT_GIB 上方那段)。
+    #   ★ 推断量:NVML free 是全机共享的,别的进程同时动一下就会串味。
+    footprint_gib: Tuple[Tuple[str, float], ...] = ()
     state: str = STATE_STARTING
     power_on: bool = True
     invariants: Tuple[Dict, ...] = ()
@@ -442,6 +485,32 @@ class Snapshot:
             },
             "state": self.state,
             "power_on": self.power_on,
+            # ══════════════════════════════════════════════════════════
+            #  ★★★ V16 · 「Broker 说已卸载」与「进程真的没了」之间那条**能为假**的判据。
+            #  candidate pool = **全部登记端口**,与账本无关 —— 这正是它能为假的原因。
+            #  `probe == null` ⇒ **还没探过**,不是"没问题"。界面必须分得清这两件事。
+            # ══════════════════════════════════════════════════════════
+            "residency_truth": self.residency_truth,
+            # ★ 进/出 RECONCILING 的记录。★★ 它是**进程内**的 —— 重启就没了。
+            #   跨重启那一半由网关落 `{state}/logs/gpu_reconcile.jsonl`(强 ACL),
+            #   因为决议包 p4-broker-shape 定了 Broker 的**状态**不落盘,
+            #   而"发生过什么"是**事件**不是状态,两者不该混。
+            "reconcile_log": [dict(r) for r in self.reconcile_log],
+            "reconcile_note": (
+                "RECONCILING 的原意是「必须继续服务」(§8.1 行 1606),不是故障终态。"
+                "出口有两条:账本与现实重新对上时自动回 READY(判据,不动任何集合);"
+                "或由人显式『以现实为准对齐账本』。"),
+            # ★ 实测足迹。**标 inferred** —— 与 non_ai_used_gib_inferred 同款纪律:
+            #   NVML free 是全机共享的,这个差值可能被别的进程串味。
+            "footprint": {
+                "measured_gib": {k: v for k, v in self.footprint_gib},
+                "inferred": True,
+                "note": "装载那一刻 NVML free 的实测降幅。★ 卸载的『显存回收』判据用它,"
+                        "**不用 peak** —— peak 是准入用的保守上界,拿上界当回收等式,"
+                        "在准入方向是安全的,在回收方向就是必然误报(V16 实测:"
+                        "speech.lite 足迹 0.002 GiB,而 peak 声称 2.07)。"
+                        "★ 一次装多个时分不出谁占了多少 ⇒ **不记**,而不是按 peak 分摊编一个数。",
+            },
             # ★ RECONCILE_WATCH 的结果:**只报告不修复**。每条自带 confidence ——
             #   actual 今天不是独立观测(无装载器 + WDDM 不暴露逐进程显存),
             #   所以 I2/I3 标 self_reported。不标就是个假检测器。
@@ -559,6 +628,24 @@ class Broker:
         #   而探活是 async I/O —— 不能在同步路径里跑。
         #   ⇒ 由采样循环刷新;None = 还没探过,此时退回账本并保持 self_reported。
         self._actual_cache: Optional[List[str]] = None
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ V16 · 实测足迹账 —— 「卸掉它该吐回来多少」的**唯一**合法来源。
+        #
+        #  键 = 组件 id;值 = 装载那一刻 NVML free 的**实测**降幅(GiB)。
+        #  ★ 只在**单个组件**的装载上记 —— 一次装两个的批,分不出谁占了多少,
+        #    而按 peak 比例分摊是**编一个数**,正是本次要修的那类动作。
+        #    分不出的那些**不记**,于是它们在期望值里贡献 0 并被如实标成 unknown。
+        #  ★ 夹在 [0, peak] 里:负数(别的进程同时释放了显存)与超过 peak 的读数
+        #    都说明这次测量被别人污染了,而**污染过的数不许当判据**。
+        #  ★ 它是**推断量**:NVML free 是全机共享的,别的进程同时动一下就会串味。
+        #    ⇒ 快照里带 `inferred: True`,与 non_ai_used_gib_inferred 同款纪律。
+        # ══════════════════════════════════════════════════════════════
+        self._footprint: Dict[str, float] = {}
+        # ★★★ V16 · 驻留真相探针的最近一次结果(见 model_loader.residency_truth)。
+        #   None = 还没探过 —— 与"探过且没有孤儿"是两件事,不许混。
+        self._residency_truth: Optional[Dict] = None
+        # ★★★ V16 · 进 RECONCILING 这件事的**可查记录**。见 _note_reconcile。
+        self._reconcile_log: List[Dict] = []
         self._free_history: List[Tuple[float, Optional[float]]] = []
         # ★ 推送修订号 + 上次推出去的那个 free —— 见 wait_for_change 上方 A1 那一段。
         #   与世代号**分开**:世代号是事务的乐观锁,不能被显存波动带着涨。
@@ -636,6 +723,14 @@ class Broker:
                         self._actual_cache = await self._loader.running()
                     except Exception as e:                   # noqa: BLE001
                         self._sampler_error = f"loader_probe: {type(e).__name__}: {e}"
+                    # ── ★★★ V16:驻留真相探针 —— **候选池是登记端口,不是账本** ──
+                    #   `running()` 结构上报不出「账本说卸了、进程还在」:它只探账本
+                    #   已经相信的那几条。这一条探全部登记端口,因此**能为假**。
+                    #   ★ 它同样**只报告不修复**(见下方 RECONCILE_WATCH 的理由)。
+                    try:
+                        self._residency_truth = await self._loader.residency_truth()
+                    except Exception as e:                   # noqa: BLE001
+                        self._sampler_error = f"residency_probe: {type(e).__name__}: {e}"
                 # ── RECONCILE_WATCH(P4-S7)★★ 只报告,不修复 ──
                 #   修复即"自动触发",而那正是 D10 存活下来的那半条明令禁止的。
                 #   这里只把结果记下来放进快照;要不要动手,是人的决定。
@@ -657,6 +752,14 @@ class Broker:
                 self._note_pressure_sample()
                 self._expire_pressure_notice()
                 await self.yield_under_pressure()
+                # ── ★★★ V16:RECONCILING 的**出口判据**(不是动作)──
+                #   它只问一件事:账本与现实重新对上了吗(actual == committed)——
+                #   与 finish_startup 的后件是同一个式子。对上了就离开 RECONCILING。
+                #   ★ 它**不动任何集合、不起停任何进程** ⇒ 不是 D10 禁的「自动触发」。
+                #     那条禁的是系统自己去动显存;这里动的只是"承认条件已经满足"。
+                #   ★ 在此之前这个状态**没有任何出口**:ALLOWED_TRANSITIONS 写着
+                #     RECONCILING → READY 合法,而全模块从来没有代码走过它。
+                await self.reconcile_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -739,8 +842,11 @@ class Broker:
             else:
                 # 装载没齐 —— 不宣布 READY。按 §8.1 行 1606:RECONCILING **仍然提供服务**,
                 # 按 actual 那一份对外说话,而不是把还活着的一并判死。
-                await self._transition(STATE_RECONCILING,
-                                       f"开机装载未齐:actual={sorted(actual)} ⊊ committed={sorted(committed)}")
+                _why = (f"开机装载未齐:actual={sorted(actual)} ⊊ committed={sorted(committed)}")
+                await self._transition(STATE_RECONCILING, _why)
+                # ★ V16:开机就落在 RECONCILING 是最难查的那一种(没有调用方拿得到返回值),
+                #   所以它**尤其**要留记录。网关在开机路上读它并落盘。
+                self._note_reconcile_locked("entered", "startup_incomplete", _why)
             return self._state
 
     async def stop(self) -> None:
@@ -784,6 +890,10 @@ class Broker:
             pressure_notice=(dict(self._pressure_notice)
                              if self._pressure_notice is not None else None),
             pressure_active=self.under_pressure(),
+            residency_truth=(dict(self._residency_truth)
+                             if self._residency_truth is not None else None),
+            reconcile_log=tuple(dict(r) for r in self._reconcile_log),
+            footprint_gib=tuple(sorted(self._footprint.items())),
             state=self._state,
             power_on=self._power_on,
             invariants=tuple(r.to_json() for r in (self._last_watch or self.check_invariants())),
@@ -1095,17 +1205,51 @@ class Broker:
             detail = f"state={self._state} 不是 READY ⇒ 前件为假,I2 自动成立(这是设计,不是放水)"
         # ★ 置信度跟着事实源走:有装载器 ⇒ actual 是**独立观测**(observed);
         #   没有 ⇒ 退回账本,仍然是 self_reported。**不许固定写死其中一个。**
-        _conf = "observed" if self._loader is not None else "self_reported"
+        # ★★★ V16 修:判据原来只问「装载器接上了吗」,而 `actual_resident` 还有
+        #   **第三种**形态 —— 装载器接上了但**一次都还没探过**(`_actual_cache is None`,
+        #   采样循环没跑起来时就是这样)⇒ 它退回账本,却被标成 observed。
+        #   V16 实机复现当场撞到:一个 6.5 GiB 的孤儿活着,I2/I3 全绿且自称 observed。
+        #   ⇒ 判据必须问**这一次的数从哪来**,不是问接线在不在。
+        _conf = ("observed" if (self._loader is not None and self._actual_cache is not None)
+                 else "self_reported")
         out.append(InvariantReport("I2", ok, detail, confidence=_conf))
 
         # ── I3 · 在的都该在(★ 无状态前件,任何状态下恒成立)──
         #  这条才是接住「某个 bug 装了不该装的」的那一条。
         #  它是准入白名单的**运行期**版本:白名单只在申请那一刻把关。
         stray = sorted(actual - (committed | permitted))
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ V16:I3 加上**第二条子句** —— 端口层面的「不该在的驻留」。
+        #
+        #  第一条子句(stray)问的是「actual 里有没有不该有的组件」,而 `actual` 来自
+        #  `loader.running()`,后者的候选池**就是账本**(见 model_loader.running 的说明)
+        #  ⇒ 一个被账本忘掉、进程却还活着的后端,**永远进不了 actual**,
+        #    于是第一条子句对它**结构上不可能为假**。
+        #  V16 实机复现:孤儿 llama-server 占着 6.5 GiB 活着,I3 报绿。
+        #
+        #  ⇒ 第二条子句的输入是 `residency_truth()`:候选池是**全部登记端口**,
+        #    与账本无关。它问的是账本回答不了的那个问题:
+        #    「哪个端口上有人,而我们说不出他是谁?」
+        #  ★ 这是对 I3 的**加强**,不是换一条不变式:它问的仍然是「在的都该在」,
+        #    只是把"在"从"账本认得的组件"扩到了"端口上真的有人"。
+        #  ★ 同端口多组件时只报**端口**不报组件名 —— 分不清就不假装分得清
+        #    (与 adopt() 的诚实边界同源)。
+        #  ★ `_residency_truth is None` = **还没探过**,与"探过且没有孤儿"是两件事:
+        #    前者不该让 I3 变绿,所以它进 detail 说明,而不是被当成"没问题"。
+        # ══════════════════════════════════════════════════════════════
+        _rt = self._residency_truth
+        _orphan_ports = list((_rt or {}).get("orphan_ports") or [])
+        _rt_note = ("" if _rt is not None else
+                    ";★ 端口真相探针**还没探过**(本条只覆盖了账本认得的那一半)")
         out.append(InvariantReport(
-            "I3", not stray,
-            ("没有不该在的组件" if not stray else
-             f"★ 出现了既不在 committed 也不在 permitted_on_demand 的驻留:{stray} —— §9.3 告警"),
+            "I3", not stray and not _orphan_ports,
+            ("没有不该在的组件" + _rt_note if not stray and not _orphan_ports else
+             (f"★ 出现了既不在 committed 也不在 permitted_on_demand 的驻留:{stray} —— §9.3 告警"
+              if stray else "") +
+             (f"★★ 端口 {_orphan_ports} 上有能应答的后端,而账本说不出他是谁 —— "
+              f"「账本说卸了,进程还在」。候选:"
+              f"{(_rt or {}).get('orphan_candidates')} —— §9.3 告警"
+              if _orphan_ports else "")),
             # ★★ 与 I2 同一个 _conf:它们**读同一个 actual**,同一个事实源。
             #   一个标 observed 一个标 self_reported 会让人以为它们的可信度不同 ——
             #   2026-08-05 我改 I2 时漏了这一行,被新写的一条断言当场抓到。
@@ -1257,7 +1401,9 @@ class Broker:
             if not v.ok:
                 return {"code": ON_DEMAND_GATE, "component": component,
                         "gate": v.gate, "message": v.message}
-            await self._loader.load([component])
+            # ★ V16:走 `_load_measured` —— 装载时量一次实测足迹,卸载时按它等。
+            #   不量的话,这一条按需组件将来被卸时又要拿 peak 去猜(那正是本次修的事)。
+            await self._load_measured([component])
         except Exception as e:                                # noqa: BLE001
             # ★ 装不上就是装不上 —— **不进 transient 平面**。
             #   记进账本而显存里没有,正是 I2/I3 存在的理由所要禁止的事。
@@ -1312,8 +1458,16 @@ class Broker:
             self._transient_inflight.extend(v for v in victims
                                             if v not in self._transient_inflight)
 
+        # ★★★ V16:卸完之后**核实**「进程真的没了吗」。此前这条路径上
+        #   一次核对都没有 —— `unload()` 返回 None 且 `_kill()` 永不抛,
+        #   于是**每一次收割都成功**,而认领来的孤儿按边界根本没被杀。
+        #   `keep` = 卸完之后仍然该活着的那些(同端口多组件必须传,8b 三档共用 18081)。
+        keep = [c for c in list(self._committed) + list(self._transient_resident)
+                if c not in victims]
         try:
-            await self._loader.unload(victims)               # ★ 锁外 I/O
+            unload_rep = await self._loader.unload(victims)   # ★ 锁外 I/O
+            still_alive = self._unload_shortfall(
+                unload_rep, await self._loader.verify_unloaded(victims, keep=keep))
         except Exception as e:                                # noqa: BLE001
             async with self._lock:
                 for v in victims:
@@ -1321,12 +1475,24 @@ class Broker:
                         self._transient_inflight.remove(v)
             return {"unloaded": [], "reason": "unload_failed",
                     "message": f"{type(e).__name__}: {e}", "victims": victims}
+        if still_alive:
+            # ★★ 没卸掉就**不许从账上摘** —— 摘了就是"账面上卸了而显存里还在",
+            #   而那比不卸更坏(本文件在 loader_absent 那一条已经写过同一句话)。
+            await self._loader.readopt([str(x["component"]) for x in still_alive])
+            async with self._lock:
+                for v in victims:
+                    if v in self._transient_inflight:
+                        self._transient_inflight.remove(v)
+            return {"unloaded": [], "reason": "unload_not_effective",
+                    "still_alive": still_alive, "victims": victims,
+                    "unload_report": unload_rep}
 
         async with self._lock:
             for v in victims:
                 if v in self._transient_resident:
                     self._transient_resident.remove(v)
                 self._transient_last_intent.pop(v, None)
+                self._footprint.pop(v, None)
                 if v in self._transient_inflight:
                     self._transient_inflight.remove(v)
             self._generation += 1
@@ -1433,8 +1599,14 @@ class Broker:
             self._transient_inflight.extend(v for v in victims
                                             if v not in self._transient_inflight)
 
+        # ★★★ V16:让位同样要**核实**。让不出去却在账上记成让了,
+        #   等于告诉用户"已经腾出显存了"而实际一个字节都没腾 —— 那比不让更坏。
+        keep = [c for c in list(self._committed) + list(self._transient_resident)
+                if c not in victims]
         try:
-            await self._loader.unload(victims)                # ★ 锁外 I/O
+            unload_rep = await self._loader.unload(victims)    # ★ 锁外 I/O
+            still_alive = self._unload_shortfall(
+                unload_rep, await self._loader.verify_unloaded(victims, keep=keep))
         except Exception as e:                                # noqa: BLE001
             async with self._lock:
                 for v in victims:
@@ -1442,12 +1614,22 @@ class Broker:
                         self._transient_inflight.remove(v)
             return {"code": YIELD_FAILED, "yielded": [], "victims": victims,
                     "message": f"{type(e).__name__}: {e}"}
+        if still_alive:
+            await self._loader.readopt([str(x["component"]) for x in still_alive])
+            async with self._lock:
+                for v in victims:
+                    if v in self._transient_inflight:
+                        self._transient_inflight.remove(v)
+            return {"code": YIELD_FAILED, "yielded": [], "victims": victims,
+                    "still_alive": still_alive, "unload_report": unload_rep,
+                    "message": "让位失败:卸载之后进程还活着,显存没有真的腾出来"}
 
         async with self._lock:
             for v in victims:
                 if v in self._transient_resident:
                     self._transient_resident.remove(v)
                 self._transient_last_intent.pop(v, None)
+                self._footprint.pop(v, None)
                 if v in self._transient_inflight:
                     self._transient_inflight.remove(v)
             self._pressure_notice = {
@@ -1600,6 +1782,88 @@ class Broker:
                 "from_gib": peak, "to_gib": now_f,
                 "action": "refuse_new_admission"}
 
+    # ══════════════════════════════════════════════════════════════
+    #  ★★★ V16 · 实测足迹:装载时量一次,卸载时按它等 —— 见 RECLAIM_MIN_EXPECT_GIB 上方那段
+    # ══════════════════════════════════════════════════════════════
+
+    async def _load_measured(self, ids: List[str]) -> None:
+        """装载,并在**只装一个**时把实测足迹记下来。★ 采样在锁外(模块头硬约束)。
+
+        ★ 一次装多个时**不记** —— 分不出谁占了多少,而按 peak 分摊是编一个数。
+          不记的代价写在 `_expected_reclaim` 里:它们如实进 `unknown`,期望值贡献 0。
+        """
+        loop = asyncio.get_running_loop()
+        if len(ids) != 1:
+            await self._loader.load(ids)
+            return
+        await loop.run_in_executor(None, self._sample_once)
+        before = self._free
+        await self._loader.load(ids)
+        await loop.run_in_executor(None, self._sample_once)
+        after = self._free
+        if before is None or after is None:
+            return                       # ★ 没读到就**不记**,不拿 None 凑一个数
+        cid = ids[0]
+        cap = self.cfg.peak(cid) if cid in self.cfg.components else 0.0
+        delta = before - after
+        if delta < 0.0 or (cap and delta > cap):
+            # ★ 被别的进程串味了 —— 污染过的数不许当判据。宁可 unknown。
+            return
+        self._footprint[cid] = round(delta, 3)
+
+    async def _refresh_actual(self) -> None:
+        """事务里动完真实状态之后,**立刻**重取一次独立观测。★ 锁外 I/O。
+
+        ★ 不做这一步的话有一个可复现的窗口:事务已经把 committed 改了、状态也回了 READY,
+          而 `_actual_cache` 还是采样循环上一秒的旧值 ⇒ **I2 会红上最多一秒**,
+          理由指向一个已经不成立的差异。这个项目最恨的就是"理由是假的告警"。
+        ★ 探不到就**保留上一次的观测**(与采样循环同款):探失败不等于"什么都没装"。
+        """
+        if self._loader is None:
+            return
+        try:
+            self._actual_cache = await self._loader.running()
+        except Exception as e:                                # noqa: BLE001
+            self._sampler_error = f"loader_probe: {type(e).__name__}: {e}"
+
+    @staticmethod
+    def _unload_shortfall(unload_rep, still_alive) -> List[Dict]:
+        """卸载**没生效**的那几条 —— **两个来源合起来**,缺一不可。
+
+        ★ 为什么不能只看端口核实:`verify_unloaded` 跳过**不监听端口**的组件
+          (`comfyui.*` 的 port = 0)—— 对它们端口探针什么都说不出来。
+          那一格唯一的信号就是装载器的回执里那条 `kill_failed`。
+        ★ 反过来也不能只看回执:认领来的孤儿走的是 `skipped_adopted`,
+          回执里它**不算失败**(不杀是对的),而它是不是还占着显存**只有端口知道**。
+        ⇒ 两个来源问的是两件事,合起来才盖得住。
+        """
+        out = list(still_alive or [])
+        seen = {str(x.get("component")) for x in out}
+        for cid in ((unload_rep or {}).get("kill_failed") or []):
+            if str(cid) not in seen:
+                out.append({"component": str(cid), "port": 0, "port_state": "unknown",
+                            "we_spawned_it": True, "pid": None,
+                            "why": "我们起的进程**杀不掉**(terminate 与 kill 都没成)"})
+        return out
+
+    def _expected_reclaim(self, drop: List[str]) -> Tuple[float, List[str]]:
+        """卸掉这些**该吐回来多少**。返回 (期望 GiB, 说不出的那几个)。
+
+        ★★★ 这里**不出现 `peak`**,而且是有意的:peak 是准入上界,
+          拿上界当回收等式的方向恰好反过来(见 RECLAIM_MIN_EXPECT_GIB 上方那段)。
+          没测过足迹的成员进 `unknown` —— 它们让期望**变小**,判据因此**变松**,
+          而"松"这一侧的漏网由结构判据(进程真的没了吗)接住,不由这条算术接住。
+        """
+        total = 0.0
+        unknown: List[str] = []
+        for c in drop:
+            f = self._footprint.get(c)
+            if f is None:
+                unknown.append(c)
+            else:
+                total += f
+        return round(total, 3), unknown
+
     async def _await_reclaim(self, expect_free: float, *, timeout: Optional[float] = None,
                              poll: float = 1.0) -> Optional[str]:
         """卸载后轮询 NVML 直到 free 回升到预期 ±0.2 GiB(方案书行 1507)。
@@ -1608,6 +1872,8 @@ class Broker:
         ★ 超时**不是**"大概回收了就算了" —— 显存没吐出来还硬装,撞的是物理墙。
         ★ timeout 走 None 而不是默认参数直接引用常量:默认参数在 def 那一刻就绑死了,
           测试改不动模块常量,断言就只能抄一份数字 —— 那份抄件跟真值分家的那天就是假断言。
+        ★ V16:本函数的**算术一个字没改**,改的是调用方喂给它的 `expect_free`
+          从哪里来(见 `_reclaim_after_unload`)。判据本身仍然可以独立测。
         """
         timeout = RECLAIM_TIMEOUT_S if timeout is None else timeout
         deadline = time.monotonic() + timeout
@@ -1618,6 +1884,33 @@ class Broker:
             if time.monotonic() >= deadline:
                 return "vram_not_reclaimed"
             await asyncio.sleep(poll)
+
+    async def _reclaim_after_unload(self, drop: List[str], free_before: Optional[float]
+                                    ) -> Dict[str, object]:
+        """卸载之后的显存核对。★ 只在**有可信期望**时才真的等。
+
+        返回 `{"code": ""|"vram_not_reclaimed", "expected_gib": …, "unknown": [...], …}`。
+        ★ code == "" 有两种成因,而且**必须分得清**(`waited` 字段):
+            · 真的等到了显存回来
+            · 期望值小到没什么可等的(speech.lite:实测足迹 0.002 GiB)
+          混成一个"通过",下一个人就会以为这条路径每次都验过显存。
+        """
+        expect_gib, unknown = self._expected_reclaim(drop)
+        base = {"expected_gib": expect_gib, "unknown": unknown,
+                "free_before": free_before,
+                "measured": {c: self._footprint[c] for c in drop if c in self._footprint}}
+        if free_before is None or expect_gib < RECLAIM_MIN_EXPECT_GIB:
+            # ★ 没什么可等的。**不是**"跳过检查" —— 是这条算术在这一次没有判据可用,
+            #   而"没有判据"必须说出来(waited=False),不能伪装成"验过了"。
+            return dict(base, code="", waited=False,
+                        why=("没有可信的回吐期望(实测足迹合计 "
+                             f"{expect_gib} GiB < 容差 {RECLAIM_TOLERANCE_GIB})—— "
+                             "本次不以显存判成败,改由『进程真的没了吗』那条结构判据承重"))
+        err = await self._await_reclaim(free_before + expect_gib)
+        return dict(base, code=(err or ""), waited=True, free_after=self._free,
+                    why=("显存已回到实测足迹之内" if not err else
+                         f"等了 {RECLAIM_TIMEOUT_S:.0f} 秒,free 仍未回到 "
+                         f"{round((free_before or 0) + expect_gib, 2)} ±{RECLAIM_TOLERANCE_GIB} GiB"))
 
     async def apply_intended(self, requested: List[str], *,
                              permitted: Optional[List[str]] = None,
@@ -1658,10 +1951,31 @@ class Broker:
                     + "。★ 授权集合是 I3 允许集的一半 —— 塞进未登记的 id 等于把那条不变式关掉。"
                       "组件必须先进 config/vram-budget.toml。")
 
+        # ══════════════════════════════════════════════════════════════
+        #  ★★★ V16:进 STAGING 之前,先给 RECONCILING 一次**出去的机会**。
+        #
+        #  在此之前它没有任何出路:`ACCEPTS_TRANSACTION` 不含它 ⇒ 每一次「点确定」
+        #  都退 busy,而全模块没有一处代码走 `RECONCILING → READY` 那条**已经合法**的边。
+        #  ⇒ V16 实机复现:一次失败的事务把整台中枢的驻留变更面永久打死,只能重启进程。
+        #  ★ 这里再判一次而不是只靠采样循环,是因为**判据不该依赖某个后台任务活着**:
+        #    采样器崩了的时候,恰恰是最需要人能点一次确定的时候。
+        # ══════════════════════════════════════════════════════════════
+        if self._state == STATE_RECONCILING:
+            await self.reconcile_tick()
+
         async with self._lock:
             if self._state not in ACCEPTS_TRANSACTION:
+                _why = ""
+                if self._state == STATE_RECONCILING:
+                    # ★ busy 的**理由**必须点名 —— 「忙」是个指向别处的假理由,
+                    #   而真相是"账本与现实对不上,对不上的是这几项"。
+                    _a = sorted(set(self.actual_resident) - set(self._transient_resident))
+                    _c = sorted(self._committed)
+                    _why = (f" —— 账本与现实仍未对上:committed={_c} · 实测 actual={_a}。"
+                            "对上之后会自动回 READY;若账本本身错了,"
+                            "由人显式『以现实为准对齐』")
                 return ApplyResult(False, "busy", self._state,
-                                   f"当前状态 {self._state} 不接受新事务(单写者)")
+                                   f"当前状态 {self._state} 不接受新事务(单写者){_why}")
             await self._transition(STATE_STAGING, "点确定")
 
         # ── ② blocking_set:有人在等结果 → 5 秒排空窗口,再交给用户裁定 ──
@@ -1723,14 +2037,59 @@ class Broker:
         try:
             drop = [c for c in prev if c not in requested]
             if drop:
-                expect = self._free + sum(self.cfg.peak(c) for c in drop if c in self.cfg.components)
-                await self._loader.unload(drop)
-                err = await self._await_reclaim(expect)
-                if err:
-                    return await self._to_reconciling(err, f"卸载 {drop} 后显存未回收")
+                free_before = self._free
+                unload_rep = await self._loader.unload(drop)
+                # ══════════════════════════════════════════════════════
+                #  ★★★ V16 · 判据①(结构,**硬**):进程真的没了吗?
+                #
+                #  这一条**能为假**,而且今天就真的会为假:认领来的孤儿按边界不杀
+                #  (model_loader.unload 的说明),旧代码却在它还活着的时候
+                #  就把它从账上抹了,再用**显存**去猜卸没卸掉 —— 猜的方向还反了。
+                #  ⇒ 先问端口,再谈显存。`keep=requested` 是同端口多组件必须传的:
+                #    8b 三档共用 18081,隔壁那一档还在跑不算"没卸干净"。
+                # ══════════════════════════════════════════════════════
+                still_alive = self._unload_shortfall(
+                    unload_rep, await self._loader.verify_unloaded(drop, keep=list(requested)))
+                if still_alive:
+                    # ★ 账本必须**先回到现实**:它还活着,就别在账上装作没有。
+                    await self._loader.readopt([str(x["component"]) for x in still_alive])
+                    _who = "、".join(f"{x['component']}(端口 {x['port']}:{x['why']})"
+                                     for x in still_alive)
+                    return await self._to_reconciling(
+                        "unload_not_effective",
+                        f"卸载 {drop} 之后**进程还活着**:{_who}。"
+                        "★ 它仍然占着显存,而账本不该假装它已经没了",
+                        detail={"still_alive": still_alive, "unload_report": unload_rep})
+                # ★★ 进程确实没了 ⇒ **账本先记下这一点**,不管显存那条怎么说。
+                #   不记的话就会出现 V16 复现里那一幕:事务失败退出,
+                #   而 committed 仍然列着一个**进程已经死了**的组件。
+                async with self._lock:
+                    self._committed = [c for c in prev if c not in drop]
+                # ── 判据②(算术,**软**):只在有可信期望时才等 ──
+                #   ★ 顺序要紧:**先按足迹核对,再把足迹销账**。
+                #     第一版写反了(先 pop 再核对)⇒ 期望值恒为 0 ⇒ 这条判据
+                #     变成了一个**永远说通过**的探测器,而那条反向断言当场把它抓了出来。
+                await self._refresh_actual()
+                rc = await self._reclaim_after_unload(drop, free_before)
+                for _c in drop:
+                    self._footprint.pop(_c, None)
+                if rc["code"]:
+                    # ★★★ V16:这里**不再进 RECONCILING**。
+                    #   进程没了、账本也记下了 ⇒ 账本与现实**没有分家**,
+                    #   而 RECONCILING 的语义就是"分家了,一边服务一边对齐"。
+                    #   拿它当"显存异常"的落点,是让一次可重试的失败变成死锁态。
+                    #   ⇒ 落 READY(此刻 actual == committed,I2 成立),事务失败可重试。
+                    async with self._lock:
+                        await self._transition(STATE_READY, "卸载已完成,但显存未回收 —— 不装新的")
+                    return ApplyResult(
+                        False, "vram_not_reclaimed", STATE_READY,
+                        f"已卸下 {drop},但显存没有回到预期({rc['why']})。"
+                        f"为免撞物理墙,本次**不装**新的组件 —— 可以直接再点一次确定")
             add = [c for c in requested if c not in prev]
             if add:
-                await self._loader.load(add)
+                await self._load_measured(add)
+            # ★ V16:动完真实状态就**立刻**重取一次独立观测 —— 见 _refresh_actual。
+            await self._refresh_actual()
         except Exception as e:
             # ── 回滚到上一个成功集合;回滚也失败 → DEGRADED_SAFE ──
             try:
@@ -1742,11 +2101,19 @@ class Broker:
                     self._committed = []
                     self._generation += 1
                     self._notify_locked()
+                    # ★ V16:落进终态这件事同样要留下记录 —— 见 _note_reconcile_locked。
+                    self._note_reconcile_locked("entered", "rollback_failed",
+                                                f"装载失败({e})且回滚失败({e2})")
                 return ApplyResult(False, "rollback_failed", STATE_DEGRADED_SAFE,
                                    f"装载失败({e})且回滚失败({e2})—— 等价 Off + 托盘红 + 不可忽略通知")
             async with self._lock:
                 self._committed = prev
                 await self._transition(STATE_RECONCILING, "装载失败,已回滚")
+                # ★★★ V16:这条路径**也**会进 RECONCILING,所以它**也**要留记录。
+                #   只给 _to_reconciling 记的话,这一半的入口就是一片空白 ——
+                #   而它恰恰是最常见的那一半(后端起不来)。
+                self._note_reconcile_locked("entered", "load_failed_rolled_back",
+                                            f"装载失败已回滚到 {sorted(prev)}:{e}")
             return ApplyResult(False, "load_failed_rolled_back", STATE_RECONCILING, str(e))
 
         async with self._lock:
@@ -1779,15 +2146,114 @@ class Broker:
             await self._transition(STATE_STAGING, "预检不过,回编辑态")
         return ApplyResult(False, code, STATE_STAGING, msg)
 
-    async def _to_reconciling(self, code: str, msg: str) -> "ApplyResult":
+    async def _to_reconciling(self, code: str, msg: str,
+                              detail: Optional[Dict] = None) -> "ApplyResult":
         """RECONCILING:**必须继续按 actual_resident 提供服务**(方案书行 1606-1608)。
 
         ★ 否则一个语音 worker 掉线会连带把仍然可用的 LLM 也判成不可用 —— **比故障本身更糟**。
           复用 §8.1.4 既有的 `contract_changed`(默认放行 + 回带真实契约 + X-LocalAI-Contract 头)。
+
+        ★★★ V16:进这个状态这件事**必须留下可查的记录**。此前 `_transition(to, why)`
+          在成功路径上把 `why` **整个丢掉**(它只出现在 IllegalTransition 的消息里),
+          而本模块没有任何日志与 I/O ⇒ 「为什么进的 RECONCILING」连**重启之前**都查不到。
         """
         async with self._lock:
             await self._transition(STATE_RECONCILING, code)
+            self._note_reconcile_locked("entered", code, msg, detail)
         return ApplyResult(False, code, STATE_RECONCILING, msg)
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★★★ V16 · RECONCILING 的可查记录 + **出得去的路**
+    #
+    #  V16 实机复现:进 RECONCILING 之后
+    #    · `ACCEPTS_TRANSACTION = {READY, STAGING}` 不含它 ⇒ 一切「点确定」退 busy;
+    #    · 全模块**没有任何一处** `_transition` 以 RECONCILING 为源状态走到 READY ——
+    #      `ALLOWED_TRANSITIONS[:194]` 写着这条边合法,而**从来没有代码走过它**;
+    #    · `set_power(True)` 只救 DEGRADED_SAFE,`finish_startup()` 只认 STARTING。
+    #  ⇒ 它今天是一个**死锁态**,而方案书行 1606 给它的原意是「**必须继续服务**」。
+    #
+    #  ★ 两条出路,**分开**,因为它们的授权来源不同:
+    #    ① `reconcile_tick()` —— **判据**,不是动作:账本与现实重新对上了
+    #       (actual == committed,与 `finish_startup` 的后件**同一个式子**)⇒ 回 READY。
+    #       它不动任何集合、不起停任何进程 ⇒ 不是 D10 禁的那种「自动触发」:
+    #       D10 禁的是**系统自己动显存**,而这里动的只是"我们承认条件已经满足了"。
+    #    ② `reconcile_to_actual()` —— **人的动作**:让账本去追现实(与 `adopt_running`
+    #       同一条原则:以现实为准,不以账本为准),然后回 READY。
+    #       它**会改 committed**,所以绝不挂在任何自动路径上。
+    # ══════════════════════════════════════════════════════════════
+
+    #: 记录环的上限。★ 不设上限的话一台长跑的中枢会把它涨成内存泄漏。
+    RECONCILE_LOG_MAX = 32
+
+    def _note_reconcile_locked(self, event: str, code: str, msg: str,
+                               detail: Optional[Dict] = None) -> None:
+        """★ 必须在锁内调用。把「进/出 RECONCILING」这件事记成一条可查的记录。
+
+        ★ 这是**进程内**的记录环,不是落盘 —— 落盘由网关那一侧做
+          (它已经有 `{state}/logs/*.jsonl` 那套强 ACL 的落点)。
+          分工的理由:决议包 p4-broker-shape 定了 Broker 的状态**不进 PG**,
+          而"发生过什么"是**事件**不是状态,两者不是一回事,不该混在一起。
+        """
+        self._reconcile_log.append({
+            "event": event,               # entered | resolved | realigned
+            "code": code,
+            "message": msg,
+            "at_monotonic": time.monotonic(),
+            "generation": self._generation,
+            "committed": list(self._committed),
+            "actual": list(self.actual_resident),
+            "detail": detail or {},
+        })
+        if len(self._reconcile_log) > self.RECONCILE_LOG_MAX:
+            del self._reconcile_log[:-self.RECONCILE_LOG_MAX]
+
+    async def reconcile_tick(self) -> Optional[str]:
+        """RECONCILING 的**自愈判据**。★ 纯判据 —— 不动任何集合,不起停任何进程。
+
+        放行条件与 `finish_startup` **同一个式子**:`actual(常驻面) == committed`。
+        这不是巧合:READY 的全部含义就是"账面上装着的,真的装着了"。
+        ★ 不满足时返回 None 并**停在 RECONCILING** —— 它仍然提供服务(SERVING_STATES),
+          这正是方案书行 1606 给这个状态的原意。
+        """
+        if self._state != STATE_RECONCILING:
+            return None
+        actual = set(self.actual_resident) - set(self._transient_resident)
+        if actual != set(self._committed):
+            return None
+        async with self._lock:
+            if self._state != STATE_RECONCILING:
+                return self._state          # 期间被别人改了 —— 单写者,以锁内为准
+            await self._transition(STATE_READY, "账本与现实重新对上")
+            self._note_reconcile_locked(
+                "resolved", "reconciled",
+                f"actual == committed == {sorted(self._committed)} ⇒ 离开 RECONCILING")
+        return self._state
+
+    async def reconcile_to_actual(self) -> Dict[str, object]:
+        """**人的动作**:以现实为准对齐账本,然后离开 RECONCILING。
+
+        ★ 与 `adopt_running` 同一条原则:「不是信任账本,恰恰相反 —— 是让账本去追现实」。
+        ★ 它**改 committed**,所以:① 只有显式调用才会发生;② 绝不挂进采样循环。
+        ★ `_intended`(用户勾了什么)**一个字都不动** —— 与 I4 同一条理由:
+          系统对齐自己的账本,不该顺手改写用户的意思。
+        """
+        if self._state != STATE_RECONCILING:
+            return {"ok": False, "state": self._state,
+                    "message": f"当前不是 RECONCILING({self._state}),没有要对齐的东西"}
+        observed = sorted(set(self.actual_resident) - set(self._transient_resident))
+        async with self._lock:
+            if self._state != STATE_RECONCILING:
+                return {"ok": False, "state": self._state, "message": "期间已经离开 RECONCILING"}
+            was = list(self._committed)
+            self._committed = list(observed)
+            await self._transition(STATE_READY, "以现实为准对齐账本")
+            self._note_reconcile_locked(
+                "realigned", "reconcile_to_actual",
+                f"committed 由 {sorted(was)} 对齐为现实 {observed}",
+                {"was": was, "now": observed})
+        return {"ok": True, "state": self._state, "was": was, "now": observed,
+                "intended_untouched": list(self._intended),
+                "message": "已按现实对齐账本;你勾选的意图一个字都没动"}
 
     def serves_requests(self) -> bool:
         """哪些状态仍然对外提供服务。★ RECONCILING **必须**是 True —— 见 `_to_reconciling`。"""

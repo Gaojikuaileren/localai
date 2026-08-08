@@ -745,6 +745,25 @@ class _FakeLoader:
     async def unload(self, ids):
         self.calls.append(("unload", list(ids)))
         self.loaded -= set(ids)
+        # ★ V16:回执三分。替身也要**如实**回报,不许返回一个空壳 ——
+        #   一个总说"都杀干净了"的替身,会让真实现里的那条核实路径永远测不到。
+        return {"killed": list(ids), "skipped_adopted": [], "kill_failed": []}
+
+    async def verify_unloaded(self, ids, keep):
+        """★ V16:替身的核实必须问**它自己那个世界**的真相(self.loaded),
+        不能硬编码成空列表 —— 那样它就是在替被测代码打掩护。"""
+        self.calls.append(("verify", list(ids)))
+        return [{"component": c, "port": 0, "port_state": "ready",
+                 "we_spawned_it": True, "pid": None, "why": "替身:还在 loaded 里"}
+                for c in ids if c in self.loaded]
+
+    async def readopt(self, ids):
+        self.calls.append(("readopt", list(ids)))
+        return [c for c in ids if c in self.loaded]
+
+    async def residency_truth(self):
+        return {"live_ports": [], "ledger_ports": [], "orphan_ports": [],
+                "orphan_candidates": {}, "probed": 0, "note": "替身"}
 
     async def load(self, ids):
         self.calls.append(("load", list(ids)))
@@ -2234,6 +2253,13 @@ _SNAPSHOT_TOP_KEYS = {
     "loader_present", "loader_error", "idle_seconds", "lease_count",
     "idle_is_meaningful", "idle_note", "idle_note_transient",
     "transient_idle_s", "transient_idle_threshold_s", "transient_note",
+    # ★ 2026-08-08(V16):新增三段。**同样是被门禁逼出来的** —— 加上它们那一刻
+    #   V5 钉的三条断言(gpu.snapshot 顶层键 · SSE 帧载荷 · 409 里那份完整快照)
+    #   一起变红,理由写着「多 [...]」。这就是成对断言在挡自己人的契约漂移。
+    #   · residency_truth —— 「Broker 说已卸载 vs 进程真的没了」那条**能为假**的判据;
+    #   · reconcile_log / reconcile_note —— 进/出 RECONCILING 的可查记录;
+    #   · footprint —— 装载时**实测**的显存足迹(卸载的回收判据用它,不用 peak)。
+    "residency_truth", "reconcile_log", "reconcile_note", "footprint",
     # ★ 2026-08-07(V8 · D87③):新增 pressure 段。**这一行是被门禁逼出来的** ——
     #   加上 `pressure` 那一刻,V5 钉的三条断言(gpu.snapshot 顶层键 · SSE 帧载荷 ·
     #   409 里那份完整快照)**同时变红**,理由都写着「多 ['pressure']」。
@@ -2574,6 +2600,532 @@ check("★★★ 网关里**没有**自动关栈的执行者 —— 新设计下
 _safe_src = assert_helpers.code_only(gateway.safe_to_stop_stack)
 check("★★ 而 safe_to_stop_stack **自己不关任何东西**(只回答安不安全)",
       "kill" not in _safe_src and "SIGINT" not in _safe_src)
+
+
+##########################################################################
+#  V16 · D? · Broker 卸载与启动重整 —— 三条**今天第一次可达**的缺陷
+#
+#  来源:V13 收工报告(提交 0474d8c,packet host-loopback-business-route §4.2)。
+#  三条都**不是 V13 引入的** —— 在它之前没有任何设备写得了 intended,所以一次都
+#  不可能被触发;V13 把那条路打通,它们才第一次真实可达。
+#
+#  ★★★ 本节每一条断言都**先在旧代码上判过红**(V16 收工报告附实测),
+#    因为「没红过的护栏」和「没有护栏」是一回事(ASSERTION-PITFALLS 通则)。
+#
+#  ★ 实机复现(2026-08-08,本机真中枢 · 真进程 · 真 NVML · 无任何故障注入):
+#    路径 A:勾 speech.lite → 确定 → 装上 → 取消勾选 → 确定
+#            实测 free 14.559 → 14.557(**足迹 0.002 GiB**,而 peak 声称 2.07)
+#            ⇒ 10.7 秒后 vram_not_reclaimed → RECONCILING → 此后一切「点确定」退 busy。
+#            逐条试过 finish_startup / set_power(False) / set_power(True) / 再点确定
+#            —— **一条都出不去**,只能重启进程。
+#    路径 B:按需起 llm.assistant.8b@8k(实测占 5.311 GiB)→ 模拟网关重启 →
+#            adopt 把它当成 8b@16k 采纳进 committed → 取消勾选 → 确定
+#            ⇒ 认领来的进程按边界不杀,而账本把它抹了 ⇒ 一个 6.5 GiB 的进程活着,
+#            `running()` 报空,**I2/I3/I4 三条全绿**,再重启一次又被采纳一遍。
+##########################################################################
+
+#: ★★ 取证用的容错取值器。**只用在采数那一步,不用在判词里**。
+#  理由与本文件头那条编码双保险同款:这一节的断言必须能在**修好之前**的代码上
+#  逐条判红 —— 而旧代码里 `_footprint` / `reconcile_tick` / `residency_truth`
+#  压根不存在,一条 AttributeError 会把整套脚本掀翻,于是
+#  「一条断言变红」表现成「整套崩溃」,运行器看不出是**哪一条**没守住。
+#  ⇒ 缺了就回 None/空,让**断言自己**去判红。判词一个字没放松:
+#    下面每条断言比的都是具体的值,拿 None/空 一样红。
+def _v16_get(obj, name, default=None):
+    return getattr(obj, name, default)
+
+
+def _v16_m(obj, name):
+    """取一个协程方法;不存在就回一个总是回 None 的替身(理由同上)。"""
+    fn = getattr(obj, name, None)
+    if fn is not None:
+        return fn
+
+    async def _absent(*a, **k):
+        return None
+    return _absent
+
+
+print("\n=== V16 ① · 回收判据:peak 是**准入上界**,不是必然回吐量 ===")
+
+# ── 判据本身还在(方案书行 1507 那条没被删掉,只是换了期望值的来源)──
+check("★ vram_not_reclaimed 这个码仍然存在(不是把闸删掉了事)",
+      "vram_not_reclaimed" in inspect.getsource(gpu_broker.Broker._await_reclaim))
+check("★ 容差/超时两个常量一个没动", gpu_broker.RECLAIM_TOLERANCE_GIB == 0.2
+      and gpu_broker.RECLAIM_TIMEOUT_S == 10.0)
+
+_exp_fn = getattr(gpu_broker.Broker, "_expected_reclaim", None)
+check("★★★ 存在一条**专门算「该吐回来多少」**的函数 —— "
+      "旧代码把这个算式内联在 apply_intended 里,于是它既测不到、也没人能指着它说话",
+      _exp_fn is not None)
+if _exp_fn is not None:
+    _exp_src = assert_helpers.code_only(_exp_fn)
+    check("★★★ 它的源码里**没有 peak** —— peak 是准入用的保守上界,"
+          "vram-budget.toml 自己写着「5.31 > 5.0,闸变更保守」是 fail-safe 方向;"
+          "而在回收方向,多算一点就是**必然误报**",
+          "peak" not in _exp_src, _exp_src[:200])
+# ★ 元断言:上面那条"没有 peak"的判据不能是个永远不响的探测器 ——
+#   同一个词在**真的用 peak 的那段**必须查得到。
+check("★★ 元断言:同一个词在 pressure_victims(真的按 peak 挑人)里查得到 —— "
+      "否则「源码里没有 peak」只是因为我把词写错了",
+      "peak" in assert_helpers.code_only(gpu_broker.Broker.pressure_victims))
+
+
+class _VramLoader:
+    """★ 会**真的影响那个 free 读数**的替身 —— 装载器改的是显存,不是账本。
+
+    `cost` 逐组件给:0 就是「装上了但一个字节都不占」(speech.lite 的真实形态,
+    实测足迹 0.002 GiB)。判据必须能分清「没占」与「没卸掉」。
+    """
+
+    def __init__(self, broker, cost):
+        self.b, self.cost, self.loaded = broker, dict(cost), set()
+
+    async def load(self, ids):
+        for c in ids:
+            self.loaded.add(c)
+            self.b._free = round(self.b._free - self.cost.get(c, 0.0), 4)
+
+    async def unload(self, ids):
+        rep = {"killed": [], "skipped_adopted": [], "kill_failed": []}
+        for c in ids:
+            if c in self.loaded:
+                self.loaded.discard(c)
+                self.b._free = round(self.b._free + self.cost.get(c, 0.0), 4)
+                rep["killed"].append(c)
+        return rep
+
+    async def verify_unloaded(self, ids, keep):
+        return [{"component": c, "port": 0, "port_state": "ready",
+                 "we_spawned_it": True, "pid": None, "why": "杀不掉"}
+                for c in ids if c in self.loaded]
+
+    async def readopt(self, ids):
+        return []
+
+    async def running(self):
+        return sorted(self.loaded)
+
+    async def adopt(self):
+        return []
+
+
+def _mkvram(free, cost):
+    b = gpu_broker.Broker(cfg=gpu_broker.BROKER.cfg)
+    b._state = gpu_broker.STATE_READY
+    b._free = free
+    b._sampled_at = 0.0
+    b._sample_once = lambda: None          # ★ free 由 _VramLoader 直接改,不去真采样
+    b.attach_loader(_VramLoader(b, cost))
+    return b
+
+
+async def _t_v16_reclaim():
+    o = {}
+    # ── ① 零足迹组件(speech.lite 的真实形态):装上 → 卸掉,事务**必须成功** ──
+    #   旧代码:expect = free + peak(2.07),而 free 一动不动 ⇒ 等满 10 秒 → RECONCILING。
+    b = _mkvram(free=14.5, cost={_small: 0.0})
+    t0 = time.monotonic()
+    r_on = await b.apply_intended([_small], permitted=[])
+    o["fp_zero"] = dict(_v16_get(b, "_footprint", {}) or {})
+    r_off = await b.apply_intended([], permitted=[])
+    o["zero"] = (r_on.ok, r_off.ok, r_off.code, r_off.state, list(b._committed),
+                 time.monotonic() - t0)
+
+    # ── ② 真占显存的组件:装上量到足迹,卸掉时按**足迹**等,一样过 ──
+    #   ★ 挑**闸放得过**的那个里 peak 最大的 —— 挑全表最大(30b 的 11.9 > 预算 8.52)
+    #     会在预检就被拒,于是这条用例根本走不到装载,而它自称在测的是装载后的足迹。
+    #     那是 ASSERTION-PITFALLS 第 5 条的形状:**判据落在了它没在看的那条路径上**。
+    _big = max((c for c in gpu_broker.BROKER.cfg.components
+                if gpu_broker.BROKER.cfg.peak(c) <= gpu_broker.BROKER.cfg.budget.vram_budget),
+               key=lambda c: gpu_broker.BROKER.cfg.peak(c))
+    o["big_peak"] = gpu_broker.BROKER.cfg.peak(_big)
+    b2 = _mkvram(free=64.0, cost={_big: 3.0})     # ★ 真实占用 3.0,而 peak 声称更多
+    await b2.apply_intended([_big], permitted=[])
+    o["fp_big"] = dict(_v16_get(b2, "_footprint", {}) or {})
+    r2 = await b2.apply_intended([], permitted=[])
+    o["big"] = (r2.ok, r2.code, r2.state)
+
+    # ── ③ **反向**:显存真的没吐回来 ⇒ 仍然要判 vram_not_reclaimed ──
+    #   没有这一条,上面两条可以被一个「永远说通过」的实现全部满足。
+    b3 = _mkvram(free=64.0, cost={_big: 3.0})
+    await b3.apply_intended([_big], permitted=[])
+    b3._loader.cost[_big] = 0.0                   # 卸的时候**不还**那 3.0 GiB
+    b3._await_reclaim = lambda *a, **k: _done("vram_not_reclaimed")   # 免去真等 10 秒
+    r3 = await b3.apply_intended([], permitted=[])
+    o["not_reclaimed"] = (r3.ok, r3.code, r3.state, list(b3._committed))
+    return o
+
+
+async def _done(v):
+    return v
+
+
+_v16a = asyncio.run(_t_v16_reclaim())
+check("★★★ 零足迹组件(speech.lite:实测 0.002 GiB 而 peak 声称 2.07)"
+      "**装得上也卸得掉** —— 这正是 V13 撞出来的那条路",
+      _v16a["zero"][0] and _v16a["zero"][1] and _v16a["zero"][2] == ""
+      and _v16a["zero"][3] == gpu_broker.STATE_READY, _v16a["zero"])
+check("★★ 而且**没有等满那 10 秒** —— 没什么可等的时候就不该等",
+      _v16a["zero"][5] < 5.0, f'{_v16a["zero"][5]:.2f}s')
+check("★ 卸完之后 committed 是空的(账本跟上了现实)", _v16a["zero"][4] == [])
+check("★★ 实测足迹被**真的量了一次**,而且量出来是 0(不是拿 peak 顶上)",
+      _v16a["fp_zero"].get(_small) == 0.0, _v16a["fp_zero"])
+check("★★★ 真占显存的组件:足迹量成**实测的 3.0**,而不是它声称的 peak —— "
+      "旧判据要求把整个 peak 吐回来,差额就是它必然误报的量",
+      bool(_v16a["fp_big"]) and abs(list(_v16a["fp_big"].values())[0] - 3.0) < 0.01
+      and list(_v16a["fp_big"].values())[0] < _v16a["big_peak"],
+      (_v16a["fp_big"], _v16a["big_peak"]))
+check("★ 按足迹等,卸载事务通过", _v16a["big"][0] and _v16a["big"][2] == gpu_broker.STATE_READY,
+      _v16a["big"])
+check("★★★ **反向**:显存真的没吐回来 ⇒ 照样判 vram_not_reclaimed。"
+      "没有这一条,上面几条可以被一个「永远说通过」的实现全部满足",
+      _v16a["not_reclaimed"][1] == "vram_not_reclaimed", _v16a["not_reclaimed"])
+check("★★★ 但它**不再是 RECONCILING** —— 进程确实没了、账本也记下了 ⇒ "
+      "账本与现实**没有分家**,而 RECONCILING 的语义就是分家。"
+      "拿它当『显存异常』的落点,是把一次可重试的失败变成死锁态",
+      _v16a["not_reclaimed"][2] == gpu_broker.STATE_READY, _v16a["not_reclaimed"])
+check("★★ 而且卸下来的那一份**真的从 committed 里去掉了** —— "
+      "旧代码在这条路径上直接 return,committed 仍然列着一个进程已经死了的组件",
+      _v16a["not_reclaimed"][3] == [], _v16a["not_reclaimed"][3])
+
+
+print("\n=== V16 ② · RECONCILING 必须**出得去**,而且要留下可查的记录 ===")
+
+# ── 反向全表:ALLOWED_TRANSITIONS 里写着合法的边,必须**真的有代码走过它** ──
+#   旧代码:RECONCILING → READY 写在白名单里(:194)而全模块零调用点 ——
+#   「看着有出口、实际没有」正是本项目最恨的那种形状。
+check("★ 白名单里 RECONCILING → READY 这条边仍然登记着",
+      gpu_broker.STATE_READY in gpu_broker.ALLOWED_TRANSITIONS[gpu_broker.STATE_RECONCILING])
+check("★★★ 而且**有代码走它**:存在 reconcile_tick(判据)与 reconcile_to_actual(人的动作)",
+      hasattr(gpu_broker.Broker, "reconcile_tick")
+      and hasattr(gpu_broker.Broker, "reconcile_to_actual"))
+check("★★ 采样循环里真的调了那条判据(不是写了个没人叫的函数 —— D102 那个形状)",
+      "reconcile_tick()" in assert_helpers.code_only(gpu_broker.Broker._sampler_loop))
+check("★★★ 而 reconcile_to_actual(会改 committed 的那条)**不在**采样循环里 —— "
+      "它是人的动作,挂进自动路径就是 D10 禁的那种自动触发",
+      "reconcile_to_actual" not in assert_helpers.code_only(gpu_broker.Broker._sampler_loop))
+check("★★ 它在网关的**开机路**上有调用点(写好了的恢复动作零调用点 = 没写)",
+      "reconcile_to_actual" in assert_helpers.code_only(gateway._start_gpu_broker))
+check("★★★ **反向**:它**不在任何请求处理器**里 —— 它会改 committed,"
+      "而开机那一刻 committed 本来就是刚从现实推出来的、还没承载任何用户意图;"
+      "挂到请求路径上就变成了「一个请求把别人的账本改了」",
+      "reconcile_to_actual" not in assert_helpers.code_only(gateway.gpu_intended)
+      and "reconcile_to_actual" not in assert_helpers.code_only(gateway.gpu_intent))
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ V16 · 反向全表:白名单里的**每一条边**都要登记一个**驱动者**
+#
+#  这条表就是 V16 撞到的那件事的**一般形式**:`RECONCILING → READY` 写在
+#  `ALLOWED_TRANSITIONS` 里(:194),而全模块**零调用点** ——
+#  于是「看着有出口、实际没有」躲过了此前**所有**断言,直到有人真的被卡在里面。
+#  ⇒ 从此:加一条边而不给它驱动者,是一件**会红**的事;
+#    而"今天有意留着没有驱动者"的那几条,必须**逐条写在下面这张表里**,
+#    ★ 那不是豁免,是一张**看得见的欠债表**。
+# ══════════════════════════════════════════════════════════════════════
+_S = gpu_broker
+_EDGE_DRIVERS = {
+    (_S.STATE_STARTING,    _S.STATE_READY):         "finish_startup",
+    (_S.STATE_STARTING,    _S.STATE_RECONCILING):   "finish_startup",
+    (_S.STATE_READY,       _S.STATE_STAGING):       "apply_intended",
+    (_S.STATE_STAGING,     _S.STATE_PRECHECK):      "apply_intended",
+    (_S.STATE_STAGING,     _S.STATE_READY):         "apply_intended",
+    (_S.STATE_PRECHECK,    _S.STATE_APPLYING):      "apply_intended",
+    (_S.STATE_PRECHECK,    _S.STATE_STAGING):       "_back_to_staging",
+    (_S.STATE_APPLYING,    _S.STATE_READY):         "apply_intended",
+    (_S.STATE_APPLYING,    _S.STATE_RECONCILING):   "_to_reconciling",
+    # ★★★ V16 新接上的那一条 —— 在此之前它是白名单里唯一"合法却没人走"的出口边
+    (_S.STATE_RECONCILING, _S.STATE_READY):         "reconcile_tick",
+    (_S.STATE_RECONCILING, _S.STATE_DEGRADED_SAFE): "apply_intended",
+    (_S.STATE_DEGRADED_SAFE, _S.STATE_STARTING):    "set_power",
+}
+#: **今天有意没有驱动者**的边。★ 一张欠债表,不是豁免表 —— 逐条写明为什么。
+_EDGES_WITHOUT_DRIVER = {
+    # READY 永远先经 STAGING 进事务(apply_intended 第 ① 步),所以这条直达边
+    # 今天没有任何代码走。**留着**是因为 §8.1 的状态图里有它;
+    # 若哪天真要用,得先在上表登记驱动者,否则本条断言会红。
+    (_S.STATE_READY, _S.STATE_RECONCILING),
+}
+_ALL_EDGES = {(src, dst) for src, dsts in _S.ALLOWED_TRANSITIONS.items() for dst in dsts}
+check("★★★ 白名单里的每条边**要么有驱动者、要么登记在欠债表里** —— "
+      "没有第三种。V16 之前 RECONCILING → READY 就落在第三种里:"
+      "写着合法、零调用点、而所有断言都看不见它",
+      _ALL_EDGES == (set(_EDGE_DRIVERS) | _EDGES_WITHOUT_DRIVER),
+      f"没登记 {sorted(_ALL_EDGES - set(_EDGE_DRIVERS) - _EDGES_WITHOUT_DRIVER)} · "
+      f"登记了但白名单里没有 {sorted((set(_EDGE_DRIVERS) | _EDGES_WITHOUT_DRIVER) - _ALL_EDGES)}")
+for (_src, _dst), _drv in sorted(_EDGE_DRIVERS.items()):
+    _fn = getattr(gpu_broker.Broker, _drv, None)
+    check(f"★ 驱动者 {_drv} 真的存在({_src} → {_dst})", _fn is not None)
+    if _fn is not None:
+        check(f"★★ 而且它源码里真的写着那个目标状态({_src} → {_dst})——"
+              "光有个函数名不算,判据要落在它真的走那条边上",
+              f"STATE_{_dst}" in assert_helpers.code_only(_fn), _drv)
+check("★★ 欠债表**只许变短**:今天恰好一条,而且是那条 READY → RECONCILING 直达边",
+      _EDGES_WITHOUT_DRIVER == {(_S.STATE_READY, _S.STATE_RECONCILING)},
+      sorted(_EDGES_WITHOUT_DRIVER))
+check("★★★ 落盘的那条也有调用点,而且落在 {state}/logs(与 upstream_problem 同一套强 ACL)",
+      hasattr(gateway, "log_gpu_reconcile")
+      and inspect.getsource(gateway).count("log_gpu_reconcile(") >= 3
+      and "gpu_reconcile.jsonl" in inspect.getsource(gateway.log_gpu_reconcile))
+
+
+async def _t_v16_recon():
+    o = {}
+    # ── ① 账本与现实重新对上 ⇒ 自愈回 READY ──
+    b = _mkbroker(free=64.0, loader=_FakeLoaderObs([_small]))
+    b._state = gpu_broker.STATE_RECONCILING
+    b._committed = [_small]
+    b._actual_cache = [_small]
+    o["tick_ok"] = (await _v16_m(b, "reconcile_tick")(), b._state)
+
+    # ── ② 还没对上 ⇒ **停在 RECONCILING**(判据不是"到点就放行")──
+    b2 = _mkbroker(free=64.0, loader=_FakeLoaderObs([]))
+    b2._state = gpu_broker.STATE_RECONCILING
+    b2._committed = [_small]
+    b2._actual_cache = []
+    o["tick_no"] = (await _v16_m(b2, "reconcile_tick")(), b2._state, b2.serves_requests())
+    # 但它必须**说得出**是哪几项对不上,而不是一句"忙"
+    _r = await b2.apply_intended([], permitted=[])
+    o["busy_why"] = (_r.code, _r.message)
+    # ── ③ 人的动作:以现实为准对齐 ⇒ 出得去,且 intended 一个字不动 ──
+    b2._intended = [_small]
+    o["realign"] = (await _v16_m(b2, "reconcile_to_actual")() or {}, b2._state,
+                    list(b2._committed), list(b2._intended))
+
+    # ── ④ **端到端**:一次真的失败事务把它打进 RECONCILING,之后**必须还能点确定** ──
+    #   这正是 V13 实机撞出来的那条路(旧代码:此后一切变更永久 busy)。
+    b3 = _mkbroker(free=64.0, loader=_FakeLoader(fail_load={_small}))
+    r_fail = await b3.apply_intended([_small], permitted=[])
+    _rl = _v16_get(b3, "_reconcile_log", []) or []
+    o["entered"] = (r_fail.code, r_fail.state, tuple(x["event"] for x in _rl))
+    b3._loader.fail_load = set()               # 故障过去了
+    b3._actual_cache = []                      # 现实:一个都没装,与 committed(空)一致
+    r_retry = await b3.apply_intended([_small], permitted=[])
+    o["retry"] = (r_retry.ok, r_retry.code, r_retry.state)
+    _rl2 = _v16_get(b3, "_reconcile_log", []) or []
+    o["log"] = [x["event"] for x in _rl2]
+    o["log_has_why"] = bool(_rl2) and all(x.get("code") and x.get("message") for x in _rl2)
+    return o
+
+
+_v16b = asyncio.run(_t_v16_recon())
+check("★★★ 账本与现实重新对上 ⇒ 离开 RECONCILING 回 READY(此前**没有任何**代码走这条边)",
+      _v16b["tick_ok"] == (gpu_broker.STATE_READY, gpu_broker.STATE_READY), _v16b["tick_ok"])
+check("★★★ **反向**:还没对上就**停在 RECONCILING** —— "
+      "一个「到点就放行」的实现能让上一条绿,却把这条判据整个抽空",
+      _v16b["tick_no"][0] is None
+      and _v16b["tick_no"][1] == gpu_broker.STATE_RECONCILING, _v16b["tick_no"])
+check("★ 停在 RECONCILING 期间**仍然提供服务**(方案书行 1606 给它的原意)",
+      _v16b["tick_no"][2] is True)
+check("★★ 而拒绝的理由**点名**是哪几项对不上 —— 「忙」是个指向别处的假理由",
+      _v16b["busy_why"][0] == "busy" and "committed" in _v16b["busy_why"][1],
+      _v16b["busy_why"])
+check("★★★ 人的动作:以现实为准对齐 ⇒ 出得去",
+      _v16b["realign"][0].get("ok") and _v16b["realign"][1] == gpu_broker.STATE_READY,
+      _v16b["realign"][:2])
+check("★★ 对齐**只动 committed,不动 intended** —— 与 I4 同一条理由:"
+      "系统对齐自己的账本,不该顺手改写用户勾了什么",
+      _v16b["realign"][2] == [] and _v16b["realign"][3] == [_small], _v16b["realign"][2:])
+check("★★★ 端到端:一次真失败把它打进 RECONCILING",
+      _v16b["entered"][1] == gpu_broker.STATE_RECONCILING, _v16b["entered"])
+check("★★★ 而**之后还点得动确定** —— 这一条就是 V13 撞出来的那条卡死路径。"
+      "旧代码在这里永久返回 busy,只能重启进程",
+      _v16b["retry"][0] is True and _v16b["retry"][2] == gpu_broker.STATE_READY,
+      _v16b["retry"])
+check("★★★ 进/出都留下了**可查的记录** —— 旧代码把 _transition 的 why 整个丢掉,"
+      "而本模块没有任何日志 ⇒ 「为什么进的 RECONCILING」连重启之前都查不到",
+      _v16b["log"] == ["entered", "resolved"], _v16b["log"])
+check("★★ 每条记录都带**码与人话**(只记一个时间戳等于没记)", _v16b["log_has_why"])
+check("★ 记录环有上限(不设上限的话长跑的中枢会把它涨成内存泄漏)",
+      (_v16_get(gpu_broker.Broker, "RECONCILE_LOG_MAX") or 1 << 30) <= 64)
+# ── ★★ 反向:DEGRADED_SAFE **不许**被自愈判据带出来(它是终态,只有人能开电源轴)──
+_dg = _mkbroker(free=64.0, loader=_FakeLoaderObs([]))
+_dg._state = gpu_broker.STATE_DEGRADED_SAFE
+asyncio.run(_v16_m(_dg, "reconcile_tick")())
+check("★★★ 反向:自愈判据**碰不到** DEGRADED_SAFE —— 它是终态,唯一出口是人重开电源轴(D10)。"
+      "没有这条反向,一个「见状态就放行」的实现会把终态也一并放掉",
+      _dg._state == gpu_broker.STATE_DEGRADED_SAFE, _dg._state)
+
+
+print("\n=== V16 ③ · 「Broker 说已卸载」与「进程真的没了」之间那条**能为假**的判据 ===")
+
+import model_loader as _mlx     # noqa: E402  ★ 本节要子类化装载器注入端口真假
+
+
+class _PortLoader(_mlx.ModelLoader):
+    """★ 把**端口的真假**注入进来 —— 不去真的绑 18081/18085(那是去动真实系统)。"""
+
+    def __init__(self, cfg, live=()):
+        super().__init__(cfg=cfg)
+        self.live = set(live)
+
+    async def _port_state(self, port, timeout=2.0):
+        return self.PORT_READY if port in self.live else self.PORT_DOWN
+
+
+_CFG = gpu_broker.BROKER.cfg
+_P18081 = sorted(c for c in _CFG.components if int(_CFG.components[c].get("port") or 0) == 18081)
+check("★ 前提:确实存在同端口多组件(18081 被 8b 三档共用)—— "
+      "『分不清是哪一档』这条诚实边界要真的有对象",
+      len(_P18081) >= 2, _P18081)
+
+
+async def _t_v16_truth():
+    o = {}
+    # ── ① 账本空 + 端口活着 = 孤儿。running() **结构上看不见**,residency_truth 看得见 ──
+    ld = _PortLoader(_CFG, live={18081})
+    o["running_blind"] = await ld.running()
+    o["truth"] = await _v16_m(ld, "residency_truth")() or {"orphan_ports": None, "orphan_candidates": {}}
+
+    b = gpu_broker.Broker(cfg=_CFG)
+    b.attach_loader(ld)
+    b._actual_cache = await ld.running()
+    b._residency_truth = o["truth"]
+    o["i3_orphan"] = {r.invariant: (r.holds, r.detail) for r in b.check_invariants()}["I3"]
+
+    # ── ② **反向**:端口全灭 ⇒ I3 必须回绿(一个永远判红的检测器等于没有检测器)──
+    ld2 = _PortLoader(_CFG, live=set())
+    b2 = gpu_broker.Broker(cfg=_CFG)
+    b2.attach_loader(ld2)
+    b2._actual_cache = await ld2.running()
+    b2._residency_truth = await _v16_m(ld2, "residency_truth")()
+    o["i3_clean"] = {r.invariant: r.holds for r in b2.check_invariants()}["I3"]
+
+    # ── ③ **还没探过** ≠ 没问题:探针没跑时 I3 要说出来 ──
+    b3 = gpu_broker.Broker(cfg=_CFG)
+    b3.attach_loader(ld2)
+    o["i3_unprobed"] = {r.invariant: r.detail for r in b3.check_invariants()}["I3"]
+
+    # ── ④ unload 的回执:认领来的**没杀**必须说出来,不能与"已经没了"同形 ──
+    ld3 = _PortLoader(_CFG, live={18081})
+    ld3._adopted.add(_P18081[0])
+    o["rep"] = await ld3.unload([_P18081[0]]) or {"killed": None, "skipped_adopted": None}
+    o["verify"] = await _v16_m(ld3, "verify_unloaded")([_P18081[0]], keep=[]) or []
+    o["readopt"] = await _v16_m(ld3, "readopt")([_P18081[0]])
+    o["after_readopt"] = await ld3.running()
+
+    # ── ⑤ 同端口多组件:隔壁那一档还在跑,**不算**没卸干净 ──
+    ld4 = _PortLoader(_CFG, live={18081})
+    o["verify_keep"] = await _v16_m(ld4, "verify_unloaded")([_P18081[0]], keep=[_P18081[1]])
+
+    # ── ⑥ running() **不再因为一次非 2xx 就把 adopted 丢账** ──
+    #   旧代码:非 2xx 即 discard ⇒ llama-server 加载中回 503 的那一瞬间,
+    #   一个占着 6 GiB 的后端被从账本上永久抹掉,而抹掉之后再没人会回来探它。
+    class _Loading(_PortLoader):
+        async def _port_state(self, port, timeout=2.0):
+            return self.PORT_ALIVE if port in self.live else self.PORT_DOWN
+
+    ld5 = _Loading(_CFG, live={18081})
+    ld5._adopted.add(_P18081[0])
+    o["loading_running"] = await ld5.running()
+    o["loading_kept"] = sorted(ld5._adopted)
+    ld6 = _Loading(_CFG, live=set())
+    ld6._adopted.add(_P18081[0])
+    await ld6.running()
+    o["down_dropped"] = sorted(ld6._adopted)
+    return o
+
+
+_v16c = asyncio.run(_t_v16_truth())
+check("★★★ `running()` 对孤儿**结构上不可能为真** —— 它的候选池就是账本,"
+      "账本忘了的那一条它永远不会去探。这是 S14 那条 /health 探活没抓到 V13 那一条的原因",
+      _v16c["running_blind"] == [], _v16c["running_blind"])
+check("★★★ 而 `residency_truth()` 探的是**全部登记端口** ⇒ 它**能为假**,"
+      "并且这一次就为假了:18081 上有人,而账本说不出他是谁",
+      _v16c["truth"].get("orphan_ports") == [18081], _v16c["truth"])
+check("★★ 同端口多组件时**只报端口不报组件名**(分不清就不假装分得清,与 adopt 同一条边界)",
+      set((_v16c["truth"].get("orphan_candidates") or {}).get(18081) or []) == set(_P18081),
+      _v16c["truth"].get("orphan_candidates"))
+check("★★★ I3 因此**判红** —— V16 之前它在同一处境下报绿"
+      "(实机复现:6.5 GiB 的孤儿活着,I2/I3/I4 三条全绿)",
+      _v16c["i3_orphan"][0] is False, _v16c["i3_orphan"])
+check("★★ 而且说得出是**哪个端口**", "18081" in _v16c["i3_orphan"][1])
+check("★★★ **反向**:端口全灭 ⇒ I3 回绿。一个永远判红的检测器和没有检测器是一回事",
+      _v16c["i3_clean"] is True)
+check("★★ **还没探过** ≠ 没问题:探针没跑时 I3 的理由里要说出这一点",
+      "还没探过" in _v16c["i3_unprobed"], _v16c["i3_unprobed"])
+check("★★★ `unload()` 回执把「没杀」与「已经没了」**分开** —— "
+      "旧签名是 None,三个调用方一个字都收不到,于是两者在账上完全同形",
+      _v16c["rep"].get("skipped_adopted") == [_P18081[0]]
+      and _v16c["rep"].get("killed") == [], _v16c["rep"])
+check("★★★ 卸完之后**核实得出来**它还活着(旧代码在这里一次核对都没有)",
+      len(_v16c["verify"]) == 1 and _v16c["verify"][0].get("we_spawned_it") is False,
+      _v16c["verify"])
+check("★★ 还活着就**认回账上** —— 账本不该假装它已经没了;"
+      "认回来不等于要杀它,边界(不是我们起的不该由我们杀)一个字没动",
+      _v16c["readopt"] == [_P18081[0]] and _v16c["after_readopt"] == [_P18081[0]],
+      (_v16c["readopt"], _v16c["after_readopt"]))
+check("★★★ **反向**:隔壁那一档还占着同一个端口时,**不算**没卸干净 —— "
+      "8b 三档共用 18081,不传 keep 的话每次卸载都会误报",
+      _v16c["verify_keep"] == [], _v16c["verify_keep"])
+check("★★★ `running()` 不再因为一次**非 2xx**就把 adopted 丢账 —— "
+      "llama-server 加载中回 503,而那时它**已经占满了显存**",
+      _v16c["loading_running"] == [] and _v16c["loading_kept"] == [_P18081[0]],
+      (_v16c["loading_running"], _v16c["loading_kept"]))
+check("★★ 而**真的连不上**(down)时仍然丢账 —— 否则账本只会涨不会缩",
+      _v16c["down_dropped"] == [], _v16c["down_dropped"])
+
+# ── _kill:杀不掉要**说出来**,而且**不许丢句柄** ──
+class _Zombie:
+    """★ terminate/kill 都不管用的进程 —— Windows 上两者都是 TerminateProcess,
+    terminate 失败时 kill 会以同样的理由失败,而旧代码把两次异常都 pass 掉。"""
+    pid = 4242
+    returncode = None
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        raise OSError("拒绝访问")
+
+    def kill(self):
+        raise OSError("拒绝访问")
+
+
+async def _t_v16_kill():
+    ld = _PortLoader(_CFG, live={18081})
+    ld._procs[_P18081[0]] = _Zombie()
+    ok = await ld._kill(_P18081[0])
+    return ok, list(ld._procs), (await ld.unload([_P18081[0]])
+                                or {"kill_failed": None, "killed": None})
+
+
+_kl_ok, _kl_procs, _kl_rep = asyncio.run(_t_v16_kill())
+check("★★★ 杀不掉 ⇒ `_kill` 返回 False(旧代码永不抛、永不回,每一次卸载都『成功』)",
+      _kl_ok is False)
+check("★★★ 而且**句柄留在账上** —— 旧代码第一句就 pop,于是这个进程"
+      "再也没有任何一条路径能杀它第二次,`running()` 也永远不会再探它",
+      _kl_procs == [_P18081[0]], _kl_procs)
+check("★★ unload 的回执把它记进 kill_failed(与 killed / skipped_adopted 三分)",
+      _kl_rep.get("kill_failed") == [_P18081[0]] and _kl_rep.get("killed") == [], _kl_rep)
+# ── ★★★ 两个来源必须**合起来**看:端口探针盖不到不监听端口的组件(comfyui port=0),
+#   而回执盖不到「按边界没杀、但还占着显存」的认领孤儿。只用一个 = 有一整格盲区。
+_NOPORT = sorted(c for c in _CFG.components if not int(_CFG.components[c].get("port") or 0))
+check("★ 前提:确实存在**不监听端口**的组件(comfyui)—— 那一格端口探针什么都说不出来",
+      bool(_NOPORT), _NOPORT)
+_sf = getattr(gpu_broker.Broker, "_unload_shortfall", lambda *a: None)
+check("★★★ 端口探针说没事,但回执里有 kill_failed ⇒ 仍然算**没卸掉**。"
+      "只看端口的话,comfyui 这类不监听端口的组件杀失败会**完全静默**",
+      [x["component"] for x in (_sf({"kill_failed": [_NOPORT[0]]}, []) or [])] == [_NOPORT[0]]
+      if _NOPORT else False)
+check("★★ **反向**:回执干净且端口探针也干净 ⇒ 就是干净的"
+      "(一个永远说『没卸掉』的合流器和没有合流器是一回事)",
+      _sf({"killed": [_NOPORT[0]], "kill_failed": []}, []) == [])
+check("★ 两个来源指向同一个组件时**不重复计**",
+      len(_sf({"kill_failed": [_P18081[0]]},
+              [{"component": _P18081[0], "port": 18081, "port_state": "ready",
+                "we_spawned_it": True, "pid": 1, "why": "x"}]) or []) == 1)
+
+# ── 置信度:装载器接上了但**一次都没探过**时,actual 退回账本 ⇒ 不许自称 observed ──
+_c_unprobed = gpu_broker.Broker(cfg=_CFG)
+_c_unprobed.attach_loader(_PortLoader(_CFG))
+_c_unprobed._committed = [_small]
+check("★★★ 装载器接上但**还没探过**(_actual_cache is None)⇒ actual 退回账本,"
+      "confidence 必须如实标 self_reported。旧判据只问「接线在不在」,"
+      "于是实机复现时三条不变式自称 observed 而数据来自账本本身",
+      list(_c_unprobed.actual_resident) == [_small]
+      and {r.invariant: r.confidence
+           for r in _c_unprobed.check_invariants()}["I2"] == "self_reported")
 
 
 print(f"\n=== GPU Broker 骨架:{_pass} PASS · {_fail} FAIL ===")
