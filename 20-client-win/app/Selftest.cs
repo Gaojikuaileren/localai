@@ -8600,6 +8600,66 @@ public static class Selftest
                         + "给它建一条【可能被暂停】的任务是误导");
                 }
             }
+
+            // ======================= V14 · 单实例锁的作用域(硬前置)=======================
+            // ★ 本段是**追加**,没有重排上面任何一条(多车道共享 Selftest.cs 的纪律)。
+            //
+            // 背景:排他与唤醒原来两把都写成会话级 `Local\`,而排他保护的是
+            //   %LOCALAPPDATA% 下的 profile.json —— 那是**按用户**的,不是按会话。
+            // ★★ 2026-08-08 实测(同一个用户、同一份 LOCALAPPDATA、两个会话;
+            //   会话 0 那一侧用 S4U 计划任务起,同用户、非交互):
+            //       Local\ 互斥体 : session=1 FIRST · session=0 **FIRST**   ← 两个都以为自己唯一
+            //       锁文件        : session=1 FIRST · session=0 **SECOND**  ← 修好了
+            //   ⇒ 这不是推理,是复现出来的。下面几条把它钉住。
+            {
+                var lockDir = Path.Combine(tmp, "instlock");
+
+                // ---- ① 作用域:锁必须躺在它所保护的那个目录里 ----
+                Assert(InstanceLock.LockPathFor(lockDir, "Probe")
+                           .StartsWith(lockDir, StringComparison.OrdinalIgnoreCase),
+                    "★★ 锁文件与它保护的状态目录同作用域 —— 这是本次修复的全部要点:"
+                    + "锁的作用域必须等于被保护物的作用域(按用户),而不是按会话");
+
+                // ---- ② 排他与「在不在跑」:都是**行为**判据,不是源码文本 ----
+                using (var firstLock = InstanceLock.Acquire(lockDir, "Probe"))
+                {
+                    Assert(firstLock.IsFirst, "第一个实例拿得到锁");
+                    Assert(InstanceLock.IsRunning(lockDir, "Probe"),
+                        "★ 持锁期间 IsRunning 为真 —— 管理端就是靠它回答「客户端在不在」"
+                        + "(lifecycle 包 §6.2 要的那个跨进程判据)");
+                    using var secondLock = InstanceLock.Acquire(lockDir, "Probe");
+                    Assert(!secondLock.IsFirst,
+                        "★★ 第二个实例【拿不到】—— 否则两个进程会同时抱着同一份 profile.json");
+                }
+
+                // ---- ③ 释放之后必须还能再取(否则一次崩溃就再也起不来)----
+                Assert(!InstanceLock.IsRunning(lockDir, "Probe"),
+                    "★★ 释放后 IsRunning 转假 —— DeleteOnClose 让崩溃也不留下僵尸锁");
+                using (var againLock = InstanceLock.Acquire(lockDir, "Probe"))
+                    Assert(againLock.IsFirst, "★ 前一个退出之后,下一个必须还能起来");
+            }
+
+            // ---- ④ 反向钉:排他不许退回 Global\;唤醒必须仍然是 Local\ ----
+            // ★ 用 NoComments 而不是 CodeOnly:这里找的是**字符串字面量**里的名字,
+            //   而 CodeOnly 会把每个字面量整个换成 ""(ASSERTION-PITFALLS 3c:那个方向是恒真)。
+            // ★ 而 NoComments 又恰好躲开第 1 条那个坑 —— InstanceLock.cs 顶上那段
+            //   「为什么不改成 Global\」的说明里就带着这个词,照字面搜会把最负责任的写法判红。
+            var ilSrc = TryReadSource(Path.Combine("Services", "InstanceLock.cs"));
+            if (ilSrc is not null)
+            {
+                var ilLive = NoComments(ilSrc);
+                Assert(!ilLive.Contains("Global" + "\\"),
+                    "★★★ 排他不许退回 Global\\ 命名对象:2026-08-08 实测本机 SeCreateGlobalPrivilege "
+                    + "只给 LOCAL SERVICE / NETWORK SERVICE / Administrators / SERVICE,"
+                    + "**不含 BUILTIN\\Users** —— 而 D46 要求客户端一律普通用户运行。"
+                    + "⇒ 那条路在真正要跑的环境里 ACCESS_DENIED,却在开发机(机主是管理员)上永远试不出来");
+                Assert(ilLive.Contains("Local" + "\\" + "LocalAI."),
+                    "★★ 唤醒仍然是会话级 Local\\ —— 这不是遗漏:窗口只能显示在自己的会话里,"
+                    + "一个跨会话的唤醒信号收到了也没处显示");
+                Assert(ilLive.Contains("FileShare.None"),
+                    "★ 排他靠内核级独占打开(天然跨会话、零特权),不靠命名对象");
+            }
+            // ======================= V14 单实例锁段结束 =======================
         }
         catch (Exception ex) { fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
         finally
