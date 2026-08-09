@@ -470,6 +470,9 @@ if ($env:LOCALAI_PG_USER) {
 }
 
 $totalPass = 0; $totalFail = 0; $totalSkip = 0
+# ★ 管理端自检的数**有意不并进上面三个** —— 它单独一份(仓库形态 ≠ 出包形态)。
+#   预置成 $null,好让覆盖账分得清「跑了但为 0」与「压根没跑」。
+$adminSelftest = $null
 $ran = @(); $skipped = @(); $broken = @()
 
 function Invoke-PySuite($file, $interp) {
@@ -896,6 +899,104 @@ if ($Full) {
             Write-Host "  X 客户端自检没跑起来" -ForegroundColor Red
         }
     }
+
+    # ══════════════════════════════════════════════════════════════════
+    #  [管理端自检] 2026-08-09 接进门禁
+    #
+    #  ★★★ 起因是一笔写在 STATE 里的明账:此前门禁对管理端**只验编译**
+    #    (「√ 管理端工程编译通过(只 build,未 publish)」)⇒ 它那 150+ 条断言
+    #    **一条都不在提交门禁里**,只有跑 build-client.ps1 那一趟才会真跑。
+    #    **改坏管理端而不出包,-Full 会一直是绿的** —— 而管理端现在扛着 D114
+    #    搬过去的 3100 行。一份跑得起来、却没人跑的自检,和没有自检的区别
+    #    只在你记不记得手动跑。
+    #
+    #  ★★ 被测的是 **win-x64** 那个产物,而上面那次 `dotnet build`(不带 -r)
+    #    写的是 `<tfm>\` 那个 —— **两条路径必须不同**,否则门禁自己的 build
+    #    会把产物刷新,「产物比源码旧」那条守卫**永远不响**(客户端那半同一形状,
+    #    见上面 'client build' 那条守卫)。
+    #
+    #  ★ 它的数**单独列,不并进 $totalPass/$totalFail**:
+    #    仓库形态(153/0/SKIP=1)与出包形态(111/0)量的不是同一个东西 ——
+    #    出包那一趟旁边没有源码,一批结构判据整段跳过(第 11 条)。
+    #    加成一个总数就等于造一个没有任何东西量过的数字。
+    #    ★★ 但 FAIL>0 或"没跑起来"**照样进 $broken** ⇒ 门禁照红。
+    #
+    #  ★ SKIP 必须**透出来**:管理端自检自己会打印「★ SKIP 不是 PASS」,
+    #    而它今天那 1 条 SKIP 是「八步优雅退出的实跑验证」——
+    #    那条要 client 与 admin **并排**才跑得了(它找 ..\client\),
+    #    只有 build-client.ps1 搭得出那个形状。**把它吞掉就等于把 SKIP 读成通过。**
+    # ══════════════════════════════════════════════════════════════════
+    Write-Host ""
+    Write-Host "[管理端自检]" -ForegroundColor Cyan
+    $ADMIN_SCAN_ROOTS = @('20-client-win\admin')
+    $aexe = Join-Path $repo '20-client-win\admin\bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-admin.exe'
+    $newestASrc = @($ADMIN_SCAN_ROOTS |
+                    ForEach-Object { Join-Path $repo $_ } |
+                    Where-Object { Test-Path $_ } |
+                    ForEach-Object { Get-ChildItem $_ -Recurse -Include *.cs, *.xaml -File -ErrorAction SilentlyContinue }) |
+                  Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
+                  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $aStale = $false
+    if ((Test-Path $aexe) -and $newestASrc) {
+        $aexeTime = (Get-Item $aexe).LastWriteTimeUtc
+        if ($newestASrc.LastWriteTimeUtc -gt $aexeTime) {
+            $aStale = $true
+            $arel = $newestASrc.FullName.Substring($repo.Length).TrimStart('\')
+            $broken += [pscustomobject]@{ File = 'admin --selftest'
+                                          Why  = "产物比源码旧($arel 改于 $($newestASrc.LastWriteTimeUtc.ToString('MM-dd HH:mm')),产物出于 $($aexeTime.ToString('MM-dd HH:mm')))—— 跑它等于测上一版。先跑 90-ops\build-client.ps1" }
+            Write-Host "  X 管理端自检:产物比源码旧,跑它等于测上一版 —— 先出包" -ForegroundColor Red
+            Write-Host "     最新改动:$arel" -ForegroundColor DarkGray
+        }
+    }
+    if (-not (Test-Path $aexe)) {
+        # ★ 两种"没有产物"下一步完全相反 —— 与客户端那半同一判据(.git 是文件 = worktree)
+        $aDotGit = Join-Path $repo '.git'
+        if (Test-Path $aDotGit -PathType Leaf) {
+            $skipped += [pscustomobject]@{ File = 'admin --selftest'
+                                           Reason = '★ 这是一个 git worktree,`bin/` 不进 git ⇒ 本来就不会有构建产物。' +
+                                                    '★★ 但别读成「管理端没问题」—— 本次运行【没有跑过任何一条管理端断言】。' }
+            Write-Host "  ! 管理端自检:worktree 里没有产物,已记进覆盖账的「没跑」栏(不判红)" -ForegroundColor Yellow
+        } else {
+            $broken += [pscustomobject]@{ File = 'admin --selftest'
+                                          Why = "没有构建产物($aexe)—— 先跑 90-ops\build-client.ps1" }
+            Write-Host "  X 管理端自检:没有构建产物,先出一次包" -ForegroundColor Red
+        }
+    } elseif ($aStale) {
+        # 已在上面报过;这里**不跑** —— 跑出来的绿数字比不跑更有害
+    } else {
+        $alog = Join-Path ([IO.Path]::GetTempPath()) ("localai-ci-adminselftest-" + [Guid]::NewGuid().ToString('N') + ".txt")
+        $aproc = Start-Process -FilePath $aexe -ArgumentList '--selftest' -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $alog
+        $aout2 = if (Test-Path $alog) { Get-Content $alog -Raw -Encoding UTF8 } else { '' }
+        Remove-Item $alog -Force -ErrorAction SilentlyContinue
+        if ($aout2 -match 'PASS=(\d+)\s+FAIL=(\d+)') {
+            $ap = [int]$Matches[1]; $af = [int]$Matches[2]
+            # ★ 先取 PASS/FAIL 再匹配 SKIP —— $Matches 是整个换掉的,不是累加(D91 裁定⑤踩过)
+            $askip = 0
+            if ($aout2 -match 'SKIP=(\d+)') { $askip = [int]$Matches[1] }
+            $adminSelftest = [pscustomobject]@{ Pass = $ap; Fail = $af; Skip = $askip }
+            if ($af -gt 0) {
+                # ★ 措辞要说清它是**哪一种**红:$broken 那一栏的抬头是「应该跑却没跑起来的」,
+                #   而这一条是**跑起来了、而且红了** —— 两件事的下一步完全不同
+                #   (没跑起来 ⇒ 去出包;跑了红了 ⇒ 去看那条断言)。
+                #   红测(2026-08-09)第一版只写「管理端自检 FAIL=1」,读起来像"没跑起来",
+                #   而**给错原因的提示比不给提示更坏**。⇒ 在 Why 里把类别写死。
+                $broken += [pscustomobject]@{ File = 'admin --selftest'
+                                              Why  = "★ 管理端自检**跑起来了,但 FAIL=$af** —— 这不是「没跑起来」,是**跑了且红了**。" +
+                                                     "下一步是去看那 $af 条红的断言(跑 20-client-win\admin\bin\Release\net9.0-windows10.0.19041.0\win-x64\localai-admin.exe --selftest 看逐条),**不是**去出包。" }
+            }
+            $ac = if ($af -gt 0) { 'Red' } else { 'DarkGray' }
+            $ask = if ($askip -gt 0) { "  SKIP=$askip" } else { '' }
+            Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}{3}" -f 'admin --selftest', $ap, $af, $ask) -ForegroundColor $ac
+            Write-Host "     ★ 这个数【不并进全仓总数】—— 仓库形态与出包形态量的不是同一个东西" -ForegroundColor DarkGray
+            if ($askip -gt 0) {
+                Write-Host "     ★★ SKIP=$askip 不是 PASS:那是「八步优雅退出的实跑验证」,它要 client 与 admin 并排才跑得了" -ForegroundColor Yellow
+                Write-Host "        ⇒ 只有 90-ops\build-client.ps1 搭得出那个形状。**跳过 = 那条没被验过。**" -ForegroundColor Yellow
+            }
+        } else {
+            $broken += [pscustomobject]@{ File = 'admin --selftest'; Why = "没有汇总行(退出码 $($aproc.ExitCode))" }
+            Write-Host "  X 管理端自检没跑起来" -ForegroundColor Red
+        }
+    }
 } else {
     $skipped += [pscustomobject]@{ File = 'dotnet 自检(identity / lan-edge / transport)+ 客户端 --selftest'
                                    Reason = '慢(数分钟)。加 -Full 一起跑。' }
@@ -948,6 +1049,24 @@ if ($totalSkip -gt 0) {
     # ★ SKIP 单独一行,且明写「不是 PASS」:它是套件**自己**报的「这段我没验」,
     #   混进 PASS 里就等于把没验过的东西算成验过了。
     Write-Host "  ★ SKIP    : $totalSkip 条 —— **SKIP 不是 PASS**,是套件自报「这段没验」,逐条看上面哪个套件报的" -ForegroundColor Yellow
+}
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 管理端自检:**单列一行,有意不并进上面那个合计**(2026-08-09)
+#    仓库形态与出包形态量的不是同一个东西 —— 出包那一趟旁边没有源码,
+#    一批结构判据整段跳过(第 11 条)。加成一个总数 = 造一个没有任何东西量过的数字。
+#    ★ 但它 FAIL>0 或没跑起来照样进 $broken ⇒ 门禁照红(见上面 [管理端自检] 段)。
+# ══════════════════════════════════════════════════════════════════════════
+if ($null -ne $adminSelftest) {
+    $amsg = "  ★ 管理端  : PASS=$($adminSelftest.Pass)  FAIL=$($adminSelftest.Fail)" +
+            $(if ($adminSelftest.Skip -gt 0) { "  SKIP=$($adminSelftest.Skip)" } else { "" }) +
+            "  —— **单列,不并进上面那个合计**(仓库形态 ≠ 出包形态,量程不同)"
+    Write-Host $amsg -ForegroundColor $(if ($adminSelftest.Fail -gt 0) { 'Red' } else { 'Yellow' })
+    if ($adminSelftest.Skip -gt 0) {
+        Write-Host "              ★★ 那 $($adminSelftest.Skip) 条 SKIP 是「八步优雅退出的实跑验证」—— 它要 client 与 admin 并排才跑得了," -ForegroundColor Yellow
+        Write-Host "                 只有 90-ops\build-client.ps1 搭得出那个形状。**跳过 = 那条没被验过**,不是通过。" -ForegroundColor Yellow
+    }
+} elseif ($Full) {
+    Write-Host "  ★ 管理端  : **本次没跑**(见上方 [管理端自检] 段的理由)—— 别读成「管理端没问题」" -ForegroundColor Yellow
 }
 # ══════════════════════════════════════════════════════════════════════════
 #  ★★★ 契约欠配对 —— 它**不是 FAIL,但它也不是「没事」**,所以必须单列。
