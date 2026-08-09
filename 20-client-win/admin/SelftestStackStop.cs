@@ -129,8 +129,9 @@ public static partial class Selftest
                         $"★★★ 机器上有个 {StackOwnership.EdgeProcName},而账本里没有它 ⇒ **一个字都不许动**。"
                         + "★ 用户手工跑 90-ops\\start-stack.ps1 起的 Edge 就长这样 —— "
                         + "「名字对得上」不是「是我们起的」");
-                    Assert(rep.Untouched.Any(u => u.Contains(stray.Id.ToString(), StringComparison.Ordinal)),
-                        "★★ 而且要**如实说出来**:没动它、以及为什么没动。"
+                    Assert(rep.Unattributed.Any(u => u.Contains(stray.Id.ToString(), StringComparison.Ordinal)),
+                        "★★ 而且要**如实说出来**,写进【认不出归属】那张单子(不是【有意没动】那张)——"
+                        + "只有前者会在关掉自己之前弹给人看。"
                         + "★ 不说的话人会以为关栈已经把它带走了(D99 裁定④:置灰不说原因等于骗人)");
                     Assert(!rep.Did.Any(d => d.Contains(stray.Id.ToString(), StringComparison.Ordinal)),
                         "★ 它不许出现在【停掉了】那一栏里");
@@ -162,9 +163,18 @@ public static partial class Selftest
                     $"★★★ 127.0.0.1:{pyPort} 上有个别人的 python 在听,而账本里没有它 ⇒ **不许动它**。"
                     + "★ 这是本轮唯一一条会**损坏用户东西**的缺陷:Kill(entireProcessTree: true) "
                     + "会连着它的整棵子进程树一起带走");
-                Assert(rep.Untouched.Any(u => u.Contains(py.Id.ToString(), StringComparison.Ordinal)),
+                Assert(rep.Unattributed.Any(u => u.Contains(py.Id.ToString(), StringComparison.Ordinal)),
                     "★★ 并且**如实说不知道**:那个口上有人在听、我们没有它的归属账、所以没动 —— "
                     + "而不是安静地跳过(安静跳过与「那儿本来就没人」长得一模一样)");
+                // ★★★ 「不动手」只是一半 —— 另一半是**说**。这一条钉的就是那另一半:
+                //   端口探不到人 ⇒ AllGone=true ⇒ 管理端会**关掉自己**,
+                //   而 ToText() 那句「整套 AI 栈已经停掉了(已验)」在这个处境下是**假的**。
+                Assert(!rep.ToText().Contains("整套 AI 栈已经停掉了", StringComparison.Ordinal),
+                    "★★★ 有东西还在跑(只是我们不敢动它)时,**不许**打出「整套 AI 栈已经停掉了(已验)」——"
+                    + "那是弹窗里唯一让人相信栈没了的那句话");
+                Assert(rep.ToText().Contains("认不出归属", StringComparison.Ordinal),
+                    "★★ 报告里要有【认不出归属,没敢动】这一栏 —— "
+                    + "把它混进【有意没动】里,人就分不出「规矩如此」和「这一次的意外」");
             }
             Environment.SetEnvironmentVariable(GatewayPortEnvVar, gwPort.ToString());
 
@@ -234,16 +244,31 @@ public static partial class Selftest
             //  ⑤ 报告的话:没停干净时不许说「已经停掉了」
             // ═══════════════════════════════════════════════════════════════
             var notClean = new StackStop.StopReport(false, new[] { "动过 X" },
-                                                    new[] { "网关还在应答" }, Array.Empty<string>());
+                                                    new[] { "网关还在应答" },
+                                                    Array.Empty<string>(), Array.Empty<string>());
             Assert(!notClean.ToText().Contains("已经停掉了", StringComparison.Ordinal),
                 "★★★ 没停干净时**不许**打出「整套 AI 栈已经停掉了(已验)」—— "
                 + "那句话是弹窗里唯一让人相信栈没了的证据");
             Assert(notClean.ToText().Contains("网关还在应答", StringComparison.Ordinal),
                 "★★ 没停干净要把**还剩什么**摆出来,而不是只说一句失败");
             var clean = new StackStop.StopReport(true, new[] { "动过 X" },
-                                                 Array.Empty<string>(), Array.Empty<string>());
-            Assert(clean.ToText().Contains("已验", StringComparison.Ordinal),
-                "★ 停干净了才说「已验」");
+                                                 Array.Empty<string>(), Array.Empty<string>(),
+                                                 Array.Empty<string>());
+            Assert(clean.ToText().Contains("整套 AI 栈已经停掉了", StringComparison.Ordinal),
+                "★ **真的**全停了(什么都没剩、也没有认不出归属的)才说「整套 AI 栈已经停掉了」");
+            // ★ 三个标题两两不同 —— 合并任意两个,就等于把三种处境里的一种抹掉
+            var onlyAdopted = new StackStop.StopReport(true, new[] { "动过 X" }, Array.Empty<string>(),
+                                                       new[] { "认领的那批,不动" }, Array.Empty<string>());
+            var unknownLeft = new StackStop.StopReport(true, new[] { "动过 X" }, Array.Empty<string>(),
+                                                       Array.Empty<string>(), new[] { "8080 上有人在听,没动" });
+            string Head(StackStop.StopReport r) => r.ToText().Split('\n')[0];
+            Assert(Head(clean) != Head(onlyAdopted) && Head(onlyAdopted) != Head(unknownLeft)
+                   && Head(clean) != Head(unknownLeft),
+                "★★★ 三种结局要说三句**不同**的话:全停了 / 我们那些停了但认领的还在 / "
+                + "有东西还在跑而我们不敢动它。★ 合成一句就是给一个**错的**理由(D99 裁定④)");
+            Assert(!Head(unknownLeft).Contains("整套 AI 栈已经停掉了", StringComparison.Ordinal),
+                "★★★ 尤其是最后那种:那时说「整套 AI 栈已经停掉了(已验)」是**假话** —— "
+                + "它下面就跟着一张「还在跑」的单子");
         }
         catch (Exception ex)
         {
@@ -407,13 +432,19 @@ public static partial class Selftest
             var gw = StartDecoy(Path.Combine(tmp, "gw"), "localai-v23-gw-decoy", out var w1);
             var edge = StartDecoy(Path.Combine(tmp, "edge"), StackOwnership.EdgeProcName, out var w2);
             var bystander = StartDecoy(Path.Combine(tmp, "by"), "localai-v23-bystander", out var w3);
-            if (gw is null || edge is null || bystander is null)
+            // ★★ 第四个替身叫 `llama-server`,**不记账** —— 它让「有东西还在跑而我们认不出归属」
+            //   这个处境**确定地**发生(没有起栈快照 ⇒ 后端一个都不认领 ⇒ 进 Unattributed),
+            //   于是下面那条「关掉自己之前先说一声」才有确定的靶可打。
+            //   ★ 不这么安排的话,那条判据的成败取决于**你这台机器上现在有没有 llama-server**
+            //     —— 一条会随环境漂的断言(ASSERTION-PITFALLS 第 5 条)。
+            var backend = StartDecoy(Path.Combine(tmp, "be"), StackOwnership.BackendProcName, out var w4);
+            if (gw is null || edge is null || bystander is null || backend is null)
             {
                 Cant("④c 托盘右键「关闭」",
-                     "起不了替身进程(" + string.Join(" / ", new[] { w1, w2, w3 }.Where(w => w.Length > 0)) + ")");
+                     "起不了替身进程(" + string.Join(" / ", new[] { w1, w2, w3, w4 }.Where(w => w.Length > 0)) + ")");
                 return WriteLifecycleOut(outFile, lines, decoys, tmp);
             }
-            decoys.AddRange(new[] { gw, edge, bystander });
+            decoys.AddRange(new[] { gw, edge, bystander, backend });
             StackOwnership.Clear();
             StackOwnership.NoteStarted(StackOwnership.Component.Gateway, gw);
             StackOwnership.NoteStarted(StackOwnership.Component.Edge, edge);
@@ -431,6 +462,11 @@ public static partial class Selftest
             app.ConfirmClose = _ => true;
             var blocked = new List<string>();
             app.ReportCloseBlocked = t => blocked.Add(t);
+            // ★★ 这一环**必须**也替掉:它是 V23 新加的、在「关成了但有东西没敢动」时弹的那个框。
+            //   不替的话,凡是这台机器上恰好有个 llama-server 在跑,自检子进程就会**卡在模态框上**
+            //   直到看门狗 —— 而红的理由会是「托盘那条路没通」,一句假话。
+            var notices = new List<string>();
+            app.ReportCloseNotice = t => notices.Add(t);
 
             var exited = false;
             app.Exit += (_, _) => exited = true;
@@ -496,6 +532,19 @@ public static partial class Selftest
                 "4c-6 关掉之后托盘图标真的收走了 —— 留一个点不动的图标等于没关干净");
             Ok(blocked.Count == 0,
                 "4c-7 这一趟没有走到「关不成」那条岔路(走到了说明探针把不存在的客户端看成在跑)");
+            // ★★★ 「不动手」只是一半 —— 另一半是**说**。这两条钉的就是那另一半。
+            //   ★ 靶是确定的:上面那个不记账的 `llama-server` 替身保证了 Unattributed 非空,
+            //     而机器上**多几个真的 llama-server 也不影响** —— 它们汇总进同一条消息。
+            Ok(notices.Count == 1,
+                $"4c-14 ★★★ 关掉自己**之前**,把「还在跑、但我们认不出归属所以没动」那些**说了**"
+                + $"(实得 {notices.Count} 条通知)。★ 不说的话:他点了「关闭」、管理端安静消失、"
+                + "而他自己那个进程还在跑 —— 他会以为关栈根本没用,而真相是我们**有意**没动它");
+            Ok(notices.Count > 0 && notices[0].Contains("认不出归属", StringComparison.Ordinal),
+                "4c-15 ★★ 那句话要说清是【认不出归属】,不是含糊的「有东西没关」——"
+                + "给个错的理由比不给更坏(D99 裁定④)");
+            Ok(!Gone(backend),
+                "4c-16 ★★★ 而那个没记账的 `llama-server` **还活着** —— "
+                + "没有起栈快照时后端一个都不认领,这一条同时钉住了陈旧快照那个洞");
 
             // ★★★ 验收④ 的正题:**栈真的没了**,而且是从 LastStopReport 读出来的
             var rep = app.LastStopReport;

@@ -240,6 +240,18 @@ public partial class App : Application
     internal Action<string> ReportCloseBlocked { get; set; } = text =>
         MessageBox.Show(text, "关闭管理端", MessageBoxButton.OK, MessageBoxImage.Warning);
 
+    /// <summary>
+    /// 关**成了**、但有东西我们认不出归属所以没动 —— 关掉自己**之前**先告诉人的那一下(V23)。
+    /// <para>★★★ 为什么要多这一环:V23 之后「认不出归属就不动手」是常见结局,
+    /// 而那时端口探不到人 ⇒ <c>AllGone=true</c> ⇒ 管理端**安静地关掉自己**。
+    /// 用户点了「关闭」,屏幕上一个字都没有,而他自己那个 python 还在 8080 上跑着。
+    /// ⇒ 「不动手」只是一半,另一半是**说**。</para>
+    /// <para>★ 只在 <c>Unattributed</c> 非空时弹 —— <c>Untouched</c>(`adopt_running()` 认领的那批)
+    /// 是**用户早就知道的规矩**,每次关栈都会有,拿它弹窗就是噪音,而噪音会训练人不看弹窗。</para>
+    /// </summary>
+    internal Action<string> ReportCloseNotice { get; set; } = text =>
+        MessageBox.Show(text, "关闭管理端", MessageBoxButton.OK, MessageBoxImage.Information);
+
     /// <summary>自检读:托盘图标。null = 压根没建出来;Visible=false = 收掉了。</summary>
     internal WinForms.NotifyIcon? TrayIcon => _tray;
 
@@ -279,6 +291,14 @@ public partial class App : Application
                                + "\n\n★ 管理端没有关闭 —— 留着它,你还能再点一次「关闭」重试。");
             return;
         }
+
+        // ★★★ 停干净了,但**有东西我们认不出归属所以没敢动** —— 关掉自己之前先说一声。
+        //   不说的话:他点了「关闭」、管理端安静消失、而他自己那个 python 还在跑,
+        //   下一次他会以为「关栈根本没用」——而真相是我们**有意**没动它。
+        if (report.Unattributed.Count > 0)
+            ReportCloseNotice(report.ToText()
+                              + "\n\n★ 管理端现在就关闭。上面那些**不是**我们起的(至少我们证明不了),"
+                              + "所以没动 —— 要停请你自己确认后再停。");
 
         _settingsWatcher?.Dispose();
         if (_tray is not null) { _tray.Visible = false; _tray.Dispose(); }

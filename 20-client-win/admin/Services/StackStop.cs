@@ -55,9 +55,15 @@
 //       `90-ops/start-stack.ps1` 起的 edge 会被杀,而那**不是我们起的**。
 //
 //  ★★ 换上的**不是**一个更聪明的猜法,是**如实说不知道**:
-//    认不出归属时,把「谁在那个口上听 / 机器上有几个同名进程」写进 `Untouched`,
-//    让人自己决定。代价是「管理端重启过就关不掉网关了」—— 这个代价是用户明着认的,
-//    而它的反面是**替用户杀掉一个无关进程**,那没法撤销。
+//    认不出归属时,把「谁在那个口上听 / 机器上有几个同名进程」写进 `StopReport.Unattributed`,
+//    **并且由 `App.RealCloseAsync` 在关掉之前弹给人看**。代价是「管理端重启过就关不掉网关了」
+//    —— 这个代价是用户明着认的,而它的反面是**替用户杀掉一个无关进程**,那没法撤销。
+//
+//  ★★★ 「不动手」只是一半 —— 另一半是**说**。第一版只做了前一半:
+//    认不出归属 ⇒ 不动 ⇒ 端口探不到人 ⇒ `AllGone=true` ⇒ **管理端安静地关掉自己**,
+//    而 `ToText()` 那句「整套 AI 栈已经停掉了(已验)」根本没人看见(它只在失败路径上被调用)。
+//    ⇒ 用户点了「关闭」,屏幕上什么都没说,而他自己那个 python 还在 8080 上跑着。
+//    那和 V22 的误杀是**同一条毛病的两面**:一个替他做了决定,一个瞒了他一件事。
 //
 //  ★★★ 第三条在 `StackOwnership`:陈旧快照(见该文件头 V23 那段)。
 // ══════════════════════════════════════════════════════════════════════════════
@@ -123,15 +129,39 @@ public static class StackStop
     /// <param name="AllGone">停干净了没有 —— 判据是**端口不通 + 没有孤儿后端**,不是调用成功。</param>
     /// <param name="Did">逐条:动了谁。</param>
     /// <param name="Left">逐条:还剩谁(空表才算干净)。</param>
-    /// <param name="Untouched">逐条:**有意没动**的(认领的后端),以及为什么。</param>
+    /// <param name="Untouched">逐条:**有意没动**的(`adopt_running()` 认领的那一批),以及为什么。</param>
+    /// <param name="Unattributed">
+    /// 逐条:**认不出归属所以没动**的 —— 与 <paramref name="Untouched"/> 是**两件事**。
+    /// <para>★★★ V23 把它单独拆出来,理由不是分类癖:
+    /// 「认领的那批不动」是**用户早就知道的规矩**,每次关栈都会出现,拿它去弹窗就是噪音;
+    /// 而「8080 上有个东西、我们认不出它是不是自己起的、所以没动」是**这一次的意外**,
+    /// 用户不知道 —— 不说的话,他点了「关闭」、管理端安静退出,他会以为栈全停了。
+    /// ⇒ 「不动手」只做了一半,另一半是**如实说**(用户裁定原话)。两者合成一个列表就说不清了。</para>
+    /// </param>
     public sealed record StopReport(bool AllGone, IReadOnlyList<string> Did,
-                                    IReadOnlyList<string> Left, IReadOnlyList<string> Untouched)
+                                    IReadOnlyList<string> Left, IReadOnlyList<string> Untouched,
+                                    IReadOnlyList<string> Unattributed)
     {
         public string ToText()
         {
             var s = new System.Text.StringBuilder();
-            s.AppendLine(AllGone ? "整套 AI 栈已经停掉了(已验)。" : "★ 没有完全停干净 —— 下面是还剩的东西。");
+            // ★★★ 标题分三种,不是两种(V23)。
+            //   在此之前只要端口不通就打「整套 AI 栈已经停掉了(已验)」——
+            //   而 V23 之后「有东西还在跑、只是我们不敢动它」变成了**常见结局**,
+            //   那句话会和它下面那张「还在跑但没动」的单子当场自相矛盾。
+            s.AppendLine(!AllGone ? "★ 没有完全停干净 —— 下面是还剩的东西。"
+                       : Unattributed.Count > 0
+                         ? "AI 栈的入口**都不通了(已验)**。★ 但下面这些**还在跑** —— "
+                           + "我们认不出它们是不是自己起的,所以没动。请你自己看一眼。"
+                       : Untouched.Count > 0
+                         ? "我们起的那些都停掉了(已验:端口不通)。★ 下面是**有意没动**的那批。"
+                         : "整套 AI 栈已经停掉了(已验)。");
             if (Did.Count > 0) { s.AppendLine(); s.AppendLine("停掉了:"); foreach (var d in Did) s.AppendLine("  · " + d); }
+            if (Unattributed.Count > 0)
+            {
+                s.AppendLine(); s.AppendLine("★ 还在跑,但【我们认不出归属,没敢动】:");
+                foreach (var u in Unattributed) s.AppendLine("  · " + u);
+            }
             if (Untouched.Count > 0)
             {
                 s.AppendLine(); s.AppendLine("【有意没动】:");
@@ -169,6 +199,8 @@ public static class StackStop
         var did = new List<string>();
         var left = new List<string>();
         var untouched = new List<string>();
+        // ★ 认不出归属的那些单独一张单子 —— 见 StopReport.Unattributed 的说明。
+        var unattributed = new List<string>();
 
         // ★ 显存:停之前先读一次。★★ 它是**佐证**,不是判据 ——
         //   判据是端口与进程(下面第⑤步)。显存读不到时不影响结论,只是少一句佐证。
@@ -202,7 +234,7 @@ public static class StackStop
             if (strays.Count == 0)
                 did.Add($"LAN Edge:机器上没有 {StackOwnership.EdgeProcName} 在跑(它多半本来就没起)。");
             else
-                untouched.Add($"机器上有 {strays.Count} 个 {StackOwnership.EdgeProcName}"
+                unattributed.Add($"机器上有 {strays.Count} 个 {StackOwnership.EdgeProcName}"
                               + $"(PID {string.Join("、", strays.Select(p => p.Id))}),"
                               + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)—— "
                               + "手工跑 start-stack.ps1 起的 Edge 就长这样。"
@@ -218,7 +250,7 @@ public static class StackStop
                 did.Add($"网关:没有归属账,127.0.0.1:{HostSetup.GatewayPort} 上也没人在听 ——"
                         + "它多半本来就没起。");
             else
-                untouched.Add($"127.0.0.1:{HostSetup.GatewayPort} 上有人在听"
+                unattributed.Add($"127.0.0.1:{HostSetup.GatewayPort} 上有人在听"
                               + $"(PID {onPort.Value.Pid} · {onPort.Value.Name}),"
                               + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)。"
                               + "★ 在这个口上听、进程名像 python 的**不一定是网关** —— "
@@ -235,7 +267,7 @@ public static class StackStop
             //   猜"应该是这几个吧"然后杀掉,代价是杀掉用户正在用的进程。
             var live = StackOwnership.LiveBackends();
             if (live.Count > 0)
-                untouched.Add($"机器上还有 {live.Count} 个 {StackOwnership.BackendProcName}"
+                unattributed.Add($"机器上还有 {live.Count} 个 {StackOwnership.BackendProcName}"
                               + $"(PID {string.Join("、", live.Select(p => p.Id))})—— {snapWhy}。"
                               + "⇒ 分不出哪些是我们起的、哪些是你自己开着的,所以**一个都没动**。"
                               + "要停的话请自己确认后再停。");
@@ -287,7 +319,7 @@ public static class StackStop
         if (left.Count == 0) StackOwnership.Clear();   // ★ 停干净了才清账,没停干净留着好查
         StackBoot.Forget();                            // ★ 界面别再显示上一次起栈的绿灯
 
-        return new StopReport(left.Count == 0, did, left, untouched);
+        return new StopReport(left.Count == 0, did, left, untouched, unattributed);
     }
 
     /// <summary>现在用了多少显存(MiB)。★ 读不到返回 null —— **不返回 0**:
