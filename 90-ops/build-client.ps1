@@ -58,7 +58,49 @@ if ($dirty) {
     $ver = "$ver.dirty-$treeId"
 }
 
-if (-not $Out) { $Out = Join-Path $repo "dist\client-pack" }
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ V28:`$Out` 默认值从 `dist\client-pack` 改成**落位目录** ——
+#    补上 V22 只做了一半的那件事。V22 把 `$AdminOut` 改成并排的 `admin\`(管理端出包即落位),
+#    **而 `$Out` 一个字没动**。后果不是"名字不好看":
+#      · 无参跑一次,管理端落到 `dist\admin\`,客户端落到 `dist\client-pack\`,
+#        而部署位 `dist\client\` **原地不动** ⇒ 每出一次包,两个目录的戳就分裂一次。
+#      · 2026-08-09 那天 P4 清单为此连写错三次方向,第三次把**当天最新的**客户端包
+#        (`client-pack`)称作「上一轮的残留」,而它指人去拷的 `dist\client` 才是旧的那份。
+#        ★ 那份清单最后只好加一条「本节从此不写死任何版本戳」—— 拿纪律去糊一个**机械缺陷**。
+#
+#  ★★ 目录名是**算出来的,不是挑出来的**(与 [3b] 同一个手法,方向相反):
+#    管理端逐字探 `<管理端 exe 目录>\..\client\localai-client.exe`
+#    (`ClientLink.ClientExePathNextTo`,与客户端探管理端的 `AdminAppPathNextTo` 互为镜像)。
+#    ⇒ 这里直接把那条探测里的字面量抠出来用。在本文件里另写一个 "client" 字面量的话,
+#      改一处就会再断一次 —— 而断掉的表现仍然是"开发树里好好的"。
+#  ★ 抠不出来**判红**:零命中与全清白长得一模一样;更不许静默用 'client' 兜底 ——
+#    兜底会让这个洞再躺一版,而这一版它已经躺过了。
+# ══════════════════════════════════════════════════════════════════════════════
+$clientLinkSrc = Join-Path $repo '20-client-win\admin\Services\ClientLink.cs'
+if (-not (Test-Path $clientLinkSrc)) {
+    Write-Host "X 找不到 $clientLinkSrc —— 客户端落位目录名的【唯一来源】不见了。" -ForegroundColor Red
+    Write-Host "  ★ 不许猜一个:猜对了也只是这一次对,下一次改名照样断。" -ForegroundColor Red
+    exit 1
+}
+$cm = [regex]::Match((Get-Content $clientLinkSrc -Raw),
+                     'Path\.Combine\(\s*adminExeDir\s*,\s*"\.\."\s*,\s*"([^"]+)"')
+if (-not $cm.Success) {
+    Write-Host "X 读不出管理端探客户端时用的目录名(ClientLink.ClientExePathNextTo)。" -ForegroundColor Red
+    Write-Host "  ★ 这条判据的两端有一端不见了,不许静默兜底 —— 兜底就是把「客户端出包即落位」" -ForegroundColor Red
+    Write-Host "    这件事重新变成一句没人守的承诺。" -ForegroundColor Red
+    exit 1
+}
+$clientDirName = $cm.Groups[1].Value
+
+if (-not $Out) {
+    $Out = Join-Path $repo "dist\$clientDirName"
+} else {
+    # ★ 带 -Out 是**有意去别处**(例如出一份拿去比对的包)。允许,但要当场说清它不落位 ——
+    #   否则「我明明出过包了,怎么部署位还是旧的」会再发生一次。
+    Write-Host "  ! 指定了 -Out:$Out" -ForegroundColor Yellow
+    Write-Host "    ★ 这【不是】部署位($repo\dist\$clientDirName)—— 出完包部署位不会动。" -ForegroundColor Yellow
+    Write-Host "      要落位就别带 -Out。" -ForegroundColor Yellow
+}
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 Write-Host "[1] 发布单文件 exe(自包含,win-x64)…"
@@ -275,10 +317,19 @@ $pass1 = Invoke-GateSelftest -ExePath $exe -Label '发布产物原位'
 $hit1 = $script:LastSrcHit; $miss1 = $script:LastSrcMiss
 if ($null -eq $pass1) { exit 1 }
 
-# ★ 再跑一遍【第二种目录形状】—— 客户端真正装的位置是 dist\client,那儿 dist\host 就在旁边,
-#   而这里的 client-pack 旁边没有。只跑一种形状,"依赖安装位置"的断言就会溜过门禁:
+# ★ 再跑一遍【第二种目录形状】。只跑一种形状,"依赖安装位置"的断言就会溜过门禁:
 #   2026-08-03 真的溜过一次(HostToolsDir 的断言在 client-pack 绿、装到 dist\client 红)。
 #   代价是一次 exe 拷贝,换的是"断言必须与装在哪儿无关"这条被机械地钉住。
+#
+# ★★ V28 更正本段的口径 —— `$Out` 改成落位目录之后,这两种形状的**含义变了**:
+#   · 从前:① = `dist\client-pack`(旁边**没有** host)· ② = 临时目录(有 stub host)。
+#   · 现在:① = `dist\client`(**真的落位**,旁边就是真的 `dist\host`)
+#           ② = 临时目录(仓库外 + stub host)。
+#   ⇒ ① 从"一个谁也不装的中转目录"变成了**用户真正会双击的那一份**,这正是想要的:
+#     门禁第一次跑在真实安装形态上。★ 而两个数仍然**不可互比** —— ② 在仓库外,
+#     往上翻摸不到仓库级文件,那批【结构/接线】断言整段测不了(见下面写进 VERSION.txt 的口径)。
+#   ★★★ 若 ① 这一趟因此变红而 ② 是绿的:**不要**把 `$Out` 改回去。
+#     那说明有断言此前一直靠"旁边没有 host"才绿 —— 它测的是中转目录,不是产品。
 $shape = Join-Path ([IO.Path]::GetTempPath()) ("localai-gate-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path (Join-Path $shape 'client') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $shape 'host')   | Out-Null
@@ -409,7 +460,19 @@ if ($null -eq $passAdmin) {
     exit 1
 }
 
-$last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS=$pass2,FAIL=0;管理端 PASS=$passAdmin,FAIL=0）"
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ V28:客户端的 VERSION.txt **不再写管理端的数**。
+#
+#  「一个数写在两处」在这儿不是理论风险,是**已经发生的事故**:
+#    两个目录可以来自**不同的两次构建**(而"只重出改动的那一个"恰恰是正确做法),
+#    于是 `dist\client\VERSION.txt` 里那句「管理端 PASS=134」在盘上一直指着一个
+#    早就不存在的数 —— 同一天 `dist\admin\VERSION.txt` 里写的是 164。
+#  ★ 而当时的处置是往 P4 清单 §0 加一条「那个数不可信,管理端的数只看 dist\admin」——
+#    **拿文档去糊一个本来就不该存在的第二处**。文档糊不住:读的人先读到的是包里的数。
+#  ⇒ 不写第二处。管理端的数只由管理端自己的 VERSION.txt 说(就在旁边的目录里),
+#    它和管理端 exe 一起出、一起过期,永远不会各说各话。
+# ══════════════════════════════════════════════════════════════════════════════
+$last = "自检通过（两种安装位置,均有哨兵佐证:PASS=$pass1 / PASS=$pass2,FAIL=0）"
 # ★★★ 口径跟着数字进 VERSION.txt(2026-08-06)。
 #   在此之前 VERSION.txt 只写「PASS=852 / PASS=848」,而 STATE 的基线是四位数 ——
 #   读的人只能自己猜这两个数在量什么,而**猜错的方向是"以为覆盖变少了"**。
@@ -474,8 +537,13 @@ localai-admin(主机管理端)
 自检:   管理端(出包形态)PASS=$passAdmin FAIL=0
 构建于: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 
-★ 版本戳与同目录旁边的 localai-client 是【同一个】—— 同一次构建、同一棵源码树。
-  对不上就说明这两个包不是一起出的,别混用。
+★ 这一次构建**同时**出了客户端,落在:$Out
+  那份客户端的版本戳与本文件里这个是同一个($ver)—— 同一次构建、同一棵源码树。
+★★ 但**不要**把「两个目录的戳必须相同」当判据 —— 那条判据本身是错的:
+  只重出改动的那一个是**正确**做法,戳不同很正常。要核的是
+  「每个包各自含到哪一次提交」,各看各自的 VERSION.txt,不要互相推断。
+  (本文件此前写的是「与旁边的 client 必须是同一个,对不上就别混用」。
+   那句话在盘上长期不成立 —— 而它不成立的原因不是有人拷错了包,是判据写错了。)
 ★ 这个目录必须与 client\ 并排(客户端逐字探 ..\$adminDirName\localai-admin.exe),
   单独拷走会让「客户端拉起管理端 ⇒ 自动起栈」整条走不到。
 $verNote
@@ -498,12 +566,15 @@ Set-Content -Path (Join-Path $Out '安装说明.txt') -Encoding utf8 -Value @"
   (配过对之后还有别的证据可用,所以这条只在"未配对首启"这个窄场景下要紧。)
 
 【第一次打开】
-它会问你要中枢的连接地址,并做一次配对(六个词的短语要与主机上显示的逐字一致才按"确认")。
+它会问你要中枢的连接地址,并做一次配对:
+  ① 在这台上点「开始寻找主机」,从找到的中枢里选一个;这台会显示【六个词】。
+  ② 到**主机那台**的管理端「主机中枢」页上,把那六个词逐字核对一遍,再按「词一致,批准」。
+★ 批准是在【主机】上按的,不在这台按 —— 这台只负责把六个词显示出来给你核对。
 配对只做一次 —— 以后启动自动连接。
 
 【换了路由器/网段】
-不要"解除配对"。打开 系统 → 设备,在已配对卡片里直接【改地址】即可;
-证书与配对原样保留。(自动发现要等 P3b.2。)
+不要点「解除本机配对」。打开 系统 → 设置,找到「已配对的电脑」那一节,
+在卡片上直接点「改地址」即可;证书与配对原样保留。(自动发现要等 P3b.2。)
 
 【开机自启】
 在客户端的设置里开关,写的是当前用户的启动项(HKCU),不需要管理员。
