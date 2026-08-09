@@ -125,13 +125,37 @@ public static partial class Selftest
         Assert(unsafe_.Contains("副机正在用"), "★ 副机在用时问「副机正在用,仍要关吗」");
         Assert(!safe.Contains("副机正在用"), "★ 安全时不吓唬人");
 
-        // 今天必然读不到 —— 中枢那条路由还没开(DEBT,交接 V16)。
-        // ★ 这条断言是【故意】钉住"今天读不到"的:哪天 V16 把路由开出来,它会红,
-        //   而那正是提醒接手的人回来把这里接上,并把这条断言改成真正的往返测试。
-        var v = StackStop.QueryAsync().GetAwaiter().GetResult();
-        Assert(!v.Known,
-            "★ 今天关栈判据读不到(safe_to_stop_stack 还没有 HTTP 路由,10-core/gateway 是别人的车道)"
-            + " —— ★ 这条哪天变红,就是该回来把 " + StackStop.SafeToStopRoute + " 接上的信号");
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V25:那条路由**开出来了**,这一格按它自己写的交代改掉。
+        //
+        //  上一版逐字写着「今天必然读不到 —— 中枢那条路由还没开(DEBT,交接 V16)」,
+        //  并且说明「哪天路由开出来,它会红,那正是提醒接手的人把这里接上」。
+        //  ★★ 实际不会红 —— 这一点必须记下来,它是这类"预约式红灯"的通病:
+        //    自检环境里没有网关 ⇒ `QueryAsync` 走的是**拒连**那条路 ⇒ 仍然 `Known=false`
+        //    ⇒ `!v.Known` 照样成立、照样绿,而它的**判词已经变成假的**
+        //    (路由已经有了)。一条会说谎却不会红的断言,比没有断言更坏。
+        //  ⇒ 改成一条**能为假**的:证明 `QueryAsync` 真的**发了一次请求**。
+        // ══════════════════════════════════════════════════════════════════
+        {
+            // ★ 把网关端口临时指到一个**确定没人听**的口上,让"拒连"成为确定结果 ——
+            //   不这样的话,开发机上恰好跑着网关时这条会翻面,成为一条看天吃饭的断言。
+            var portSaved = Environment.GetEnvironmentVariable("LOCALAI_GATEWAY_PORT");
+            try
+            {
+                Environment.SetEnvironmentVariable("LOCALAI_GATEWAY_PORT", "1");
+                var v = StackStop.QueryAsync(timeoutMs: 1500).GetAwaiter().GetResult();
+                Assert(!v.Known, "★ 问不到网关时判【读不到】—— fail-closed 的方向没变");
+                Assert(v.Why.Contains("127.0.0.1:1" + StackStop.SafeToStopRoute),
+                    "★★★ 而且理由里带着**它真的拨过的那个地址** —— 这一条证明 QueryAsync "
+                    + "不再是 Task.FromResult(改回去当场红)。"
+                    + "★ 只判 !v.Known 的写法测不出这个区别:那一版也是 !Known");
+                Assert(v.Why.Contains("读不到"),
+                    "★ 措辞仍旧带【读不到】—— ConfirmText 的三分支判据靠它");
+            }
+            finally { Environment.SetEnvironmentVariable("LOCALAI_GATEWAY_PORT", portSaved); }
+            Assert(Environment.GetEnvironmentVariable("LOCALAI_GATEWAY_PORT") == portSaved,
+                "★ 收尾:网关端口环境变量已还原(不还原会让后面每一条都拨到 1 口)");
+        }
 
         // 客户端 exe 的定位:纯路径逻辑,两个方向都走一遍
         Assert(ClientLink.ClientExePathNextTo(null) is null && ClientLink.ClientExePathNextTo("  ") is null,

@@ -375,6 +375,9 @@ public sealed class HubClient
             {
                 401 when LooksRevoked(body) => "本设备已被主机解除,需要重新配对",
                 401 => "中枢在这条通道上拒绝了这次请求(401)—— 可能是权限或网关策略,先别重新配对",
+                // ★★★ V25:与业务通道**同一条判据、同一句话**(见 UpstreamGatewayDownMessage)。
+                //   这条 when 排在光秃秃的 `>= 500` 前面 —— 顺序反了就一行都执行不到。
+                >= 500 when LooksUpstreamGatewayDown(body) => UpstreamGatewayDownMessage(body),
                 >= 500 => $"中枢应答了,但返回 {status} —— 不是连不上,请看中枢日志",
                 _ => null,
             };
@@ -528,6 +531,46 @@ public sealed class HubClient
         Profile = await Transport.Pair(edgeUrl, ep, AppPaths.StateDir, displayName, onSas);
         State = HubState.Online;
         LastError = null;
+
+        // ★★★★ V25(用户裁定 2026-08-09):配对成功后**主动探一次**业务面。
+        await ProbeBusinessAfterPairAsync();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★★ V25 · 把「配得上但用不了」那个空档**当场**捅破。
+    //
+    //  ★ 这个空档是结构性的:配对整条链(pair/enroll/六词/approve/active)
+    //    只用 8443+8442,**一次都不碰网关**。于是上面那行 `State = Online`
+    //    是**真话里的假话** —— 配对确实成了,而"能用了"从来没有被任何东西证明过。
+    //    副机上又没有管理端(那张会说真话的「AI 栈」卡它看不到)⇒ 空档可以一直存在,
+    //    直到用户第一次真的去用,才拿到一句(在 V25 之前还是错的)报错。
+    //
+    //  ★★ 为什么探的是 `/v1/models` 而不是新开一条"健康检查"端点:
+    //    ① 它**就是业务流量真正走的那条路**(Edge → 上游网关),
+    //       新开一条端点探到的是另一条路,而两条路的失败模式可以不一样;
+    //    ② 它是**已登记的契约**(CONTRACT:models.list)⇒ 本轮**零新增契约**。
+    //       新开端点要再走一次成对登记,而 DEBT 是一张只许变短的表。
+    //  ★★★ 代价如实写在这里:配对多花一次往返(网关没起时是一次立刻失败的 502)。
+    //    换来的是「配得上但用不了」从**可以一直存在**变成**当场就说**。
+    //
+    //  ★ 探失败**绝不回滚配对** —— 设备已经在主机的成员表里 active 了。
+    //    把它当成"配对失败"会引导用户再配一次,而再配一次会删掉本机私钥
+    //    (为一件「主机没起栈」的事销毁一个完好的身份)。
+    //    ⇒ 这里只更新**状态与说法**,不动身份。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 配对刚成功时探一次业务面,让「配得上但用不了」当场显形。
+    /// <para>★★ 归因**一个字都不在这里写** —— <see cref="CallAsync"/> 已经把
+    /// State/LastError 按它那套五分类(含 V25 那条「上游网关没起」)写好了。
+    /// 在这里再写一份判据,就是让两处对同一件事各有一个说法,而漂开时不会有东西红。</para>
+    /// <para>★ 它吞掉异常:<see cref="CallAsync"/> 写完归因之后会 `throw`,
+    /// 而对**配对**这条路径来说那不是异常路径 —— 配对成功了,只是栈还没起。</para>
+    /// </summary>
+    async Task ProbeBusinessAfterPairAsync()
+    {
+        try { await CallAsync("/v1/models"); }
+        catch { /* 归因已由 CallAsync 落进 State/LastError;配对本身没失败,不回滚、不上抛 */ }
     }
 
     /// <summary>
@@ -566,12 +609,26 @@ public sealed class HubClient
                     ? "本设备已被主机解除,需要重新配对"
                     : "中枢拒绝了这次请求(401)。可能是权限或网关策略,不一定是被解除 —— 先别重新配对。";
             }
+            else if (r.status >= 500 && LooksUpstreamGatewayDown(r.body))
+            {
+                // ★★★★ V25:**这一条必须排在下面那条 `>= 500` 前面**(见上方那段)。
+                //   排到后面去的话它一行都执行不到,而症状恰好是"改了等于没改"。
+                //   ★ 状态仍用 HubServerError —— 它的状态词是「中枢报错(它在)」,
+                //     对这一处境是**对的**:Edge 确实在,确实报了错。
+                //     错的从来不是那个词,是它后面跟的那句「请看中枢日志」。
+                //   ★★ 处置办法在 LastError 里(DevicesView 就在状态词下面显示它):
+                //     「去**主机**上起 AI 栈,别重新配对」。
+                State = HubState.HubServerError;
+                LastError = UpstreamGatewayDownMessage(r.body);
+            }
             else if (r.status >= 500)
             {
                 // ★ 走到这一行意味着:TCP 通了、mTLS 拿钉住的 CA 校验过了、响应连头带正文都读到了。
                 //   能确定的事恰恰相反 —— 中枢【在】,是它这次请求内部出错了。
                 //   判成 Offline 会让人去做"连不上"该做的事:跑到主机看 Edge 起没起、查防火墙、
                 //   改拨号地址、甚至解除重配(那会删掉本机私钥)。真正该做的是去看中枢日志。
+                // ★★ V25 起,「上游网关没起」已经被上面那条**先接走了** ——
+                //   所以这句「请看中枢日志」现在是对的:剩下的 5xx 才真的是中枢自己的事。
                 State = HubState.HubServerError;
                 LastError = $"中枢应答了,但返回 {r.status} —— 不是连不上,是中枢内部出错,请看中枢日志。";
             }
@@ -653,6 +710,57 @@ public sealed class HubClient
     static bool LooksRevoked(string body) =>
         body.Contains("lan_device_unknown", StringComparison.OrdinalIgnoreCase) ||
         body.Contains("revoked", StringComparison.OrdinalIgnoreCase);
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★★ V25 · 那句**把人送去错地方**的报错(用户裁定 2026-08-09)。
+    //
+    //  在这之前:上游 8080 拒连 ⇒ lan-edge 的 `Proxy` 没有 try/catch ⇒ 框架兜成 5xx
+    //  ⇒ 走到下面 `>= 500` 那条 ⇒ 界面写「中枢应答了,但返回 500 —— **不是连不上,
+    //  是中枢内部出错,请看中枢日志**」。★ **而中枢日志里没有网关的事。**
+    //
+    //  ★ 它出现的时机让这件事更坏:配对整条链(pair/enroll/六词/approve/active)
+    //    只用 8443+8442,**一次都不碰网关** ⇒ 副机**配得上**、主机 list 显示 active,
+    //    之后全线失败;而副机上没有管理端,那张会说真话的「AI 栈」卡它根本看不到。
+    //    ⇒ 副机上唯一能说明真相的,就是这一条归因。
+    //
+    //  ★★ 判据是 lan-edge **明确给出的那个词**,不是猜状态码 ——
+    //    与 `LooksRevoked` 同一条纪律:没有明确信号一律不认定。
+    //    502 可能来自任何一层代理,拿 502 当判据会把别人的故障也认成"网关没起"。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 中枢的 Edge 明确说了「我上游那个网关够不着」。
+    /// <para>★★ 这个词与 `10-core/lan-edge/Program.cs` 的
+    /// <c>Edge.UpstreamUnreachableType</c> 是**同一个跨进程约定**。
+    /// 两边各写一个字面量,改一处、另一处静默失配,而失配的表现恰好是
+    /// **退回到那句错的归因** —— 所以它被两侧的断言各钉一次。</para>
+    /// </summary>
+    public const string UpstreamGatewayDownType = "upstream_gateway_unreachable";
+
+    internal static bool LooksUpstreamGatewayDown(string body) =>
+        body.Contains(UpstreamGatewayDownType, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 「中枢在,但它后面的 AI 栈没起」这一处境该说的话。
+    /// <para>★ 抽成一处:业务通道与配对通道**两条路**都会撞上它,
+    /// 各写一份的话必然漂开,而漂开的那一份多半就是没人看见的那份。</para>
+    /// </summary>
+    internal static string UpstreamGatewayDownMessage(string body)
+    {
+        // ★ 优先用 Edge 给的那句(它知道自己的上游地址);读不出来再退回本地措辞。
+        //   ★★ 退回的那句**不许**说成"中枢内部出错" —— 那正是本轮要消掉的错归因。
+        try
+        {
+            var m = JsonDocument.Parse(body).RootElement
+                .GetProperty("error").GetProperty("message").GetString();
+            if (!string.IsNullOrWhiteSpace(m)) return m!;
+        }
+        catch { /* 读不出来就用下面那句 —— 不编,也不退回错的那句 */ }
+        return "中枢在,但它后面的 AI 栈(统一入口网关)没有应答 —— "
+             + "这**不是**你这台机器的问题,也不是配对/证书/网络的问题。"
+             + "★ 下一步在【主机】上做:打开主机上的管理端起一次 AI 栈。"
+             + "这台机器什么都不用改,更**不要**重新配对。";
+    }
 
     /// <summary>
     /// TLS 失败的五分类 —— **整个判据都在 transport 的 <see cref="TlsFailure.Classify"/> 里**,

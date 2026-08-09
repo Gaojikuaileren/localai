@@ -155,6 +155,24 @@ CONTRACTS: dict[tuple[str, str, str], dict] = {
         "note": "顶层键集合 {status, released_leases, device, reason}。"
                 "★ 这条路由曾经**根本不存在**而客户端每次退出都在调它、失败还被吞掉",
     },
+    # ── 关栈判据(V25 · 2026-08-09)─────────────────────────────────────
+    #  ★★★ 本条是**第一条消费者在管理端**的网关契约,所以 client_file 指向 admin/。
+    #    把它的断言塞进 app/Selftest.cs 会更省事、也能让元断言变绿 —— 而那正是
+    #    本文件对 `GET /health` 逐字写过的那句:「给一条没人走的路配断言,
+    #    断言是绿的,而它什么都没守」。⇒ 判据跟着**真正的消费者**走。
+    ("gateway", "GET", "/v1/stack/safe-to-stop"): {
+        "state": "paired", "cid": "CONTRACT:stack.safe_to_stop",
+        "lane": "GPU/租约切片",
+        "client_file": "20-client-win/admin/SelftestMoved.cs",
+        "note": "★★★ D102 立的通则「`safe_to_stop_stack` **必须有调用点**」"
+                "(DECISIONS.md:5240)的落点 —— 在 V25 之前它的生产调用点是 **0**,"
+                "全仓只有 test_gpu_broker.py 引用它,于是管理端 `StackStop.QueryAsync()` "
+                "恒返回 `Known=false`(`Task.FromResult`,一次请求都不发),"
+                "而托盘关闭的确认框正是拿它的答案说话。"
+                "★ 消费者 `admin/Services/StackStop.cs` 的 `ParseVerdict` / `QueryAsync`。"
+                "★★ 承重的是 `known` 与 `can_stop` **两个键**:「判据没读成」与"
+                "「判据说不能关」要说两句不同的话,合并就是又一条恒假判据。",
+    },
     # ── 同步 + 对话切片(V6)· 2026-08-06 收盘登记 ─────────────────────────
     #  ★★ 这 5 条的两半**在 V6 那次提交里就写好了**,而本表直到收盘才登记上 ——
     #    中间那段时间门禁照报全绿。抓到它的是第 ⑦ 组(全仓契约号反向全表),

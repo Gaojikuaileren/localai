@@ -658,13 +658,16 @@ static async Task<int> Selftest()
         await edge.StartAsync();
 
         // client helper: custom root trust (CA), dial loopback, optional client cert
-        HttpClient MkClient(X509Certificate2? cc)
+        // ★ port 带默认值 18443 —— 既有调用点一个字都不用改。
+        //   V25 那条「上游连不上」的断言要拨**另一个** Edge(它指向一个死的上游),
+        //   所以这里让端口成为参数,而不是再抄一份这个工厂。
+        HttpClient MkClient(X509Certificate2? cc, int port = 18443)
         {
             var h = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false };
             h.SslOptions.CertificateChainPolicy = new X509ChainPolicy { TrustMode = X509ChainTrustMode.CustomRootTrust, RevocationMode = X509RevocationMode.NoCheck };
             h.SslOptions.CertificateChainPolicy.CustomTrustStore.Add(caPublic);
             if (cc is not null) h.SslOptions.ClientCertificates = new X509CertificateCollection { cc };
-            h.ConnectCallback = async (_, ct) => { var s = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true }; await s.ConnectAsync(IPAddress.Loopback, 18443, ct); return new NetworkStream(s, true); };
+            h.ConnectCallback = async (_, ct) => { var s = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true }; await s.ConnectAsync(IPAddress.Loopback, port, ct); return new NetworkStream(s, true); };
             return new HttpClient(h);
         }
         var baseUrl = $"https://{hub.ServerName}:18443";
@@ -1163,6 +1166,49 @@ static async Task<int> Selftest()
                $"★ 元断言的两个方向:核对过 {coveredContracts.Count} 条 / 登记 {WireContracts.All.Length} 条"
                + "(核对数多于登记数 = 有人重复核对或表漏登记)");
 
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★★ V25 · 上游网关连不上 ⇒ **502 + 可归因的类型**,不是裸 5xx。
+        //
+        //  这一条钉的是本轮修的那件事:在它之前 `Proxy` 对 `SendAsync` 没有 try/catch,
+        //  拒连被框架兜成 5xx,而客户端对 `>=500` 一律判「中枢内部出错,请看中枢日志」——
+        //  **而中枢日志里没有网关的事**。判词:给错原因的提示比不给提示更坏。
+        //
+        //  ★ 起**第二个** Edge 指向一个死端口,而不是把上面那个 stub 停掉:
+        //    停掉的话第 4 节就没有干净的现场了,而且 WebApplication 停了起不回来。
+        // ══════════════════════════════════════════════════════════════════
+        {
+            const int DeadUpstreamPort = 18099;    // 确定没人在听
+            const int Edge2Port = 18444;
+            var edge2 = Edge.Build(new EdgeConfig(idDir, secDir,
+                $"http://127.0.0.1:{DeadUpstreamPort}", Edge2Port,
+                OpenPairingWindowOnStart: false));
+            await edge2.StartAsync();
+            try
+            {
+                using var c = MkClient(currentCert ?? clientCert, Edge2Port);
+                using var r = await c.GetAsync($"https://{hub.ServerName}:{Edge2Port}/v1/models");
+                Assert((int)r.StatusCode == 502,
+                       "★★★ 上游网关拒连 ⇒ Edge 回 **502**(实得 " + (int)r.StatusCode + ")—— "
+                       + "502 的意思正是「我是网关,我上游够不着」;裸 500 会被客户端读成中枢内部出错");
+                var body = await r.Content.ReadAsStringAsync();
+                var err = JsonDocument.Parse(body).RootElement.GetProperty("error");
+                Assert(err.GetProperty("type").GetString() == Edge.UpstreamUnreachableType,
+                       "★★★ 正文带着可归因的 type=" + Edge.UpstreamUnreachableType
+                       + " —— 客户端靠这个词把「网关没起」从「中枢内部出错」里分出来");
+                var msg = err.GetProperty("message").GetString() ?? "";
+                Assert(msg.Contains("主机"),
+                       "★★★ 而且说清**下一步在哪台机器上做** —— 副机上没有管理端,"
+                       + "看不到那张「AI 栈」卡,不在这句话里说全就没有别的地方说了");
+                Assert(!msg.Contains("中枢日志"),
+                       "★★ 反向:**不许**再把人送去看中枢日志 —— 网关的事不在那儿。"
+                       + "这一条是本轮那句错归因的直接墓碑");
+                Assert(msg.Contains("不要") && msg.Contains("配对"),
+                       "★★ 并且明说**不要重新配对** —— 重新配对会删掉本机私钥,"
+                       + "为一件「主机没起栈」的事销毁一个完好的身份");
+            }
+            finally { await edge2.StopAsync(); }
+        }
+
         // 4. revoke the paired device -> its cert can no longer reach business
         var store = Store.LoadOrEmpty(idDir);
         store.RevokeDevice(deviceId);
@@ -1582,6 +1628,31 @@ static class Edge
         return store.Certificates.Find(X509FindType.FindByThumbprint, pub.Thumbprint, false)[0];
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★★ V25:「上游网关连不上」必须**说成它本来的样子**(用户裁定 2026-08-09)。
+    //
+    //  在这之前 `Proxy` 对 `http.SendAsync` **没有 try/catch**,`MapFallback` 外也没有
+    //  异常中间件 ⇒ 上游 8080 拒连时抛 `HttpRequestException`,由框架兜成 **5xx**。
+    //  而客户端 `HubClient.cs` 对 `>=500` 判 `HubServerError`,原话是
+    //    「中枢应答了,但返回 500 —— **不是连不上,是中枢内部出错,请看中枢日志**」。
+    //  ★★★ 而**中枢日志里没有网关的事** —— 那句话把人送去了一个不存在的地方。
+    //
+    //  ★ 更坏的是它出现的时机:配对整条链(pair/enroll/六词/approve/active)只用
+    //    8443+8442,**一次都不碰网关** ⇒ 副机**配得上**、主机 list 里显示 active,
+    //    之后全线失败;而副机上没有管理端,那张会说真话的「AI 栈」卡它根本看不到。
+    //  ⇒ 于是这条 502 的**正文**就是副机上唯一能说明真相的东西。
+    //
+    //  ★★ 判词:**给错原因的提示比不给提示更坏。**
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 上游网关连不上时的错误类型。★★ 它是**跨进程约定**:
+    /// 客户端 `HubClient` 靠这个词把「网关没起」从「中枢内部出错」里分出来。
+    /// <para>★ 抽成常量而不是散落的字面量 —— 两边各写一个字符串的话,
+    /// 改一处、另一处静默失配,表现恰好是**退回到那句错的归因**。</para>
+    /// </summary>
+    public const string UpstreamUnreachableType = "upstream_gateway_unreachable";
+
     static async Task Proxy(HttpContext ctx, HttpClient http, string upstreamBase, string fp)
     {
         var target = upstreamBase.TrimEnd('/') + ctx.Request.Path + ctx.Request.QueryString;
@@ -1596,7 +1667,40 @@ static class Edge
                 req.Content?.Headers.TryAddWithoutValidation(n, (IEnumerable<string>)h.Value);
         }
         req.Headers.TryAddWithoutValidation("X-LocalAI-Cert-Sha256", fp);   // inject the VERIFIED fingerprint
-        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
+
+        HttpResponseMessage sent;
+        try
+        {
+            sent = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
+        }
+        catch (Exception ex)
+        {
+            // ★ 副机自己走了(关窗口/切网)⇒ 不是上游的事,也没人在听这个回答了。
+            //   不区分的话,每一次正常的取消都会被记成一次"网关连不上"。
+            if (ctx.RequestAborted.IsCancellationRequested) return;
+
+            // ★★ 502 Bad Gateway —— 语义上就是这一条:**我是网关,我上游够不着**。
+            //   ★ 为什么不是 503:503 的意思是"我自己暂时不可用",而 Edge 好得很;
+            //     选 503 会让人去重启 Edge,那又是一趟无用功。
+            ctx.Response.StatusCode = 502;
+            await ctx.Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    type = UpstreamUnreachableType,
+                    // ★ 这句话是给**副机上的人**看的 —— 他那台机器上没有管理端,
+                    //   看不到「AI 栈」那张卡,所以下一步必须在这里说全:去**主机**上开。
+                    message = "中枢在,但它后面的 AI 栈(统一入口网关)没有应答 —— "
+                            + "这**不是**你这台机器的问题,也不是配对/证书/网络的问题。"
+                            + "★ 下一步在【主机】上做:打开主机上的管理端,起一次 AI 栈"
+                            + "(或让主机上的人开一下)。这台机器什么都不用改,更**不要**重新配对。",
+                    upstream = upstreamBase,
+                    detail = ex.GetType().Name + ": " + ex.Message,
+                },
+            });
+            return;
+        }
+        using var resp = sent;
         ctx.Response.StatusCode = (int)resp.StatusCode;
         foreach (var h in resp.Headers) ctx.Response.Headers[h.Key] = h.Value.ToArray();
         foreach (var h in resp.Content.Headers) ctx.Response.Headers[h.Key] = h.Value.ToArray();

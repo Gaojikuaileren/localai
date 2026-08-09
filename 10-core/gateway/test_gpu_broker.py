@@ -2328,6 +2328,14 @@ CROSS_PROCESS_CONTRACTS = {
     # ★ 成功与失败**两个形状**都要钉:失败那个多一个 error,而 snapshot 必须还在 ——
     #   客户端读不出 snapshot 就无从重试(见下方 409 那一组)。
     "CONTRACT:gpu.intended":     ("POST /v1/gpu/intended 200", {"result", "snapshot"}),
+    # ── 2026-08-09(V25)· D102 通则的落点 ────────────────────────────────
+    # ★★ `known` 与 `can_stop` **必须是两个键**,这是本条契约承重的地方:
+    #   「判据没读成」与「判据说不能关」在管理端要说两句**不同**的话。
+    #   合成一个布尔 ⇒ "读不到"静默退化成"不能关" ⇒ 又一条恒假判据
+    #   (D102 留痕里 `snap.get()` 那次就是这个形状)。
+    #   ⇒ 少了 known 这条契约就白开了,所以它被钉进键集合里。
+    "CONTRACT:stack.safe_to_stop": ("GET /v1/stack/safe-to-stop 200",
+                                    {"known", "can_stop", "why", "blocking", "resident"}),
 }
 
 #: 意图那条契约要一个**真的有别名指向它**的组件 —— `_small`(speech.lite)今天没有别名,
@@ -2369,6 +2377,13 @@ with _Isolated() as _c:
     _rc = _c.get("/v1/gpu/components", headers=_LAN_H)
     _observed["CONTRACT:gpu.components"] = (_rc.status_code, set(_rc.json()))
     _cat_body = _rc.json()
+
+    # ── V25 · CONTRACT:stack.safe_to_stop ───────────────────────────
+    #   ★ 用 `_LAN_H` 打(副机档):这条路由归 read 档,副机读得到 ——
+    #     拿主机档打的话,「副机也读得到」这句话就没有被任何东西证明过。
+    _rss = _c.get("/v1/stack/safe-to-stop", headers=_LAN_H)
+    _observed["CONTRACT:stack.safe_to_stop"] = (_rss.status_code, set(_rss.json()))
+    _safe_stop_body = _rss.json()
 
     pass
 
@@ -2552,8 +2567,38 @@ check("★ 失败码点名(generation_conflict),不是一句『失败了』",
 # ── 元断言:每一条契约在**客户端**那半边都必须有配对 ──
 #   ★ 缺配对即判红。找不到客户端源码也判红 —— 「查不了」不等于「没问题」,
 #     那正是本项目最恨的那种静默。
-_SELFTEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "..", "..", "20-client-win", "app", "Selftest.cs")
+_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+_SELFTEST = os.path.join(_REPO, "20-client-win", "app", "Selftest.cs")
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★ V25:客户端半边**可以不在 app/Selftest.cs**,逐条登记(默认不变)。
+#
+#  ★ 为什么现在才需要:在此之前每一条契约的消费者都在客户端工程里。
+#    `stack.safe_to_stop` 是**第一条消费者在管理端**的 ——
+#    问「现在关栈会不会切断别人」的是托盘那一下,而托盘在 `20-client-win/admin/`。
+#  ★★ 把它的断言硬塞进 `app/Selftest.cs` 是能让这条元断言变绿的最省事做法,
+#    而那正是本仓最恨的形状:**给一条没人走的路配断言,断言是绿的,它什么都没守**
+#    (90-ops/gate/check_contract_pairs.py 对 `GET /health` 那条逐字写过这句)。
+#    ⇒ 判据跟着**真正的消费者**走,不跟着"哪个文件改起来方便"走。
+#  ★ 这与 `check_contract_pairs.py` 的 `client_file` 是同一手法(那边 V19 就做了),
+#    两处现在对同一件事有同一个说法。
+#  ★★★ 判据**一个字都没弱化**:不在本表里的契约仍旧去 `app/Selftest.cs` 找,
+#    行为一个字节没变;在表里的那条,文件读不到照样判红(见下面的 None 分支)。
+# ══════════════════════════════════════════════════════════════════════
+_CLIENT_HALF_FILES = {
+    "CONTRACT:stack.safe_to_stop": os.path.join(
+        _REPO, "20-client-win", "admin", "SelftestMoved.cs"),
+}
+
+
+def _read_client_half(path):
+    try:
+        with open(path, "r", encoding="utf-8") as _fh:
+            return _fh.read()
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
 _st_src = None
 try:
     with open(_SELFTEST, "r", encoding="utf-8") as _f:
@@ -2578,9 +2623,21 @@ if _st_src is not None:
         return re.search(re.escape(cid) + r"(?![a-z0-9_.])", src) is not None
 
     for _cid in CROSS_PROCESS_CONTRACTS:
+        # ★ 逐条取它**自己**那半边所在的文件;没登记的一律用默认的 app/Selftest.cs。
+        _half_path = _CLIENT_HALF_FILES.get(_cid)
+        _half_src = _st_src if _half_path is None else _read_client_half(_half_path)
+        _where = os.path.basename(_half_path) if _half_path else "app/Selftest.cs"
+        # ★★ 读不到那个文件 ⇒ **判红**,不是跳过 ——「查不了」不等于「没问题」。
+        #   登记表指着一个不存在的文件时,这条红的原因和"没写断言"不一样,所以分开说。
+        check(f"★★ 元断言的前提:{_cid} 的客户端半边文件读得到({_where})",
+              _half_src is not None, f"{_half_path}")
         check(f"★★★ 元断言:{_cid} 在客户端那半边有配对断言(缺配对即判红)",
-              _has_anchor(_st_src, _cid),
-              "Selftest.cs 里找不到这个契约号 —— 服务端钉了形状,客户端没人证明它读得懂")
+              _half_src is not None and _has_anchor(_half_src, _cid),
+              f"{_where} 里找不到这个契约号 —— 服务端钉了形状,客户端没人证明它读得懂")
+    # ★ 登记表里指到的文件必须真的存在 —— 过期登记会让上面那条红得莫名其妙。
+    for _cid, _p in _CLIENT_HALF_FILES.items():
+        check(f"★★ 客户端半边登记表:{_cid} 指的文件存在(过期登记 = 指向空处)",
+              os.path.isfile(_p), _p)
     check("★ 且元断言本身不是空转(确实读到了内容)", len(_st_src) > 1000)
     # ★★ 判据自检:拿一个**只以已登记契约号为前缀**的假契约号问一遍,必须判**不在**。
     #   没有这一条,上面那条边界修复本身也只是"看着修好了"。
@@ -2636,6 +2693,92 @@ check("★★★ 网关里**没有**自动关栈的执行者 —— 新设计下
 _safe_src = assert_helpers.code_only(gateway.safe_to_stop_stack)
 check("★★ 而 safe_to_stop_stack **自己不关任何东西**(只回答安不安全)",
       "kill" not in _safe_src and "SIGINT" not in _safe_src)
+
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★★ V25(D?)· D102 的通则**自己不满足自己**,这一组是它的落点。
+#
+#  `DECISIONS.md:5240` 逐字:「★★ `safe_to_stop_stack` **必须有调用点** ——
+#  这正是 D102 立的通则」。而在本轮之前,它的**生产调用点是 0**:
+#  全仓只有本文件引用它。于是管理端 `StackStop.QueryAsync()` 恒返回 `Known=false`
+#  (`Task.FromResult`,一次请求都不发),而托盘关闭的确认框正是拿它的答案说话。
+#
+#  ★★ 判据必须**把测试自己排除在"调用点"之外**,否则它恒真 ——
+#    一条只被自检引用的函数,在自检眼里和一条真在跑的函数长得一模一样。
+#    ⇒ 下面数的是 **gateway.py 这个生产模块**里的调用,不是本文件里的。
+# ══════════════════════════════════════════════════════════════════════
+_gw_code = assert_helpers.code_only(gateway)
+#: 定义那一行不算调用点 —— 不排除它的话,判据靠 `def` 就恒真了。
+_gw_calls = re.findall(r"(?<!def )\bsafe_to_stop_stack\s*\(", _gw_code)
+check("★★★ D102 通则:safe_to_stop_stack 在**生产模块**里有调用点 —— "
+      "在此之前是 0 处,而通则本身就写着它必须有。"
+      "★ 数的是 gateway.py,**不是本文件**:只被自检引用的函数在自检眼里恒真",
+      len(_gw_calls) >= 1, f"gateway.py 里实测 {len(_gw_calls)} 处调用")
+#  ★ 判据自己被钉住:去掉 `(?<!def )` 就会把定义算成调用点 ⇒ 恒真。
+#    这一条证明那个排除**真的在起作用**(否则上面那条是空话)。
+check("★★ 判据自证:把定义行算进去会多出恰好 1 处 —— 说明"
+      "「定义不算调用点」这条排除真的在起作用,而不是写着好看",
+      len(re.findall(r"\bsafe_to_stop_stack\s*\(", _gw_code)) == len(_gw_calls) + 1)
+
+#  ── 那个调用点**就是这条路由**,而且路由真的调它(不是自己重抄一遍判据)──
+check("★★★ 关栈判据有**对外的门**:GET /v1/stack/safe-to-stop 已登记进 ROUTE_TIERS",
+      ("GET", "/v1/stack/safe-to-stop") in gateway.ROUTE_TIERS)
+_route_src = assert_helpers.code_only(gateway.stack_safe_to_stop)
+check("★★★ 那条路由**真的调** safe_to_stop_stack —— 而不是在路由里把四条件重抄一遍。"
+      "抄一份的话两处会漂,而漂了**不会有任何东西红**",
+      "safe_to_stop_stack(" in _route_src)
+check("★★ 路由**自己也不关任何东西**(D102 裁定④:关是人的动作)——"
+      "给它加上'顺手关掉'等于推翻那条裁定,须另立决议",
+      "kill" not in _route_src and "SIGINT" not in _route_src
+      and "terminate" not in _route_src.lower())
+
+#  ── ★★★ 两个方向**各走一次真的 HTTP**(而不是只调函数)──────────────
+#    ★ 为什么要走 HTTP:上面那些 `safe_to_stop_stack(...)` 的直接调用,
+#      在**路由不存在**的那一年里也全是绿的 —— 它们证明不了"外面问得到"。
+with _Isolated() as _c:
+    _r_ok = _c.get("/v1/stack/safe-to-stop", headers=_LAN_H)
+    check("★★★ 没人在用时,**从外面问**也答【可以关】—— 恒假的判据不是判据",
+          _r_ok.status_code == 200 and _r_ok.json()["known"] is True
+          and _r_ok.json()["can_stop"] is True, f"{_r_ok.status_code} {_r_ok.text[:200]}")
+
+with _Isolated() as _c:
+    # 真发一份点名组件的租约 ⇒ 判据必须从外面看也变成"不能关"
+    _lr = _c.post("/v1/gpu/lease", headers=_LAN_H,
+                  json={"if_generation": _gen(_c), "kind": "client_session",
+                        "components": [_small], "ttl_s": 60})
+    _r_no = _c.get("/v1/stack/safe-to-stop", headers=_LAN_H)
+    _b_no = _r_no.json()
+    check("★★★ 有活在跑时,从外面问答【不能关】,且 known 仍为真 —— "
+          "「读不到」和「不能关」**不是**一回事",
+          _r_no.status_code == 200 and _b_no["known"] is True
+          and _b_no["can_stop"] is False and _b_no["blocking"] >= 1,
+          f"lease={_lr.status_code} body={_b_no}")
+    check("★ 而且说得出**是哪一条**理由(四条件不许被短路合并成一句'条件不满足')",
+          len(_b_no["why"]) > 10 and "租约" in _b_no["why"], _b_no["why"])
+
+#  ── ★★★ 第三种处境:判据**没读成**。它在本轮之前结构上无法表达 ──────────
+#    ★ 这一格是整组里最不可能恒真的一格:它要求 known=false 与 can_stop=false
+#      **不是同一件事**。合成一个布尔的实现会当场红。
+_orig_counts = gateway._stack_counts
+try:
+    def _boom():
+        raise RuntimeError("Broker 假装读不到")
+    gateway._stack_counts = _boom
+    with _Isolated() as _c:
+        _r_unk = _c.get("/v1/stack/safe-to-stop", headers=_LAN_H)
+        _b_unk = _r_unk.json()
+    check("★★★ Broker 读不到时:known=false,而**不是**伪装成「不能关」—— "
+          "两者在管理端要说两句不同的话,合成一句就是给一个**错的**理由",
+          _r_unk.status_code == 200 and _b_unk["known"] is False, f"{_b_unk}")
+    check("★★ 且此时 blocking/resident 如实为 null(不是 0)—— "
+          "0 会被读成「没人在用」,而那正是我们没读到的那件事",
+          _b_unk["blocking"] is None and _b_unk["resident"] is None, f"{_b_unk}")
+    check("★★ 读不到时**仍回 200**:中枢在,只是读不到 Broker。"
+          "回 5xx 会让客户端归成「中枢内部出错」,而那是另一件事的下一步",
+          _r_unk.status_code == 200, f"实得 {_r_unk.status_code}")
+finally:
+    gateway._stack_counts = _orig_counts
+check("★ 收尾:_stack_counts 已还原(否则后面每一条都在假故障下跑)",
+      gateway._stack_counts is _orig_counts)
 
 
 ##########################################################################

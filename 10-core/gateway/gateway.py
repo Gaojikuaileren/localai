@@ -741,6 +741,12 @@ ROUTE_TIERS = {
     ("GET", "/v1/sync/snapshot"): "authenticated",
     ("POST", "/v1/sync/push"): "authenticated",
     ("GET", "/v1/sync/events"): "authenticated",
+    # V25:★ 关栈判据的**对外入口**(D102 通则「safe_to_stop_stack 必须有调用点」的落点)。
+    #   ★ 归 `read` 档而非变更档:它**只回答安不安全,自己不关任何东西** ——
+    #     关是人的动作(管理端托盘)。给它变更能力等于推翻 D102 裁定④。
+    #   ★★ 副机(lan-device)也读得到,与 `/v1/gpu/snapshot` 同档:它泄露的
+    #     「几份租约/几个组件驻留」在那条快照里本来就看得见,不多给一个字。
+    ("GET", "/v1/stack/safe-to-stop"): "authenticated",
 }
 
 
@@ -895,6 +901,27 @@ async def _start_gpu_broker():
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def _stack_counts() -> tuple:
+    """读一次 Broker,给出 (blocking, resident)。★ 读不到就**抛** —— 由调用方决定怎么如实说。
+
+    ★★ 抽成一处的理由:V25 开 `/v1/stack/safe-to-stop` 时,路由要在
+      「判据答不能关」与「判据根本没读成」之间给出**不同**的答案(前者 known=true,
+      后者 known=false)。最省事的写法是在路由里再抄一遍这两行读法 ——
+      而抄的那份一旦与这里漂开,**不会有任何东西红**:两处都能跑,只是答案不一样。
+      ⇒ 读法只留一份,`safe_to_stop_stack` 与路由共用它。
+
+    ★ `snapshot()` 返回 **Snapshot 数据类**,不是 dict —— 第一版写成
+      `snap.get("committed")` 当场 AttributeError,被 `safe_to_stop_stack` 的 except
+      兜成"不能关"。**那次 fail-closed 是对的,但它掩盖了一个真 bug**:判据会
+      **永远**走进 except ⇒ 恒答"不能关",而"不能关"和"条件没满足"长得一模一样。
+      ⇒ 恒假的判据不是判据 —— 与 `idle_seconds` 那个病同源。
+    """
+    blocking = len(gpu_broker.BROKER.blocking_leases())
+    snap = gpu_broker.BROKER.snapshot()
+    resident = len(snap.committed or []) + len(snap.transient_resident or [])
+    return blocking, resident
+
+
 def safe_to_stop_stack(*, blocking: int | None = None,
                        resident: int | None = None) -> tuple:
     """现在关栈会不会切断别人。返回 (可以关吗, 理由)。
@@ -909,16 +936,12 @@ def safe_to_stop_stack(*, blocking: int | None = None,
     ★ 参数可注入 —— 判据要能被**两个方向**各测一次。
     """
     try:
-        if blocking is None:
-            blocking = len(gpu_broker.BROKER.blocking_leases())
-        if resident is None:
-            # ★ `snapshot()` 返回 **Snapshot 数据类**,不是 dict —— 第一版写成
-            #   `snap.get("committed")` 当场 AttributeError 被下面 except 兜成"不能关"。
-            #   **那次 fail-closed 是对的,但它掩盖了一个真 bug**:判据会**永远**走进
-            #   except ⇒ 恒答"不能关",而"不能关"和"条件没满足"长得一模一样。
-            #   ⇒ 恒假的判据不是判据 —— 与 `idle_seconds` 那个病同源。
-            snap = gpu_broker.BROKER.snapshot()
-            resident = len(snap.committed or []) + len(snap.transient_resident or [])
+        if blocking is None or resident is None:
+            _b, _r = _stack_counts()
+            if blocking is None:
+                blocking = _b
+            if resident is None:
+                resident = _r
     except Exception as e:                                   # noqa: BLE001
         return False, f"读不到 Broker 状态({type(e).__name__})—— **拿不准就答不能关**"
 
@@ -929,6 +952,53 @@ def safe_to_stop_stack(*, blocking: int | None = None,
     if resident > 0:
         return False, f"还有 {resident} 个组件驻留着 —— 关栈会把它们卸掉"
     return True, "没有点名组件的租约,也没有组件驻留 —— 关栈不会切断谁"
+
+
+@app.get("/v1/stack/safe-to-stop")
+async def stack_safe_to_stop(request: Request):
+    """★★★ V25 · `safe_to_stop_stack()` 的**对外入口** —— CONTRACT:stack.safe_to_stop。
+
+    ══════════════════════════════════════════════════════════════════════
+     ★★★ 这条路由存在的理由,是 D102 立的通则**自己不满足自己**。
+
+     `DECISIONS.md:5240` 逐字写着「`safe_to_stop_stack` **必须有调用点**」,
+     而在本路由之前它的生产调用点是 **0**:全仓只有 `test_gpu_broker.py` 引用它。
+     于是管理端 `StackStop.QueryAsync()` 只能 `Task.FromResult(Known: false)` ——
+     **一次网络请求都不发**,而托盘关闭的确认框正是拿它的答案说话。
+     ⇒ 判据写好了、文案写好了、入口接上了,**而中间那条线不存在**。
+       这是本仓第 N 次同形(A5 · doctor ⑫ 环 · `ModelLoader.shutdown` ·
+       `HostProvision.EnsureStackAsync`),这次补的是那条线本身。
+    ══════════════════════════════════════════════════════════════════════
+
+    ★★ 响应把 `known` 与 `can_stop` **分成两个字段**,这是本路由承重的那一处:
+      · `known=false` —— 判据**没读成**(Broker 读不到)。此时 `can_stop` 无意义;
+      · `known=true, can_stop=false` —— 判据读成了,答案是**不能关**。
+      两者在管理端要说**两句不同的话**:前者是「读不到副机在不在用,你自己判断」,
+      后者是「副机正在用,仍要关吗」。合成一句就是给一个**错的**理由 ——
+      而本仓的判词是:**给错原因的提示比不给提示更坏**(D99 裁定④)。
+      ★ 合并它们的写法(比如只回 `can_stop`)会让"读不到"静默退化成"不能关",
+        那正是 D102 留痕里 `snap.get()` 那次的形状:恒假的判据不是判据。
+
+    ★ 它**只回答,不动手** —— 关是人的动作(管理端),这条路由没有任何副作用。
+      给它加上"顺手关掉"的能力 = 推翻 D102 裁定④,须另立决议(见 DECISIONS.md:5264)。
+    """
+    _tier, _deny = gpu_guard(request, "read")
+    if _deny is not None:
+        return _deny
+    try:
+        blocking, resident = _stack_counts()
+    except Exception as e:                                   # noqa: BLE001
+        # ★ 与显存闸 CLI 的三态同一条纪律:「读不出来」不能伪装成「一切正常」,
+        #   也不能伪装成「不能关」。这里如实说 known=false,由人决定。
+        # ★★ 仍回 200:这不是 HTTP 层的错误 —— 中枢**在**,它只是读不到 Broker。
+        #   回 5xx 会让客户端把它归成"中枢内部出错",而那是另一件事的下一步。
+        return {"known": False, "can_stop": False,
+                "why": f"读不到 Broker 状态({type(e).__name__})—— 判据没读成,"
+                       "这**不是**「有人在用」,也**不是**「没人在用」。",
+                "blocking": None, "resident": None}
+    ok, why = safe_to_stop_stack(blocking=blocking, resident=resident)
+    return {"known": True, "can_stop": ok, "why": why,
+            "blocking": blocking, "resident": resident}
 
 
 #: ★ 断言抓手:`_shutdown_stack` 必须真的调装载器的 shutdown。
