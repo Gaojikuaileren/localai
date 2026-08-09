@@ -94,8 +94,19 @@ public sealed class HostHubView : UserControl
         {
             if (!(bool)e.NewValue && Admin.PairingWindowOpen) _ = CloseWindowAsync(quiet: true);
         };
+
+        // ★★ V22:起栈是在**管理端启动时**就跑起来的(App.OnStartup),多半比这一页早得多。
+        //   挂上它的进度播报,这一页才能在"正在起"的那 40 秒里说人话;
+        //   ★ 一定要在 Unloaded 里摘掉 —— 事件是静态的,不摘就把这个视图一直吊着,
+        //     而且 Build() 换掉控件之后回调会往一棵摘下来的树上写。
+        StackBoot.Changed += OnStackChanged;
+        Unloaded += (_, _) => StackBoot.Changed -= OnStackChanged;
+
         Build();
     }
+
+    /// <summary>起栈那边有动静了 —— 只重画栈那一格,不动整页(整页重画会打断配对轮询)。</summary>
+    void OnStackChanged() => Dispatcher.InvokeAsync(() => { _ = RenderStackAsync(); });
 
     /// <summary>★ 角色没探出来之前【什么都不猜】—— 如实说"正在确认",探完再画。</summary>
     void Build()
@@ -108,12 +119,19 @@ public sealed class HostHubView : UserControl
                 _ = ProbeRoleAsync();
                 break;
 
+            // ★★★ V22:栈那一格在**两档里都画**,这一点是承重的。
+            //   在此之前「这台电脑就是中枢主机」那一档**根本不看网关** ——
+            //   而写这段时本机的真实状态正是「Edge 的管理面 8442 通、网关 8080 不通」:
+            //   页面一路绿灯说「就是中枢主机」,「模型」页却是空的(模型清单读的是 8080)。
+            //   ⇒ 只在 HubDown 那一档显示栈状态,等于让**最坏的中间态**恰好落在看不见的地方。
             case HostRole.Host:
+                _root.Children.Add(StackCard());
                 _root.Children.Add(HostSelfCard());
                 _root.Children.Add(HostDevicesCard());
                 break;
 
             default:   // HostHubDown
+                _root.Children.Add(StackCard());
                 _root.Children.Add(HubDownCard());
                 break;
         }
@@ -121,6 +139,156 @@ public sealed class HostHubView : UserControl
 
     /// <summary>手动重探一次(换了状态 —— 比如刚把 Edge 起起来 —— 用它,不用重开管理端)。</summary>
     UIElement RecheckRow() => Ui.Secondary("重新检测", (_, _) => { _role = HostRole.Unknown; Build(); });
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ V22 · 栈的进度与失败原因(D115)
+    //
+    //  「客户端与栈」那一页的文案一直写着:
+    //    「起栈的进度与失败原因在【主机中枢】那一页」
+    //  ——而这一页在此之前**没有那个东西**。两页互相担保,谁都没兑现。
+    //  这一格就是那句承诺的落地。
+    //
+    //  ★ 判据用 `StackResult`(AllUp / HalfUp),**不另造模型** —— 用户明说别新造。
+    //  ★★ 就绪判据探的是**网关 8080**,不是 8443:模型清单读的就是 8080,
+    //    而 8443 那个口在 `run` 模式下本来就开着 ⇒ 探它等于「失败与成功长得一样」。
+    // ════════════════════════════════════════════════════════════════════════
+
+    StackPanel? _stackBox;
+
+    /// <summary>中枢日志的最后 14 行。★ 读不到就如实返回那句话,不返回空(空会让这一段整个消失,
+    /// 而"没有日志"与"读不到日志"是两件事)。</summary>
+    static string EdgeLogTail()
+    {
+        try
+        {
+            if (!File.Exists(HostProvision.EdgeLogPath)) return "";
+            var all = File.ReadAllLines(HostProvision.EdgeLogPath);
+            return string.Join(Environment.NewLine, all.Reverse().Take(14).Reverse());
+        }
+        catch (Exception ex) { return "(读不到中枢日志:" + ex.Message + ")"; }
+    }
+
+    /// <summary>栈那一格。★ 内容由 <see cref="RenderStackAsync"/> 填,因为它要去探端口。</summary>
+    UIElement StackCard()
+    {
+        _stackBox = new StackPanel();
+        _ = RenderStackAsync();
+        return Ui.Card(Ui.Stack(Ui.Subtitle("AI 栈"), _stackBox));
+    }
+
+    /// <summary>
+    /// 画栈的现状。★ 两份材料合起来才够:
+    ///   · **现在通不通** —— 去探(`ProbeStackAsync`),这是唯一的肯定证据;
+    ///   · **为什么没通** —— 起栈那一轮留下的 `Detail`(venv 缺依赖 / 端口被占 / 退出码几)。
+    /// 只有探测没有原因,页面就只会说"没起来"而不说是哪一步;
+    /// 只有原因没有探测,栈被别人关掉之后页面还会显示上一次的绿灯。
+    /// </summary>
+    async Task RenderStackAsync()
+    {
+        var box = _stackBox;
+        if (box is null) return;
+
+        var phase = StackBoot.Phase;
+        var lines = StackBoot.Lines;
+        var boot = StackBoot.Last;
+        var live = await HostProvision.ProbeStackAsync();
+
+        Dispatcher.Invoke(() =>
+        {
+            if (_stackBox != box) return;   // 这一格已经被 Build() 换掉了,别往旧控件上写
+            box.Children.Clear();
+
+            // ── 正在起:把逐步进度摆出来 ──────────────────────────────
+            if (phase == StackPhase.Working)
+            {
+                box.Children.Add(Ui.Body("正在启动 AI 栈…"));
+                foreach (var l in lines) box.Children.Add(Ui.Caption(l));
+                box.Children.Add(Ui.Caption("★ 每一步最多等 20 秒 —— 起了进程不算数,要探到端口答话才算。"));
+                return;
+            }
+
+            // ── 逐个组件说结论。★ 用现探的结果,不用上一轮的记忆 ──────
+            void Component(SetupStep now, SetupStep? attempt)
+            {
+                var up = now.Outcome != SetupOutcome.Failed;
+                box.Children.Add(Ui.Body((up ? "✓ " : "✗ ") + now.Name + (up ? ":在跑" : ":【没在跑】")));
+                box.Children.Add(Ui.Caption("　" + now.Detail));
+                // ★ 没起来的时候,把**起栈那一轮的真实原因**接在后面 —— 那才是可执行的下一步。
+                if (!up && attempt is { Outcome: SetupOutcome.Failed })
+                    box.Children.Add(Ui.Caption("　起栈时它说:" + attempt.Detail));
+            }
+            Component(live.Gateway, boot?.Gateway);
+            Component(live.Edge, boot?.Edge);
+
+            // ★★★ 中枢没起来时,把它**自己打印的最后几行原文**摆出来。
+            //   这是原来那个黑窗口真正担着的活:窗口可以藏,**现场不能丢**。
+            //   (`StartEdgeAsync` 删掉时这段跟着搬过来,一个字没少 —— 自检钉的就是这条。)
+            if (live.Edge.Outcome == SetupOutcome.Failed && EdgeLogTail() is { Length: > 0 } tail)
+            {
+                box.Children.Add(Ui.Caption("　中枢自己打印的最后几行:"));
+                var log = Ui.Caption("　" + tail.Replace("\n", "\n　"));
+                log.FontFamily = new FontFamily("Consolas");
+                box.Children.Add(log);
+            }
+
+            box.Children.Add(new Border { Height = 8 });
+
+            if (live.AllUp)
+            {
+                box.Children.Add(Ui.Body("整套栈都在跑。"));
+                box.Children.Add(Ui.Caption("★ 判据是**探到的**:网关 /health 答话、Edge 回环管理面答话。"
+                                            + "不是「进程起来了」就算 —— 那两件事经常不一样。"));
+            }
+            else if (live.HalfUp)
+            {
+                // ★★★ 半起 —— 用户点名要它看得见:这是最坏的中间态,因为**两半都像成功**。
+                var down = live.Gateway.Outcome == SetupOutcome.Failed ? "网关" : "LAN Edge";
+                var upOne = down == "网关" ? "LAN Edge" : "网关";
+                box.Children.Add(Ui.Body($"★★ 【起了一半】:{upOne} 在跑,{down} 没起来。"));
+                box.Children.Add(Ui.Caption(down == "网关"
+                    ? "　这台的中枢在,副机连得上 —— 但**没有任何模型用得了**:"
+                      + "「模型」页会是空的,聊天会说后端没应答。缺的就是上面那一条。"
+                    : "　模型用得了(本机客户端走回环网关)—— 但**副机连不上这台**:"
+                      + "对外的 8443 没人在听。"));
+                box.Children.Add(Ui.Caption("　★ 这一档在此之前【看不见】:页面只探 Edge 的管理面,"
+                                            + "网关不通时照样显示「就是中枢主机」。"));
+            }
+            else
+            {
+                box.Children.Add(Ui.Body("★ 整套栈都没在跑。"));
+                box.Children.Add(Ui.Caption("　上面两行写着卡在哪一步。"
+                                            + "★ 这里【不会】叫你去跑 start-stack.ps1 —— 起栈是这个程序的活。"));
+            }
+
+            // ── 可执行的下一步 ────────────────────────────────────────
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+            if (!live.AllUp)
+            {
+                var retry = Ui.Primary("重新启动 AI 栈", async (_, _) =>
+                {
+                    await StackBoot.EnsureAsync(force: true);
+                    _role = HostRole.Unknown;
+                    Build();
+                });
+                retry.Margin = new Thickness(0, 0, 8, 0);
+                row.Children.Add(retry);
+            }
+            var recheck = Ui.Secondary("重新检测", (_, _) => { _ = RenderStackAsync(); });
+            recheck.Margin = new Thickness(0, 0, 8, 0);
+            row.Children.Add(recheck);
+            if (File.Exists(HostProvision.EdgeLogPath))
+                row.Children.Add(Ui.Secondary("打开中枢日志", (_, _) =>
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.Start(
+                            new System.Diagnostics.ProcessStartInfo(HostProvision.EdgeLogPath) { UseShellExecute = true });
+                    }
+                    catch { }
+                }));
+            box.Children.Add(row);
+        });
+    }
 
     UIElement ProbingCard() => Ui.Card(Ui.Stack(
         Ui.Subtitle("正在确认这台电脑的角色…"),
@@ -283,28 +451,44 @@ public sealed class HostHubView : UserControl
     }
 
     /// <summary>
-    /// 起中枢。★ bindIp 非空时【直接调 localai-lan-edge.exe run-lan &lt;ip&gt;】,不走 启动Edge.cmd ——
-    ///   那个 .cmd 把绑定地址**写死**成一台开发机的 192.168.178.61:换台机器、或这台换一次
-    ///   DHCP 租约/改用 Wi-Fi,它绑的就是一个不存在的地址,而"无痛丝滑"这条主线在第二台电脑上
-    ///   从来没成立过。而我们手里【已经有正确答案】—— 用户刚在网卡选择里挑过。
-    /// ★ 拿不到 IP 时才退回 .cmd(总比什么都不做强),并如实说明它绑的是脚本里写死的那个地址。
+    /// 起栈(身份/防火墙那两步做完之后的第三步)。
+    ///
+    /// <para>★★★ V22:这里原来是**第二套起栈实现** —— 它自己 `Process.Start` 一个
+    /// `localai-lan-edge.exe`,与 `HostProvision.EnsureStackAsync` 平行存在。
+    /// 那正是 `EnsureStackAsync` 零调用点却**没人察觉**的原因:界面上确实有一条能起 Edge 的路,
+    /// 于是"起栈入口没接上"这件事从表面上看不出来。而两套实现的差别是实打实的:</para>
+    /// <list type="bullet">
+    ///   <item>这一套**只起 Edge,从来不起网关** ⇒ 起完之后「模型」页仍然是空的;</item>
+    ///   <item>两套同时跑会各起一个 Edge,第二个撞 `address already in use`(退出码 4)。</item>
+    /// </list>
+    /// <para>⇒ 合成一条:这里改调 <see cref="StackBoot"/>(单飞),网关与 Edge 一起起,
+    /// 进度与失败原因落在上面那一格里。</para>
+    ///
+    /// <para>★ 一处**如实交代的行为变化**:`启动Edge.cmd` 那条退路**没有保留**。
+    /// 它把绑定地址写死成一台开发机的 192.168.178.61 —— 换台机器就绑到一个不存在的地址上,
+    /// 而且**会显示成功**。拿不到网卡地址时现在如实停下来说选不出地址、让人去挑一张,
+    /// 那比"起了个绑错地址的中枢"可查得多。</para>
     /// </summary>
     async Task StartEdgeStepAsync(string? bindIp = null)
     {
-        var dir = AdminApp.HostToolsDir();
-        var exe = dir is null ? null : Path.Combine(dir, "localai-lan-edge.exe");
-        if (bindIp is { Length: > 0 } && exe is not null && File.Exists(exe))
+        Line(bindIp is { Length: > 0 }
+            ? $"③ AI 栈:正在启动(网关 + 中枢,中枢绑定 {bindIp}:{HubAdmin.EdgePort})…"
+            : "③ AI 栈:正在启动(网关 + 中枢)…");
+        Line("★ 进度与失败原因在上面那一格「AI 栈」里。", muted: true);
+
+        var r = await StackBoot.EnsureAsync(force: true, bindIp: bindIp);
+
+        ResetLines();
+        Line("③ " + HostProvision.Describe(r.Gateway));
+        Line("③ " + HostProvision.Describe(r.Edge));
+        if (r.AllUp)
         {
-            Line($"③ 中枢:正在启动(绑定 {bindIp}:{HubAdmin.EdgePort})…");
-            await StartEdgeAsync(exe, NewStatus(), $"run-lan {bindIp}");
+            // ★ 起来了就回到 Host 那一档 —— 让整页重画成"就是中枢主机"那一套。
+            Dispatcher.Invoke(() => { _role = HostRole.Unknown; Build(); });
             return;
         }
-        var cmd = HubAdmin.StartEdgeCmd();
-        if (cmd is null) { Line("③ 中枢:找不到中枢程序,也找不到 启动Edge.cmd"); Retry(); return; }
-        Line("③ 中枢:正在启动…");
-        Line("★ 没拿到本机网卡地址,只能跑 启动Edge.cmd —— 它绑的是脚本里写死的那个地址,"
-             + "换过网段/换过机器的话会绑不上。", muted: true);
-        await StartEdgeAsync(cmd, NewStatus());
+        if (r.HalfUp) Line("★★ 【起了一半】—— 上面那一格写着缺的是哪一半、缺了它会怎样。");
+        Retry();
     }
 
     /// <summary>用户明确确认之后才铸身份,然后接着往下走。</summary>
@@ -389,119 +573,33 @@ public sealed class HostHubView : UserControl
         Say($"① 中枢身份:{Mark(id)}。② 防火墙:马上会弹一次管理员授权框…");
         var fw = await HostProvision.EnsureFirewallAsync(nicAlias, script, Path.Combine(dir, "localai-lan-edge.exe"));
         Say($"① 身份:{Mark(id)}。② 防火墙:{Mark(fw)} —— {fw.Detail}");
-        // ★ 防火墙没成也【继续】起 Edge:本机自己用是通的,只是副机连不上。
+        // ★ 防火墙没成也【继续】起栈:本机自己用是通的,只是副机连不上。
         //   直接中止会让人以为整套都废了 —— 那不是实情。
-        var cmd = HubAdmin.StartEdgeCmd();
-        if (cmd is null) { Say($"① 身份:{Mark(id)}。② 防火墙:{Mark(fw)}。③ 找不到 启动Edge.cmd。"); return; }
+        // ★★ V22:这里原来先查一次 `HubAdmin.StartEdgeCmd()`,查不到就**整个不起**。
+        //   那条判据在 `启动Edge.cmd` 那条退路撤掉之后已经没有意义了 ——
+        //   而它留着的后果是:一台没有那个 .cmd 的机器上,身份和防火墙都做完了,
+        //   栈却因为"找不到一个我们根本不打算用的脚本"而不起,理由还写在界面上。
         await StartEdgeStepAsync(nicIp);
     }
 
-    /// <summary>
-    /// 替用户把中枢启起来。
-    ///
-    /// ★★ 这里【不再】预判"我是不是管理员"。同日实测推翻了那个判据:
-    ///   本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,身份也是在 High 下铸的,
-    ///   两把密钥在 High 进程里 CngKey.Open 都成功 —— 拿"是不是管理员"当门槛,
-    ///   会在这种机器上把一个本来能起来的中枢永远挡住,而且给的理由是假的。
-    ///   ⇒ 直接试着起,让中枢**自己**说话;失败时把人指向它自己的窗口,那里才有真实原因。
-    ///   (见 decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md)
-    /// ★★ 拉起 ≠ 起来了:只有【回环管理面真的答话】才算数。在那之前一律说"正在等它应答",
-    ///   绝不因为 Process.Start 没抛异常就宣布成功 —— 那是今天反复在修的那类谎。
-    /// </summary>
-    async Task StartEdgeAsync(string cmd, TextBlock status, string? args = null)
-    {
-        void Say(string s) => Dispatcher.Invoke(() => status.Text = s);
-
-        // ★★ 先看中枢是不是【已经在跑了】。不看的话会去起第二个,而第二个必然撞 "address already in use",
-        //   在黑窗口里吐一整屏 Kestrel 异常栈 —— 用户看到那一堆,根本读不出"你已经开着一个了"。
-        //   (2026-08-04 实测:用户屏幕上就是这么两个窗口,一个好的、一个一屏堆栈。)
-        if (await Admin.ProbeAsync(ClientProfilePeek.HubId()) && Admin.LastProbe == AdminProbeResult.Ok)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                status.Text = "中枢已经在这台机器上跑着了 —— 不用再起一个。";
-                _role = HostRole.Host;
-                Build();
-            });
-            return;
-        }
-
-        // ★★ 用户要求:不要让人看见黑色命令框。可以 —— 但那个窗口本来担着【两件事】:
-        //   ① Edge 的命令台;② **唯一能看到失败原因的地方**(整晚我都在让人"去看那个黑窗口")。
-        //   ⇒ 藏窗口的前提是先给失败找到别的去处,否则就是把错误藏起来 —— 那正是今天一直在修的病。
-        //   做法:无窗口启动 + 把 stdout/stderr 收进日志文件,失败时把日志【原文摆到界面上】。
-        //   ★ 中枢那边配套改了:stdin 不可用时不进 REPL、也不退出 —— 否则它打完 banner 就死
-        //     (实测撞到过:重定向输出的那一次,中枢刚说"已监听"就没了)。
-        var logPath = Path.Combine(Path.GetTempPath(), "localai-edge.log");
-        try { if (File.Exists(logPath)) File.Delete(logPath); } catch { }
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = cmd,
-                Arguments = args ?? "",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,   // ★ 让中枢看到"没有可用 stdin",走无命令台那条路
-                WorkingDirectory = Path.GetDirectoryName(cmd) ?? "",
-            };
-            var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) { Say("没能启动中枢进程。"); return; }
-            var sw = new StreamWriter(logPath, append: true) { AutoFlush = true };
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
-            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (sw) sw.WriteLine(e.Data); };
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-        }
-        catch (Exception ex)
-        {
-            Say("没能启动中枢(" + ex.GetType().Name + ":" + ex.Message + ")—— 也可以自己双击:" + cmd);
-            return;
-        }
-
-        Say("中枢正在启动(无窗口),正在等它应答…");
-        for (int i = 0; i < StartEdgeWaitSeconds; i++)
-        {
-            await Task.Delay(1000);
-            bool ok;
-            try { ok = await Admin.ProbeAsync(ClientProfilePeek.HubId()); } catch { ok = false; }
-            if (ok && Admin.LastProbe == AdminProbeResult.Ok)
-            {
-                Dispatcher.Invoke(() => { _role = HostRole.Host; Build(); });
-                return;
-            }
-            Say($"中枢正在启动(无窗口),正在等它应答…({i + 1}/{StartEdgeWaitSeconds} 秒)");
-        }
-        // ★★ 到点还没应答:把中枢自己吐出来的话【原文摆出来】。
-        //   黑窗口藏掉了,但现场不能丢 —— 这一段就是那个窗口原来真正的作用。
-        var tail = "";
-        try
-        {
-            if (File.Exists(logPath))
-            {
-                var all = File.ReadAllLines(logPath);
-                tail = string.Join(Environment.NewLine, all.Reverse().Take(14).Reverse());
-            }
-        }
-        catch (Exception ex) { tail = "(读不到中枢日志:" + ex.Message + ")"; }
-        Dispatcher.Invoke(() =>
-        {
-            status.Text = $"{StartEdgeWaitSeconds} 秒内没等到中枢应答。下面是中枢自己打印的最后几行:";
-            Line(tail.Length > 0 ? tail : "(中枢没有留下任何输出)", muted: true);
-            Line("完整日志:" + logPath, muted: true);
-            Action(Ui.Secondary("打开完整日志", (_, _) =>
-            {
-                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(logPath) { UseShellExecute = true }); }
-                catch { }
-            }));
-            Retry();
-        });
-    }
-
-
-
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ `StartEdgeAsync` 已删（V22 · 2026-08-09）—— 它是**第二套起栈实现**。
+    //
+    //  它与 `HostProvision.EnsureStackAsync` 平行存在，而且正是它让后者「零生产调用点」
+    //  这件事**从表面上看不出来**：界面上确实有一条能起 Edge 的路。
+    //  两套的差别是实打实的：
+    //    · 这一套**只起 Edge、从来不起网关** ⇒ 起完之后「模型」页仍然是空的；
+    //    · 两套同时跑会各起一个 Edge，第二个撞 `address already in use`（退出码 4）。
+    //
+    //  ★★ 它身上那几条硬救回来的约束**一条都没丢**，只是换了地方：
+    //    无窗口启动 + 收 stdout/stderr + 重定向 stdin（不进 REPL）+ 探到才算起来 +
+    //    失败时把中枢自己打印的最后几行原文摆出来 —— 全在 `HostProvision.EnsureEdgeAsync`
+    //    与上面那一格「AI 栈」里。自检那几条断言已改钉**那条活路径**（SelftestMoved ⑥）。
+    //
+    //  ★ 一处如实交代的行为变化：`启动Edge.cmd` 那条退路**没有保留**。
+    //    它把绑定地址写死成一台开发机的 192.168.178.61 —— 换台机器就绑到一个
+    //    不存在的地址上，而且**会显示成功**。现在拿不到网卡地址就如实停下来说选不出地址。
+    // ════════════════════════════════════════════════════════════════════════
 
     // ================================================================ 主机侧
     /// <summary>

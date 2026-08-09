@@ -244,7 +244,26 @@ if ($null -eq $pass2) {
 #     ★ 不搭的话 live 段会 SKIP,而 SKIP 会被读成通过 —— 那正是本项目最恨的形状。
 # ══════════════════════════════════════════════════════════════════════════════
 Write-Host "[3] 发布管理端(单文件,win-x64)…"
-if (-not $AdminOut) { $AdminOut = Join-Path (Split-Path $Out -Parent) 'admin-pack' }
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ V22:默认值从 `admin-pack` 改成 `admin`。这**不是**改名好看,是修一个
+#    让整条「客户端拉起管理端」结构性失效的路径错。
+#
+#  客户端认「这台装没装管理端」用的是 `AdminApp.AdminAppPathNextTo`,它**逐字**探
+#    <客户端 exe 目录>\..\admin\localai-admin.exe          (`AdminApp.AdminDirName` = "admin")
+#  而这里以前发到 `<dist>\admin-pack\` ⇒ 那个探测**永远落空**
+#  ⇒ `HostSetup.RoleEvidence.AdminAppPresent` **结构上恒为 false**
+#  ⇒ 裁定第 1 条(主机客户端启动 ⇒ 拉起管理端)在出包产物上**根本走不到**,
+#     而在开发树里它是好的 —— 典型的「只在发布形态下断掉」。
+#  ★ 实测(2026-08-09):`dist\admin` **不存在**,exe 躺在 `dist\admin-pack`。
+#
+#  ★★ 目录名是**算出来的,不是挑出来的**:下面直接引用客户端那一侧的常量口径
+#    (`AdminApp.AdminDirName`)。两处各写一个字面量的话,改一处就会再断一次 ——
+#    而断掉的表现仍然是"开发树里好好的"。
+# ══════════════════════════════════════════════════════════════════════════════
+# ★ 与 `20-client-win/app/Services/AdminApp.cs` 的 `AdminDirName` 对齐;
+#   下面 [3b] 有一条断言拿源码里的常量与这个值对拍,漂了就判红。
+$adminDirName = 'admin'
+if (-not $AdminOut) { $AdminOut = Join-Path (Split-Path $Out -Parent) $adminDirName }
 New-Item -ItemType Directory -Force -Path $AdminOut | Out-Null
 $adminProj = Join-Path $repo '20-client-win\admin\localai-admin.csproj'
 if (-not (Test-Path $adminProj)) {
@@ -258,6 +277,62 @@ if (-not (Test-Path $adminProj)) {
 if ($LASTEXITCODE -ne 0) { Write-Host "X 管理端发布失败" -ForegroundColor Red; exit 1 }
 $adminExe = Join-Path $AdminOut 'localai-admin.exe'
 if (-not (Test-Path $adminExe)) { Write-Host "X 没有产出管理端 exe" -ForegroundColor Red; exit 1 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [3b] ★★★★ 把「客户端找得到管理端」这件事**当场验掉**(V22)。
+#
+#  ★ 这条判据在此之前**不存在** —— 而它不存在的后果不是"少测一条":
+#    `AdminAppPresent` 恒为 false 这件事在出包产物上躺了整整一版,
+#    开发树里一切正常,谁也没看出来。★ 红测:把 $AdminOut 改回 'admin-pack' ⇒ 本条当场红。
+#
+#  ★★ 判据算的是**客户端会去看的那个路径**,不是"我发到哪儿了":
+#    客户端 exe 在 <Out>,它探 <Out>\..\admin\localai-admin.exe。
+#    这样写,哪天有人改了 $AdminOut 的算法、或者改了客户端那个常量,
+#    两边一漂本条就红 —— 而不是各自都"对"。
+# ══════════════════════════════════════════════════════════════════════════════
+Write-Host "[3b] 验:客户端旁边找得到管理端…"
+$adminSrc = Join-Path $repo '20-client-win\app\Services\AdminApp.cs'
+if (Test-Path $adminSrc) {
+    $m = [regex]::Match((Get-Content $adminSrc -Raw), 'AdminDirName\s*=\s*"([^"]+)"')
+    if (-not $m.Success) {
+        Write-Host "X 读不出 AdminApp.AdminDirName —— 这条判据的两端有一端不见了,不许静默放过。" -ForegroundColor Red
+        exit 1
+    }
+    if ($m.Groups[1].Value -ne $adminDirName) {
+        Write-Host ("X 出包目录名与客户端常量对不上:脚本用 '$adminDirName',而 " +
+                    "AdminApp.AdminDirName = '" + $m.Groups[1].Value + "'。") -ForegroundColor Red
+        Write-Host "  ★ 这正是「客户端探不到管理端」那个病的源头 —— 两处各写一个字面量。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "     OK 目录名与 AdminApp.AdminDirName 一致($adminDirName)" -ForegroundColor DarkGray
+}
+# ★★ 真正那一问:一个放在 <Out> 的客户端 exe,按它自己的算法找得到**这一次发的**管理端吗
+$expectedAdminDir = Join-Path (Split-Path $Out -Parent) $adminDirName
+$asIfClientSees   = Join-Path $expectedAdminDir 'localai-admin.exe'
+# ★★★ 先比**目录**,再看文件在不在。顺序不能反,而且两条都要:
+#   只看"那个路径上有没有 exe"是**不够**的 —— 上一次构建留下的旧 exe 会让它变绿,
+#   于是把 $AdminOut 改错了也照样过。那种判据在红测里会骗人(实测想到过这一条)。
+#   ⇒ 先要求"这一次发到的就是客户端会去看的那个目录",这条与残留物无关。
+function Resolve-Norm([string]$p) {
+    try { return (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path.TrimEnd('\') }
+    catch { return ([IO.Path]::GetFullPath($p)).TrimEnd('\') }
+}
+if ((Resolve-Norm $AdminOut) -ne (Resolve-Norm $expectedAdminDir)) {
+    Write-Host "X 管理端发错了地方。" -ForegroundColor Red
+    Write-Host "  这一次发到:  $(Resolve-Norm $AdminOut)" -ForegroundColor Red
+    Write-Host "  客户端会去看:$(Resolve-Norm $expectedAdminDir)" -ForegroundColor Red
+    Write-Host "  ★ 客户端探的是 <自己所在目录>\..\$adminDirName\localai-admin.exe" -ForegroundColor Red
+    Write-Host "    (AdminApp.AdminAppPathNextTo,喂 HostSetup.RoleEvidence.AdminAppPresent)。" -ForegroundColor Red
+    Write-Host "  ★★ 后果不是少个文件:AdminAppPresent 会**恒为 false**,于是" -ForegroundColor Red
+    Write-Host "     【主机客户端启动 ⇒ 拉起管理端 ⇒ 自动起栈】整条在出包产物上走不到," -ForegroundColor Red
+    Write-Host "     而在开发树里它是好的 —— 这正是它躺了一整版没人发现的原因。" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $asIfClientSees)) {
+    Write-Host "X 目录对了,但那儿没有 localai-admin.exe:$asIfClientSees" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     OK 客户端会去看的那个目录,就是这一次发到的目录($expectedAdminDir)" -ForegroundColor DarkGray
 
 Write-Host "[4] 管理端自检（出包形态:client 与 admin 并排）…"
 $ashape = Join-Path ([IO.Path]::GetTempPath()) ("localai-admin-gate-" + [Guid]::NewGuid().ToString('N'))
@@ -318,6 +393,31 @@ localai-client
 版本戳: $ver
 自检:   $last
 构建于: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+$verNote
+"@
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★ V22:管理端包也要有版本戳与校验和。
+#
+#  在此之前 `dist\admin-pack` 里**只有 exe 与 pdb** —— 拿到手上说不清是哪一版。
+#  这与本脚本开头第 67 行自己写的那条道理是同一条:
+#    「不烧的话,版本只存在 VERSION.txt 里,而那个文件拷丢了就永远说不清手上这个 exe 是什么」
+#  —— 管理端连那个文件都没有,所以它比客户端还差一档。
+#  ★ 两个 exe 的版本戳**是同一个 $ver**(同一次构建、同一棵树),这一点要写在文件里:
+#    两个包各自带一个不同的戳,排查时会让人以为它们不是一起出的。
+# ══════════════════════════════════════════════════════════════════════════════
+$adminHash = (Get-FileHash -Algorithm SHA256 $adminExe).Hash
+Set-Content -Path (Join-Path $AdminOut 'SHA256.txt') -Encoding utf8 -Value "$adminHash  localai-admin.exe"
+Set-Content -Path (Join-Path $AdminOut 'VERSION.txt') -Encoding utf8 -Value @"
+localai-admin(主机管理端)
+版本戳: $ver
+自检:   管理端(出包形态)PASS=$passAdmin FAIL=0
+构建于: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+
+★ 版本戳与同目录旁边的 localai-client 是【同一个】—— 同一次构建、同一棵源码树。
+  对不上就说明这两个包不是一起出的,别混用。
+★ 这个目录必须与 client\ 并排(客户端逐字探 ..\$adminDirName\localai-admin.exe),
+  单独拷走会让「客户端拉起管理端 ⇒ 自动起栈」整条走不到。
 $verNote
 "@
 

@@ -57,6 +57,10 @@ public static partial class Selftest
         else Skip("★★★ 「已配对设备」真的点开用",
                   $"回环管理面 127.0.0.1:{HubAdmin.AdminPort} 没人听");
 
+        // ★★ V22:栈那一格。★ 它**不需要**管理面在 —— 恰恰相反,
+        //   「Edge 没起」也是它必须说清楚的一档,所以这一节在两种前提下都跑。
+        LiveStackCard();
+
         if (gatewayUp) LiveModels();
         else Skip("★★★ 「模型」真的点开用",
                   $"回环网关 127.0.0.1:{LocalAI.Client.Services.HostSetup.GatewayPort} 没人听");
@@ -102,10 +106,43 @@ public static partial class Selftest
                 + "这一条是「点开能用」的直接证据:HTTP → 唯一那处解析器 → 可视树,全程真跑,"
                 + "没有一段是读源码读出来的");
         // ★ 反向:已吊销的**不该**出现 —— 只钉"该出的出来了"是一条随时会变成恒真的判据
+        //
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★★ V22:判据从【显示名】改成【证书指纹短码】。这是在修一条**红得理由是假的**断言。
+        //
+        //  实测(2026-08-09,本机真中枢):`SENIORBIRDS` 与 `HONGKONGPINGPON`
+        //  **各有在册的一条 + 已吊销的若干条**,名字一模一样(本文件下面那条注释
+        //  自己写着「同名设备很常见(实机就有两条 SENIORBIRDS)」)。
+        //  于是这条按名字找的断言在要求:**把在册那条也从界面上抹掉** —— 而那正是
+        //  上一条断言(「在册设备真的出现在界面上」)要求的**反面**。两条互相打架,
+        //  按名字那条必然红,且**永远**红。
+        //
+        //  ★ 实测数字:FAIL=8 **全部**来自这一条(SENIORBIRDS ×2 + HONGKONGPINGPON ×6),
+        //    而产品行为是**对的** —— `LoadDevicesAsync` 里 `Where(d => d.Status != "revoked")`
+        //    过滤得好好的,上一条断言绿着就是证据。
+        //  ★★ 这与下面那条指纹断言踩的是**同一个坑**,而那一条已经修过并把理由写在注释里了:
+        //    「两条判据互相打架时,先看哪一条说的是真的」。这一条当时漏了。
+        //
+        //  ⇒ 改钉 **DeviceId**:它是这条记录的唯一标识,而且**界面上真的印着它**
+        //    (`DeviceRow`:「指纹 … · {DeviceId}」)—— 所以它既分得开同名设备,
+        //    又确实是"这一行在不在屏幕上"的直接证据。
+        //  ★★ 为什么**不是**指纹短码:已吊销的设备恰恰**没有活动证书** ⇒ `CertShort` 为 null。
+        //    第一版改成钉指纹,结果 8 条全落进"分不开、跳过"那一支,反向判据整段空转 ——
+        //    而那个空转是被下面那条零命中断言当场抓出来的(FAIL=1),不是蒙混过去的。
+        // ══════════════════════════════════════════════════════════════════
+        var revokedChecked = 0;
         foreach (var d in devices.Where(x => x.Status == "revoked"))
-            Assert(!texts.Any(t => t.Contains(d.DisplayName, StringComparison.Ordinal)),
-                $"★★ 反向:已解除的「{d.DisplayName}」**不出现**在已配对列表里 —— "
+        {
+            if (string.IsNullOrWhiteSpace(d.DeviceId)) continue;   // 没标识就没法可靠地找,下面零命中会兜住
+            revokedChecked++;
+            Assert(!texts.Any(t => t.Contains(d.DeviceId, StringComparison.Ordinal)),
+                $"★★ 反向:已解除的「{d.DisplayName}」(id {d.DeviceId})**不出现**在已配对列表里 —— "
                 + "混在里面会让人以为它还连得上");
+        }
+        // ★ 零命中判红:一条已吊销设备都没查到的话,上面那个 foreach 是空转,
+        //   而空转的表现是**一片绿**。中枢上确实有已吊销记录(实测 8 条)。
+        Assert(revokedChecked > 0 || !devices.Any(x => x.Status == "revoked"),
+            "★ 元断言:反向判据至少查了一条已吊销设备 —— 0 条的话这一段是空转,而空转看着像通过");
         // ★ 指纹短码也要摆出来:同名设备很常见(实机就有两条 SENIORBIRDS),只按名字分不开。
         //   ★★ 只看**在册**那些 —— 第一版把已吊销的也算了进去,于是它红了,
         //     而红的理由是假的:已吊销的本来就**不该**出现在这一页上(上一条正是在钉这件事)。
@@ -115,6 +152,75 @@ public static partial class Selftest
         Assert(liveDevs.All(d => texts.Any(t => t.Contains(d.CertShort!, StringComparison.OrdinalIgnoreCase))),
             "★★ 每一行都带**证书指纹短码** —— 同名设备只按名字分不开(D47 那条的界面落点)");
         }
+    }
+
+    // ── AI 栈那一格(V22)────────────────────────────────────────────────
+    /// <summary>
+    /// 「主机中枢」那一页上的**栈状态**真的画出来了,而且**它说的与探到的一致**。
+    ///
+    /// <para>★★★★ 这一节钉的是本轮最要紧的那条:**页面的结论必须跟着探测走**。
+    /// 在此之前那一页只探 Edge 的回环管理面(8442),网关(8080)**整档不看** ——
+    /// 于是「Edge 起着、网关没起」时它显示「这台电脑就是中枢主机」一路绿灯,
+    /// 而「模型」页是空的。写这段时本机的真实状态**正是**那一档。</para>
+    ///
+    /// <para>★★ 判据写成**四种状态都能查**的形式(全起 / 半起两向 / 全没起),
+    /// 而不是"现在应该显示某句话" —— 后者只在写它的那天成立,
+    /// 换一台机器或者过一小时就变成一条恒假或恒真的断言。</para>
+    /// </summary>
+    static void LiveStackCard()
+    {
+        // ① 先**探**一次,拿到这一刻的事实。这是判据的另一端。
+        var probed = HostProvision.ProbeStackAsync().GetAwaiter().GetResult();
+        var gwUp = probed.Gateway.Outcome != SetupOutcome.Failed;
+        var edgeUp = probed.Edge.Outcome != SetupOutcome.Failed;
+        Console.WriteLine($"     (实测这一刻:网关 {(gwUp ? "在跑" : "没在跑")} · "
+                          + $"Edge {(edgeUp ? "在跑" : "没在跑")})");
+
+        // ② 真 new 出那一页,真等它把栈那一格填进去
+        var view = new HostHubView();
+        PumpUntil(() => TextsOf(view).Any(t => t.Contains("统一入口网关", StringComparison.Ordinal)),
+                  seconds: 20);
+        var texts = TextsOf(view);
+        var all = string.Join("\n", texts);
+
+        Assert(texts.Count > 0, "★ 元断言:「主机中枢」那一页真的画出了东西");
+        // ★★ 这一格必须在**两档里都画**(Host 与 HostHubDown)。
+        //   只在 HubDown 档画的话,最坏的中间态恰好落在看不见的地方 —— 那正是本轮修的病。
+        Assert(all.Contains("统一入口网关", StringComparison.Ordinal),
+            "★★★★ 「主机中枢」那一页上**必须有网关那一行** —— "
+            + "在此之前这一页整档不看网关,于是「Edge 起着、网关没起」时它一路绿灯,"
+            + "而「模型」页是空的。★ 这一条与角色判成 Host 还是 HostHubDown 无关");
+        Assert(all.Contains($"{LocalAI.Client.Services.HostSetup.GatewayPort}", StringComparison.Ordinal),
+            $"★★ 那一行要写明端口 {LocalAI.Client.Services.HostSetup.GatewayPort} —— "
+            + "模型清单读的就是这个口,写出来才对得上账");
+
+        // ③ ★★★★ 承重的那一条:**页面的结论必须与探到的一致**。
+        var saysAllUp = all.Contains("整套栈都在跑", StringComparison.Ordinal);
+        var saysHalf = all.Contains("【起了一半】", StringComparison.Ordinal);
+        var saysNone = all.Contains("整套栈都没在跑", StringComparison.Ordinal);
+        if (gwUp && edgeUp)
+            Assert(saysAllUp && !saysHalf && !saysNone,
+                "★★★ 两个都探到了 ⇒ 页面必须说「整套栈都在跑」,而且不能同时说别的");
+        else if (gwUp || edgeUp)
+            Assert(saysHalf && !saysAllUp,
+                $"★★★★ 【半起】(网关 {(gwUp ? "在" : "不在")} / Edge {(edgeUp ? "在" : "不在")})"
+                + " ⇒ 页面必须**明说是半起**,绝不许显示成全好 —— "
+                + "这是最坏的中间态,因为两半都像成功");
+        else
+            Assert(saysNone && !saysAllUp,
+                "★★★ 两个都没探到 ⇒ 页面必须说整套都没在跑");
+
+        // ④ 半起时要说清**缺的那一半会怎样**,不是笼统一句「有问题」
+        if (gwUp ^ edgeUp)
+            Assert(all.Contains("模型", StringComparison.Ordinal)
+                   || all.Contains("副机", StringComparison.Ordinal),
+                "★★ 半起那句话要说清**缺了它会怎样**(没网关 ⇒ 模型页是空的;"
+                + "没 Edge ⇒ 副机连不上),不是笼统一句「起了一半」");
+
+        // ⑤ ★★ 绝不许把人推回命令行 —— 这是本车道存在的理由(用户裁定:不跑任何命令)
+        Assert(!all.Contains("start-stack", StringComparison.OrdinalIgnoreCase),
+            "★★★★ 这一页**不许**叫人去跑 `start-stack.ps1` —— 起栈是这个程序的活。"
+            + "用户裁定:全程不需要跑任何命令");
     }
 
     // ── 模型 ──────────────────────────────────────────────────────────────
