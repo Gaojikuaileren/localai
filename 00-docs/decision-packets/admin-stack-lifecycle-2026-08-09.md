@@ -167,7 +167,7 @@ StackStop.QueryAsync()  →  弹确认框  →  请客户端优雅退出  →  �
 | 护栏 | 怎么弄假 | 结果 |
 |---|---|---|
 | 「唯一入口」必须有生产调用点 | 把 `StackBoot` 里那行 `HostProvision.EnsureStackAsync(...)` 换成别的调用 | **FAIL=8→9**,且**只有** `EnsureStackAsync` 那条变红,另两条(`Strings.Get` / `TranslationState.NotifyPoolChanged`)仍绿 ⇒ 判据是**特定**的,不是一红全红。★ 同文件注释里那句 `HostProvision.EnsureStackAsync(...)` **没有**被算成调用点(剥注释起了作用) |
-| 出包路径 `[3b]` | 传 `-AdminOut <dist>\admin-pack` | 见 §3.7 |
+| 出包路径 `[3b]` | 传 `-AdminOut <dist>\admin-pack` | **红**(`EXIT=1`)。原文:「管理端发错了地方。这一次发到 …\dist\admin-pack;客户端会去看 …\dist\admin」。★★ 关键:它红在**目录比对**那一步,不是"文件在不在" —— 当时 `dist\admin` **确实存在**(上一次成功构建留下的),第一版写法会被那份残留放过去。见 §3.7 |
 
 ### 3.7 `[3b]` 那条判据自己也差点骗人
 
