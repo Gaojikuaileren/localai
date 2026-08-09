@@ -42,6 +42,8 @@ public static class Selftest
 
         try
         {
+            SelftestUiPromises.Run(Assert); // ★ V24:界面指路护栏(全文与判词在 SelftestUiPromises.cs;它自己兜住异常)
+
             // ---- 状态目录 ----
             Assert(AppPaths.StateDir == tmp, "状态目录可被环境变量覆盖(自检不碰真实档案)");
             AppPaths.EnsureStateDir();
