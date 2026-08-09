@@ -47,6 +47,23 @@ public static class HostProvision
 
     public const int EdgePort = 8443;
 
+    // ════════════════════════════════════════════════════════════════════
+    //  ★★★ 探活等多久。**实测定的,不是拍的**(V22 · 2026-08-09):
+    //    本机冷起网关到 `/health` 答话用了 **19 秒**。
+    //    而这里原来写的是 20 秒 —— 只剩 1 秒余量:机器忙一点、缓存冷一点,
+    //    自动起栈就会报「起不来」,**而网关其实好好的**。
+    //    ★ `start-stack.ps1` 等的是 30 次 × 1 秒 = **30 秒**,它早就知道这件事。
+    //    ⇒ 与它对齐。两处不一样的话,「手动起得来、自动起不来」会变成一个查不出根因的问题
+    //      —— 而这一次那个根因会是**我们自己写的超时**。
+    // ════════════════════════════════════════════════════════════════════
+    /// <summary>等网关 /health 答话多久(毫秒)。★ 与 `90-ops/start-stack.ps1` 的 30 秒一致。</summary>
+    public const int GatewayWaitMs = 30_000;
+
+    /// <summary>等 Edge 回环管理面答话多久(毫秒)。
+    /// ★ 与「主机中枢」那一页原来的 `StartEdgeWaitSeconds = 30` 一致 ——
+    /// 合并两条起栈路径时把它从 30 降到 20 是**悄悄的功能退化**,这里补回来。</summary>
+    public const int EdgeWaitMs = 30_000;
+
     // ---------------------------------------------------------------- 身份
     /// <summary>
     /// 确保本机有中枢身份。已经有就是 Skipped(**不是**错误,更不去覆盖)。
@@ -297,11 +314,11 @@ public static class HostProvision
         StackOwnership.NoteBackendsBeforeStart();
 
         progress?.Report($"① 统一入口网关 :{HostSetup.GatewayPort} —— 正在启动…");
-        var gw = await EnsureGatewayAsync();
+        var gw = await EnsureGatewayAsync(progress);
         progress?.Report("① " + Describe(gw));
 
         progress?.Report($"② LAN Edge :{EdgePort} —— 正在启动…");
-        var edge = await EnsureEdgeAsync(bindIp);
+        var edge = await EnsureEdgeAsync(bindIp, progress);
         progress?.Report("② " + Describe(edge));
 
         return new StackResult(gw, edge);
@@ -346,7 +363,7 @@ public static class HostProvision
                        : $"探不到回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— 副机连不上这台。"));
     }
 
-    static async Task<SetupStep> EnsureGatewayAsync()
+    static async Task<SetupStep> EnsureGatewayAsync(IProgress<string>? progress = null)
     {
         var name = $"统一入口网关 :{HostSetup.GatewayPort}";
         // ★ 探活与端口都走**客户端那份** HostSetup(csproj link 的同一个文件),不另存一个数:
@@ -383,10 +400,11 @@ public static class HostProvision
             return new SetupStep(name, SetupOutcome.Failed, ex.GetType().Name + ": " + ex.Message);
         }
         // ★★★ 边界③:**不看退出码,去探**。uvicorn 起不来时进程可能还活着而端口没开。
-        if (await WaitUntilAsync(() => HostSetup.GatewayUpAsync(), 20_000))
+        if (await WaitUntilAsync(() => HostSetup.GatewayUpAsync(), GatewayWaitMs,
+                (s, t) => progress?.Report($"\u2460 {name} \u2014\u2014 \u8fdb\u7a0b\u5df2\u8d77\uff0c\u6b63\u5728\u7b49\u5b83\u5e94\u7b54\u2026\uff08{s}/{t} \u79d2\uff09")))
             return new SetupStep(name, SetupOutcome.Ok, "已起并探到 /health");
         return new SetupStep(name, SetupOutcome.Failed,
-            $"进程起了,但 20 秒内探不到 http://127.0.0.1:{HostSetup.GatewayPort}/health —— "
+            $"进程起了,但 {GatewayWaitMs / 1000} 秒内探不到 http://127.0.0.1:{HostSetup.GatewayPort}/health —— "
             + "【不当作成功】(端口被占?venv 缺依赖?)");
     }
 
@@ -470,7 +488,7 @@ public static class HostProvision
     ///     恰恰是 D48 裁定 2 明令禁止的那件事。</item>
     /// </list>
     /// </summary>
-    static async Task<SetupStep> EnsureEdgeAsync(string? bindIp = null)
+    static async Task<SetupStep> EnsureEdgeAsync(string? bindIp = null, IProgress<string>? progress = null)
     {
         const string name = "LAN Edge :8443";
         if (await EdgeUpAsync()) return new SetupStep(name, SetupOutcome.Skipped, "本来就在跑");
@@ -541,11 +559,12 @@ public static class HostProvision
         }
         // ★★★ 边界③:**不看退出码,去探**。Edge 起不来时进程可能还活着而端口没开。
         //   ★ 但探的是**管理面**(见 EdgeUpAsync)—— 探 8443 的那一版对客户端毫无意义。
-        if (await WaitUntilAsync(() => EdgeUpAsync(), 20_000))
+        if (await WaitUntilAsync(() => EdgeUpAsync(), EdgeWaitMs,
+                (s, t) => progress?.Report($"\u2461 {name} \u2014\u2014 \u8fdb\u7a0b\u5df2\u8d77\uff0c\u6b63\u5728\u7b49\u5b83\u5e94\u7b54\u2026\uff08{s}/{t} \u79d2\uff09")))
             return new SetupStep(name, SetupOutcome.Ok,
                 $"已起(业务口 {ip}:{EdgePort},管理面 127.0.0.1:{HubAdmin.AdminPort})并探到管理面。{whyIp}");
         return new SetupStep(name, SetupOutcome.Failed,
-            $"进程起了,但 20 秒内连不上回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— 【不当作成功】。"
+            $"进程起了,但 {EdgeWaitMs / 1000} 秒内连不上回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— 【不当作成功】。"
             + ExitNote(_edgeProc) + " 中枢自己打印的话在:" + EdgeLogPath);
     }
 
@@ -594,13 +613,24 @@ public static class HostProvision
         catch (Exception ex) { return "(读不到子进程的退出状态:" + ex.Message + ")"; }
     }
 
-    /// <summary>轮询直到条件为真或超时。★ 起进程到端口可用之间必然有一段,不等就会误判成失败。</summary>
-    static async Task<bool> WaitUntilAsync(Func<Task<bool>> probe, int timeoutMs)
+    /// <summary>
+    /// 轮询直到条件为真或超时。★ 起进程到端口可用之间必然有一段,不等就会误判成失败。
+    ///
+    /// <para>★★ <paramref name="tick"/> 每秒报一次「等到第几秒了」。**这不是装饰**:
+    /// 这里最长要等 30 秒,而一个 30 秒不动的页面与一个卡死的页面**在用户眼里一模一样**。
+    /// 「主机中枢」那一页原来的 `StartEdgeAsync` 就是逐秒报 `n/30` 的,
+    /// 两条路合并时把它丢了 —— 这里补回来。</para>
+    /// </summary>
+    static async Task<bool> WaitUntilAsync(Func<Task<bool>> probe, int timeoutMs, Action<int, int>? tick = null)
     {
         var sw = Stopwatch.StartNew();
+        var lastSec = -1;
+        var total = timeoutMs / 1000;
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
             if (await probe()) return true;
+            var sec = (int)(sw.ElapsedMilliseconds / 1000);
+            if (sec != lastSec) { lastSec = sec; tick?.Invoke(sec, total); }
             await Task.Delay(400);
         }
         return false;

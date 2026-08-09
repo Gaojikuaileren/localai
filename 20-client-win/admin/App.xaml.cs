@@ -143,13 +143,23 @@ public partial class App : Application
     }
 
     // ---------------------------------------------------------------- 托盘
+    /// <summary>托盘菜单里「打开管理端面板」那一项的名字(自检按名字找它)。</summary>
+    internal const string TrayOpenItemName = "TrayOpenPanel";
+
+    /// <summary>托盘菜单里「关闭」那一项的名字 —— 裁定第 6 条说的唯一真关闭入口。</summary>
+    internal const string TrayCloseItemName = "TrayRealClose";
+
     void BuildTray()
     {
         var menu = new WinForms.ContextMenuStrip();
-        menu.Items.Add("打开管理端面板", null, (_, _) => Dispatcher.Invoke(ShowPanel));
+        var open = menu.Items.Add("打开管理端面板", null, (_, _) => Dispatcher.Invoke(ShowPanel));
+        open.Name = TrayOpenItemName;
         menu.Items.Add(new WinForms.ToolStripSeparator());
         // ★★ 第 6 条:**真正关闭只能走这里**。窗口的 × 只缩托盘。
-        menu.Items.Add("关闭", null, (_, _) => Dispatcher.Invoke(async () => await RealCloseAsync()));
+        var close = menu.Items.Add("关闭", null, (_, _) => Dispatcher.Invoke(async () => await RealCloseAsync()));
+        // ★ 起个名字是为了让自检**按身份**找到它,而不是按显示文案去猜 ——
+        //   按文案找的断言会在改文案那天红,而它本来要守的是「这条路通不通」。
+        close.Name = TrayCloseItemName;
 
         _tray = new WinForms.NotifyIcon
         {
@@ -192,12 +202,42 @@ public partial class App : Application
     /// <para>★ 为什么排在客户端退出**之后**:客户端正用着这套栈。先拆栈再让它退,
     /// 它那八步善后里每一次拨号都会失败,日志里全是连不上 —— 而那是我们自己造的假现场。</para>
     /// </summary>
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★ 诚实的测试缝(捞自未并分支 `worktree-agent-ad36411fae961778d`,逐段搬,不整片 apply)
+    //
+    //  出包自检要覆盖管理端,而「托盘右键能真关闭 + 栈真的没了」是**行为**判据,
+    //  不是源码文本判据。只验「源码里有个叫『关闭』的菜单项」仍然是"编得过",
+    //  不是"跑得起来"(ASSERTION-PITFALLS 第 12 条:4197 条全绿而真机开不起来)。
+    //
+    //  ★★ 而这条路中间隔着一个**模态框** —— 自检进程里没有人去点它,进程会当场挂死。
+    //    那正是 `admin/Selftest.cs` 今天那条 SKIP 的真原因。
+    //    ⇒ 把「问人」和「告诉人」抽成可替换的一环,自检就能走**真正那条路**。
+    //  ★ 默认实现**就是原来那两个 MessageBox**,生产路径一个字都没有改变;
+    //    自检替换的只是"谁来回答那一句",不是被测的那条路本身。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>关栈前问人的那一下。默认 = 原来的模态框;自检替换成"就当人点了确定"。</summary>
+    internal Func<string, bool> ConfirmClose { get; set; } = text =>
+        MessageBox.Show(text, "关闭管理端", MessageBoxButton.OKCancel, MessageBoxImage.Warning)
+            == MessageBoxResult.OK;
+
+    /// <summary>关不成时告诉人的那一下。默认 = 原来的模态框。</summary>
+    internal Action<string> ReportCloseBlocked { get; set; } = text =>
+        MessageBox.Show(text, "关闭管理端", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+    /// <summary>自检读:托盘图标。null = 压根没建出来;Visible=false = 收掉了。</summary>
+    internal WinForms.NotifyIcon? TrayIcon => _tray;
+
+    /// <summary>自检读:面板窗口。null = 还没建过 —— `--tray` 启动时就该是这样(不弹窗)。</summary>
+    internal AdminWindow? Panel => _main;
+
+    /// <summary>自检读:最近一次关栈的实测结果(没关过就是 null)。</summary>
+    internal StackStop.StopReport? LastStopReport { get; private set; }
+
     async Task RealCloseAsync()
     {
         var verdict = await StackStop.QueryAsync();
-        var answer = MessageBox.Show(StackStop.ConfirmText(verdict),
-                                     "关闭管理端", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.OK) return;
+        if (!ConfirmClose(StackStop.ConfirmText(verdict))) return;
 
         if (ClientLink.IsClientRunning())
         {
@@ -207,22 +247,21 @@ public partial class App : Application
                 // ★ 如实说,并且**不继续关自己** —— 管理端先走会让用户失去唯一的入口,
                 //   而客户端还在那儿占着租约。
                 // ★★ 也**不关栈**:客户端还在用它。
-                MessageBox.Show(why + "\n\n管理端没有关闭,AI 栈也没有停。", "关闭管理端",
-                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                ReportCloseBlocked(why + "\n\n管理端没有关闭,AI 栈也没有停。");
                 return;
             }
         }
 
         // ── ③ 真的关栈,并验 ────────────────────────────────────────────
         var report = await StackStop.StopAsync();
+        LastStopReport = report;
         if (!report.AllGone)
         {
             // ★★ 没停干净就**把还剩什么摆出来**,并且**不关掉管理端** ——
             //   管理端一走,用户就失去了唯一能再试一次的入口,而屏幕上刚才那句
             //   「已关闭」会变成一句没人能验证的话。
-            MessageBox.Show(report.ToText()
-                            + "\n\n★ 管理端没有关闭 —— 留着它,你还能再点一次「关闭」重试。",
-                            "关闭管理端", MessageBoxButton.OK, MessageBoxImage.Warning);
+            ReportCloseBlocked(report.ToText()
+                               + "\n\n★ 管理端没有关闭 —— 留着它,你还能再点一次「关闭」重试。");
             return;
         }
 

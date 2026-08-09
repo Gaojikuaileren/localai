@@ -1148,11 +1148,31 @@ public static partial class Selftest
                     //     出厂产物旁边没有源码,读不到时这几条要【跳过】而不是判红。
                     //     (写成 `Assert(slice is not null && …)` 的那一版实测在
                     //      `build-client.ps1` 的「发布产物原位自检」那一趟直接三条红。)
-                    var hsSrc = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★★★ V22:这四条**一次都没跑过**,而且是**双重指错**:
+                    //    ① `TryReadSource("Services/HostSetup.cs")` 沿 BaseDirectory 找**磁盘上**的文件,
+                    //       而 `HostSetup.cs` 的真身在 `app/Services/`,靠 csproj 的
+                    //       `<Compile Link>` 进管理端 —— **它不落盘**。⇒ `hsSrc` 恒为 null。
+                    //    ② 就算读到了也切不出东西:`EnsureEdgeAsync` 在 V21 已经从
+                    //       `HostSetup.cs` **搬进了 `HostProvision.cs`**。
+                    //  ⇒ 后果:`if (hsSrc is not null)` 静默跳过 ——
+                    //    不计 PASS、不计 FAIL、**连 SKIP 都不计**。「零命中与全清白长得一模一样」。
+                    //  ★ 而它守的恰恰是本轮动的那块:「自动起栈必须用 run-lan,不许退回 run」。
+                    //  ⇒ 改读**真的在管理端磁盘上、而且真的含 EnsureEdgeAsync** 的那个文件,
+                    //    并且读不到时**明着 Skip**,不许再静默。
+                    // ══════════════════════════════════════════════════════════
+                    var hsSrc = TryReadSource(Path.Combine("Services", "HostProvision.cs"));
+                    if (hsSrc is null)
+                        Skip("「自动起栈必须用 run-lan」那四条",
+                             "读不到 `admin/Services/HostProvision.cs`(发布产物旁边没有源码)—— "
+                             + "★ 这一档以前是**静默跳过**的,连 SKIP 都不计;现在它至少说得出自己没跑。");
                     if (hsSrc is not null)
                     {
                         var ensureEdge = Slice(hsSrc, "static async Task<SetupStep> EnsureEdgeAsync",
                                                "static string ExitNote");
+                        // ★ 元断言:切得到。切不到的话下面四条会全部恒假,而红的理由是假的。
+                        Assert(ensureEdge is not null,
+                            "★ 元断言:切得到 `EnsureEdgeAsync` —— 切不到的话下面四条会红得给出假理由");
                         Assert(ensureEdge is not null && ensureEdge.Contains("\"run-lan \""),
                             "★★★ 自动起栈必须用 `run-lan <ip>` —— `run` 那条路上 lan-edge 不绑管理面"
                             + "(EdgeConfig 的 AdminPort 形参默认 0),主机上的客户端会被自己判成「不是主机」");
