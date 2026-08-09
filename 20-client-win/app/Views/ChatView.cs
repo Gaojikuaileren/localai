@@ -1007,7 +1007,16 @@ public sealed class ChatView : UserControl
         //       常驻的提示会被当成背景噪声,真出事那天也就没人看了。
         if (!TheApp.Hub.IsPaired)
         {
-            var noHub = Ui.Caption("还没有配对到中枢 —— 消息会记在本机,但没有 AI 可问。到「设备」里完成配对。");
+            // ★★★ V24:这句话原来写的是「到『设备』里完成配对」——**客户端已经没有「设备」这一页了**
+            //   (MainWindow.xaml.cs:528「设备/配对已并入设置,不再单列」;全客户端没有一个控件叫这个名字)。
+            //   ⇒ 用户 2026-08-07 实机报的「副机需要打开设置下滑到底才可以开始连接」,根因就是这一句:
+            //     它把人支去找一个不存在的入口,人只好自己把设置从头翻到底。
+            //   ★ 判词:**给错原因的提示比不给提示更坏。** 现在这三个名字今天都真的在屏幕上:
+            //     「设置」= 左栏系统组那一项(nav.settings)· 「已配对的电脑」= 设置最下面那一节的小标题
+            //     (devices.title,SettingsView 里 `Ui.Subtitle(Strings.Get("devices.title"))`)·
+            //     「开始寻找主机」= 那一节里未配对时的主按钮(DevicesView.ClientPairCard)。
+            var noHub = Ui.Caption("还没有配对到中枢 —— 消息会记在本机,但没有 AI 可问。"
+                                   + "到「设置」最下面的「已配对的电脑」里点「开始寻找主机」。");
             noHub.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             noHub.Margin = new Thickness(2, 0, 2, 6);
             area.Children.Add(noHub);
