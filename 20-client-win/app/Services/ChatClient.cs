@@ -35,7 +35,9 @@ public sealed record ChatOutcome(bool Ok, string Code, string Message, string Pa
     public string Advice => Code switch
     {
         "" => "",
-        "not_paired" => "还没有配对到中枢。到「设备」里完成配对再试。",
+        // ★ V24:原文写的是「到『设备』里完成配对再试」—— 客户端已经没有「设备」这一页了
+        //   (设备/配对并入设置,见 MainWindow.xaml.cs:528)。这个文件只编进客户端,所以直说客户端的路。
+        "not_paired" => "还没有配对到中枢。到「设置」最下面的「已配对的电脑」里点「开始寻找主机」,配好再试。",
         // ══════════════════════════════════════════════════════════════
         //  ★★★ V20-③(D?):这一句原来说的是
         //    「目前后端要在主机上手动启动:跑 90-ops\start-stack.ps1」。

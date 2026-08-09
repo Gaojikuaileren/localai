@@ -462,12 +462,19 @@ public static class HostSetup
         }
         // ★★★ 以下**全部**是副机分支。★ V21 起这句话对**两边**都成立了:
         //   整个客户端(不只是副机分支)一行起栈代码都没有 —— 元断言钉着,红测过。
+        // ★★ V24:这两句原来都指着「设备」页 —— 那一页**已经没有了**(设备/配对并入设置,
+        //   见 MainWindow.xaml.cs:528)。★ 而这个文件被 `admin/localai-admin.csproj` 用
+        //   `<Compile Link>` 编进**管理端**,两个 exe 里去处的名字不一样(客户端在设置里,
+        //   管理端在「主机中枢」那一页)⇒ 只写一边会把另一边说错。
+        //   ⇒ 落点用两边都有的那个小标题「已配对的电脑」,再各自补一句它在哪儿。
         if (!isPaired)
             return new BootDecision(BootRoute.ClientNeedsPairing, role,
-                "这台是副机,**还没配过对** —— 去「设备」里配对到中枢主机。" + WhyNotHost(role));
+                "这台是副机,**还没配过对** —— 去「已配对的电脑」那一节里配对到中枢主机"
+                + "(客户端:「设置」最下面;管理端:「主机中枢」那一页)。" + WhyNotHost(role));
         if (!hubReachable)
             return new BootDecision(BootRoute.ClientHubUnreachable, role,
-                "已配对,但现在**连不上中枢** —— 多半是主机没开机;具体归因见「设备」页。");
+                "已配对,但现在**连不上中枢** —— 多半是主机没开机;具体归因在「已配对的电脑」那一节里"
+                + "(客户端:「设置」最下面;管理端:「主机中枢」那一页)。");
         return new BootDecision(BootRoute.ClientReady, role, "");
     }
 
