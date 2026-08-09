@@ -59,6 +59,10 @@ public static class StackBoot
     /// <summary>状态变了。★ 界面挂这个,不要轮询。</summary>
     public static event Action? Changed;
 
+    /// <summary>自检闸的环境变量名(见 <see cref="EnsureAsync"/> 里那段)。
+    /// ★ 名字放在这里、由自检引用,是为了不出现两个字面量各写一个。</summary>
+    public const string NoAutoStackEnvVar = "LOCALAI_ADMIN_NO_AUTOSTACK";
+
     static void Raise() { try { Changed?.Invoke(); } catch { } }
 
     /// <summary>
@@ -71,6 +75,33 @@ public static class StackBoot
     /// <param name="bindIp">用户在界面上挑的网卡地址(挑过才传)。</param>
     public static Task<HostProvision.StackResult> EnsureAsync(bool force = false, string? bindIp = null)
     {
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V23 · **自检闸**:自检要走的是【关栈】那条路,它不许顺手起一套真的栈。
+        //
+        //  自检里 `④c 托盘右键真关闭` 会真的 `new App(...)` 并跑 `OnStartup` ——
+        //  而 `OnStartup` 里就是那条 `StackBoot.EnsureAsync()` 生产调用点。
+        //  不拦的话,一次自检会在用户机器上**真的起一个网关和一个 Edge**
+        //  (仓库形态下 `LocateGateway()` 找得到真东西),而且它们不会被收走。
+        //
+        //  ★ 闸开在**起栈**这一侧,不开在关栈那一侧 —— 被测的是关栈,
+        //    替身打在被测者身上就是 ASSERTION-PITFALLS 第 13 条那个坑(已踩 2 次)。
+        //  ★★ 生产**从不设**这个变量:它由自检自己给子进程设,并有一条断言钉着
+        //    「产品源码里不许出现给它赋值」(Selftest,红测过)。
+        //  ★★★ 而且**不装成起成功了**:如实报 Failed + 说清是自检闸拦的 ——
+        //    装成 Ok 会让「起栈」那一片断言在自检里变成恒绿。
+        // ══════════════════════════════════════════════════════════════════
+        if (Environment.GetEnvironmentVariable(NoAutoStackEnvVar) == "1")
+        {
+            const string why = "自检闸(" + NoAutoStackEnvVar + "=1)拦下了自动起栈 —— "
+                             + "自检不许在你的机器上真起一套栈。";
+            var blocked = new HostProvision.StackResult(
+                new SetupStep($"统一入口网关 :{HostSetup.GatewayPort}", SetupOutcome.Failed, why),
+                new SetupStep($"LAN Edge :{HostProvision.EdgePort}", SetupOutcome.Failed, why));
+            lock (_gate) { Last = blocked; Phase = StackPhase.Done; _lines.Clear(); _lines.Add("★ " + why); }
+            Raise();
+            return Task.FromResult(blocked);
+        }
+
         lock (_gate)
         {
             // ★★★ 单飞是**承重**的,不是优化:管理端启动时会调一次,而用户这时正好打开

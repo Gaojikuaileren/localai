@@ -195,7 +195,67 @@ function Invoke-GateSelftest {
         if ($text -match 'SRCHIT=(\d+)')  { $srcHit  = [int]$Matches[1] }
         if ($text -match 'SRCMISS=(\d+)') { $srcMiss = [int]$Matches[1] }
 
+        # ══════════════════════════════════════════════════════════════════
+        #  ★★★★ V23:「本该跑而没跑」在门禁里**看得见**(在此之前它是隐形的)
+        #
+        #  V22 立了「把静默跳过换成看得见的 SKIP」这个做法,却没走完最后一步:
+        #  上面那条正则只认 PASS/FAIL ⇒ 那些「看得见的 SKIP」在**门禁里谁也不会红**,
+        #  于是「登记成 SKIP」等于「登记给自己看」。
+        #
+        #  ★ 而「SKIP 一律判红」会走到反面:发布产物旁边没有源码、这台没装 python、
+        #    8080 被真东西占着 —— 这些是**设计如此**,天天判红只会训练人绕过门禁
+        #    (D82 已经因此失效过两条)。
+        #  ⇒ 口径是把 SKIP 切成两类,只对第二类判红:
+        #      · SKIP  = 这个形态下**本来就测不了** ⇒ 黄字打印,不判红;
+        #      · OWED  = **本该跑得了却没跑成**(判据指错了文件、子进程挂死、
+        #                生命周期那段一条结果都没写出来)⇒ **判红**;
+        #      · LIFE  = 「托盘右键关闭 → 管理端退出 → 栈真的没了」到底验没验到。
+        #                它是验收④本身,0 就是**没验**,而没验与全绿在退出码上长得一样 ⇒ 判红。
+        #  ★★ 字段缺失(exe 比本脚本旧)**不判红**,只打黄字说"口径不明" ——
+        #    与上面 SRCMISS 那一档同一条处置:不拿一个没有的数去否定一次构建。
+        # ══════════════════════════════════════════════════════════════════
+        $skip = -1; $owed = -1; $life = -1
+        if ($text -match 'SKIP=(\d+)') { $skip = [int]$Matches[1] }
+        if ($text -match 'OWED=(\d+)') { $owed = [int]$Matches[1] }
+        if ($text -match 'LIFE=(\d+)') { $life = [int]$Matches[1] }
+
+        if ($owed -gt 0) {
+            Write-Host ""
+            Write-Host "X $Label：有 $owed 条【本该跑而没跑】(OWED)。" -ForegroundColor Red
+            Write-Host "  ★ OWED 不是 SKIP：SKIP 是「这个形态下测不了」，OWED 是「本该跑得了却没跑成」——" -ForegroundColor Red
+            Write-Host "    判据指错了文件 / 子进程挂死 / 那一段一条结果都没写出来。" -ForegroundColor Red
+            Write-Host "    ★★ 不出包：一条没跑过的断言与一条通过的断言，在 PASS 数里是看不出来的。" -ForegroundColor Red
+            if ($outText -match '\S') {
+                Write-Host "  ---- 欠着的那几条 ----" -ForegroundColor Red
+                ($outText -split "`r?`n" | Where-Object { $_ -match '^\s*OWED' }) |
+                    ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+            }
+            Remove-Item $stdout -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        if ($life -eq 0) {
+            Write-Host ""
+            Write-Host "X $Label：LIFE=0 —— 「托盘右键关闭 → 管理端退出 → 栈真的没了」这一条【没验到】。" -ForegroundColor Red
+            Write-Host "  ★ 那是验收④本身，也是关栈那条路唯一算数的证据(扫源码对「点下去做没做事」什么都不会说)。" -ForegroundColor Red
+            Write-Host "  ★★ 常见成因：这个环境没有可用的桌面 / window station(托盘图标与 WPF 窗口都要它)，" -ForegroundColor Red
+            Write-Host "     或者那条路上多了一个模态框把自检子进程挡住了。上面那条 OWED 写了实测原因。" -ForegroundColor Red
+            Remove-Item $stdout -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+
         Write-Host "    $Label：PASS=$p FAIL=0"
+        if ($owed -lt 0) {
+            Write-Host "      ! 哨兵里没有 OWED/LIFE —— 这份自检还没有把「这个形态下测不了」与「本该跑而没跑」分开。" -ForegroundColor Yellow
+            Write-Host "        ★ 不判红,但这一趟【本该跑而没跑】的那些在门禁里仍然是隐形的。" -ForegroundColor Yellow
+            Write-Host "        ★★ 今天只有管理端那份带这两个字段;客户端那份是**已知的未了项**(V23 交回里登记着)。" -ForegroundColor Yellow
+        } elseif ($skip -gt 0) {
+            Write-Host "      ★ 跳过 $skip 条(OWED=0)：都是【这个形态下测不了】那一类 —— 发布产物旁边没有源码、" -ForegroundColor Yellow
+            Write-Host "        这台机器上没装某个外部程序、某个端口被真东西占着。逐条原因见自检输出，" -ForegroundColor Yellow
+            Write-Host "        **不要把它们读成通过**；但它们不判红，判红会天天误报。" -ForegroundColor Yellow
+        }
+        if ($life -eq 1) {
+            Write-Host "      OK LIFE=1：托盘右键「关闭」是**真点过**的，关栈也是**真跑过**的(替身进程真的没了)。" -ForegroundColor DarkGray
+        }
         if ($srcMiss -lt 0) {
             Write-Host "      ! 哨兵里没有 SRCMISS —— 这份 exe 比本脚本旧(自检还没带口径)。" -ForegroundColor Yellow
             Write-Host "        ★ 不判红,但这个 PASS 数【口径不明】,不要拿它和基线比。" -ForegroundColor Yellow

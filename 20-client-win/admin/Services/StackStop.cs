@@ -39,6 +39,35 @@
 //    8080 / 8442 真的不通了、没有孤儿 llama-server、显存回落 —— 验不过就如实说还剩什么。
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  ★★★★ V23 · 修 V22 在这里留下的**三条误杀**。用户裁定(2026-08-09)逐字:
+//    「停我们起的那些,`adopt_running()` 认领的一个不动;
+//      **判不出归属时如实说不知道、不动手**,不是按端口猜一个杀。」
+//
+//  被删掉的两条"猜":
+//    ① `GatewayByPort()` —— 在 127.0.0.1:8080 LISTENING **且进程名含 python** 就
+//       `Kill(entireProcessTree: true)`。没有 PID 比对、没有 StartTime、不过账本。
+//       ★ 它上面还写着「这条判据是精确的…再验一次进程名可防误杀」——
+//         而用户自己在 8080 上跑的 `http.server` / Flask / uvicorn / Jupyter
+//         **进程名恰恰就是 python**。那道"二次校验"对这一场景等于零,
+//         而它的措辞让人以为这里已经想过误杀了。⇒ 判据和那句话一起删掉。
+//    ② `ByName("localai-lan-edge").FirstOrDefault()` —— 按名字杀。用户手工跑
+//       `90-ops/start-stack.ps1` 起的 edge 会被杀,而那**不是我们起的**。
+//
+//  ★★ 换上的**不是**一个更聪明的猜法,是**如实说不知道**:
+//    认不出归属时,把「谁在那个口上听 / 机器上有几个同名进程」写进 `StopReport.Unattributed`,
+//    **并且由 `App.RealCloseAsync` 在关掉之前弹给人看**。代价是「管理端重启过就关不掉网关了」
+//    —— 这个代价是用户明着认的,而它的反面是**替用户杀掉一个无关进程**,那没法撤销。
+//
+//  ★★★ 「不动手」只是一半 —— 另一半是**说**。第一版只做了前一半:
+//    认不出归属 ⇒ 不动 ⇒ 端口探不到人 ⇒ `AllGone=true` ⇒ **管理端安静地关掉自己**,
+//    而 `ToText()` 那句「整套 AI 栈已经停掉了(已验)」根本没人看见(它只在失败路径上被调用)。
+//    ⇒ 用户点了「关闭」,屏幕上什么都没说,而他自己那个 python 还在 8080 上跑着。
+//    那和 V22 的误杀是**同一条毛病的两面**:一个替他做了决定,一个瞒了他一件事。
+//
+//  ★★★ 第三条在 `StackOwnership`:陈旧快照(见该文件头 V23 那段)。
+// ══════════════════════════════════════════════════════════════════════════════
+
 using System.Diagnostics;
 using HostSetup = LocalAI.Client.Services.HostSetup;
 
@@ -100,15 +129,39 @@ public static class StackStop
     /// <param name="AllGone">停干净了没有 —— 判据是**端口不通 + 没有孤儿后端**,不是调用成功。</param>
     /// <param name="Did">逐条:动了谁。</param>
     /// <param name="Left">逐条:还剩谁(空表才算干净)。</param>
-    /// <param name="Untouched">逐条:**有意没动**的(认领的后端),以及为什么。</param>
+    /// <param name="Untouched">逐条:**有意没动**的(`adopt_running()` 认领的那一批),以及为什么。</param>
+    /// <param name="Unattributed">
+    /// 逐条:**认不出归属所以没动**的 —— 与 <paramref name="Untouched"/> 是**两件事**。
+    /// <para>★★★ V23 把它单独拆出来,理由不是分类癖:
+    /// 「认领的那批不动」是**用户早就知道的规矩**,每次关栈都会出现,拿它去弹窗就是噪音;
+    /// 而「8080 上有个东西、我们认不出它是不是自己起的、所以没动」是**这一次的意外**,
+    /// 用户不知道 —— 不说的话,他点了「关闭」、管理端安静退出,他会以为栈全停了。
+    /// ⇒ 「不动手」只做了一半,另一半是**如实说**(用户裁定原话)。两者合成一个列表就说不清了。</para>
+    /// </param>
     public sealed record StopReport(bool AllGone, IReadOnlyList<string> Did,
-                                    IReadOnlyList<string> Left, IReadOnlyList<string> Untouched)
+                                    IReadOnlyList<string> Left, IReadOnlyList<string> Untouched,
+                                    IReadOnlyList<string> Unattributed)
     {
         public string ToText()
         {
             var s = new System.Text.StringBuilder();
-            s.AppendLine(AllGone ? "整套 AI 栈已经停掉了(已验)。" : "★ 没有完全停干净 —— 下面是还剩的东西。");
+            // ★★★ 标题分三种,不是两种(V23)。
+            //   在此之前只要端口不通就打「整套 AI 栈已经停掉了(已验)」——
+            //   而 V23 之后「有东西还在跑、只是我们不敢动它」变成了**常见结局**,
+            //   那句话会和它下面那张「还在跑但没动」的单子当场自相矛盾。
+            s.AppendLine(!AllGone ? "★ 没有完全停干净 —— 下面是还剩的东西。"
+                       : Unattributed.Count > 0
+                         ? "AI 栈的入口**都不通了(已验)**。★ 但下面这些**还在跑** —— "
+                           + "我们认不出它们是不是自己起的,所以没动。请你自己看一眼。"
+                       : Untouched.Count > 0
+                         ? "我们起的那些都停掉了(已验:端口不通)。★ 下面是**有意没动**的那批。"
+                         : "整套 AI 栈已经停掉了(已验)。");
             if (Did.Count > 0) { s.AppendLine(); s.AppendLine("停掉了:"); foreach (var d in Did) s.AppendLine("  · " + d); }
+            if (Unattributed.Count > 0)
+            {
+                s.AppendLine(); s.AppendLine("★ 还在跑,但【我们认不出归属,没敢动】:");
+                foreach (var u in Unattributed) s.AppendLine("  · " + u);
+            }
             if (Untouched.Count > 0)
             {
                 s.AppendLine(); s.AppendLine("【有意没动】:");
@@ -131,6 +184,13 @@ public static class StackStop
     /// `adopt_running()` 认领的后端是别人起的,结构上**不是**网关的子孙,
     /// 所以这个调用**够不着它们**。边界不是靠一个 if 守的,是靠进程树本身。</para>
     ///
+    /// <para>★★★★ V23 补一句 —— 上面那段**只在我们认得出那个网关时才成立**。
+    /// 「进程树就是边界」这句话有个前提:被杀的那棵树的根**得是我们起的那个网关**。
+    /// V22 那一版靠「谁在 8080 上听 + 进程名像 python」去找那个根,于是这句漂亮话
+    /// 反过来变成了误杀的放大器:认错了根,整棵树跟着陪葬。
+    /// ⇒ 现在归属只由**句柄 + 账本**回答(<see cref="StackOwnership"/>),
+    /// 认不出就**不动手、并如实说不知道**。边界是**两层**:先证明得了归属,再靠进程树。</para>
+    ///
     /// <para>★★★ 停完**要验**(边界③):端口真的不通了、没有孤儿后端。
     /// 「调了 terminate 就算」不算 —— 本项目已经栽过一次(`loader.shutdown()` 零调用点)。</para>
     /// </summary>
@@ -139,6 +199,8 @@ public static class StackStop
         var did = new List<string>();
         var left = new List<string>();
         var untouched = new List<string>();
+        // ★ 认不出归属的那些单独一张单子 —— 见 StopReport.Unattributed 的说明。
+        var unattributed = new List<string>();
 
         // ★ 显存:停之前先读一次。★★ 它是**佐证**,不是判据 ——
         //   判据是端口与进程(下面第⑤步)。显存读不到时不影响结论,只是少一句佐证。
@@ -146,7 +208,6 @@ public static class StackStop
 
         // ── ① 记下认领的那一批,并说清楚为什么不动它们 ────────────────
         var adopted = StackOwnership.AdoptedBackendPids();
-        var hasSnapshot = StackOwnership.HasBackendSnapshot();
         if (adopted.Count > 0)
             untouched.Add($"起栈之前就在跑的 {adopted.Count} 个 {StackOwnership.BackendProcName}"
                           + $"(PID {string.Join("、", adopted)})—— 那是网关 adopt_running() 认领的那一批,"
@@ -155,33 +216,67 @@ public static class StackStop
         var (ledgerGw, ledgerEdge) = StackOwnership.Owned();
         var (handleGw, handleEdge) = HostProvision.StartedHandles;
 
+        // ★★★ 归属只认这两样,**没有第三样**:
+        //   · 本进程起的那个句柄(还活着);
+        //   · 账本里那条(PID + 进程名 + 启动时刻**三样都对得上**)。
+        //   ⇒ 「谁在 8080 上听」「机器上有个同名进程」都**不是**归属证据(见文件头 V23 那段)。
+        var gw = Alive(handleGw) ?? ledgerGw;
+        var edge = Alive(handleEdge) ?? ledgerEdge;
+
+        // ★ 这一位必须**在杀网关之前**取:杀完再问「网关认得出来吗」,答案会变成"不在了"。
+        var ownedGatewayProven = gw is not null;
+
         // ── ② Edge:先断对外入口 ──────────────────────────────────────
-        var edge = Alive(handleEdge) ?? ledgerEdge ?? ByName("localai-lan-edge").FirstOrDefault();
-        if (edge is not null) Stop(edge, "LAN Edge(localai-lan-edge)", did, tree: true);
-        else did.Add("LAN Edge:没找到在跑的进程(可能本来就没起)。");
+        if (edge is not null) Stop(edge, $"LAN Edge(PID {edge.Id})", did, tree: true);
+        else
+        {
+            var strays = ByName(StackOwnership.EdgeProcName).Where(p => !Exited(p)).ToList();
+            if (strays.Count == 0)
+                did.Add($"LAN Edge:机器上没有 {StackOwnership.EdgeProcName} 在跑(它多半本来就没起)。");
+            else
+                unattributed.Add($"机器上有 {strays.Count} 个 {StackOwnership.EdgeProcName}"
+                              + $"(PID {string.Join("、", strays.Select(p => p.Id))}),"
+                              + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)—— "
+                              + "手工跑 start-stack.ps1 起的 Edge 就长这样。"
+                              + "★ 分不出是不是我们起的,所以**没动它**;要停请自己确认后再停。");
+        }
 
         // ── ③ 网关:连同它生出来的后端一起(进程树 = 我们起的那些)────
-        var gw = Alive(handleGw) ?? ledgerGw ?? GatewayByPort();
         if (gw is not null) Stop(gw, $"统一入口网关(PID {gw.Id},连同它起的后端)", did, tree: true);
-        else did.Add($"网关:没找到在跑的进程(127.0.0.1:{HostSetup.GatewayPort} 上也没人在听)。");
+        else
+        {
+            var onPort = WhoIsOnGatewayPort();
+            if (onPort is null)
+                did.Add($"网关:没有归属账,127.0.0.1:{HostSetup.GatewayPort} 上也没人在听 ——"
+                        + "它多半本来就没起。");
+            else
+                unattributed.Add($"127.0.0.1:{HostSetup.GatewayPort} 上有人在听"
+                              + $"(PID {onPort.Value.Pid} · {onPort.Value.Name}),"
+                              + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)。"
+                              + "★ 在这个口上听、进程名像 python 的**不一定是网关** —— "
+                              + "你自己的 http.server / Flask / uvicorn / Jupyter 长得一模一样,"
+                              + "而这里一旦认错就是连着子进程树一起杀掉。⇒ **没动它**。");
+        }
 
         // ── ④ 收尾:被甩掉的后端(改过父进程的那种)────────────────────
-        if (!hasSnapshot)
+        //   ★ 判据只有一处:StackOwnership.BackendSnapshotUsable(见那儿的三道)。
+        var snapshotOk = StackOwnership.BackendSnapshotUsable(ownedGatewayProven, out var snapWhy);
+        if (!snapshotOk)
         {
-            // ★ 没拍过快照 ⇒ 分不出哪些是我们的。**一个都不动**,并且说出来 ——
+            // ★ 分不出哪些是我们的 ⇒ **一个都不动**,并且把"为什么分不出"说出来 ——
             //   猜"应该是这几个吧"然后杀掉,代价是杀掉用户正在用的进程。
             var live = StackOwnership.LiveBackends();
             if (live.Count > 0)
-                untouched.Add($"机器上还有 {live.Count} 个 {StackOwnership.BackendProcName},"
-                              + "而这一轮**没有起栈记录**(管理端重启过,或者栈是手工起的)—— "
-                              + "分不出哪些是我们起的、哪些是你自己开着的,所以**一个都没动**。"
+                unattributed.Add($"机器上还有 {live.Count} 个 {StackOwnership.BackendProcName}"
+                              + $"(PID {string.Join("、", live.Select(p => p.Id))})—— {snapWhy}。"
+                              + "⇒ 分不出哪些是我们起的、哪些是你自己开着的,所以**一个都没动**。"
                               + "要停的话请自己确认后再停。");
         }
         else
         {
-            foreach (var b in StackOwnership.OursToStopBackends())
+            foreach (var b in StackOwnership.OursToStopBackends(ownedGatewayProven))
             {
-                if (b.HasExited) continue;
+                if (Exited(b)) continue;
                 Stop(b, $"{StackOwnership.BackendProcName}(PID {b.Id},起栈后出现 ⇒ 是这套栈起的)", did, tree: true);
             }
         }
@@ -206,9 +301,11 @@ public static class StackStop
         }
 
         // ★ 孤儿后端:停完还剩的、且**不在认领名单里**的 —— 那就是真的漏了
+        //   ★★ 只有快照作数时这句话才成立:快照不作数时「不在认领名单里」什么都不代表,
+        //     那时它们已经在上面的 Untouched 里如实登记过了,再报一次"孤儿"是给个错的理由。
         var adoptedSet = adopted.ToHashSet();
         var orphans = StackOwnership.LiveBackends().Where(p => !adoptedSet.Contains(p.Id)).ToList();
-        if (hasSnapshot && orphans.Count > 0)
+        if (snapshotOk && orphans.Count > 0)
             left.Add($"还有 {orphans.Count} 个孤儿 {StackOwnership.BackendProcName}"
                      + $"(PID {string.Join("、", orphans.Select(p => p.Id))})—— 它们不在认领名单里,"
                      + "本该跟着网关一起走。");
@@ -222,7 +319,7 @@ public static class StackStop
         if (left.Count == 0) StackOwnership.Clear();   // ★ 停干净了才清账,没停干净留着好查
         StackBoot.Forget();                            // ★ 界面别再显示上一次起栈的绿灯
 
-        return new StopReport(left.Count == 0, did, left, untouched);
+        return new StopReport(left.Count == 0, did, left, untouched, unattributed);
     }
 
     /// <summary>现在用了多少显存(MiB)。★ 读不到返回 null —— **不返回 0**:
@@ -267,6 +364,16 @@ public static class StackStop
         catch { return null; }
     }
 
+    /// <summary>进程没了没有。★ 问不出来时当作**还在**(不 continue 掉),
+    /// 由 <see cref="Stop"/> 里的 try/catch 去如实记 —— 与"读不到就当它不在"相反的方向。</summary>
+    static bool Exited(Process p)
+    {
+        try { return p.HasExited; }
+        catch { return false; }
+    }
+
+    /// <summary>按名字列进程。★★ 本函数的返回值**不喂给 Kill** —— 它只用来
+    /// 在报告里如实说「机器上有几个同名的、我们认不出归属」。名字不是归属证据。</summary>
     static List<Process> ByName(string name)
     {
         try { return Process.GetProcessesByName(name).ToList(); }
@@ -274,12 +381,15 @@ public static class StackStop
     }
 
     /// <summary>
-    /// 没有账本时,靠**谁在 8080 上听**把网关认出来。
-    /// <para>★ 这条判据是精确的:网关就是"在 127.0.0.1:8080 上听的那个进程" —— 全仓都拨它。
-    /// ★★ 但仍然**再验一次进程名**:万一网关没起,那个口上坐着的是别的服务,
-    /// 认错了就等于替用户杀掉一个无关进程。宁可认不出来。</para>
+    /// 谁在网关那个口上听。★★★ **只用来说话,不用来动手** ——
+    /// 返回的是 PID 与进程名,**不是一个可以 Kill 的 <see cref="Process"/>**,
+    /// 这一点是有意的:V22 那一版返回 Process,而调用方转手就把它杀了。
+    /// <para>★ 「在 127.0.0.1:8080 上听、进程名含 python」**不是**「它是我们起的网关」。
+    /// 用户自己的 http.server / Flask / uvicorn / Jupyter 满足同样的条件,
+    /// 而杀它是 `entireProcessTree: true` —— 连着它的子进程树一起。
+    /// ⇒ 归属只由句柄与账本回答(见 <see cref="StopAsync"/> 第①段)。</para>
     /// </summary>
-    static Process? GatewayByPort()
+    static (int Pid, string Name)? WhoIsOnGatewayPort()
     {
         try
         {
@@ -298,12 +408,13 @@ public static class StackStop
                 if (!line.Contains("LISTENING", StringComparison.OrdinalIgnoreCase)) continue;
                 var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length == 0 || !int.TryParse(parts[^1], out var pid)) continue;
-                var p = Process.GetProcessById(pid);
-                // ★ 网关是 uvicorn,跑在 python 里。不是 python 就**不认** —— 见上面第二段。
-                return p.ProcessName.Contains("python", StringComparison.OrdinalIgnoreCase) ? p : null;
+                string name;
+                try { name = Process.GetProcessById(pid).ProcessName; }
+                catch { name = "(读不到进程名)"; }
+                return (pid, name);
             }
         }
-        catch { /* 认不出来就是没有 —— 那时上面会如实说"没找到" */ }
+        catch { /* 问不出来就说没问出来 —— 上面会照常走"没有归属账"那条路 */ }
         return null;
     }
 }
