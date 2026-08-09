@@ -28,39 +28,59 @@
 **开工前跑这一条,它会告诉你今天该拷哪个、两边各是什么版本:**
 
 ```bash
-cd "E:\.meine\.Proj_Soft\.Proj\.localAI" && for d in client client-pack admin admin-pack; do printf "%-12s " "$d"; (sed -n 2p "dist/$d/VERSION.txt" 2>/dev/null || echo "(没有 VERSION.txt)"); done && echo "--- main 在:" && git log --oneline -1
+cd "E:\.meine\.Proj_Soft\.Proj\.localAI" && for d in client admin; do printf "%-8s " "$d"; (sed -n 2p "dist/$d/VERSION.txt" 2>/dev/null || echo "(没有 VERSION.txt)"); done && echo "--- main 在:" && git log --oneline -1
 ```
+
+> ### ★★★ 2026-08-10(V27)第四次更正 —— 而这一次改的是**缺陷本身**,不是文字
+>
+> 前三次更正都在改这一节的**措辞**(改戳、改指哪个目录),而病根一直没动:
+> **`build-client.ps1` 的 `$Out` 默认值是 `client-pack`,而落位目录是 `client`** ——
+> 管理端出包即落位,客户端不落位,于是每出一次包两个目录就分裂一次,
+> 这一节就得跟着改一次。**改到第三次仍然会过期,因为改的是症状。**
+>
+> ⇒ V27 把 `$Out` 改成落位目录(目录名从 `ClientLink.ClientExePathNextTo` 抠出,不再写第二个字面量)。
+> **`client-pack` 与 `admin-pack` 从此没有任何脚本会产**,盘上那两份已在同一轮删除。
+> ⇒ 本节从「教你怎么绕开缺陷」缩成「核两个数」。
 
 **怎么读这个输出**:
 
 1. **戳里那个短哈希就是它含到哪一次提交。** 拿去 `git log --oneline -1 <哈希>` 看它是哪一轮。
-2. **主机用哪一对**:`dist\admin\` 与 `dist\client\` 是**落位目录**(客户端逐字探
+2. **主机就用这两个目录**:`dist\client\` 与 `dist\admin\` 都是**落位目录**,
+   出包即落位,**不需要再手工覆盖任何东西**(客户端逐字探
    `<客户端 exe 目录>\..\admin\localai-admin.exe`,见 §0.1)。
-   ★ 若 `client-pack` 的戳**比** `client` 新 ⇒ **落位目录是旧的**,先把 `client-pack\` 覆盖到 `client\` 再开工。
-3. **副机拷哪个**:拷**戳最新的那份客户端包**(照上面第 2 步之后,就是 `dist\client\`)。
-   副机**不要**拷 `host\` 与 `admin\`。
+3. **副机拷哪个**:拷 `dist\client\` 整个目录。副机**不要**拷 `host\` 与 `admin\`。
 4. ★ **两个包的戳不要求相同** —— 只重出改动的那一个是对的做法。
    要核的是「**每个包各自含到哪一次提交**」,不是「两边一不一样」。
-5. ★★ **`dist\client\VERSION.txt` 里那句关于「管理端 PASS=n」的数字不可信** ——
-   那是出客户端包那一刻管理端的数。**管理端的数只看 `dist\admin\VERSION.txt`。**
-   同理 `dist\admin\VERSION.txt` 里那句「版本戳与旁边的 client 是同一个」也**不成立**,别照它判。
+5. ★★ **这两条已在 2026-08-10 从源头修掉,但旧包里仍然带着**:
+   · 客户端 `VERSION.txt` 从前会写一句「管理端 PASS=n」—— 那是出**客户端**包那一刻管理端的数,
+     两个目录可以来自不同两次构建 ⇒ 它会过期。**现在客户端包里不再写这个数**;
+     管理端的数只看 `dist\admin\VERSION.txt`。
+   · 管理端 `VERSION.txt` 从前写「版本戳与旁边的 client 是【同一个】,对不上就别混用」——
+     **那条判据本身是错的**(见第 4 条),现在已删掉。
+   ⇒ 手上若是 **2026-08-10 之前**出的包,这两句仍在里面,**别照它们判**。
 
 > **看到别的说明什么**:两个包的戳都**落后于 `git log` 那一行** ⇒ 有车道并入后没重出包,
 > **这一趟验的是旧代码**。停下来先出包,别接着往下测。
 
 ### 0.1 ★★ 管理端的位置由代码决定 —— 而这一格**已经不用手工做了**
 
-> ★★★ **2026-08-09 更正两次:**
+> ★★★ **2026-08-09 更正两次,2026-08-10 第三次 —— 而第三次才真的到底:**
 > 初稿要求「手工把 `admin-pack\localai-admin.exe` 摆到 `..\admin\`」—— 那是在**绕**一个缺陷;
 > 第二版写「V22 已根治,现在出包即落位」—— **只对了一半**:
 > V22 把 **`$AdminOut`** 默认值改成了并排的 `admin\`(管理端确实落位了),
-> **而 `$Out`(客户端)默认值一个字没动,至今仍是 `client-pack`**。
-> ⇒ **管理端出包即落位,客户端不是** —— 无参跑一次 `build-client.ps1`,
-> 客户端会落在 `dist\client-pack\`,而**部署位 `dist\client\` 原地不动**。
-> 这就是两个戳当天分裂的直接原因,也是我上一版把方向写反的根子。
+> **而 `$Out`(客户端)默认值一个字没动,仍是 `client-pack`** ——
+> 于是「管理端落位、客户端不落位」,两个戳每出一次包就分裂一次。
+> **第三版(V27)把 `$Out` 也改成落位目录,两边这才对称。**
 >
-> ★ 判据不是审美选的:客户端 `HubAdmin.AdminAppPathNextTo` 逐字探
-> `<客户端 exe 目录>\..\admin\localai-admin.exe`(喂 `HostSetup.RoleEvidence.AdminAppPresent`)。
+> ⇒ 今天:无参跑一次 `build-client.ps1`,**客户端与管理端同时落位**,
+> 部署位 `dist\client\` 与 `dist\admin\` 直接就是这一次出的包,**不需要手工覆盖**。
+> 实证(2026-08-10 那一趟):两个目录的戳都是 `20260809-2355+c340b3d`,同一次构建。
+>
+> ★ 判据不是审美选的,两个方向各有一条逐字探测:
+> · 客户端探 `<客户端 exe 目录>\..\admin\localai-admin.exe`(`AdminApp.AdminAppPathNextTo`,喂 `HostSetup.RoleEvidence.AdminAppPresent`);
+> · 管理端探 `<管理端 exe 目录>\..\client\localai-client.exe`(`ClientLink.ClientExePathNextTo`)。
+> **`build-client.ps1` 现在从这两处把目录名抠出来用**,不再自己写字面量 ——
+> 谁改了常量,出包当场判红,而不是等到实机那天才发现。
 
 主机上今天应当已经是这个样子(**核对一眼即可,不需要动手**):
 
