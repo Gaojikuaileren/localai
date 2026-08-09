@@ -57,6 +57,10 @@ public static partial class Selftest
         else Skip("★★★ 「已配对设备」真的点开用",
                   $"回环管理面 127.0.0.1:{HubAdmin.AdminPort} 没人听");
 
+        // ★★ V22:栈那一格。★ 它**不需要**管理面在 —— 恰恰相反,
+        //   「Edge 没起」也是它必须说清楚的一档,所以这一节在两种前提下都跑。
+        LiveStackCard();
+
         if (gatewayUp) LiveModels();
         else Skip("★★★ 「模型」真的点开用",
                   $"回环网关 127.0.0.1:{LocalAI.Client.Services.HostSetup.GatewayPort} 没人听");
@@ -148,6 +152,75 @@ public static partial class Selftest
         Assert(liveDevs.All(d => texts.Any(t => t.Contains(d.CertShort!, StringComparison.OrdinalIgnoreCase))),
             "★★ 每一行都带**证书指纹短码** —— 同名设备只按名字分不开(D47 那条的界面落点)");
         }
+    }
+
+    // ── AI 栈那一格(V22)────────────────────────────────────────────────
+    /// <summary>
+    /// 「主机中枢」那一页上的**栈状态**真的画出来了,而且**它说的与探到的一致**。
+    ///
+    /// <para>★★★★ 这一节钉的是本轮最要紧的那条:**页面的结论必须跟着探测走**。
+    /// 在此之前那一页只探 Edge 的回环管理面(8442),网关(8080)**整档不看** ——
+    /// 于是「Edge 起着、网关没起」时它显示「这台电脑就是中枢主机」一路绿灯,
+    /// 而「模型」页是空的。写这段时本机的真实状态**正是**那一档。</para>
+    ///
+    /// <para>★★ 判据写成**四种状态都能查**的形式(全起 / 半起两向 / 全没起),
+    /// 而不是"现在应该显示某句话" —— 后者只在写它的那天成立,
+    /// 换一台机器或者过一小时就变成一条恒假或恒真的断言。</para>
+    /// </summary>
+    static void LiveStackCard()
+    {
+        // ① 先**探**一次,拿到这一刻的事实。这是判据的另一端。
+        var probed = HostProvision.ProbeStackAsync().GetAwaiter().GetResult();
+        var gwUp = probed.Gateway.Outcome != SetupOutcome.Failed;
+        var edgeUp = probed.Edge.Outcome != SetupOutcome.Failed;
+        Console.WriteLine($"     (实测这一刻:网关 {(gwUp ? "在跑" : "没在跑")} · "
+                          + $"Edge {(edgeUp ? "在跑" : "没在跑")})");
+
+        // ② 真 new 出那一页,真等它把栈那一格填进去
+        var view = new HostHubView();
+        PumpUntil(() => TextsOf(view).Any(t => t.Contains("统一入口网关", StringComparison.Ordinal)),
+                  seconds: 20);
+        var texts = TextsOf(view);
+        var all = string.Join("\n", texts);
+
+        Assert(texts.Count > 0, "★ 元断言:「主机中枢」那一页真的画出了东西");
+        // ★★ 这一格必须在**两档里都画**(Host 与 HostHubDown)。
+        //   只在 HubDown 档画的话,最坏的中间态恰好落在看不见的地方 —— 那正是本轮修的病。
+        Assert(all.Contains("统一入口网关", StringComparison.Ordinal),
+            "★★★★ 「主机中枢」那一页上**必须有网关那一行** —— "
+            + "在此之前这一页整档不看网关,于是「Edge 起着、网关没起」时它一路绿灯,"
+            + "而「模型」页是空的。★ 这一条与角色判成 Host 还是 HostHubDown 无关");
+        Assert(all.Contains($"{LocalAI.Client.Services.HostSetup.GatewayPort}", StringComparison.Ordinal),
+            $"★★ 那一行要写明端口 {LocalAI.Client.Services.HostSetup.GatewayPort} —— "
+            + "模型清单读的就是这个口,写出来才对得上账");
+
+        // ③ ★★★★ 承重的那一条:**页面的结论必须与探到的一致**。
+        var saysAllUp = all.Contains("整套栈都在跑", StringComparison.Ordinal);
+        var saysHalf = all.Contains("【起了一半】", StringComparison.Ordinal);
+        var saysNone = all.Contains("整套栈都没在跑", StringComparison.Ordinal);
+        if (gwUp && edgeUp)
+            Assert(saysAllUp && !saysHalf && !saysNone,
+                "★★★ 两个都探到了 ⇒ 页面必须说「整套栈都在跑」,而且不能同时说别的");
+        else if (gwUp || edgeUp)
+            Assert(saysHalf && !saysAllUp,
+                $"★★★★ 【半起】(网关 {(gwUp ? "在" : "不在")} / Edge {(edgeUp ? "在" : "不在")})"
+                + " ⇒ 页面必须**明说是半起**,绝不许显示成全好 —— "
+                + "这是最坏的中间态,因为两半都像成功");
+        else
+            Assert(saysNone && !saysAllUp,
+                "★★★ 两个都没探到 ⇒ 页面必须说整套都没在跑");
+
+        // ④ 半起时要说清**缺的那一半会怎样**,不是笼统一句「有问题」
+        if (gwUp ^ edgeUp)
+            Assert(all.Contains("模型", StringComparison.Ordinal)
+                   || all.Contains("副机", StringComparison.Ordinal),
+                "★★ 半起那句话要说清**缺了它会怎样**(没网关 ⇒ 模型页是空的;"
+                + "没 Edge ⇒ 副机连不上),不是笼统一句「起了一半」");
+
+        // ⑤ ★★ 绝不许把人推回命令行 —— 这是本车道存在的理由(用户裁定:不跑任何命令)
+        Assert(!all.Contains("start-stack", StringComparison.OrdinalIgnoreCase),
+            "★★★★ 这一页**不许**叫人去跑 `start-stack.ps1` —— 起栈是这个程序的活。"
+            + "用户裁定:全程不需要跑任何命令");
     }
 
     // ── 模型 ──────────────────────────────────────────────────────────────

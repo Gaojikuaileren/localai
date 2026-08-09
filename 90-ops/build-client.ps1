@@ -306,16 +306,33 @@ if (Test-Path $adminSrc) {
     }
     Write-Host "     OK 目录名与 AdminApp.AdminDirName 一致($adminDirName)" -ForegroundColor DarkGray
 }
-# ★★ 真正那一问:一个放在 <Out> 的客户端 exe,按它自己的算法找得到管理端吗
-$asIfClientSees = Join-Path (Join-Path (Split-Path $Out -Parent) $adminDirName) 'localai-admin.exe'
-if (-not (Test-Path $asIfClientSees)) {
-    Write-Host "X 客户端【找不到】管理端:它会去看 $asIfClientSees" -ForegroundColor Red
-    Write-Host "  而管理端实际发在:$AdminOut" -ForegroundColor Red
-    Write-Host "  ★ 后果不是少个文件:HostSetup.RoleEvidence.AdminAppPresent 会恒为 false," -ForegroundColor Red
-    Write-Host "    于是【主机客户端启动 ⇒ 拉起管理端 ⇒ 自动起栈】整条在出包产物上走不到。" -ForegroundColor Red
+# ★★ 真正那一问:一个放在 <Out> 的客户端 exe,按它自己的算法找得到**这一次发的**管理端吗
+$expectedAdminDir = Join-Path (Split-Path $Out -Parent) $adminDirName
+$asIfClientSees   = Join-Path $expectedAdminDir 'localai-admin.exe'
+# ★★★ 先比**目录**,再看文件在不在。顺序不能反,而且两条都要:
+#   只看"那个路径上有没有 exe"是**不够**的 —— 上一次构建留下的旧 exe 会让它变绿,
+#   于是把 $AdminOut 改错了也照样过。那种判据在红测里会骗人(实测想到过这一条)。
+#   ⇒ 先要求"这一次发到的就是客户端会去看的那个目录",这条与残留物无关。
+function Resolve-Norm([string]$p) {
+    try { return (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path.TrimEnd('\') }
+    catch { return ([IO.Path]::GetFullPath($p)).TrimEnd('\') }
+}
+if ((Resolve-Norm $AdminOut) -ne (Resolve-Norm $expectedAdminDir)) {
+    Write-Host "X 管理端发错了地方。" -ForegroundColor Red
+    Write-Host "  这一次发到:  $(Resolve-Norm $AdminOut)" -ForegroundColor Red
+    Write-Host "  客户端会去看:$(Resolve-Norm $expectedAdminDir)" -ForegroundColor Red
+    Write-Host "  ★ 客户端探的是 <自己所在目录>\..\$adminDirName\localai-admin.exe" -ForegroundColor Red
+    Write-Host "    (AdminApp.AdminAppPathNextTo,喂 HostSetup.RoleEvidence.AdminAppPresent)。" -ForegroundColor Red
+    Write-Host "  ★★ 后果不是少个文件:AdminAppPresent 会**恒为 false**,于是" -ForegroundColor Red
+    Write-Host "     【主机客户端启动 ⇒ 拉起管理端 ⇒ 自动起栈】整条在出包产物上走不到," -ForegroundColor Red
+    Write-Host "     而在开发树里它是好的 —— 这正是它躺了一整版没人发现的原因。" -ForegroundColor Red
     exit 1
 }
-Write-Host "     OK 客户端会去看的那个路径上确实有管理端($asIfClientSees)" -ForegroundColor DarkGray
+if (-not (Test-Path $asIfClientSees)) {
+    Write-Host "X 目录对了,但那儿没有 localai-admin.exe:$asIfClientSees" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     OK 客户端会去看的那个目录,就是这一次发到的目录($expectedAdminDir)" -ForegroundColor DarkGray
 
 Write-Host "[4] 管理端自检（出包形态:client 与 admin 并排）…"
 $ashape = Join-Path ([IO.Path]::GetTempPath()) ("localai-admin-gate-" + [Guid]::NewGuid().ToString('N'))
