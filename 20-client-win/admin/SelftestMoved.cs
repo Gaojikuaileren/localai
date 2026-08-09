@@ -72,7 +72,122 @@ public static partial class Selftest
             }
             // ---- 一键配对:按角色分流 + 配对窗口的三道闸 ----
             {
+                // ⑥ 起中枢那一步:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
+                //
+                // ══════════════════════════════════════════════════════════
+                //  ★★★ V22:这一组断言**换了钉的对象** —— 从 `HostHubView.StartEdgeAsync`
+                //    改钉 `HostProvision.EnsureEdgeAsync`。理由不是重构口味,是那个函数**已经删了**:
+                //    它是**第二套起栈实现**(只起 Edge、从不起网关),与
+                //    `HostProvision.EnsureStackAsync` 平行存在 ——
+                //    而正是它让「EnsureStackAsync 零调用点」这件事**从表面上看不出来**
+                //    (界面上确实有一条能起 Edge 的路,只是那条路起不出一个能用的栈)。
+                //  ★★ 两套合成一条之后,这些硬救回来的约束**一条都没丢**,只是换了地方 ——
+                //    所以断言跟着搬,**不是**删掉。搬完仍然能为假:
+                //    把 `CreateNoWindow` 从 `EnsureEdgeAsync` 里去掉,下面第二条当场红。
+                // ══════════════════════════════════════════════════════════
+                // ★★★★ V22:本组**从 `if (dv4 is not null)` 里搬了出来**。理由是实测出来的,
+                //   而且它本身就是本轮要抓的那个病:
+                //   `dv4 = TryReadSource("Views/DevicesView.cs")`,而 V21 已经把那个文件
+                //   改名成 `HostHubView.cs` —— **管理端里根本没有 DevicesView.cs**。
+                //   ⇒ `dv4` 恒为 null ⇒ 那个 `if` 底下的**整片断言(实测 69 条)一条都没跑过**,
+                //     而且**不留任何痕迹**:不计 PASS、不计 FAIL、连 SKIP 都没有。
+                //   ★ 也就是说,把这一组留在里面 = 写了一组永远不会执行的断言。
+                //   ★★ 那 69 条的处置**不在本车道**(重新指向之后 44 条绿、25 条红,
+                //     红的多半是 V21 有意留在客户端的成员 —— 要逐条裁,不是改个文件名了事)。
+                //     已在交回里列成第一条「同形」发现。这里先把**本轮新写的**那几条救出来。
+                var hhv = TryReadSource(Path.Combine("Views", "HostHubView.cs"));
+                var hpSrc = TryReadSource(Path.Combine("Services", "HostProvision.cs"));
+                var se = hpSrc is null ? null
+                       : Slice(hpSrc, "static async Task<SetupStep> EnsureEdgeAsync",
+                                      "/// <summary>自动起栈拉起来的那个中枢进程");
+                Assert(hpSrc is null || se is not null,
+                       "★ 元断言:切得到 `EnsureEdgeAsync` —— 切不到的话下面整组会静默零断言");
+                var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
+                // ★★ 这里原来断言「拉起 Edge 之前先查本进程有没有提权」。**已退役,而且是反过来钉的**:
+                //   同日实测推翻了那个判据 —— 本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,
+                //   身份也是在 High 下铸的、在 High 下 CngKey.Open 得开。
+                //   拿"是不是管理员"当门槛,会在这种机器上把一个本来能起来的中枢永远挡住,理由还是假的。
+                //   ⇒ 现在要求的正相反:【不许】预判,直接试着起,让中枢自己说话。
+                Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
+                       "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
+                       + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
+                // ★★ 这条断言【翻面】了:用户要求不要黑窗口。可以藏 ——
+                //   但前提是先给失败找到别的去处,否则就是把错误藏起来。
+                //   ⇒ 现在要求:无窗口启动 + 收日志 + 失败时把日志原文摆到界面上。
+                Assert(se is not null && se.Contains("CreateNoWindow = true"),
+                       "★ 不给用户看黑窗口");
+                Assert(se is not null && se.Contains("RedirectStandardOutput = true")
+                       && se.Contains("RedirectStandardError = true"),
+                       "★★ 藏窗口就必须收日志 —— 那个窗口原来的真正作用是「唯一能看到失败原因的地方」");
+                Assert(se is not null && se.Contains("RedirectStandardInput = true"),
+                       "★★ 还要让中枢看到「没有可用 stdin」,它才会走无命令台那条路 —— "
+                       + "否则它打完 banner 就当场退出(实测撞到过)");
+                Assert(se is not null && se.Contains("EdgeLogPath"),
+                       "★★ 藏窗口就必须把中枢自己吐的话收进日志 —— 窗口可以藏,现场不能丢");
+                // ★★★ 「把日志原文摆到界面上」那一半**搬到了界面**(StartEdgeAsync 删掉时跟过去的),
+                //   所以它要在**那边**钉:钉在这儿会因为找不到而恒假,钉丢了则会静默恒真。
+                Assert(hhv is not null && hhv.Contains("中枢自己打印的最后几行")
+                       && hhv.Contains("EdgeLogTail"),
+                       "★★ 起不来时,「主机中枢」那一页要把中枢自己吐的最后几行【原文】摆出来 —— "
+                       + "窗口可以藏,现场不能丢");
+                // ★★ 判据钉的是**三件事的先后**:先起进程 → 再去探 → 探到了才敢报 Ok。
+                //   ★ 不能拿「`EdgeUpAsync` 的第一次出现」当探测点:`EnsureEdgeAsync` 开头
+                //     那一句 `if (await EdgeUpAsync()) … Skipped`(幂等预检)**排在 Process.Start 之前**,
+                //     拿它去比会让这条判据恒假 —— V22 写第一版时就是这么红的,而红得理由是假的。
+                var iWait = se?.LastIndexOf("WaitUntilAsync", StringComparison.Ordinal) ?? -1;
+                var iOk = se?.IndexOf("SetupOutcome.Ok", StringComparison.Ordinal) ?? -1;
+                Assert(iSpawn >= 0 && iWait > iSpawn && iOk > iWait,
+                       "★★ 拉起 ≠ 起来了:必须【起进程 → 去探 → 探到才报 Ok】这个顺序,"
+                       + "不许因为 Process.Start 没抛异常就宣布成功"
+                       + $"(实测位置:spawn={iSpawn} wait={iWait} ok={iOk})");
+                Assert(se is not null && se.Contains("【不当作成功】"),
+                       "★ 到点没等到就如实说 —— 不无限转圈,也不把它记成起来了");
+                // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
+                // ★★ V22:切片的下界从 `UIElement HubDownCard()` 收成 `;`。
+                //   理由是实打实的:V22 在 RecheckRow 与 HubDownCard **之间**插进了「AI 栈」那一格,
+                //   而那一格里有一个「打开中枢日志」按钮(Process.Start)——
+                //   旧的下界会把它一起切进来,于是这条断言会**红,而理由是假的**
+                //   (它会说"重新检测按钮顺手启动了 Edge",而那按钮一个字都没改)。
+                //   RecheckRow 是个单行表达式体成员,切到第一个 `;` 就正好是它整个。
+                Assert(hhv is not null,
+                       "★ 元断言:读得到 `Views/HostHubView.cs` —— 读不到的话上下几条会静默恒假");
+                var recheck = hhv is null ? null : Slice(hhv, "UIElement RecheckRow()", ";");
+                Assert(recheck is not null && !recheck.Contains("Process.Start")
+                       && !recheck.Contains("EnsureStackAsync") && !recheck.Contains("StackBoot"),
+                       "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
+
+
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★★ V22 实测:**下面这一整片断言,一条都没跑过。**
+                //
+                //  `dv4` 读的是 `Views/DevicesView.cs`,而 V21 把那个文件改名成
+                //  `HostHubView.cs` 并搬掉了一半成员 —— **管理端里没有 DevicesView.cs**。
+                //  ⇒ `dv4` 恒为 null ⇒ 这个 `if` 底下的 **69 条断言**全部不执行,
+                //    而且**不留痕迹**:不计 PASS、不计 FAIL、连一行 SKIP 都没有。
+                //    自检末尾那个 PASS 数看着照常涨,没有任何东西提示这里空了。
+                //
+                //  ★ 这与本轮要修的 `EnsureStackAsync` 是**同一个病**:
+                //    东西写好了、看着在那儿,而**没有任何东西会真的走到它**。
+                //    区别只在于这一次躺着的是**断言**,而断言躺下的后果更坏 ——
+                //    它让别的缺陷也跟着看不见(V21 那次搬迁就是在这片沉默里做的)。
+                //
+                //  ★★ 为什么本车道**不**顺手改掉那个文件名:改完实测 PASS 166→210、
+                //    FAIL 8→33。多出来的 25 条红,绝大多数钉的是 V21 **有意留在客户端**的成员
+                //    (`SelfPairAsync` / `ClientPairCard` / `KnockAsync` …)—— 那要**逐条裁**
+                //    「这条该跟去客户端自检、还是本来就该撤」,不是改个文件名了事。
+                //    在一条 24 小时的车道里草草改名,只会把 25 条红塞给下一个人,
+                //    而且那时它们看起来像是**本轮引入的**。
+                //  ⇒ 本轮做两件**够得着且不留假象**的事:
+                //    ① 本轮新写的那几条断言已经搬到这个 `if` **外面**(见上面 ⑥);
+                //    ② 这里补一条 `Skip`,把"沉默"换成"看得见的空" ——
+                //       实测数字与逐条处置写在交回里。
+                // ══════════════════════════════════════════════════════════════
                 var dv4 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dv4 is null)
+                    Skip("管理端「一键配对 + 配对窗口三道闸」那 69 条断言",
+                         "它们读的是 `Views/DevicesView.cs`,而 V21 已把该文件改名为 `HostHubView.cs` "
+                         + "⇒ 这一片**一条都没跑**(V22 实测)。★ 这不是「没什么可测」,是判据指错了文件。"
+                         + "重新指向后实测 PASS 166→210 / FAIL 8→33,那 25 条红要逐条裁 —— 见交回。");
                 if (dv4 is not null)
                 {
                     var body4 = Body(dv4);
@@ -252,43 +367,7 @@ public static partial class Selftest
                                + "上一版钉名字,而那个名字被删掉之后判据就恒真了");
                     }
 
-                    // ⑥ 「启动中枢」按钮:客户端拉得动是因为它自己就是普通用户(D46),不是绕过了护栏
-                    var se = Slice(dv4, "async Task StartEdgeAsync", "// ====");
-                    var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
-                    // ★★ 这里原来断言「拉起 Edge 之前先查本进程有没有提权」。**已退役,而且是反过来钉的**:
-                    //   同日实测推翻了那个判据 —— 本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,
-                    //   身份也是在 High 下铸的、在 High 下 CngKey.Open 得开。
-                    //   拿"是不是管理员"当门槛,会在这种机器上把一个本来能起来的中枢永远挡住,理由还是假的。
-                    //   ⇒ 现在要求的正相反:【不许】预判,直接试着起,让中枢自己说话。
-                    Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
-                           "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
-                           + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
-                    // ★★ 这条断言【翻面】了:用户要求不要黑窗口。可以藏 ——
-                    //   但前提是先给失败找到别的去处,否则就是把错误藏起来。
-                    //   ⇒ 现在要求:无窗口启动 + 收日志 + 失败时把日志原文摆到界面上。
-                    Assert(se is not null && se.Contains("CreateNoWindow = true"),
-                           "★ 不给用户看黑窗口");
-                    Assert(se is not null && se.Contains("RedirectStandardOutput = true")
-                           && se.Contains("RedirectStandardError = true"),
-                           "★★ 藏窗口就必须收日志 —— 那个窗口原来的真正作用是「唯一能看到失败原因的地方」");
-                    Assert(se is not null && se.Contains("RedirectStandardInput = true"),
-                           "★★ 还要让中枢看到「没有可用 stdin」,它才会走无命令台那条路 —— "
-                           + "否则它打完 banner 就当场退出(实测撞到过)");
-                    Assert(se is not null && se.Contains("logPath") && se.Contains("中枢自己打印的最后几行"),
-                           "★★ 失败时把中枢自己吐的话【原文】摆出来,并给一个打开完整日志的入口 —— "
-                           + "窗口可以藏,现场不能丢");
-                    var iWait = se?.IndexOf("admin.ProbeAsync", StringComparison.Ordinal) ?? -1;
-                    Assert(iSpawn >= 0 && iWait >= 0 && iSpawn < iWait
-                           && se!.Contains("LastProbe == AdminProbeResult.Ok"),
-                           "★★ 拉起 ≠ 起来了:只有回环管理面真的答话才算数,"
-                           + "不许因为 Process.Start 没抛异常就宣布成功");
-                    Assert(se is not null && se.Contains("秒内没等到中枢应答"),
-                           "★ 到点没等到就如实说 —— 不无限转圈");
-                    // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
-                    var recheck = Slice(dv4, "UIElement RecheckRow()", "UIElement HubDownCard()");
-                    Assert(recheck is not null && !recheck.Contains("Process.Start") && !recheck.Contains("StartEdgeAsync"),
-                           "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
-
+                    // ⑥ 起中枢那一步的断言已移到本块之外（V22）—— 理由见那儿。
                     // ⑦ 「一次装好这台主机」:三条不可让步的边界
                     var hs = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
                     if (hs is not null)
@@ -934,6 +1013,60 @@ public static partial class Selftest
                                new SetupStep("网关", SetupOutcome.Skipped, ""), okStep).AllUp,
                         "★★ Skipped(本来就在跑)算**成**,不算失败 —— 幂等的那一半");
 
+                    // ════════════════════════════════════════════════════════
+                    //  ★★★★ 元断言(V22 · D115):
+                    //    **凡被注释称为「唯一入口」的函数,必须有生产调用点。**
+                    //
+                    //  ★ 为什么够格立这一条:**第四次**同形了 ——
+                    //    A5 的 `TlsFailure` · doctor ⑫ 环 · `loader.shutdown()` ·
+                    //    `HostProvision.EnsureStackAsync`。形状每次都一样:
+                    //    **函数写好、有文档、有自检、零生产调用点**。
+                    //
+                    //  ★★ 而上面那一整段断言**测不到它**:它们验的是 `StackResult` 的逻辑,
+                    //    而那个逻辑在 V22 之前**永远不会被界面触发**。
+                    //    一条只被自检引用的函数,在自检眼里和一条真在跑的函数长得一模一样 ——
+                    //    所以判据必须**把自检自己排除在"调用点"之外**,否则它恒真。
+                    //
+                    //  ★★★ 判据能为假(红测记录在决议包里):
+                    //    把 `StackBoot.cs` 里那一行 `HostProvision.EnsureStackAsync(...)` 删掉
+                    //    ⇒ 本条当场红。
+                    // ════════════════════════════════════════════════════════
+                    {
+                        var cwRoot = ClientWinRoot();
+                        if (cwRoot is null)
+                        {
+                            // ★ 发布产物旁边没有源码 —— 第 11 条:那一趟要【跳过】,不是判红。
+                            Skip("元断言「唯一入口必须有生产调用点」",
+                                 "读不到 20-client-win 源码树(发布产物旁边没有源码)");
+                        }
+                        else
+                        {
+                            var prod = ProductionCsFiles(cwRoot);
+                            var claims = SoleEntryClaims(prod, cwRoot);
+
+                            // ★★ 零命中判红:扫不到任何声明 = 判据失效,而失效会**静默变绿**。
+                            //   (今天实际扫到的:HostProvision.EnsureStackAsync 与 Strings.Get。)
+                            Assert(claims.Count >= 2,
+                                   $"★★★ 元断言的元断言:全仓「唯一入口」声明只扫到 {claims.Count} 条(要 ≥2)—— "
+                                   + "扫不到就说明这条判据自己坏了(措辞换了 / 文件枚举错了),"
+                                   + "而坏掉的表现是**它会一直绿**");
+                            Assert(prod.Count >= 20,
+                                   $"★★ 生产源码只枚举到 {prod.Count} 个 .cs(要 ≥20)—— "
+                                   + "枚举不到文件的话,下面每一条的「调用点」都会是 0,红得理由是假的");
+
+                            foreach (var c in claims)
+                            {
+                                var n = QualifiedCallSites(prod, c.Method);
+                                Assert(n >= 1,
+                                       $"★★★★ 「唯一入口」必须有生产调用点:`{c.Method}` 被 {c.File}:{c.Line} "
+                                       + "的注释称为唯一入口,而**全仓生产源码里一个调用点都没有**"
+                                       + "(自检里的引用【不算】—— 那正是这条要抓的形状:"
+                                       + "函数写好、有文档、有自检,而界面上没有任何东西会触发它)。"
+                                       + "★ 要么把它接到真正会跑的那条路上,要么把「唯一入口」这句话改掉。");
+                            }
+                        }
+                    }
+
                     // ════════════════════════════════════════════════════
                     //  ★★★ D? · 自动起栈必须起出一个**本机客户端用得上**的中枢
                     //
@@ -1236,4 +1369,117 @@ public static partial class Selftest
         return b < 0 ? null : src[a..b];
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    //  ★★★ 元断言「唯一入口必须有生产调用点」的三件工具(V22 · D115)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 找到 `20-client-win` 那一级。★ 判据是**它下面同时有 admin 与 app** ——
+    /// 不是"往上找得到同名文件就采信"(那是 ASSERTION-PITFALLS 第 9 条那个坑:
+    /// 出包闸把 exe 拷进 %TEMP%,而那儿躺着别的会话留下的陈旧源码,一找就中)。
+    /// 出包形态的临时目录里是 `client\` + `admin\`,**没有 app\** ⇒ 配不上这个条件。
+    /// </summary>
+    static string? ClientWinRoot()
+    {
+        var dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 10 && dir is not null; i++)
+        {
+            if (Directory.Exists(Path.Combine(dir, "admin")) && Directory.Exists(Path.Combine(dir, "app")))
+                return dir;
+            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 全部**生产**源码。★★★ `Selftest*.cs` **不算生产** —— 这一条是整个元断言的支点:
+    /// 「只被自检引用的函数」正是要抓的那个形状,把自检算进调用点,判据就恒真了。
+    /// </summary>
+    static List<string> ProductionCsFiles(string root)
+    {
+        var files = new List<string>();
+        foreach (var sub in new[] { "admin", "app", "transport" })
+        {
+            var d = Path.Combine(root, sub);
+            if (!Directory.Exists(d)) continue;
+            IEnumerable<string> found;
+            try { found = Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories); }
+            catch { continue; }
+            foreach (var f in found)
+            {
+                var norm = f.Replace('\\', '/');
+                if (norm.Contains("/bin/", StringComparison.Ordinal)
+                    || norm.Contains("/obj/", StringComparison.Ordinal)) continue;
+                if (Path.GetFileName(f).StartsWith("Selftest", StringComparison.OrdinalIgnoreCase)) continue;
+                files.Add(f);
+            }
+        }
+        return files;
+    }
+
+    /// <summary>一条「唯一入口」声明:谁在哪儿说的、说的是哪个函数。</summary>
+    sealed record SoleEntryClaim(string File, int Line, string Method);
+
+    /// <summary>
+    /// 扫出所有「唯一入口」声明。★ 只认**紧挨着方法声明**的 `///` 文档块:
+    ///   · 枚举成员 / 属性没有括号 —— 它们不是「入口」,是状态,跳过;
+    ///   · 普通 `//` 注释与界面文案不参与 —— 它们说的常常是"面板入口""菜单入口"这类**人**的入口,
+    ///     不是函数。判据宁可窄一点,也不要红得理由是假的。
+    /// </summary>
+    static List<SoleEntryClaim> SoleEntryClaims(List<string> files, string root)
+    {
+        var claims = new List<SoleEntryClaim>();
+        var phrase = new System.Text.RegularExpressions.Regex("唯一[^\n]{0,10}入口");
+        var decl = new System.Text.RegularExpressions.Regex(@"(\w+)\s*(?:<[^>]*>)?\s*\(");
+        foreach (var f in files)
+        {
+            string[] lines;
+            try { lines = File.ReadAllLines(f); } catch { continue; }
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (!lines[i].TrimStart().StartsWith("///", StringComparison.Ordinal)) continue;
+                if (!phrase.IsMatch(lines[i])) continue;
+                // 走到这个 /// 块的末尾,再跳过特性行与空行,停在**声明那一行**
+                var j = i;
+                while (j < lines.Length && lines[j].TrimStart().StartsWith("///", StringComparison.Ordinal)) j++;
+                while (j < lines.Length)
+                {
+                    var d = lines[j].TrimStart();
+                    if (d.Length == 0 || d.StartsWith("[", StringComparison.Ordinal)) { j++; continue; }
+                    break;
+                }
+                if (j < lines.Length && lines[j].Contains('('))
+                {
+                    var m = decl.Match(lines[j]);
+                    if (m.Success)
+                        claims.Add(new SoleEntryClaim(
+                            Path.GetRelativePath(root, f).Replace('\\', '/'), i + 1, m.Groups[1].Value));
+                }
+                i = j;   // 同一个块里的多行只算一条
+            }
+        }
+        return claims;
+    }
+
+    /// <summary>
+    /// 数**限定形式**的调用点(`Type.Method(`)。
+    /// <para>★ 为什么只数限定形式:声明那一行长成 `public static X Foo(`,它**不含** `.Foo(` ——
+    /// 于是"声明"与"调用"天然分得开,不需要去猜哪一行是声明(猜错会让判据恒真或恒假)。
+    /// 这几个入口本来就都是静态工具函数,全仓都写成 `Type.Method(...)`。</para>
+    /// <para>★★ 先剥注释再数:注释里提到函数名**不算调用点** —— 恰恰相反,
+    /// 「注释里到处都是它、代码里一次都没有」正是这条要抓的病。</para>
+    /// </summary>
+    static int QualifiedCallSites(List<string> files, string method)
+    {
+        var rx = new System.Text.RegularExpressions.Regex(
+            @"\." + System.Text.RegularExpressions.Regex.Escape(method) + @"\s*\(");
+        var n = 0;
+        foreach (var f in files)
+        {
+            string src;
+            try { src = File.ReadAllText(f); } catch { continue; }
+            n += rx.Matches(NoComments(src)).Count;
+        }
+        return n;
+    }
 }

@@ -277,12 +277,73 @@ public static class HostProvision
     /// 把栈拉起来。★ **全仓唯一的起栈入口** —— 客户端里一行都没有。
     /// <para>幂等:已经在跑的直接 Skipped。可重试:失败不留半套**状态**
     /// (起不来的那个不会被记成起来了),而"起了一半"会由 <see cref="StackResult.HalfUp"/> 明说。</para>
+    ///
+    /// <para>★★★ V22:生产调用点是 <c>StackBoot.EnsureAsync</c>(管理端 <c>OnStartup</c> 无条件调一次,
+    /// 两条启动路径都盖到)。在此之前本函数**零生产调用点** —— 写好了、有文档、有自检,
+    /// 而界面上没有任何东西会触发它,于是「起栈的唯一入口」这句话在实机上等于**栈谁都起不了**。
+    /// 那是本项目第四次同形(A5 的 `TlsFailure` · doctor ⑫ 环 · `loader.shutdown()` · 这条),
+    /// 现在由元断言 `唯一入口必须有生产调用点` 钉住(Selftest,红测过)。</para>
     /// </summary>
-    public static async Task<StackResult> EnsureStackAsync()
+    /// <param name="progress">每做完一步就报一句给界面。★ 可选 —— 但**没有它的时候**
+    /// 界面只能在两个 20 秒的超时窗口里干等,而用户看到的是一个不动的页面。</param>
+    /// <param name="bindIp">Edge 要绑的网卡地址。★ 只在**用户在界面上明确挑过一张网卡**时才传 ——
+    /// 那时 <see cref="PickBindIp"/> 的「多个候选就不替你挑」已经由人答过了,别再问一次。
+    /// 传 null 就照常自己选。</param>
+    public static async Task<StackResult> EnsureStackAsync(IProgress<string>? progress = null, string? bindIp = null)
     {
+        // ★★ 先记下【现在有哪些 llama-server 在跑】—— 那些是**我们起栈之前就存在的**,
+        //   也就是网关 `adopt_running()` 会去认领的那一批。关栈时**一个都不许动**。
+        //   这一笔账只有在这里记得下来:等到关栈那一刻再去问,已经分不出谁是谁了。
+        StackOwnership.NoteBackendsBeforeStart();
+
+        progress?.Report($"① 统一入口网关 :{HostSetup.GatewayPort} —— 正在启动…");
         var gw = await EnsureGatewayAsync();
-        var edge = await EnsureEdgeAsync();
+        progress?.Report("① " + Describe(gw));
+
+        progress?.Report($"② LAN Edge :{EdgePort} —— 正在启动…");
+        var edge = await EnsureEdgeAsync(bindIp);
+        progress?.Report("② " + Describe(edge));
+
         return new StackResult(gw, edge);
+    }
+
+    /// <summary>把一步的结果写成给人看的一行。★ 三种结局要看得出**不一样**。</summary>
+    public static string Describe(SetupStep s) => s.Outcome switch
+    {
+        SetupOutcome.Ok => s.Name + ":已起来 —— " + s.Detail,
+        SetupOutcome.Skipped => s.Name + ":本来就在跑",
+        _ => s.Name + ":【没起来】—— " + s.Detail,
+    };
+
+    /// <summary>
+    /// 现在栈到底在不在。★★★ 这是**给界面看的就绪判据**,而它探的是**网关 8080** ——
+    /// 不是 8443,也不只是 Edge 的管理面。
+    ///
+    /// <para>★★★ 为什么这一条必须存在(V22 实测,不是推想):
+    /// 「主机中枢」那一页原来只探 Edge 的回环管理面(8442)。本机在写这段时的真实状态是
+    /// **8442 通、8080 不通** —— 于是那一页显示「这台电脑就是中枢主机」,一路绿灯,
+    /// 而「模型」页是空的:模型清单读的是网关 `127.0.0.1:8080/v1/models`。
+    /// 「起栈成功」这句话与客户端能不能用**完全无关**,又一次。</para>
+    ///
+    /// <para>★ 复用 <see cref="StackResult"/>,不另造一个状态模型:AllUp / HalfUp 这两问
+    /// 在「刚起完」和「现在还在不在」上是**同一问**,两份模型一定会漂。</para>
+    /// </summary>
+    public static async Task<StackResult> ProbeStackAsync()
+    {
+        var gwName = $"统一入口网关 :{HostSetup.GatewayPort}";
+        var edgeName = $"LAN Edge :{EdgePort}";
+        var gwUp = await HostSetup.GatewayUpAsync();
+        var edgeUp = await EdgeUpAsync();
+        return new StackResult(
+            new SetupStep(gwName,
+                gwUp ? SetupOutcome.Skipped : SetupOutcome.Failed,
+                gwUp ? $"探到 http://127.0.0.1:{HostSetup.GatewayPort}/health"
+                     : $"探不到 http://127.0.0.1:{HostSetup.GatewayPort}/health —— "
+                       + "★ 模型清单读的就是这个口,它不通【模型页就是空的】。"),
+            new SetupStep(edgeName,
+                edgeUp ? SetupOutcome.Skipped : SetupOutcome.Failed,
+                edgeUp ? $"探到回环管理面 127.0.0.1:{HubAdmin.AdminPort}"
+                       : $"探不到回环管理面 127.0.0.1:{HubAdmin.AdminPort} —— 副机连不上这台。"));
     }
 
     static async Task<SetupStep> EnsureGatewayAsync()
@@ -307,8 +368,15 @@ public static class HostProvision
                 CreateNoWindow = true,
                 WorkingDirectory = dirOrWhy,
             };
-            using var p = Process.Start(psi);
+            // ★★ V22:**不再** `using var p` —— 那一行把 Process 对象当场释放掉,
+            //   于是网关的 PID 从来没有被任何人记下来。后果不是"少了个句柄",
+            //   是**关栈那一下压根不知道该关谁**:托盘「关闭」只弹了个框、退了管理端自己,
+            //   而网关和 Edge 原地继续跑(V22 实测,见 StackStop 文件头)。
+            //   ⇒ 谁起的谁记账,记在 StackOwnership 里(带 StartTime 防 PID 复用)。
+            var p = Process.Start(psi);
             if (p is null) return new SetupStep(name, SetupOutcome.Failed, "进程没起来");
+            _gatewayProc = p;
+            StackOwnership.NoteStarted(StackOwnership.Component.Gateway, p);
         }
         catch (Exception ex)
         {
@@ -402,7 +470,7 @@ public static class HostProvision
     ///     恰恰是 D48 裁定 2 明令禁止的那件事。</item>
     /// </list>
     /// </summary>
-    static async Task<SetupStep> EnsureEdgeAsync()
+    static async Task<SetupStep> EnsureEdgeAsync(string? bindIp = null)
     {
         const string name = "LAN Edge :8443";
         if (await EdgeUpAsync()) return new SetupStep(name, SetupOutcome.Skipped, "本来就在跑");
@@ -413,7 +481,15 @@ public static class HostProvision
 
         // ★ 选不出地址就【停在这里】,不退回 `run`。退回去会"成功"——
         //   而那个成功正是这次要消灭的东西(起了,客户端却用不了,还没人看得出来)。
-        var ip = PickBindIp(out var whyIp);
+        // ★★ 用户在界面上挑过网卡的话就用那一张 —— `PickBindIp` 的「多个候选不替你挑」
+        //   已经由**人**答过了,这里再问一次只会把那次选择丢掉。
+        string? ip; string whyIp;
+        if (bindIp is { Length: > 0 })
+        {
+            ip = bindIp;
+            whyIp = $"你在「主机中枢」那一页里选的网卡({bindIp})";
+        }
+        else ip = PickBindIp(out whyIp);
         if (ip is null) return new SetupStep(name, SetupOutcome.Failed, "选不出要绑的网卡地址:" + whyIp);
 
         try
@@ -447,6 +523,7 @@ public static class HostProvision
             //   不抽,子进程写满约 4 KiB 缓冲就卡死。把 Process 留住,读取回调才活着。
             //   (管理端是后台常驻的,中枢本来也该比这个方法活得久。)
             _edgeProc = proc;
+            StackOwnership.NoteStarted(StackOwnership.Component.Edge, proc);
             try
             {
                 var sw = new StreamWriter(EdgeLogPath, append: true) { AutoFlush = true };
@@ -474,6 +551,13 @@ public static class HostProvision
 
     /// <summary>自动起栈拉起来的那个中枢进程。★ 留住它,重定向的管道才有人抽(见 EnsureEdgeAsync)。</summary>
     static Process? _edgeProc;
+
+    /// <summary>自动起栈拉起来的那个网关进程。★ V22 才留住 —— 在此之前它是 `using var`,
+    /// 当场释放,所以关栈时**没人知道网关的 PID**。</summary>
+    static Process? _gatewayProc;
+
+    /// <summary>本进程这一轮起栈留下的两个句柄(关栈优先用它们,拿不到再退回 PID 账本)。</summary>
+    public static (Process? Gateway, Process? Edge) StartedHandles => (_gatewayProc, _edgeProc);
 
     /// <summary>
     /// 中枢自己打印的话落在哪。★ 两条起栈路径(自动起栈与「主机中枢」那一页的手动起)
