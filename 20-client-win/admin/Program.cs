@@ -29,6 +29,17 @@ public static class Program
         // ★ 自检分流排在**最前面**:
         //   · 不该被单实例锁挡住 —— 自检时托盘里可能正挂着一个真的管理端;
         //   · 不该走提权护栏 —— 自检不起任何窗口,也不去开客户端与栈。
+        // ★★ V23:生命周期那一段(托盘右键 →「关闭」→ 栈真的没了)跑在**子进程**里 ——
+        //   一个 AppDomain 只许有一个 `System.Windows.Application`,而 `SelftestLiveViews`
+        //   已经建了一个;更要命的是 `App.Shutdown()` 会把本线程的 Dispatcher 一起关掉,
+        //   而那 403 行 live 视图断言全靠它推帧。理由全文在 SelftestStackStop.cs。
+        //   ★ 这条分流排在 `--selftest` 之前只是为了读起来顺;两个开关是精确匹配,不会互相吃掉。
+        if (args.Any(a => a.Equals(Selftest.LifecycleArg, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!AttachConsole(AttachParentProcess)) AllocConsole();
+            return Selftest.RunLifecycleChild();
+        }
+
         if (args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
         {
             if (!AttachConsole(AttachParentProcess)) AllocConsole();

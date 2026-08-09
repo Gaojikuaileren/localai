@@ -174,7 +174,16 @@ public partial class App : Application
         _tray.DoubleClick += (_, _) => Dispatcher.Invoke(ShowPanel);
     }
 
-    void ShowPanel()
+    /// <summary>
+    /// 打开面板。★ V23 从 <c>private</c> 放到 <c>internal</c>,只为一件事:
+    /// 让自检能走**裁定第 6 条**那条真路 —— 打开面板 → 点 × → 断言它只是隐藏、进程还活着。
+    /// <para>★★ 在此之前那一条只有**源码文本**判据(`code.Contains("ev.Cancel = true")`),
+    /// 而 ASSERTION-PITFALLS 第 14 条整节记的就是:扫源码的判据对「这个按钮点下去到底做没做事」
+    /// 什么都不会说。放开一个访问修饰符换一条真的行为判据,这笔账是划算的。</para>
+    /// <para>★ 只是 <c>internal</c>,不是 <c>public</c>:自检与本类在**同一个程序集**里,
+    /// 外面(客户端)仍然够不着 —— 托盘与双击之外没有第二个打开面板的入口。</para>
+    /// </summary>
+    internal void ShowPanel()
     {
         if (_main is null)
         {
@@ -210,8 +219,14 @@ public partial class App : Application
     //  不是"跑得起来"(ASSERTION-PITFALLS 第 12 条:4197 条全绿而真机开不起来)。
     //
     //  ★★ 而这条路中间隔着一个**模态框** —— 自检进程里没有人去点它,进程会当场挂死。
-    //    那正是 `admin/Selftest.cs` 今天那条 SKIP 的真原因。
     //    ⇒ 把「问人」和「告诉人」抽成可替换的一环,自检就能走**真正那条路**。
+    //  ★★★ V23 更正:上一版这里写着「**那正是 `admin/Selftest.cs` 今天那条 SKIP 的真原因**」
+    //    —— 那句话在 main 上**是假的**。`admin/Selftest.cs` 的两条 SKIP 是
+    //    :141(出包产物旁边读不到源码)与 :185(旁边找不到 localai-client.exe),
+    //    **都跟模态框无关**;它描述的是那条未并原型分支上的世界。
+    //    ⇒ 这个缝的理由本身成立(模态框确实会挂死自检进程),但它当时**没有**对应的 SKIP,
+    //      而那句话让人以为"有一条 SKIP 正等着这个缝去解锁"。
+    //      本轮把消费侧搬齐之后,这条路由 `Selftest.RunLifecycle` 真的走一遍(LIFE=1)。
     //  ★ 默认实现**就是原来那两个 MessageBox**,生产路径一个字都没有改变;
     //    自检替换的只是"谁来回答那一句",不是被测的那条路本身。
     // ══════════════════════════════════════════════════════════════════════════

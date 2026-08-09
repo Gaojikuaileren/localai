@@ -184,6 +184,137 @@ public static partial class Selftest
                            "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
                 }
 
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★★ V23 · 救出三片「双重指错」的断言
+                //
+                //  V22 把「TryReadSource 指向不落盘文件 ⇒ 恒 null ⇒ 整片静默不跑」这个病
+                //  **诊断得一字不差**并补了 Skip —— 却没搜一下同一表达式还有几处。
+                //  ★ 判词:**一个修法漏改一处,缺陷就完整地留在那一处。**
+                //
+                //  剩下的三处,而且每一处都**错了两层**:
+                //    ⑦  `Services/HostSetup.cs`     —— 路径错(真身在 `..\app\Services\`)· 下辖 7 条
+                //    ⑱b `Views/ConfirmDialog.cs`    —— 路径错(真身在 `..\app\Views\`)  · 下辖 1 条
+                //    ⑫  sync-over-async 那一组      —— 路径错 **且** 被一个空壳 `if` 吞掉
+                //  ★★ 第二层是它们**同时还嵌在 `if (dv4 is not null)` 里面** ——
+                //    光把路径改对**它们照样一条都不跑**。这正是"漏改一处"最阴的地方:
+                //    修了看得见的那一层,人就以为修完了。
+                //  ⇒ 两层一起修:搬出 `dv4` 那个块 + 指到**管理端真的编译进来的那份**
+                //    (csproj `<Compile Link>` 了 `..\app\Services\HostSetup.cs` 与
+                //     `..\app\Views\ConfirmDialog.cs`,所以断言的是**这个 exe 里真有的代码**)。
+                //  ★ 而 `Views/DevicesView.cs` / `Services/HubClient.cs` **没有**被 link 进来
+                //    ⇒ 它们不在这里救,救了就是拿管理端自检去测客户端不编译的代码。
+                // ══════════════════════════════════════════════════════════════
+                // ⑦ 「一次装好这台主机」:三条不可让步的边界
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★ 读的是 `Services/HostProvision.cs`,**不是** `HostSetup.cs` ——
+                //    而这一条是那条元断言当场量出来的,不是我推出来的:
+                //    第一版按注释里的说法指向 `..\app\Services\HostSetup.cs`,实跑后
+                //    元断言红了(那份文件里没有 `EnsureFirewallAsync`),另外六条跟着红。
+                //    ★ 真相是 V21 把 `EnsureIdentityAsync` / `EnsureFirewallAsync` /
+                //      `FirewallRuleExistsAsync` **搬到了管理端这一侧**(HostProvision.cs:106),
+                //      `HostSetup.cs` 只剩一句注释提到它们的名字。
+                //  ⇒ **同一个病在同一片代码上叠了两层**:路径指向不落盘的文件(第一层),
+                //    而就算读到了也切不出东西,因为函数早搬走了(第二层)——
+                //    与 V22 在 `:1200` 那段记的「双重指错」逐字同形。
+                //  ★★ 这就是元断言存在的理由:没有它,这七条会以「防火墙那步没验规则」
+                //    这类**假理由**红着,而真因是判据读错了文件。
+                // ══════════════════════════════════════════════════════════════
+                var hs = hpSrc;   // ★ 上面已经读过同一份,不再读第二遍
+                if (hs is null)
+                    Skip("「一次装好这台主机」那七条(HostProvision.cs)",
+                         "读不到 `Services/HostProvision.cs`(出包产物旁边没有源码)");
+                if (hs is not null)
+                {
+                    var hsBody = Body(hs);
+                    // ★ 元断言:读到的**确实**是那份含铸身份/防火墙的源码,不是撞名撞上的别的文件。
+                    Assert(hsBody.Contains("EnsureFirewallAsync"),
+                           "★ 元断言:读到的确实是含 `EnsureFirewallAsync` 的那一份 —— "
+                           + "读错文件时下面六条会**红得给出假理由**(V23 第一版就是这么红的)");
+                    // ★★ 绝不调那个会先 del 掉身份的重置脚本 —— 它会让所有已配对设备失效
+                    Assert(!hsBody.Contains("重置并铸身份"),
+                           "★★ 客户端绝不调 重置并铸身份.cmd —— 它开头就删掉 identity 目录,"
+                           + "那是破坏性的;只调 localai-identity init(它自己 fail-closed,已存在就拒绝覆盖)");
+                    Assert(hsBody.Contains("\"init\""),
+                           "★ 铸身份走 localai-identity init");
+                    // ★★ 只有防火墙那一步提权,而且提的是 powershell 跑那个脚本
+                    var runas = hsBody.Split("Verb = \"runas\"").Length - 1;
+                    Assert(runas == 1,
+                           $"★★ 全文件只允许【一处】提权(实得 {runas} 处)—— identity / Edge / 网关"
+                           + "一旦继承 High 完整性,身份就毁了");
+                    var fw = Slice(hs, "public static async Task<SetupStep> EnsureFirewallAsync", "/// <summary>查规则在不在");
+                    Assert(fw is not null && fw.LastIndexOf("FirewallRuleExistsAsync", StringComparison.Ordinal)
+                           > fw.IndexOf("Verb = \"runas\"", StringComparison.Ordinal),
+                           "★★ 提权跑完【要回来验规则在不在】—— 只凭「UAC 点过了 / 退出码是 0」就宣布成功,"
+                           + "是在替用户假设一件没看过的事");
+                    Assert(hsBody.Contains("Win32Exception"),
+                           "★ 用户在 UAC 上点「否」是【正常路径】,要如实说没放行会怎样,不是抛个异常了事");
+                    // ★★ 同上,这条也退役并反过来钉:要紧的不是"是不是普通用户",
+                    //   而是【铸的时候和用的时候是不是同一个等级】—— 那要中枢侧把铸造等级记下来才能比,
+                    //   已写进 integrity-guard-asks-wrong-question-2026-08-03.md。
+                    Assert(!hsBody.Contains("Elevation.IsElevated()"),
+                           "★★ 铸身份不许拿「我是不是管理员」当门槛 —— "
+                           + "UAC 关闭的机器上根本没有普通身份的进程,那条门槛会把它彻底堵死");
+                    // ★ 这一条查的是**文件头注释**,所以看原文而不是 Body() —— Body() 会把注释剥掉。
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★ V23 换了钉的那句话,并如实说清为什么(不是嫌它不好看):
+                    //    原来钉的是 `铸的时候和用的时候是不是同一个等级` —— 那句话写在
+                    //    `HostSetup.cs` 的文件头上,而 V21 把**代码**搬到了 HostProvision.cs,
+                    //    **那句话没跟过来**,今天全仓的产品源码里一个字都找不到。
+                    //  ⇒ 继续钉它 = 钉一句已经不存在的话(ASSERTION-PITFALLS 第 1 条那个形状)。
+                    //  ⇒ 改钉**跟着代码一起搬过来的**那条边界原文(HostProvision.cs 文件头 ②),
+                    //    它说的是同一件事:提权的只许是防火墙那一步,身份绝不能继承 High。
+                    // ══════════════════════════════════════════════════════════
+                    Assert(hs.Contains("一旦继承 High,身份就毁了"),
+                           "★ 文件头要写清真正要防的是什么(提权只许给防火墙那一步,身份不能继承 High),"
+                           + "免得后人又照着「是不是管理员」那种判据写回去");
+                }
+
+                // ⑱b 确认框不许被一个超长的自报名字顶爆
+                var cd = TryReadSource(Path.Combine("..", "app", "Views", "ConfirmDialog.cs"));
+                if (cd is null)
+                    Skip("确认框高度上限那一条(ConfirmDialog.cs)",
+                         "读不到 `..\\app\\Views\\ConfirmDialog.cs`(出包产物旁边没有源码)");
+                if (cd is not null)
+                    Assert(Body(cd).Contains("MaxHeight") && Body(cd).Contains("ScrollViewer"),
+                           "★★ 确认框要有高度上限并能滚动 —— 否则一个超长的自报名字就能把按钮顶出屏幕,"
+                           + "那是一个由对方决定的界面拒绝服务");
+
+                // ⑫ UI 侧不许 sync-over-async —— 2026-08-04 实机卡死就是一行 .GetAwaiter().GetResult()
+                //   在 UI 线程上等一个 async 方法:里面 await 的续体要回 UI 线程,而 UI 线程正卡着。
+                //   ★ 允许的写法是先 Task.Run 把它挪出 UI 线程再 GetResult(App.xaml.cs 里那处就是)。
+                //   ★★ 名单是**管理端真的编译进来的那几份**,一份不落盘的都不许写进来 ——
+                //     写进来的那一条会静默 continue 掉,而名单看着还是"覆盖了四个文件"。
+                var syncOverAsyncFiles = new[]
+                {
+                    Path.Combine("..", "app", "Services", "HostSetup.cs"),
+                    Path.Combine("Services", "HubAdmin.cs"),
+                    Path.Combine("..", "app", "Services", "HubDiscovery.cs"),
+                    Path.Combine("Views", "HostHubView.cs"),
+                };
+                var soaRead = 0;
+                foreach (var f in syncOverAsyncFiles)
+                {
+                    var src = TryReadSource(f);
+                    if (src is null) continue;
+                    soaRead++;
+                    foreach (var line in Body(src).Split('\n'))
+                    {
+                        if (!line.Contains("GetAwaiter().GetResult()") && !line.Contains(".Wait()")) continue;
+                        Assert(line.Contains("Task.Run("),
+                               $"★★ {Path.GetFileName(f)} 里有一处 sync-over-async 没先 Task.Run —— "
+                               + "在 UI 线程上这会【直接死锁】(实机卡死过一次):" + line.Trim());
+                    }
+                }
+                // ★ 元断言:名单里的文件**真的读到了**。读到 0 份时上面那个 foreach 一条断言都不做,
+                //   而"一条都没做"与"一条违例都没有"在结果上长得一模一样(第 10/13 条那个形状)。
+                if (soaRead == 0)
+                    Skip("sync-over-async 那一组", "名单里的源码一份都读不到(出包产物旁边没有源码)");
+                else
+                    Assert(soaRead == syncOverAsyncFiles.Length,
+                           $"★★ 元断言:sync-over-async 名单里 {syncOverAsyncFiles.Length} 份源码要**全部**读到"
+                           + $"(实得 {soaRead} 份)—— 少一份就是那一份在静默跳过,"
+                           + "而名单看上去仍然覆盖着它");
+
 
                 // ══════════════════════════════════════════════════════════════
                 //  ★★★★ V22 实测:**下面这一整片断言,一条都没跑过。**
@@ -210,12 +341,33 @@ public static partial class Selftest
                 //    ② 这里补一条 `Skip`,把"沉默"换成"看得见的空" ——
                 //       实测数字与逐条处置写在交回里。
                 // ══════════════════════════════════════════════════════════════
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★★ V23 · 把这条 SKIP 的**文案改准**,以及它原来会怎样害人
+                //
+                //  上一版这条 SKIP 写的是「V21 已把该文件**改名**为 `HostHubView.cs`」——
+                //  **那是假的**:V21 是**拆分**,`app/Views/DevicesView.cs` 今天仍在(491 行)。
+                //  `dv4` 恒为 null 的真因是另一回事:`TryReadSource` 是从**管理端源码根**往下找,
+                //  而它够不到 `app/Views/`(那是客户端那一半,没有被 csproj link 进管理端)。
+                //
+                //  ★★★ 为什么这个差别要紧,而不是措辞洁癖:
+                //    按「已经改名了」那个说法,这一片是**没东西可读**,读到才奇怪;
+                //    按真因,这一片是**读错了地方** —— 只要哪天锚点解析到了
+                //    `Views/DevicesView.cs`(例如管理端 exe 的某个祖先目录里出现了同名文件,
+                //    出包闸把 exe 拷进 %TEMP% 那类形态正是 PITFALLS 第 9 条那个坑),
+                //    这 58 条就会**静默地对着客户端那一半源码跑,红绿都是假的** —— 比现在的 null 更坏。
+                //  ⇒ V23 把锚点收到 `AdminSourceRoot()`(Selftest.cs 里那段):
+                //    只认「`Selftest.cs` + `localai-admin.csproj` 同时在」的那一级,
+                //    一份路过的同名文件配不上这个条件 ⇒「解析到了但解析错了」这条路被堵死。
+                //  ★ 而「解析不到」这件事本身由 `RunAnchorTally` 报出来:
+                //    在登记表里的算一条**看得见的 SKIP**,不在表里的算 **OWED**(门禁判红)。
+                // ══════════════════════════════════════════════════════════════
                 var dv4 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
                 if (dv4 is null)
-                    Skip("管理端「一键配对 + 配对窗口三道闸」那 69 条断言",
-                         "它们读的是 `Views/DevicesView.cs`,而 V21 已把该文件改名为 `HostHubView.cs` "
-                         + "⇒ 这一片**一条都没跑**(V22 实测)。★ 这不是「没什么可测」,是判据指错了文件。"
-                         + "重新指向后实测 PASS 166→210 / FAIL 8→33,那 25 条红要逐条裁 —— 见交回。");
+                    Skip("管理端「一键配对 + 配对窗口三道闸」那一片断言",
+                         "它们读的是 `Views/DevicesView.cs` —— 那个文件在**客户端**(`app/Views/`,今天仍在、491 行),"
+                         + "而本自检的锚点只认管理端源码根 ⇒ 这一片**一条都没跑**。"
+                         + "★ 这不是「没什么可测」,是判据指错了地方。"
+                         + "重新指向后实测 PASS 166→210 / FAIL 8→33,那 25 条红要逐条裁 —— 协调层已裁:单开车道。");
                 if (dv4 is not null)
                 {
                     var body4 = Body(dv4);
@@ -396,40 +548,7 @@ public static partial class Selftest
                     }
 
                     // ⑥ 起中枢那一步的断言已移到本块之外（V22）—— 理由见那儿。
-                    // ⑦ 「一次装好这台主机」:三条不可让步的边界
-                    var hs = TryReadSource(Path.Combine("Services", "HostSetup.cs"));
-                    if (hs is not null)
-                    {
-                        var hsBody = Body(hs);
-                        // ★★ 绝不调那个会先 del 掉身份的重置脚本 —— 它会让所有已配对设备失效
-                        Assert(!hsBody.Contains("重置并铸身份"),
-                               "★★ 客户端绝不调 重置并铸身份.cmd —— 它开头就删掉 identity 目录,"
-                               + "那是破坏性的;只调 localai-identity init(它自己 fail-closed,已存在就拒绝覆盖)");
-                        Assert(hsBody.Contains("\"init\""),
-                               "★ 铸身份走 localai-identity init");
-                        // ★★ 只有防火墙那一步提权,而且提的是 powershell 跑那个脚本
-                        var runas = hsBody.Split("Verb = \"runas\"").Length - 1;
-                        Assert(runas == 1,
-                               $"★★ 全文件只允许【一处】提权(实得 {runas} 处)—— identity / Edge / 网关"
-                               + "一旦继承 High 完整性,身份就毁了");
-                        var fw = Slice(hs, "public static async Task<SetupStep> EnsureFirewallAsync", "/// <summary>查规则在不在");
-                        Assert(fw is not null && fw.LastIndexOf("FirewallRuleExistsAsync", StringComparison.Ordinal)
-                               > fw.IndexOf("Verb = \"runas\"", StringComparison.Ordinal),
-                               "★★ 提权跑完【要回来验规则在不在】—— 只凭「UAC 点过了 / 退出码是 0」就宣布成功,"
-                               + "是在替用户假设一件没看过的事");
-                        Assert(hsBody.Contains("Win32Exception"),
-                               "★ 用户在 UAC 上点「否」是【正常路径】,要如实说没放行会怎样,不是抛个异常了事");
-                        // ★★ 同上,这条也退役并反过来钉:要紧的不是"是不是普通用户",
-                        //   而是【铸的时候和用的时候是不是同一个等级】—— 那要中枢侧把铸造等级记下来才能比,
-                        //   已写进 integrity-guard-asks-wrong-question-2026-08-03.md。
-                        Assert(!hsBody.Contains("Elevation.IsElevated()"),
-                               "★★ 铸身份不许拿「我是不是管理员」当门槛 —— "
-                               + "UAC 关闭的机器上根本没有普通身份的进程,那条门槛会把它彻底堵死");
-                        // ★ 这一条查的是**文件头注释**,所以看原文而不是 Body() —— Body() 会把注释剥掉。
-                        //   (刚写的时候就用错了 hsBody,当场红了一次。)
-                        Assert(hs.Contains("铸的时候和用的时候是不是同一个等级"),
-                               "★ 文件头要写清真正要防的是什么,免得后人又照着「普通用户」那句写回去");
-                    }
+                    // ⑦ 「一次装好这台主机」那七条也已移到本块之外（V23）—— 理由见那儿。
                     var nicPick = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
                     Assert(nicPick is not null && nicPick.Contains("nics.Count == 1") && nicPick.Contains("请选一张"),
                            "★★ 多张网卡时让人自己选 —— 放行在虚拟机的仅主机网卡上等于没放行,"
@@ -540,11 +659,7 @@ public static partial class Selftest
                     var safeFn = Slice(dv4, "static string SafeDisplayName", "/// <summary>手填入口");
                     Assert(safeFn is not null && safeFn.Contains("char.IsControl") && safeFn.Contains("48"),
                            "★ 剔控制字符并截断");
-                    var cd = TryReadSource(Path.Combine("Views", "ConfirmDialog.cs"));
-                    if (cd is not null)
-                        Assert(Body(cd).Contains("MaxHeight") && Body(cd).Contains("ScrollViewer"),
-                               "★★ 确认框要有高度上限并能滚动 —— 否则一个超长的自报名字就能把按钮顶出屏幕,"
-                               + "那是一个由对方决定的界面拒绝服务");
+                    // ⑱b 确认框那一条也已移到本块之外（V23）—— 理由见那儿。
                     // ⑲ 两边的批准截止时间要对齐
                     var ctDl = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
                     if (ctDl is not null)
@@ -575,28 +690,11 @@ public static partial class Selftest
                     Assert(hostCard is not null && hostCard.Contains("ChangeDialRow("),
                            "★★ 主机自己那台换了 IP 也要有出路 —— 以前这张卡上连输入框都没有,"
                            + "只能去手改 profile.json,而界面从没说过它在哪");
-                    // ⑮ 链不通 ≠ 过期:处置正好相反,而旧文案加粗否掉了唯一的出路
-                    var hcCls = TryReadSource(Path.Combine("Services", "HubClient.cs"));
-                    if (hcCls is not null)
-
-                    // ⑫ UI 侧不许 sync-over-async —— 2026-08-04 实机卡死就是一行 .GetAwaiter().GetResult()
-                    //   在 UI 线程上等一个 async 方法:里面 await 的续体要回 UI 线程,而 UI 线程正卡着。
-                    //   ★ 允许的写法是先 Task.Run 把它挪出 UI 线程再 GetResult(App.xaml.cs 里那处就是)。
-                    foreach (var f in new[] { Path.Combine("Services", "HostSetup.cs"),
-                                              Path.Combine("Services", "HubAdmin.cs"),
-                                              Path.Combine("Services", "HubDiscovery.cs"),
-                                              Path.Combine("Views", "DevicesView.cs") })
-                    {
-                        var src = TryReadSource(f);
-                        if (src is null) continue;
-                        foreach (var line in Body(src).Split('\n'))
-                        {
-                            if (!line.Contains("GetAwaiter().GetResult()") && !line.Contains(".Wait()")) continue;
-                            Assert(line.Contains("Task.Run("),
-                                   $"★★ {Path.GetFileName(f)} 里有一处 sync-over-async 没先 Task.Run —— "
-                                   + "在 UI 线程上这会【直接死锁】(今天就卡死过一次):" + line.Trim());
-                        }
-                    }
+                    // ⑮ 「链不通 ≠ 过期」那条断言**在某次搬迁里被删掉了,而它的 `if` 留了下来** ——
+                    //   于是 `if (hcCls is not null)` 底下**没有自己的语句**,它一路吞掉了紧跟其后的
+                    //   ⑫ 那整个 `foreach`(C# 里 if 的主体就是下一条语句,中间隔多少注释都不算)。
+                    //   ⇒ V23 删掉这个空壳,并把 ⑫ 搬到本块之外(它读的文件与 DevicesView 无关)。
+                    // ⑫ sync-over-async 那一组也已移到本块之外（V23）—— 理由见那儿。
 
                     // ⑨ 起中枢要绑【用户刚选的那张网卡】,不能靠 .cmd 里写死的地址
                     var step = Slice(dv4, "async Task StartEdgeStepAsync", "/// <summary>");
