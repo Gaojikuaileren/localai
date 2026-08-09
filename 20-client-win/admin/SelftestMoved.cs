@@ -97,64 +97,92 @@ public static partial class Selftest
                 //     已在交回里列成第一条「同形」发现。这里先把**本轮新写的**那几条救出来。
                 var hhv = TryReadSource(Path.Combine("Views", "HostHubView.cs"));
                 var hpSrc = TryReadSource(Path.Combine("Services", "HostProvision.cs"));
-                var se = hpSrc is null ? null
-                       : Slice(hpSrc, "static async Task<SetupStep> EnsureEdgeAsync",
-                                      "/// <summary>自动起栈拉起来的那个中枢进程");
-                Assert(hpSrc is null || se is not null,
-                       "★ 元断言:切得到 `EnsureEdgeAsync` —— 切不到的话下面整组会静默零断言");
-                var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
-                // ★★ 这里原来断言「拉起 Edge 之前先查本进程有没有提权」。**已退役,而且是反过来钉的**:
-                //   同日实测推翻了那个判据 —— 本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,
-                //   身份也是在 High 下铸的、在 High 下 CngKey.Open 得开。
-                //   拿"是不是管理员"当门槛,会在这种机器上把一个本来能起来的中枢永远挡住,理由还是假的。
-                //   ⇒ 现在要求的正相反:【不许】预判,直接试着起,让中枢自己说话。
-                Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
-                       "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
-                       + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
-                // ★★ 这条断言【翻面】了:用户要求不要黑窗口。可以藏 ——
-                //   但前提是先给失败找到别的去处,否则就是把错误藏起来。
-                //   ⇒ 现在要求:无窗口启动 + 收日志 + 失败时把日志原文摆到界面上。
-                Assert(se is not null && se.Contains("CreateNoWindow = true"),
-                       "★ 不给用户看黑窗口");
-                Assert(se is not null && se.Contains("RedirectStandardOutput = true")
-                       && se.Contains("RedirectStandardError = true"),
-                       "★★ 藏窗口就必须收日志 —— 那个窗口原来的真正作用是「唯一能看到失败原因的地方」");
-                Assert(se is not null && se.Contains("RedirectStandardInput = true"),
-                       "★★ 还要让中枢看到「没有可用 stdin」,它才会走无命令台那条路 —— "
-                       + "否则它打完 banner 就当场退出(实测撞到过)");
-                Assert(se is not null && se.Contains("EdgeLogPath"),
-                       "★★ 藏窗口就必须把中枢自己吐的话收进日志 —— 窗口可以藏,现场不能丢");
-                // ★★★ 「把日志原文摆到界面上」那一半**搬到了界面**(StartEdgeAsync 删掉时跟过去的),
-                //   所以它要在**那边**钉:钉在这儿会因为找不到而恒假,钉丢了则会静默恒真。
-                Assert(hhv is not null && hhv.Contains("中枢自己打印的最后几行")
-                       && hhv.Contains("EdgeLogTail"),
-                       "★★ 起不来时,「主机中枢」那一页要把中枢自己吐的最后几行【原文】摆出来 —— "
-                       + "窗口可以藏,现场不能丢");
-                // ★★ 判据钉的是**三件事的先后**:先起进程 → 再去探 → 探到了才敢报 Ok。
-                //   ★ 不能拿「`EdgeUpAsync` 的第一次出现」当探测点:`EnsureEdgeAsync` 开头
-                //     那一句 `if (await EdgeUpAsync()) … Skipped`(幂等预检)**排在 Process.Start 之前**,
-                //     拿它去比会让这条判据恒假 —— V22 写第一版时就是这么红的,而红得理由是假的。
-                var iWait = se?.LastIndexOf("WaitUntilAsync", StringComparison.Ordinal) ?? -1;
-                var iOk = se?.IndexOf("SetupOutcome.Ok", StringComparison.Ordinal) ?? -1;
-                Assert(iSpawn >= 0 && iWait > iSpawn && iOk > iWait,
-                       "★★ 拉起 ≠ 起来了:必须【起进程 → 去探 → 探到才报 Ok】这个顺序,"
-                       + "不许因为 Process.Start 没抛异常就宣布成功"
-                       + $"(实测位置:spawn={iSpawn} wait={iWait} ok={iOk})");
-                Assert(se is not null && se.Contains("【不当作成功】"),
-                       "★ 到点没等到就如实说 —— 不无限转圈,也不把它记成起来了");
-                // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
-                // ★★ V22:切片的下界从 `UIElement HubDownCard()` 收成 `;`。
-                //   理由是实打实的:V22 在 RecheckRow 与 HubDownCard **之间**插进了「AI 栈」那一格,
-                //   而那一格里有一个「打开中枢日志」按钮(Process.Start)——
-                //   旧的下界会把它一起切进来,于是这条断言会**红,而理由是假的**
-                //   (它会说"重新检测按钮顺手启动了 Edge",而那按钮一个字都没改)。
-                //   RecheckRow 是个单行表达式体成员,切到第一个 `;` 就正好是它整个。
-                Assert(hhv is not null,
-                       "★ 元断言:读得到 `Views/HostHubView.cs` —— 读不到的话上下几条会静默恒假");
-                var recheck = hhv is null ? null : Slice(hhv, "UIElement RecheckRow()", ";");
-                Assert(recheck is not null && !recheck.Contains("Process.Start")
-                       && !recheck.Contains("EnsureStackAsync") && !recheck.Contains("StackBoot"),
-                       "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
+                // ★★★★ V22 出包门禁当场抓住的一条（它就是干这个的）：
+                //   把这组断言从 `if (dv4 is not null)` 里搬出来的时候，
+                //   把它们「读不到源码就跳过」那层保护**一并搬没了** ⇒
+                //   在**出包形态**（exe 旁边没有源码）里这几条全部变红，
+                //   而红的理由是假的：`spawn=-1 wait=-1 ok=-1` —— 那不是代码坏了，是没读到文件。
+                //   ★ 本文件早就写过这一条（「必须用 if (src is not null) 兜住」），而我又踩了一次。
+                //   ⇒ 读不到就**明着 Skip**，不判红；读得到才断言。
+                if (hpSrc is null || hhv is null)
+                    Skip("起中枢那一步的那一组断言",
+                         "读不到源码（"
+                         + (hpSrc is null ? "Services/HostProvision.cs " : "")
+                         + (hhv is null ? "Views/HostHubView.cs " : "")
+                         + "—— 出包产物旁边没有源码，设计如此）。"
+                         + "★ 这一档以前是**静默跳过**的，现在至少说得出自己没跑。");
+                if (hpSrc is not null && hhv is not null)
+                {
+                    var se = hpSrc is null ? null
+                           : Slice(hpSrc, "static async Task<SetupStep> EnsureEdgeAsync",
+                                          "/// <summary>自动起栈拉起来的那个中枢进程");
+                    Assert(hpSrc is null || se is not null,
+                           "★ 元断言:切得到 `EnsureEdgeAsync` —— 切不到的话下面整组会静默零断言");
+                    var iSpawn = se?.IndexOf("Process.Start", StringComparison.Ordinal) ?? -1;
+                    // ★★ 这里原来断言「拉起 Edge 之前先查本进程有没有提权」。**已退役,而且是反过来钉的**:
+                    //   同日实测推翻了那个判据 —— 本机 EnableLUA=0(UAC 关闭),桌面 explorer 本身就是 High,
+                    //   身份也是在 High 下铸的、在 High 下 CngKey.Open 得开。
+                    //   拿"是不是管理员"当门槛,会在这种机器上把一个本来能起来的中枢永远挡住,理由还是假的。
+                    //   ⇒ 现在要求的正相反:【不许】预判,直接试着起,让中枢自己说话。
+                    Assert(se is not null && !se.Contains("Elevation.IsElevated()"),
+                           "★★ 不许拿「我是不是管理员」预判能不能起中枢 —— "
+                           + "UAC 关闭的机器上那恒为真,会把健康的机器永远挡住");
+                    // ★★ 这条断言【翻面】了:用户要求不要黑窗口。可以藏 ——
+                    //   但前提是先给失败找到别的去处,否则就是把错误藏起来。
+                    //   ⇒ 现在要求:无窗口启动 + 收日志 + 失败时把日志原文摆到界面上。
+                    Assert(se is not null && se.Contains("CreateNoWindow = true"),
+                           "★ 不给用户看黑窗口");
+                    Assert(se is not null && se.Contains("RedirectStandardOutput = true")
+                           && se.Contains("RedirectStandardError = true"),
+                           "★★ 藏窗口就必须收日志 —— 那个窗口原来的真正作用是「唯一能看到失败原因的地方」");
+                    Assert(se is not null && se.Contains("RedirectStandardInput = true"),
+                           "★★ 还要让中枢看到「没有可用 stdin」,它才会走无命令台那条路 —— "
+                           + "否则它打完 banner 就当场退出(实测撞到过)");
+                    Assert(se is not null && se.Contains("EdgeLogPath"),
+                           "★★ 藏窗口就必须把中枢自己吐的话收进日志 —— 窗口可以藏,现场不能丢");
+                    // ★★★ 「把日志原文摆到界面上」那一半**搬到了界面**(StartEdgeAsync 删掉时跟过去的),
+                    //   所以它要在**那边**钉:钉在这儿会因为找不到而恒假,钉丢了则会静默恒真。
+                    Assert(hhv is not null && hhv.Contains("中枢自己打印的最后几行")
+                           && hhv.Contains("EdgeLogTail"),
+                           "★★ 起不来时,「主机中枢」那一页要把中枢自己吐的最后几行【原文】摆出来 —— "
+                           + "窗口可以藏,现场不能丢");
+                    // ★★ 判据钉的是**三件事的先后**:先起进程 → 再去探 → 探到了才敢报 Ok。
+                    //   ★ 不能拿「`EdgeUpAsync` 的第一次出现」当探测点:`EnsureEdgeAsync` 开头
+                    //     那一句 `if (await EdgeUpAsync()) … Skipped`(幂等预检)**排在 Process.Start 之前**,
+                    //     拿它去比会让这条判据恒假 —— V22 写第一版时就是这么红的,而红得理由是假的。
+                    // ㉑ 起中枢**之前**先看它是不是已经在跑 —— 否则第二个必然撞端口,吐一屏 Kestrel 异常栈。
+                    //   ★ 这里要的是 `EdgeUpAsync` 的**第一次**出现(幂等预检,排在 Process.Start 前);
+                    //     下面那条要的是**最后一次**(起完之后的探活)。**两条是不同的性质,不能合并**:
+                    //     只钉"探过"的话,把预检删掉它照样绿,而症状是每次都起出第二个中枢。
+                    var iPre = se?.IndexOf("EdgeUpAsync", StringComparison.Ordinal) ?? -1;
+                    Assert(iSpawn >= 0 && iPre >= 0 && iPre < iSpawn,
+                           "★★ 拉起中枢前先探一次:已经在跑就别起第二个 —— "
+                           + "第二个会撞 address already in use,在黑窗口里吐一整屏异常栈,"
+                           + "而人根本读不出「你已经开着一个了」"
+                           + $"(实测位置:pre={iPre} spawn={iSpawn})");
+
+                    var iWait = se?.LastIndexOf("WaitUntilAsync", StringComparison.Ordinal) ?? -1;
+                    var iOk = se?.IndexOf("SetupOutcome.Ok", StringComparison.Ordinal) ?? -1;
+                    Assert(iSpawn >= 0 && iWait > iSpawn && iOk > iWait,
+                           "★★ 拉起 ≠ 起来了:必须【起进程 → 去探 → 探到才报 Ok】这个顺序,"
+                           + "不许因为 Process.Start 没抛异常就宣布成功"
+                           + $"(实测位置:spawn={iSpawn} wait={iWait} ok={iOk})");
+                    Assert(se is not null && se.Contains("【不当作成功】"),
+                           "★ 到点没等到就如实说 —— 不无限转圈,也不把它记成起来了");
+                    // ★ 「重新检测」这个按钮【只能】做它名字说的那件事
+                    // ★★ V22:切片的下界从 `UIElement HubDownCard()` 收成 `;`。
+                    //   理由是实打实的:V22 在 RecheckRow 与 HubDownCard **之间**插进了「AI 栈」那一格,
+                    //   而那一格里有一个「打开中枢日志」按钮(Process.Start)——
+                    //   旧的下界会把它一起切进来,于是这条断言会**红,而理由是假的**
+                    //   (它会说"重新检测按钮顺手启动了 Edge",而那按钮一个字都没改)。
+                    //   RecheckRow 是个单行表达式体成员,切到第一个 `;` 就正好是它整个。
+                    Assert(hhv is not null,
+                           "★ 元断言:读得到 `Views/HostHubView.cs` —— 读不到的话上下几条会静默恒假");
+                    var recheck = hhv is null ? null : Slice(hhv, "UIElement RecheckRow()", ";");
+                    Assert(recheck is not null && !recheck.Contains("Process.Start")
+                           && !recheck.Contains("EnsureStackAsync") && !recheck.Contains("StackBoot"),
+                           "★★ 「重新检测这台的角色」不许顺手启动 Edge —— 按钮必须只做它名字说的那件事");
+                }
 
 
                 // ══════════════════════════════════════════════════════════════
@@ -418,12 +446,9 @@ public static partial class Selftest
                     Assert(auto is not null && auto.Contains("_role = HostRole.Client"),
                            "★ 出口要真的把角色改过去,不是只弹句话");
 
-                    // ㉑ 起中枢之前先看它是不是已经在跑 —— 否则第二个必然撞端口,吐一屏 Kestrel 异常栈
-                    Assert(se is not null && se.IndexOf("admin0.ProbeAsync", StringComparison.Ordinal) >= 0
-                           && se.IndexOf("admin0.ProbeAsync", StringComparison.Ordinal) < iSpawn,
-                           "★★ 拉起中枢前先探一次:已经在跑就别起第二个 —— "
-                           + "第二个会撞 address already in use,在黑窗口里吐一整屏异常栈,"
-                           + "而人根本读不出「你已经开着一个了」");
+                    // ㉑ 「起中枢之前先探一次」那一条**已随 ⑥ 搬到本块之外**(V22)——
+                    //    它引用的 `se` / `iSpawn` 是 ⑥ 的局部量,留在这儿连编都编不过。
+                    //    ★ 判据本身一个字没让步,只是改钉 `HostProvision.EnsureEdgeAsync`。
 
                     // ㉔ 配对后半程必须用【证书名】而不是 IP,否则对钉住 CA 的那条连接握不上手
                     var ctName = TryReadSource(Path.Combine("..", "transport", "ClientTransport.cs"));
