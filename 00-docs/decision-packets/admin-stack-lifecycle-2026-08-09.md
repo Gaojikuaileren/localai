@@ -167,9 +167,86 @@ StackStop.QueryAsync()  →  弹确认框  →  请客户端优雅退出  →  �
 | 护栏 | 怎么弄假 | 结果 |
 |---|---|---|
 | 「唯一入口」必须有生产调用点 | 把 `StackBoot` 里那行 `HostProvision.EnsureStackAsync(...)` 换成别的调用 | **FAIL=8→9**,且**只有** `EnsureStackAsync` 那条变红,另两条(`Strings.Get` / `TranslationState.NotifyPoolChanged`)仍绿 ⇒ 判据是**特定**的,不是一红全红。★ 同文件注释里那句 `HostProvision.EnsureStackAsync(...)` **没有**被算成调用点(剥注释起了作用) |
-| 出包路径 `[3b]` | 传 `-AdminOut <dist>\admin-pack` | 见 §5 实测 |
+| 出包路径 `[3b]` | 传 `-AdminOut <dist>\admin-pack` | 见 §3.7 |
+
+### 3.7 `[3b]` 那条判据自己也差点骗人
+
+第一版 `[3b]` 只问「客户端会去看的那个路径上有没有 exe」。
+★ 那条判据**会被上一次构建的残留变绿** —— 于是把 `$AdminOut` 改错了也照样过,
+而红测会得出「判据没问题」的结论。**一条在红测里骗人的判据,比没有判据更坏。**
+
+⇒ 收紧成两问,顺序不能反:
+① **这一次发到的目录 == 客户端会去看的目录**(与残留无关,先问这个);
+② 那儿确实有 `localai-admin.exe`。
+
+## 3.8 一条**我自己踩的**坑,被出包门禁当场抓住
+
+把 ⑥ 那组断言从 `if (dv4 is not null)` 里搬出来时,
+**把「读不到源码就跳过」那层保护一并搬没了** ⇒ 在**出包形态**(exe 旁边没有源码)里
+10 条全部变红,而红的理由是假的:`spawn=-1 wait=-1 ok=-1` 不是代码坏了,是没读到文件。
+
+★ 本文件里早就写着这一条(「必须用 `if (src is not null)` 兜住」,还注明上一版实测三条红),
+**而我又踩了一次**。⇒ 读不到就**明着 Skip**,读得到才断言。
+
+> 两种形态的数字**不可互比**(出包旁边没源码,结构断言整段不跑),这是本仓自己的口径:
+> 仓库形态 `PASS=198 FAIL=0 SKIP=3` · 出包形态 `PASS=134 FAIL=0`。
 
 ---
+
+## 3.5 六格验收 · 实测(2026-08-09,本机真跑)
+
+出包版本戳 **`20260809-1314+0f9fa1c`**(干净树,无 `.dirty`)。
+门禁:客户端 `PASS=1009 FAIL=0`(两种安装位置)· 管理端出包形态 `PASS=134 FAIL=0`。
+
+| # | 验收 | 实测 |
+|---|---|---|
+| ① | 双击管理端 → 栈自己起来 → 模型页列出模型 | **通过**。`explorer.exe dist\admin\localai-admin.exe`(走 shell ⇒ 普通完整性,绕开我这边的提权)⇒ **24 秒**后 `8080` 与 `8442` 双双 UP;网关组件目录读到 **9 个**。★ 24 秒这个数很要紧,见 §3.6 |
+| ② | 关掉栈 → 只双击**客户端** → 管理端被拉起 → 栈也起来 | **通过**。停光三个进程(8080/8442 都 False)后只起客户端:**3 秒**出现 `localai-admin` 进程,**24 秒**两个口 UP |
+| ③ | 半起 → 主机中枢页明说是哪一步失败 | **通过**,而且是**活的状态**不是造的:写这段时本机正是 `网关没在跑 · Edge 在跑`。`LiveStackCard` 真 new 出 `HostHubView`、真读可视树 ⇒ 页面明说【起了一半】· 说清「模型页会是空的」· **不出现 `start-stack`** |
+| ④ | 托盘右键 → 关闭 → 栈真的没了 | **只做到一半 —— 如实说**。见下 |
+| ⑤ | 全程不需要跑任何命令 | ①②③ 全程未跑任何命令(只有双击)。★ 但见 §6 第 3 条:**发布安装**上仍起不了网关 |
+| ⑥ | 出一次包 | **通过**。`dist\client` 与 `dist\admin` 已就位并**并排**;管理端包补上了 `VERSION.txt` + `SHA256.txt` |
+
+### ④ 做到哪儿、卡在哪儿(不许含糊)
+
+**已验的**(实机、真数据):
+
+- 起栈时的**归属账本**真的写下来了 —— `%LOCALAPPDATA%\LocalAI\admin\stack-owned.json`:
+  ```json
+  {"gateway":{"Pid":1288,"Name":"python",...},
+   "edge":{"Pid":23536,"Name":"localai-lan-edge",...},
+   "backendsBeforeStart":[],"snapshotTaken":true}
+  ```
+  两个 PID 都带 `StartedUtcTicks`(防 PID 复用),快照标志为真。
+  **这是 `StopAsync` 里最险的那一半** —— 「停我们起的、不动认领的」全靠它。
+
+**没验的**:**那一下点击本身**。
+
+托盘菜单与确认框属于 `localai-admin.exe`,而 computer-use 的应用解析器认不出它
+(它不是"已安装应用",只是一个从目录里跑起来的 exe)⇒ 截图被遮罩、点击被前台校验挡下。
+**我没有盲点** —— 看不见就按回车,可能落在任何一个对话框上。
+
+⇒ 留给人一步:托盘右键 → 关闭 → 确定,然后跑一句验:
+
+```bash
+powershell -NoProfile -Command "foreach($p in 8080,8442,8443){\"$p : \" + (Test-NetConnection 127.0.0.1 -Port $p -InformationLevel Quiet -WarningAction SilentlyContinue)}; Get-Process | Where-Object {$_.ProcessName -match 'localai|llama'} | Select-Object Id,ProcessName; nvidia-smi --query-gpu=memory.used --format=csv,noheader"
+```
+
+★ 本轮已把这条路做成**可自检的**(托盘项命名常量 + `ConfirmClose`/`ReportCloseBlocked` 缝,
+捞自未并分支、逐段搬),所以下一轮可以把它写成断言,而不是再靠一次人工点击。
+
+## 3.6 一条实测改掉的数:超时 20 秒 → 30 秒
+
+本机冷起网关到 `/health` 答话 **19 秒**,而 `EnsureGatewayAsync` 原来等 **20 秒** —— 只剩 1 秒余量。
+机器忙一点、缓存冷一点,自动起栈就会报「起不来」,**而网关其实好好的**。
+`start-stack.ps1` 等的是 30 秒,它早就知道这件事。
+
+⇒ `GatewayWaitMs = EdgeWaitMs = 30_000`,与那个脚本对齐。
+★ 顺带补回一个**悄悄的功能退化**:合并两条起栈路径时,Edge 的等待从
+`HostHubView.StartEdgeWaitSeconds = 30` 掉成了 20;逐秒进度(`n/30`)也丢了,一并补回。
+
+> ★ 验收①实测的 24 秒,正落在旧的 20 秒之外 —— **不改这个数,①就会随机失败**,
+> 而失败时页面会说「网关起不来」,人会去查网关,查不出任何问题。
 
 ## 4. 顺带查实:管理端自检里有 **69 条断言从没跑过**
 
