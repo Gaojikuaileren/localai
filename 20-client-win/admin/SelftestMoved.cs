@@ -361,45 +361,117 @@ public static partial class Selftest
                 //  ★ 而「解析不到」这件事本身由 `RunAnchorTally` 报出来:
                 //    在登记表里的算一条**看得见的 SKIP**,不在表里的算 **OWED**(门禁判红)。
                 // ══════════════════════════════════════════════════════════════
-                var dv4 = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
-                if (dv4 is null)
-                    Skip("管理端「一键配对 + 配对窗口三道闸」那一片断言",
-                         "它们读的是 `Views/DevicesView.cs` —— 那个文件在**客户端**(`app/Views/`,今天仍在、491 行),"
-                         + "而本自检的锚点只认管理端源码根 ⇒ 这一片**一条都没跑**。"
-                         + "★ 这不是「没什么可测」,是判据指错了地方。"
-                         + "重新指向后实测 PASS 166→210 / FAIL 8→33,那 25 条红要逐条裁 —— 协调层已裁:单开车道。");
-                if (dv4 is not null)
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★★ V26 · 这一片**终于跑起来了**:锚点从 `Views/DevicesView.cs`
+                //    改指 `Views/HostHubView.cs`,并把变量名从 `dv4` 改成 `hub`。
+                //
+                //  ★ 改名不是洁癖:一个叫 `dv4`(DevicesView)的变量指着 HostHubView,
+                //    正是本仓反复栽的那种「名字与内容不符、而不符本身不会红」的形状。
+                //  ★★ 直接**复用上面 ⑥ 已经读过的 `hhv`**,不再读第二遍:
+                //    同一个文件读两遍会让 `SRCHIT` 虚高,而且路径写两处,漂了不会有任何东西红。
+                //
+                //  ★★★ 实测(V26,逐条对账,不是估):
+                //    锚点指错时 `PASS=250 FAIL=0 SKIP=8`;改指之后 `PASS=285 FAIL=23 SKIP=7`。
+                //    ⇒ **救活 58 条 = 35 绿 + 23 红**(SKIP 少 1 是这条 Skip 自己没了)。
+                //    ★ 而那 35 绿里有 **1 条是假的**(被注释喂绿,见下面 ⑪ 那段)⇒ 真绿 34。
+                // ══════════════════════════════════════════════════════════════
+                var hub = hhv;
+                if (hub is null)
+                    Skip("管理端「主机中枢页 + 配对窗口三道闸」那一片断言",
+                         "读不到 `Views/HostHubView.cs`(出包产物旁边没有源码)—— "
+                         + "这一片是**结构判据**,只在仓库里跑得了。");
+                if (hub is not null)
                 {
-                    var body4 = Body(dv4);
+                    var body4 = Body(hub);
 
-                    // ① 角色四分,一种都不许合并
-                    Assert(Enum.GetValues<Views.HostRole>().Length == 4,
-                           "★★ 角色必须是四种:Unknown / Host / HostHubDown / Client —— "
-                           + "把 HostHubDown 并进 Client,就又回到「主机上说这台不是主机」那个坑");
-                    var probe = Slice(dv4, "async Task ProbeRoleAsync", "/// <summary>手动重探");
-                    Assert(probe is not null && probe.IndexOf("LastProbe == AdminProbeResult.Ok", StringComparison.Ordinal)
-                           < probe.IndexOf("HostToolsDir() is not null", StringComparison.Ordinal),
-                           "★★ 先看【肯定证据】(管理面答话)再看【线索】(本机有主机端程序)—— 顺序反了线索就会盖过证据");
+                    // ══════════════════════════════════════════════════════════
+                    //  ① 角色分档,一种都不许合并
+                    //
+                    //  ★★★ V26:期望值从 **4 改成 3**,而这**不是**放宽判据 ——
+                    //    V21 在 `HostHubView.cs:57-60` 白纸黑字删掉了第四种 `Client`,理由是
+                    //    「**这个进程里它不存在**:管理端只装在主机上(副机上根本没有这个 exe)」。
+                    //    ⇒ 继续要求 4 种,是拿一条**已经被明文撤掉**的期望值判红
+                    //      (ASSERTION-PITFALLS 第 1 条那个形状:断言撞在解释它已被删的注释上)。
+                    //  ★★ 但**判词里那件要守的事一个字没让**:`HostHubDown` 不许被并掉。
+                    //    ⇒ 改成**反向全表**:枚举名逐字对拍。少一个、多一个、改一个名字都会红,
+                    //      而不是只看个数(只看个数时「删掉 HostHubDown 再加一个别的」照样绿)。
+                    // ══════════════════════════════════════════════════════════
+                    Assert(string.Join(",", Enum.GetNames<Views.HostRole>()) == "Unknown,Host,HostHubDown",
+                           "★★ 管理端的角色**恰好**是这三种:Unknown / Host / HostHubDown(实得:"
+                           + string.Join(",", Enum.GetNames<Views.HostRole>()) + ")—— "
+                           + "把 HostHubDown 并进别的档,就又回到「主机上说这台不是主机」那个坑;"
+                           + "★ 而第四种 `Client` 是 V21 **明文撤掉**的(管理端只装在主机上,"
+                           + "那个枚举值在本进程里永远取不到)—— 它不许回来");
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★ 切片的**下界**换成 `UIElement HubDownCard`(紧跟其后的那个成员)。
+                    //    旧下界 `/// <summary>手动重探` 在 V21 拆分之后**排到了 ProbeRoleAsync 前面**,
+                    //    `Slice` 从上界往后找不到它 ⇒ 切片恒 null ⇒ 本条恒红,而**红的理由是假的**
+                    //    (它会说"顺序反了",可顺序一个字没改)。
+                    //    ★ 我第一版把下界改成 `UIElement ProbingCard` —— **也在前面**(:293 < :303),
+                    //      照样切不到。元断言当场把这一次也抓住了。⇒ 下界必须挑**真的在后面**的那个。
+                    //
+                    //  ★★★★ 而判词本身也得改,因为**它描述的那个三档判定已经不存在了**:
+                    //    `ProbeRoleAsync` 今天只有两档(`Admin.LastProbe == Ok ? Host : HostHubDown`),
+                    //    「线索」(`HostToolsDir`)那一档随 `HostRole.Client` 一起被 V21 撤掉了。
+                    //    ⇒ 幸存下来的那条性质是更强的一条:**角色只由【肯定证据】决定,线索不参与**。
+                    //      改成正反两钉:肯定证据必须在;线索**不许**出现在这段里。
+                    //
+                    //  ★ 顺带记一条(不在本车道的边界内,写进交回):`ProbeRoleAsync` 的**文档注释**
+                    //    (`HostHubView.cs:299-301`)今天还写着「拿不到再看【线索】……两样都没有
+                    //    才认定是副机」—— 那是**三档**的说法,而函数体里只有两档。注释与代码相反。
+                    //    ⇒ 这正是 `SliceBody` 要防的那种料:一条 `probe.Contains("线索")` 会被它喂绿。
+                    // ══════════════════════════════════════════════════════════
+                    var probe = SliceBody(hub, "async Task ProbeRoleAsync", "UIElement HubDownCard");
+                    Assert(probe is not null,
+                           "★ 元断言:切得到 `ProbeRoleAsync` —— 切不到的话下面两条会红得给出假理由"
+                           + "(实测这条元断言在本轮抓住了我自己挑错的下界)");
+                    Assert(probe is not null && probe.Contains("Admin.LastProbe == AdminProbeResult.Ok"),
+                           "★★ 角色由【肯定证据】决定:回环管理面答话了(而且 hubId 对得上)");
+                    Assert(probe is not null && !probe.Contains("HostToolsDir"),
+                           "★★★ 【线索】(本机有没有主机端程序)**不许**参与角色判定 —— "
+                           + "线索会盖过证据,而 2026-08-03 那次真实事故(主机那台显示「这台不是主机」)"
+                           + "就是线索说了算。★ 管理端这个 exe 只装在主机上,"
+                           + "「这台不是主机」那一档在本进程里根本不存在(V21 明文撤掉)");
                     Assert(body4.Contains("case HostRole.Unknown:") && body4.Contains("ProbingCard()"),
                            "★ 角色没探出来之前什么都不猜,如实说「正在确认」");
 
                     // ② 主机那一支不许出现"填一个中枢地址配到别人家"的框
-                    var build4 = Slice(dv4, "void Build()", "UIElement ProbingCard()");
+                    var build4 = Slice(hub, "void Build()", "UIElement ProbingCard()");
                     Assert(build4 is not null && !build4.Contains("ClientPairCard()")
                            || build4 is not null && build4.IndexOf("case HostRole.Host:", StringComparison.Ordinal)
                               < build4.IndexOf("ClientPairCard()", StringComparison.Ordinal),
                            "★ 主机分支只画主机的卡");
 
-                    // ③ 本机自配对:必须【当场重探】,不能拿旧结论当通行证;而且无论成败都关窗
-                    var self = Slice(dv4, "async Task SelfPairAsync", "/// <summary>「已配对的电脑」");
-                    Assert(self is not null && self.Contains("await admin.ProbeAsync"),
-                           "★★ 自配对前当场重探一次 —— 几分钟前的探测结果不是通行证(中枢可能换了、Edge 可能重起过)");
-                    Assert(self is not null && self.Contains("finally") && self.Contains("WindowAsync(false)"),
-                           "★★ 无论成败都关窗 —— 开着的窗口是暴露面,不能靠「正常路径会关」来保证");
-                    Assert(self is not null && self.Contains("WindowAsync(true, 1)"),
-                           "★ 自配对把窗口开到最短(1 分钟)—— 这几秒局域网上的 8443 也接受请求");
-                    Assert(self is not null && self.Contains("dials.Count > 1"),
-                           "★ 本机有多个地址在应答时不替他挑 —— 选错会把只有本机看得见的地址写进配对档案");
+                    // ══════════════════════════════════════════════════════════
+                    //  ③ ★★★★ V26:`SelfPairAsync` 那一族(8 条)**整族退役**,
+                    //     并且**换上守新路的那几条** —— 只删不补 = 把用户报过的缺陷变回盲区。
+                    //
+                    //  ★ 事实先摆:`SelfPairAsync`(主机一键自配对)**没有跟着搬,也没有留下**
+                    //    (`HostHubView.cs:26` 白纸黑字)。它跨两个进程:enroll 那一半要写
+                    //    本机设备私钥与 profile.json(客户端的活),开窗+批准那一半走回环
+                    //    `/admin/*`(管理端的活)—— 一个进程里做不完。
+                    //  ★★ V22 曾把它列进「V21 有意留在客户端的成员」—— **那是错的**,
+                    //    照那个归属把这 8 条搬去客户端自检,它们在那边**同样恒红**,
+                    //    而下一个人会以为那是客户端欠的债。⇒ 归属是「**两边都没有**」。
+                    //
+                    //  ★★★★ 而这 8 条守的**不是**一个可有可无的功能 —— 它是用户 2026-08-07
+                    //    报的那个缺陷的现场。本仓自记的故障链(见 `SelftestMoved.cs` 后面那段):
+                    //      自动起栈用 `run` ⇒ 管理面没绑 ⇒ ProbeRoleAsync 判 HostHubDown
+                    //      ⇒ `SelfPairAsync` 的唯一调用点在 `HostSelfCard` 里 ⇒ **结构上永不触发**
+                    //      ⇒ 主机自己没配对 ⇒ 面板说「这台设备不能做这个操作」。
+                    //    ⇒ 删掉旧断言的同时**必须**给新路补判据,否则这条链重新变成没人看的盲区。
+                    //
+                    //  ⇒ 新路的判据放在下面 ③b(「主机自己那台也要配对」那一组)。
+                    //    这里只留**反向钉**:那条明文跳过六词比对的捷径不许回来。
+                    // ══════════════════════════════════════════════════════════
+                    var body4NoStr = CodeOnly(hub);
+                    Assert(!body4NoStr.Contains("SelfPairAsync"),
+                           "★★★ 「一键自己配自己」(`SelfPairAsync`)**不许回来** —— "
+                           + "旧那条路**明文跳过六词比对**(它自己的注释花了 8 行解释为什么可以跳过),"
+                           + "而跨进程之后没法既保住捷径又保住纪律;"
+                           + "在两者之间,逐字比对是不能让的那一个(D47)。"
+                           + "★ 判据用 CodeOnly(剥字符串+去注释):文件头那段**讲述**它为什么没了的说明"
+                           + "不该把这条判据钉红(第 1 条那个坑的反面)");
 
                     // ④ 配对窗口的三道闸,各自独立(用户问:「只有主机没副机岂不是永远关不了」)
                     // ★★ 这条断言【退役】:宽限本身没了。它存在的前提是"客户端替中枢记账",
@@ -409,12 +481,17 @@ public static partial class Selftest
                     Assert(!body4.Contains("_addExpanded") && !body4.Contains("_graceUntil"),
                            "★★ 不许用本地布尔替中枢记「配对窗口开没开」—— 中枢在 /admin/ping 与 pending 里"
                            + "自报 pairingWindowOpen,两份账一定会对不上,而且真的对不上过");
-                    Assert(body4.Contains("TheApp.HubAdmin.PairingWindowOpen"),
-                           "★★ 渲染要读【中枢自报的】那一位");
-                    var render = Slice(dv4, "void RenderAddSection", "async Task PollPendingAsync");
+                    // ★ V26:针脚从 `TheApp.HubAdmin.PairingWindowOpen` 改成 `.PairingWindowOpen` ——
+                    //   V21 拆分之后管理端进程里那个通道叫 `HostHubView.Admin`(静态,本进程只有一个),
+                    //   不再经 `TheApp`。**性质一个字没改**:渲染读的仍然是【中枢自报的】那一位。
+                    //   ★★ 只钉属性名、不钉持有者:再搬一次家也不会因为前缀变了而红,
+                    //     而"改读本地布尔"那种真退化仍然会红(下面那条 `_addExpanded` 反向钉着)。
+                    Assert(body4.Contains(".PairingWindowOpen"),
+                           "★★ 渲染要读【中枢自报的】那一位(实得前缀见源码:`Admin.PairingWindowOpen`)");
+                    var render = Slice(hub, "void RenderAddSection", "async Task PollPendingAsync");
                     Assert(render is not null && render.Contains("PairingWindowOpen"),
                            "★ 开关的文字与面板的显隐都由中枢那一位决定");
-                    var pollSlice = Slice(dv4, "async Task PollPendingAsync", "/// <summary>");
+                    var pollSlice = Slice(hub, "async Task PollPendingAsync", "/// <summary>");
                     Assert(pollSlice is not null && pollSlice.Contains("RenderAddSection()"),
                            "★★ 每轮轮询都重画一次 —— 窗口被中枢到点关掉时界面要立刻跟上,"
                            + "不能出现「界面写着已打开、其实早关了」");
@@ -443,7 +520,7 @@ public static partial class Selftest
                     //    「批准之前必须逐字比过六个词」这条判词都得成立。
                     //    ⇒ 所以下面第三条是**遍历所有批准入口**,不是钉某一个函数。
                     // ══════════════════════════════════════════════════════════
-                    var pendRow = Slice(dv4, "UIElement PendingRow", "UIElement DeviceRow");
+                    var pendRow = SliceBody(hub, "UIElement PendingRow", "UIElement DeviceRow");   // V26:去注释,见 SliceBody
                     Assert(pendRow is not null,
                            "★ 元断言:切得到 `PendingRow`(活的批准路径)—— "
                            + "切不到的话下面三条会**静默变成零断言**");
@@ -460,38 +537,24 @@ public static partial class Selftest
                     //   ★ 这条**不挑函数** —— 挑函数的判据会随那个函数的去留一起失效,
                     //     而这正是上面那三条栽过的地方。
                     //
-                    //   ★★★ 有**一个**登记在册的例外:`SelfPairAsync`(本机自配对)。
-                    //     它写这条判据时**当场把我抓了一次** —— 第一版不认例外,
-                    //     于是对着一条项目**深思熟虑决定不比六个词**的路径判红。
-                    //     那种红是误红,而本仓的经验是:**误红的护栏很快就没人看**。
-                    //     ⇒ 例外要**登记**,而且例外自己的那道闸要被单独钉住
-                    //       (与契约门禁里 `_SUBSHAPE_CIDS` 逐条写明"为什么不抵消欠债"同款手法)。
-                    //     它凭什么免:同机走回环,没有中间人可防;能调回环管理面的人已经在这台机器上,
-                    //     他本来就能批准任何请求。⇒ 免的是**②确认请求来源**,不是①防中间人(那层仍在)。
+                    //   ★★★★ V26:那**唯一一个登记在册的例外(`SelfPairAsync`)已经不存在了** ——
+                    //     它没跟着搬也没留下(`HostHubView.cs:26`)。⇒ 例外机制整个**退役**,
+                    //     判据反而**变严**:管理端里**没有任何**批准入口可以免比六个词。
+                    //   ★ 这是「例外表只许变短」那条纪律走到头的样子:表空了,连表一起收掉。
+                    //     ★★ 留着一个永远挖不到东西的 `Replace(...)` 更坏 ——
+                    //       它会让下一个人以为这里还有一条被裁过的免除路径。
+                    //   ★ 元断言的阈值跟着改:管理端只剩 **1** 个批准入口(`PendingRow` 那个),
+                    //     旧的 `>= 2` 是照着"活路径 + 自配对例外"两处写的,那个 2 已经过期。
                     {
-                        var dvCode = NoComments(dv4);
-                        var selfPair = Slice(dv4, "async Task SelfPairAsync", "UIElement HostDevicesCard");
-                        var selfPairCode = selfPair is null ? "" : NoComments(selfPair);
+                        var dvCode = NoComments(hub);
 
                         var allSites = System.Text.RegularExpressions.Regex
                             .Matches(dvCode, @"ApproveAsync\s*\(").Count;
-                        Assert(allSites >= 2,
+                        Assert(allSites >= 1,
                                $"★ 元断言:数得到批准入口(现 {allSites} 处)—— "
-                               + "数到 0/1 时下面的判据会静默恒真或把例外算成全部");
+                               + "数到 0 时下面那条判据在空扫,而空扫与全清白长得一模一样");
 
-                        // ★ 把登记在册的那个例外**整段挖掉**再扫剩下的。
-                        var scanned = selfPairCode.Length > 0 ? dvCode.Replace(selfPairCode, "") : dvCode;
-                        var scannedSites = System.Text.RegularExpressions.Regex
-                            .Matches(scanned, @"ApproveAsync\s*\(").Count;
-                        // ★★ 挖掉的**必须恰好是 1 个** —— 挖 0 个说明切片没匹配上(判据白扫),
-                        //   挖 ≥2 个说明例外的范围悄悄变大了(那才是真正危险的方向:
-                        //   有人把新的批准入口塞进自配对那一段来躲开这条判据)。
-                        Assert(allSites - scannedSites == 1,
-                               $"★★★ 登记在册的例外必须**恰好挖掉一个**批准入口"
-                               + $"(全部 {allSites} · 挖后 {scannedSites})—— "
-                               + "挖 0 个 = 切片没匹配上,这条判据在空扫;"
-                               + "挖 ≥2 个 = 有人把新的批准入口塞进自配对那一段来躲开它");
-
+                        var scanned = dvCode;
                         var bad = 0;
                         foreach (System.Text.RegularExpressions.Match m in
                                  System.Text.RegularExpressions.Regex.Matches(scanned, @"ApproveAsync\s*\("))
@@ -500,23 +563,12 @@ public static partial class Selftest
                             if (!scanned[from..m.Index].Contains("逐字")) bad++;
                         }
                         Assert(bad == 0,
-                               $"★★★ 除登记的自配对例外外,**每一个**批准入口之前都必须有六词【逐字】比对"
-                               + $"({bad} 处没有)—— 这条判据不挑函数:弹窗接回来也好、彻底删掉也好,"
+                               $"★★★ **每一个**批准入口之前都必须有六词【逐字】比对({bad} 处没有)—— "
+                               + "★ V26 起**没有任何例外**:唯一那个登记在册的例外(`SelfPairAsync`)"
+                               + "已经随 V21 拆分消失了。"
+                               + "★★ 判据不挑函数:弹窗接回来也好、彻底删掉也好,"
                                + "「批准之前逐字比过六个词」都得成立。"
-                               + "上一版把它钉在一个具体函数上,而那个函数早就没人调了");
-
-                        // ★★★ 例外**自己的那道闸**:免了六词,就必须当场重探管理面并确认 hubId。
-                        //   不能拿几分钟前的探测结果当通行证 —— 那期间中枢可能换了、Edge 可能重起过。
-                        //   ⇒ 免六词的**全部依据**就是"这是同一台机器的回环",这条一松,例外就不成立了。
-                        Assert(selfPairCode.Length > 0,
-                               "★ 元断言:切得到 `SelfPairAsync` —— 切不到的话下面那条会静默零断言,"
-                               + "而上面那条「恰好挖掉一个」也会同时红(两条互相兜)");
-                        Assert(selfPairCode.Contains("admin.ProbeAsync(TheApp.Hub.Profile?.HubId)")
-                               && selfPairCode.Contains("admin.LastProbe != AdminProbeResult.Ok"),
-                               "★★★ 自配对免比六个词的**前提**:必须【当场重探】回环管理面并确认 hubId 一致。"
-                               + "拿旧结论当通行证,那段免除的理由就不成立了 —— "
-                               + "免的是「确认请求来源」,凭的是「这确实是本机的回环」,"
-                               + "而那件事只有刚刚探过才知道");
+                               + "更早那一版把它钉在一个具体函数上,而那个函数早就没人调了");
                     }
 
                     // ★★★ 安全判据:**轮询那条路不许自动弹窗**。
@@ -530,7 +582,7 @@ public static partial class Selftest
                     //     比没有更坏:它会让人以为那件事有人看着。
                     //   ⇒ 改钉**行为**:轮询那一段里不许出现**任何**弹窗调用。
                     //     这样无论将来那个弹窗叫什么名字、由谁写,只要它被轮询触发就会红。
-                    var pollForPopup = Slice(dv4, "async Task PollPendingAsync", "// ═════");
+                    var pollForPopup = Slice(hub, "async Task PollPendingAsync", "// ═════");
                     Assert(pollForPopup is not null,
                            "★ 元断言:切得到 `PollPendingAsync` —— 切不到的话下面那条会静默零断言");
                     {
@@ -549,21 +601,44 @@ public static partial class Selftest
 
                     // ⑥ 起中枢那一步的断言已移到本块之外（V22）—— 理由见那儿。
                     // ⑦ 「一次装好这台主机」那七条也已移到本块之外（V23）—— 理由见那儿。
-                    var nicPick = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
+                    var nicPick = SliceBody(hub, "void BuildNicPicker", "async Task SetupHostAsync");   // V26:去注释
                     Assert(nicPick is not null && nicPick.Contains("nics.Count == 1") && nicPick.Contains("请选一张"),
                            "★★ 多张网卡时让人自己选 —— 放行在虚拟机的仅主机网卡上等于没放行,"
                            + "而界面会显示成功,那是最难查的一种失败");
 
-                    // ⑪ 铸身份不是内部步骤 —— 不可回退,必须先问;而且要有"这台其实是副机"的出口
-                    var auto = Slice(dv4, "async Task AutoSetupAsync", "/// <summary>身份就绪之后");
+                    // ══════════════════════════════════════════════════════════
+                    //  ⑪ 铸身份不是内部步骤 —— 不可回退,必须先问。
+                    //
+                    //  ★★★★ V26 · 这里躺着**一条比那 23 条红更该先处理的东西**:
+                    //    「★★ 要有出路(这台其实是副机)」那一条**是绿的,而它的绿是假的**。
+                    //
+                    //    `auto` 是 `Slice(hub, ...)` 的结果 —— **原文,带注释**。
+                    //    而「这台其实是副机」这句话今天在 `HostHubView.cs` 里**只出现在注释里**
+                    //    (实测:原文命中 2 次,去注释后 **0 次**),那两处注释说的还正是
+                    //    **「这条出路已经跟着 `Client` 角色一起被删掉了」**。
+                    //    ⇒ 判据在读一句**解释它自己已经不成立**的注释,然后判绿。
+                    //    ⇒ 而它旁边钉同一件事的 `_role = HostRole.Client` 是**红**的。
+                    //       **一红一绿,钉的是同一件事,而绿的那条是假的。**
+                    //
+                    //  ★★★ 判词:**判据被注释喂绿,比没有判据更坏** ——
+                    //    没有判据时人知道这儿没人看;被喂绿时人以为有人看着。
+                    //    ⇒「35 条绿」不能读成「35 条性质成立」,真绿是 **34**。
+                    //
+                    //  ★ 处置:这条出路是 V21 **明文撤掉**的(`HostHubView.cs:57-60`:
+                    //    管理端里根本没有 `Client` 这个角色,「这台其实是副机」在这个进程里没有意义)。
+                    //    ⇒ 两条一起退役,并**反向钉**:那个撤掉的角色不许从后门回来。
+                    //  ★★ 而**结构上的**修法在下面:`SliceBody()` —— 让切片先去注释再 Contains,
+                    //    这一族(实测还有 3 条同形易感)一次性堵死。
+                    // ══════════════════════════════════════════════════════════
+                    var auto = SliceBody(hub, "async Task AutoSetupAsync", "/// <summary>身份就绪之后");
                     Assert(auto is not null && auto.Contains("IdentityExistsAsync()"),
                            "★★ 没有身份时【先问再铸】—— 走到这张卡的判据只是「旁边有个 host 目录」,"
                            + "那是线索不是判据(把主机的 dist 整个拷过去就满足它),不问就铸 = 网段里悄悄多一个中枢");
-                    Assert(auto is not null && auto.Contains("这台其实是副机"),
-                           "★★ 要有出口 —— Build() 在 HostHubDown 下只渲染这张卡,"
-                           + "没有出口这台电脑【结构上】再也走不到配对,而界面从头到尾不会提「删掉那个 host 目录」");
-                    Assert(auto is not null && auto.Contains("_role = HostRole.Client"),
-                           "★ 出口要真的把角色改过去,不是只弹句话");
+                    Assert(!CodeOnly(hub).Contains("HostRole.Client"),
+                           "★★★ 「这台其实是副机」那条出路(连同 `HostRole.Client`)是 V21 **明文撤掉**的 —— "
+                           + "管理端只装在主机上,那个角色在本进程里永远取不到。它不许从后门回来。"
+                           + "★ 上一版这里有两条钉同一件事:一条读注释判绿(假的)、一条判红。"
+                           + "★★ 判据用 CodeOnly:文件头那段**讲述**它为什么没了的说明不该把这条钉红");
 
                     // ㉑ 「起中枢之前先探一次」那一条**已随 ⑥ 搬到本块之外**(V22)——
                     //    它引用的 `se` / `iSpawn` 是 ⑥ 的局部量,留在这儿连编都编不过。
@@ -588,14 +663,98 @@ public static partial class Selftest
                     //   主机未连接就【自动连自己】,不给按钮;角色检测只在【还没配好】时出现;
                     //   已配对列表里自己那条【不给移除】。
                     Assert(!body4.Contains("\"完成本机配对\""),
-                           "★★ 主机自配对是内部步骤,不该摆成按钮 —— 用户裁定:开客户端就自动连自己");
-                    Assert(body4.Contains("_selfPairStarted"),
-                           "★ 自动自配对只跑一次 —— 每次 Build() 都启一遍会叠出好几条 enroll");
-                    var hostCard2 = Slice(dv4, "UIElement HostSelfCard", "async Task SelfPairAsync");
-                    Assert(hostCard2 is not null && hostCard2.Contains("if (!TheApp.Hub.IsPaired)")
-                           && hostCard2.Contains("RecheckRow()"),
-                           "★★ 角色检测只在还没配好时出现 —— 配好了角色已被一次成功连接证明过,再问只是噪音");
-                    var devRow = Slice(dv4, "UIElement DeviceRow", "bool IsThisMachine");
+                           "★★ 「一键完成本机配对」不许摆成按钮 —— V21 之后主机走的是和副机**一模一样**"
+                           + "的两步(客户端 enroll → 管理端逐字比对后批准),没有捷径可点");
+                    // ★ `_selfPairStarted`(自动自配对的一次性闸)那条**退役**:V21 之后
+                    //   管理端里根本没有自配对这个动作,「只跑一次」无从谈起。
+                    //   它守的那件事(不许叠出好几条 enroll)现在归客户端 —— 见 (a) 那条待办登记。
+                    var hostCard2 = SliceBody(hub, "UIElement HostSelfCard", "UIElement HostDevicesCard");
+                    Assert(hostCard2 is not null,
+                           "★ 元断言:切得到 `HostSelfCard`(下界改成 `HostDevicesCard` —— "
+                           + "旧下界 `SelfPairAsync` 随 V21 拆分消失了,切片因此恒 null、下面那条恒红)");
+                    // ══════════════════════════════════════════════════════════
+                    //  ③b ★★★★ V26 · **新路的判据** —— 这一组是替上面退役的
+                    //     `SelfPairAsync` 那 8 条补的,不是顺手加的。
+                    //
+                    //  ★ 为什么非补不可(本仓自记的故障链,不是推想):
+                    //      自动起栈用 `run` ⇒ 管理面没绑 ⇒ ProbeRoleAsync 判 HostHubDown
+                    //      ⇒ `SelfPairAsync` 的唯一调用点在 `HostSelfCard` 里 ⇒ **结构上永不触发**
+                    //      ⇒ 主机自己没配对 ⇒ 组件面板说「这台设备不能做这个操作」
+                    //      —— **这正是用户 2026-08-07 报的那一条**。
+                    //    V21 用「主机客户端也走一次 enroll + 回管理端批准」换掉了旧路,
+                    //    而在 V26 之前**全仓没有一条断言看着那条新路**。
+                    //    ⇒ 只删旧断言 = 把用户报过的缺陷重新变成盲区。
+                    //
+                    //  ★★ 判据钉三件事,而且**每一件都能为假**:
+                    //    ① 这一页**知道**主机自己那台配没配对,并且两种状态各说各的话;
+                    //    ② 没配对时给出的那几步,**每一步在对面那个进程里真有那个入口**
+                    //       —— 跨进程成对断言(D92 同款手法):指路的话与被指的按钮分处两个 exe,
+                    //          任何一边改了名字,这条当场红;
+                    //    ③ 旧缺陷那个**形状**不许回来:发起 enroll 的动作不在管理端这一页里。
+                    //       它只**指路**;真正发起在客户端(客户端总是跑的,不像管理端的角色分支
+                    //       会因为管理面没绑而永不走到)。
+                    // ══════════════════════════════════════════════════════════
+                    Assert(hostCard2 is not null && hostCard2.Contains("ClientProfilePeek.ClientPaired()"),
+                           "★★★ ③b-① 这一页要**知道主机自己那台客户端配没配对** —— "
+                           + "旧路是「结构上永不触发」的静默,而静默与「配好了」在屏幕上长得一模一样。"
+                           + "★ 判据是档案里**真有证书**(ClientPaired 自己那条),不是文件在不在");
+                    Assert(hostCard2 is not null && hostCard2.Contains("还没配对"),
+                           "★★ ③b-① 没配对时要**明说**「这台上的客户端:还没配对」");
+                    {
+                        // ★★★ ③b-② 跨进程成对:管理端写的指引 ↔ 客户端真有的入口。
+                        var guide = hostCard2 ?? "";
+                        var clientSrc = TryReadSource(Path.Combine("..", "app", "Views", "DevicesView.cs"));
+                        if (clientSrc is null)
+                            Skip("③b-② 「指引里的每一步在客户端真有入口」",
+                                 "读不到 `..\\app\\Views\\DevicesView.cs`(出包产物旁边没有源码)");
+                        else
+                        {
+                            var clientBody = Body(clientSrc);
+                            // 管理端指引里逐字提到的那个按钮,必须在**客户端**真的存在
+                            Assert(guide.Contains("开始寻找主机") && clientBody.Contains("开始寻找主机"),
+                                   "★★★ ③b-② 管理端指引里写的「开始寻找主机」,必须在**客户端**真有这个按钮 —— "
+                                   + "两个 exe 各写各的文案时,指路的那句话会指向一个不存在的按钮,"
+                                   + "而**两边各自的自检都不会红**。这条是跨进程成对断言(D92 同款)");
+                            Assert(guide.Contains("＋ 添加一台新电脑") && body4.Contains("＋ 添加一台新电脑"),
+                                   "★★ ③b-② 指引里写的「＋ 添加一台新电脑」,必须在**本页**真有那个开关");
+                            Assert(guide.Contains("逐字核对"),
+                                   "★★★ ③b-② 指引的最后一步必须是**逐字核对六个词**再批准 —— "
+                                   + "旧的一键路径明文跳过了这一步,新路把它加了回来(D47),"
+                                   + "指引里漏掉它就等于把人引回那条捷径");
+
+                            // ★★★★ ③b-④ 故障链的**另一端**:客户端那侧不许有「我是主机就跳过配对」的分支。
+                            //   旧路之所以能悄悄断掉,是因为主机走的是**另一条**(一键自配对);
+                            //   新路的全部安全性来自「主机走的和副机**完全一样**那一条」。
+                            //   ⇒ 一旦有人在客户端配对入口上加一句「主机就不用配了」,
+                            //     主机又会回到「自己没配对而界面不说」的老样子,
+                            //     而管理端这边一个字都不会红。
+                            //   ★ 这条判据放在管理端读客户端源码,是**有意的**:它和 ③b-② 是同一条
+                            //     跨进程成对断言的两半。客户端那份自检里补一条对称的更好,
+                            //     但本轮 `app/Selftest.cs` 只许在文件末尾追加(V24 正在改它的 try 块顶部),
+                            //     而末尾追加的方法**没有调用点** ⇒ 加了也不会跑。
+                            //     ⇒ 本轮先在这里钉住,并在交回里登记「等 V24 并入后补客户端那半」。
+                            var pairEntry = Slice(clientSrc, "UIElement ClientPairCard", "string? _pickedNic");
+                            Assert(pairEntry is not null,
+                                   "★ 元断言:切得到客户端的配对入口 `ClientPairCard`");
+                            Assert(pairEntry is not null
+                                   && !CodeOnly(pairEntry).Contains("IsHostMachine")
+                                   && !CodeOnly(pairEntry).Contains("ThisMachineIsHub"),
+                                   "★★★ ③b-④ 客户端的配对入口**不许**按「我是不是主机」分岔 —— "
+                                   + "主机那台走的必须和任何一台副机**完全一样**的那条路。"
+                                   + "★ 旧缺陷正是因为主机走了另一条(一键自配对),而那条断了没人知道;"
+                                   + "一旦这里再长出一个「主机就不用配了」的分支,"
+                                   + "主机就又会回到「自己没配对、而界面不说」的老样子");
+                        }
+                    }
+                    Assert(hostCard2 is not null
+                           && !CodeOnly(hostCard2).Contains("EnrollAsync")
+                           && !CodeOnly(hostCard2).Contains("StartPairing"),
+                           "★★★ ③b-③ 这一页**只指路,不发起** —— 主机自己那台的 enroll 必须由"
+                           + "**客户端**发起。★ 旧缺陷的形状就是「唯一调用点落在一个走不到的分支里」"
+                           + "(管理面没绑 ⇒ 角色判 HostHubDown ⇒ 那个分支永不渲染 ⇒ 自配对永不触发);"
+                           + "把发起权放回客户端,那个形状**结构上**就没了 —— 客户端总是跑的");
+
+                    var devRow = Slice(hub, "UIElement DeviceRow", "bool IsThisMachine");
                     Assert(devRow is not null && devRow.Contains("if (!isSelf)"),
                            "★★ 已配对列表里【看得到自己但不能移除自己】—— 自己就是主机,"
                            + "解除自己等于让这台机器把自己踢出去");
@@ -606,19 +765,38 @@ public static partial class Selftest
                     //     写成 `x is not null && x.Contains(...)` 时它判红(还好);
                     //     写成 `x?.Contains(...) != false` 那种就会静默转绿。
                     //     ⇒ 边界要挑**结构上不会消失**的东西。这里改用类的收尾分节注释。
-                    var isSelfFn = Slice(dv4, "bool IsThisMachine", "// ═════");
+                    var isSelfFn = Slice(hub, "bool IsThisMachine", "// ═════");
                     Assert(isSelfFn is not null && isSelfFn.Contains("CertShort") && isSelfFn.Contains("SHA256"),
                            "★★ 认「是不是自己」要按证书指纹,不按名字 —— 同名设备很常见,而名字还是自报的");
-                    // ㉓ 副机侧:只允许「开始寻找主机」+ 网络选择(仅多网)+ 角色检测
-                    var cpc = Slice(dv4, "UIElement ClientPairCard", "string? _pickedNic");
-                    Assert(cpc is not null && cpc.Contains("开始寻找主机"),
-                           "★ 副机未配对时的唯一主按钮");
-                    Assert(cpc is not null && cpc.Contains("nics.Count > 1") && cpc.Contains("nics.Count == 1"),
-                           "★★ 网络选择【仅多网时出现】;只有一个就自动用它、不显示按钮(用户裁定)");
-                    var knock = Slice(dv4, "async Task KnockAsync", "string? _pickedDial");
-                    Assert(knock is not null && knock.Contains("还没上线"),
-                           "★★ 敲门协议要中枢配合、现在还没有 —— 必须【如实降级】,"
-                           + "绝不假装敲门已经发出去了(那会让人在副机这边干等一个不会来的响应)");
+                    // ══════════════════════════════════════════════════════════
+                    //  ㉓ ★★★★ V26 · **(a) 那 6 条:该改归属,但本轮不搬** —— 登记在此。
+                    //
+                    //  它们钉的是 V21 **有意留在客户端**的成员(`HostHubView.cs:20-22` 逐个点名:
+                    //  `PairedCard · ChangeDialRow · StartPairing · ClientPairCard · KnockAsync ·
+                    //   ScanForHubsAsync · ManualDialRow` —— 全是「敲门那一侧」),
+                    //  所以在**管理端**这份自检里它们恒红,而红的理由是**归属错了**,不是产品坏了。
+                    //
+                    //  逐条(实测:针脚只在 `app/Views/DevicesView.cs` 里命中):
+                    //    ① `ClientPairCard` → 「开始寻找主机」是副机未配对时的唯一主按钮
+                    //    ② `ClientPairCard` → 网络选择仅多网时出现
+                    //    ③ `KnockAsync`     → 敲门协议没有时要如实降级,不许假装发出去了
+                    //    ④ `if (_pairing) return;` → 连点两次不许发两条 enroll
+                    //    ⑤ `ChangeDialRow(` → 换了 IP 也要有出路
+                    //    ⑥ 「展开「＋ 添加一台新电脑」」→ 副机侧 403 文案指向主机该做的那一步
+                    //
+                    //  ★★ **本轮不搬的理由是协调层裁的,而且成立**:V24 正在改那份文案,
+                    //    现在搬过去会立刻失配,而那时它们看起来像是本轮引入的红。
+                    //  ⇒ 登记成一条**看得见的 SKIP**(不是 OWED:这不是「本该跑得了却没跑成」,
+                    //    是「已裁定等另一条车道并入后再做」),并写进交回的待办。
+                    //  ★★★ 而它们守的**性质**在客户端那一侧今天有没有人看着 —— 见
+                    //    `app/Selftest.cs` 本轮追加的那一组(V26 只补了新路那条跨进程成对断言,
+                    //    这 6 条本身仍然欠着)。
+                    // ══════════════════════════════════════════════════════════
+                    Skip("(a) 副机侧那 6 条(ClientPairCard ×2 · KnockAsync · 在途闸 · ChangeDialRow · 403 文案)",
+                         "它们钉的是 V21 **有意留在客户端**的成员,在管理端这份自检里恒红,"
+                         + "而红的理由是【归属错了】不是产品坏了。★ 已裁定:等 V24 并入后搬去 "
+                         + "`app/Selftest.cs`(V24 正在改那份文案,现在搬会立刻失配)。"
+                         + "★★ 逐条清单写在本行上方的注释里,交回里也登记了待办");
 
                     // ⑯ 批准/拒绝的返回值不许丢 —— 409(过期/已处理)时界面必须说话
                     //
@@ -656,7 +834,10 @@ public static partial class Selftest
                     // ⑱ 自报显示名不许决定窗口尺寸
                     Assert(body4.Contains("SafeDisplayName("),
                            "★ 自报的显示名要截断 + 剔控制字符再上界面");
-                    var safeFn = Slice(dv4, "static string SafeDisplayName", "/// <summary>手填入口");
+                    // ★ V26:下界从 `/// <summary>手填入口`(那是客户端 `ManualDialRow` 的文档注释,
+                    //   随 V21 留在了对面)换成 `UIElement PendingRow` —— 管理端里紧跟其后的就是它。
+                    //   不换的话切片恒 null,这条恒红,而**红的理由是假的**(它会说"没剔控制字符")。
+                    var safeFn = SliceBody(hub, "static string SafeDisplayName", "UIElement PendingRow");
                     Assert(safeFn is not null && safeFn.Contains("char.IsControl") && safeFn.Contains("48"),
                            "★ 剔控制字符并截断");
                     // ⑱b 确认框那一条也已移到本块之外（V23）—— 理由见那儿。
@@ -681,41 +862,55 @@ public static partial class Selftest
                                "★ 令牌文件不存在就不带 —— 不假装有一层不存在的保护");
                     }
 
-                    // ⑬ 「开始配对」要有在途闸(连点两次会发两条 enroll,两组六词互相盖掉)
-                    Assert(body4.Contains("if (_pairing) return;"),
-                           "★★ 连点两次不能发出两条 enroll —— 六词卡是共用的,后一条会盖掉前一条,"
-                           + "主机弹窗上那六个词在副机屏幕上就不存在了,人没得可比");
-                    // ⑭ 主机卡也要有改地址/找回它 —— 主机换了 IP 时它自己那台最没救
-                    var hostCard = Slice(dv4, "UIElement HostSelfCard", "async Task SelfPairAsync");
-                    Assert(hostCard is not null && hostCard.Contains("ChangeDialRow("),
-                           "★★ 主机自己那台换了 IP 也要有出路 —— 以前这张卡上连输入框都没有,"
-                           + "只能去手改 profile.json,而界面从没说过它在哪");
+                    // ⑬⑭ 「开始配对」的在途闸 与 「换了 IP 也要有出路」(ChangeDialRow)
+                    //   —— 两条都在 (a) 那 6 条里,归属是**客户端**(`HostHubView.cs:20-22` 点名
+                    //   `ChangeDialRow` / `StartPairing` 留在客户端)。见上面 ㉓ 那条登记。
                     // ⑮ 「链不通 ≠ 过期」那条断言**在某次搬迁里被删掉了,而它的 `if` 留了下来** ——
                     //   于是 `if (hcCls is not null)` 底下**没有自己的语句**,它一路吞掉了紧跟其后的
                     //   ⑫ 那整个 `foreach`(C# 里 if 的主体就是下一条语句,中间隔多少注释都不算)。
                     //   ⇒ V23 删掉这个空壳,并把 ⑫ 搬到本块之外(它读的文件与 DevicesView 无关)。
                     // ⑫ sync-over-async 那一组也已移到本块之外（V23）—— 理由见那儿。
 
-                    // ⑨ 起中枢要绑【用户刚选的那张网卡】,不能靠 .cmd 里写死的地址
-                    var step = Slice(dv4, "async Task StartEdgeStepAsync", "/// <summary>");
-                    Assert(step is not null && step.Contains("run-lan ") && step.Contains("bindIp"),
-                           "★★ 有网卡地址就直接 run-lan <ip> —— 启动Edge.cmd 把地址写死成一台开发机的,"
-                           + "换机器或换一次 DHCP 租约就绑到不存在的地址上");
-                    Assert(step is not null && step.Contains("启动Edge.cmd"),
-                           "★ 拿不到地址时仍退回 .cmd,但要如实说明它绑的是写死的那个地址");
+                    // ══════════════════════════════════════════════════════════
+                    //  ⑨ 起中枢要绑【用户刚选的那张网卡】
+                    //
+                    //  ★★★ V26:`run-lan` / `启动Edge.cmd` 这两个针脚**搬家了** ——
+                    //    V21 之后 `StartEdgeStepAsync` 只做一件事:把 `bindIp` 交给
+                    //    `StackBoot.EnsureAsync(force: true, bindIp: bindIp)`,
+                    //    真正拼 `run-lan <ip>` 的是 `HostProvision.EnsureEdgeAsync`。
+                    //  ★ 那条性质**今天仍然有人看着**:本文件块外那组(V22 的 ⑥ / 「自动起栈必须用
+                    //    run-lan」那四条)钉的就是 `HostProvision.EnsureEdgeAsync`,而且是绿的。
+                    //    ⇒ 在这里再钉一遍**只会**在下一次搬家时又红一次,而且红的理由是假的。
+                    //
+                    //  ★★★★ 但**不能只删** —— 删完就少了一条:那两半之间的**交接**没人看。
+                    //    `EnsureEdgeAsync` 那条断言只证明「它会用 run-lan <ip>」,
+                    //    **证明不了「用户刚在界面上选的那张网卡真的传到了它手里」**。
+                    //    交接断了的表现是:用户选了网卡、界面一切正常、而 Edge 绑到了另一个地址上
+                    //    —— 恰恰是这一组本来要防的那个病,只是换了个地方发生。
+                    //  ⇒ 改钉**交接**:这一步必须把 bindIp 原样交下去。
+                    // ══════════════════════════════════════════════════════════
+                    var step = SliceBody(hub, "async Task StartEdgeStepAsync", "/// <summary>");
+                    Assert(step is not null,
+                           "★ 元断言:切得到 `StartEdgeStepAsync` —— 切不到的话下面那条会红得给出假理由");
+                    Assert(step is not null && step.Contains("bindIp: bindIp"),
+                           "★★★ 用户刚选的那张网卡**必须原样交给起栈那一步**(`bindIp: bindIp`)—— "
+                           + "丢了它,`EnsureEdgeAsync` 那条「必须用 run-lan <ip>」照样绿,"
+                           + "而 Edge 会绑到**它自己选的**地址上:界面一切正常、副机连不上。"
+                           + "★ 拼 run-lan 那一半由块外那组钉着(HostProvision.EnsureEdgeAsync),"
+                           + "这里钉的是**两半之间的交接** —— 只钉一半时,断的正好是没钉的那一半");
                     // ⑩ 状态行不许跨 Build 共享(它被 Clear 掉之后界面会永久静默,再 Add 还会抛)
-                    Assert(!Body(dv4).Contains("readonly TextBlock _setupStatus"),
+                    Assert(!Body(hub).Contains("readonly TextBlock _setupStatus"),
                            "★★ 状态行不许是跨 Build 共享的单例控件 —— 被摘出可视树后界面永久静默,"
                            + "重新挂回去还会抛 InvalidOperationException,把唯一能推进的按钮一起清掉");
-                    var picker2 = Slice(dv4, "void BuildNicPicker", "async Task SetupHostAsync");
+                    var picker2 = Slice(hub, "void BuildNicPicker", "async Task SetupHostAsync");
                     Assert(picker2 is not null && !picker2.Contains("host.Children.Clear()"),
                            "★★ 选网卡的面板不许 Clear 整个动作区 —— 那会把状态行一起摘走");
 
                     // ⑧ 403 的文案要指向【现在】的开窗方式,不是命令行时代的说法
                     Assert(!body4.Contains("Edge 窗口里输入 open"),
                            "★★ 「去 Edge 窗口里敲 open」是命令行时代的说法 —— 留着会把人支到黑框里");
-                    Assert(body4.Contains("展开「＋ 添加一台新电脑」"),
-                           "★ 窗口关着时告诉他主机上现在该做哪一步");
+                    // ★ 「展开「＋ 添加一台新电脑」」那条在 (a) 里(那是**副机侧**的 403 文案,
+                    //   留在客户端)。主机侧对应的那句由上面 ③b-② 钉着,而且是**跨进程成对**的。
                 }
             }
 
@@ -806,7 +1001,30 @@ public static partial class Selftest
                     Assert(haSrc2.Contains("169.254."),
                            "★ 跳过 APIPA 自封地址 —— 没拿到 DHCP 的网卡上探不出业务口");
                 }
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★ V26 · **同一个病的第二处**,而它到今天为止是**静默**的。
+                //
+                //  上面那一片(`hub`)改指之后跑起来了,而这一块**还指着
+                //  `Views/DevicesView.cs`** —— 管理端源码根底下没有那个文件 ⇒ 恒 null
+                //  ⇒ 下面这 13 条**一条都没跑过**,而且原来连一行 SKIP 都没有。
+                //  ★ 判词:**一个修法漏改一处,缺陷就完整地留在那一处。**
+                //
+                //  ★★ 本轮**没有**顺手改指,理由是量过的、不是怕麻烦:
+                //    静态试算(把这 13 条的针脚拿去 `Views/HostHubView.cs` 上比)⇒ **8 绿 5 红**。
+                //    那 5 条(`不能】填 127.0.0.1` · `ProbeAsync(TheApp.Hub.Profile?.HubId)` ·
+                //    `Edge 绑在了另一个地址上` · `LocalIPv4List()` · 切片「在局域网里找回它」)
+                //    要的是和 (a) 那 6 条**同一种逐条裁定**(这条性质该跟去客户端、还是留在主机页),
+                //    而那批已经裁定「等 V24 并入之后再做」。
+                //  ⇒ 本轮把**沉默换成看得见的登记**,并把试算数字写进来,让下一个人不必再量一遍。
+                // ══════════════════════════════════════════════════════════════
                 var dvSrc = TryReadSource(Path.Combine("Views", "DevicesView.cs"));
+                if (dvSrc is null)
+                    Skip("「主机上说这台不是主机」那一片(13 条)",
+                         "判据指着 `Views/DevicesView.cs`,而管理端源码根底下没有那个文件 ⇒ 恒 null。"
+                         + "★ 静态试算:改指 `Views/HostHubView.cs` ⇒ **8 绿 5 红**;"
+                         + "那 5 条要与 (a) 那 6 条一起逐条裁,已登记待办(等 V24 并入)。"
+                         + "★★ 这是**同一个病的第二处** —— V26 只登记不改,免得把 5 条红塞给下一个人"
+                         + "而且看起来像本轮引入的");
                 if (dvSrc is not null)
                 {
                     Assert(Body(dvSrc).Contains("不能】填 127.0.0.1"),
@@ -1582,6 +1800,25 @@ public static partial class Selftest
         var b = src.IndexOf(to, a + from.Length, StringComparison.Ordinal);
         return b < 0 ? null : src[a..b];
     }
+
+    /// <summary>
+    /// 切一段出来,**并且去掉注释**。★★★★ V26 加,起因是一条实测出来的假绿:
+    /// <para>`Slice` 返回的是**原文**(带注释),于是 `slice.Contains("某句中文")` 会被
+    /// **注释**满足。V26 实测抓到一条:`auto.Contains("这台其实是副机")` 判绿,
+    /// 而那句话在 `HostHubView.cs` 里**只出现在注释里**,那两处注释说的还正是
+    /// 「这条出路已经被删掉了」—— **判据在读一句解释它自己已经不成立的注释,然后判绿**。</para>
+    /// <para>★★ 同族**结构易感**的实测还有 3 条(`pendRow` 两条 · `nicPick` 一条):
+    /// 它们今天绿是因为那几句界面文案**还在代码里**,可只要哪天那行代码删了、
+    /// 而解释它的注释留着(V21 那次搬迁**逐字就是这个形状**),它们就会跟着变成假绿。
+    /// ⇒ 不是等它发生再修 —— 一个修法漏改一处,缺陷就完整地留在那一处。</para>
+    /// <para>★ 用 <see cref="Body"/>(= NoComments)而不是 <see cref="CodeOnly"/>:
+    /// 界面文案**只可能出现在字符串里**,剥字符串的那种会让文案判据恒真
+    /// (ASSERTION-PITFALLS 第 3c 条,已踩 2 次)。</para>
+    /// <para>★★ **切界仍走原文** —— 好几条切片的上下界本身就是 `/// &lt;summary&gt;` 文档注释,
+    /// 先去注释再切会把界找没。⇒ 先切、后去注释,顺序不能反。</para>
+    /// </summary>
+    static string? SliceBody(string src, string from, string to)
+        => Slice(src, from, to) is { } s ? Body(s) : null;
 
     // ════════════════════════════════════════════════════════════════════════
     //  ★★★ 元断言「唯一入口必须有生产调用点」的三件工具(V22 · D115)
