@@ -9,17 +9,22 @@
 //   在此之前它**有判据、没有入口**;这条入口就是那个缺口。
 //
 // ══════════════════════════════════════════════════════════════════════════════
-//  ★★★ 如实交代一件没做完的事(DEBT · V14 → V16)
+//  ★★★★ V25 · 那笔 DEBT **还上了**(V14 → V16 → V25)。
 //
-//  `safe_to_stop_stack()` 今天**没有 HTTP 路由** —— 本车道实测:全仓只有它的定义
-//  与 test_gpu_broker.py 里的直接调用,`gateway.py` 里没有任何路由暴露它。
-//  而 `10-core/gateway/**` 是 **V16 车道正在动的禁区**,本车道不碰。
+//  在此之前这里写着:`safe_to_stop_stack()` 没有 HTTP 路由,所以 `QueryAsync()`
+//  只能 `Task.FromResult(Known: false)` —— **一次网络请求都不发**。
+//  那句「读不到副机在不在用」当年是**诚实的**(它确实读不到),但它诚实的对象
+//  是一条**根本不存在的线**:判据在中枢、文案在这儿、而中间什么都没有。
 //
-//  ⇒ 于是这里的选择是:**如实说读不到,并且仍然把决定权交给人**。
-//    · **不**猜一个"应该没人在用"然后替人关掉 —— 那正是 D102 撤掉的那种推断;
-//    · **不**因为读不到就禁用这个入口 —— 那等于把 D102 留下的空位继续空着;
-//    · ⇒ 弹窗如实写「**读不到副机在不在用**」,由人决定。
-//      这与 D99 裁定④同一条规矩:**置灰但不说原因等于骗人,而给个错的原因更坏**。
+//  ★ V25 在网关那侧开了 `GET /v1/stack/safe-to-stop`(CONTRACT:stack.safe_to_stop),
+//    于是这里从"如实说读不到"变成"**真的去问**"。两半同一次提交落地(D95 配对元规则)。
+//
+//  ★★ 而「读不到」那条路**一个字都没删** —— 它现在有了**四种**互不相同的来路:
+//    ① 网关没起 / 拒连;② 网关回了非 200;③ 回答读不懂(键缺了 / 不是 JSON);
+//    ④ 网关自己说 `known=false`(它读不到 Broker)。
+//    四种都落 `Known=false`,但 `Why` **各不相同** ——
+//    合成一句「读不到」会让人不知道该去起网关、还是去看 Broker。
+//    这与 D99 裁定④同一条规矩:**置灰但不说原因等于骗人,而给个错的原因更坏**。
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -69,6 +74,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 using System.Diagnostics;
+using System.Text.Json;
 using HostSetup = LocalAI.Client.Services.HostSetup;
 
 namespace LocalAI.Admin.Services;
@@ -82,24 +88,121 @@ public sealed record StopVerdict(bool Known, bool Safe, string Why);
 public static class StackStop
 {
     /// <summary>
-    /// 中枢那条判据的路由 —— **今天还不存在**,等 V16 在网关那侧开出来。
-    /// ★ 名字先定下来放这儿,是为了让"缺的是哪一条"具体、可搜、可交接,
-    ///   而不是留一句"以后再说"。
+    /// 中枢那条判据的路由。★ V25 起它**真的存在**了 ——
+    /// 服务端在 `10-core/gateway/gateway.py` 的 <c>stack_safe_to_stop</c>,
+    /// 形状登记在 `test_gpu_broker.py` 的 <c>CONTRACT:stack.safe_to_stop</c>。
     /// </summary>
     public const string SafeToStopRoute = "/v1/stack/safe-to-stop";
 
     /// <summary>
-    /// 问一次「现在关栈会不会切断别人」。
-    /// <para>★★ 今天必然返回 <c>Known=false</c> —— 见文件头那段 DEBT。
-    /// 这**不是**占位实现:它如实表达了"判据在中枢、而入口还没开",
-    /// 而调用方(托盘关闭)据此弹的是「读不到,仍要关吗」而不是「没人在用,关吧」。</para>
+    /// 把中枢的回答解析成 <see cref="StopVerdict"/> —— **CONTRACT:stack.safe_to_stop 的客户端半边**。
+    ///
+    /// <para>★★★ 它是**纯函数**,理由不是洁癖:成对断言要能喂它一个合成的回答体,
+    /// 而「拿这个形状能不能解析出目标字段」正是 D92 那条元规则要钉的东西
+    /// (审计 A1 的病灶:服务端钉顶层键、客户端钉解析,**中间那条缝谁也没看**)。
+    /// 混在 <see cref="QueryAsync"/> 里的话,要测它就得先起一个网关。</para>
+    ///
+    /// <para>★★ 缺键**一律判读不懂**,不给默认值。`known` 缺了就当 false、
+    /// `can_stop` 缺了就当 false —— 那会让一次**解析失败**长得和一次
+    /// **「有人在用」**一模一样,而这两件事的下一步完全不同。
+    /// (同款教训:`gpu.snapshot` 的 generation 原来写 `? g.GetInt64() : 0`,
+    /// 读不到就悄悄用 0 ⇒ 稳定 409 ⇒ 伪装成"中枢忙"。)</para>
     /// </summary>
-    public static Task<StopVerdict> QueryAsync()
-        => Task.FromResult(new StopVerdict(
-            Known: false, Safe: false,
-            Why: "读不到副机在不在用 —— 中枢那条判据(safe_to_stop_stack)今天还没有对外的路由,"
-               + $"计划开在 {SafeToStopRoute}。\n"
-               + "★ 这里不替你猜:猜【应该没人用】然后替你关掉,正是 D102 撤掉的那种推断。"));
+    public static StopVerdict ParseVerdict(string body)
+    {
+        JsonElement root;
+        try
+        {
+            root = JsonDocument.Parse(body).RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return Unreadable("中枢的回答不是一个 JSON 对象");
+        }
+        catch (Exception ex)
+        {
+            return Unreadable("中枢的回答不是 JSON(" + ex.GetType().Name + ")");
+        }
+
+        // ★ 三个键都必须在,且类型要对。少一个就是读不懂 —— 不猜。
+        if (!root.TryGetProperty("known", out var kEl)
+            || kEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return Unreadable("中枢的回答里没有 `known`(或它不是真假值)—— "
+                            + "而 `known` 正是用来分开【读不到】与【不能关】的那个键");
+        if (!root.TryGetProperty("why", out var wEl) || wEl.ValueKind != JsonValueKind.String)
+            return Unreadable("中枢的回答里没有 `why` —— 没有理由的判据没法摆到人面前");
+        var why = wEl.GetString() ?? "";
+
+        // ★★ 中枢自己说"我读不到 Broker" ⇒ 这也是 Known=false,但**理由是它给的那句**。
+        //   把它写成我们自己的措辞会盖掉真正的原因(是 Broker 读不到,不是网关连不上)。
+        if (!kEl.GetBoolean())
+            return new StopVerdict(Known: false, Safe: false,
+                Why: "中枢读不到自己的 Broker 状态,所以它也答不上来:\n" + why);
+
+        if (!root.TryGetProperty("can_stop", out var cEl)
+            || cEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return Unreadable("中枢说它读到了(`known=true`),回答里却没有 `can_stop` —— "
+                            + "这种自相矛盾的回答不当成「可以关」");
+
+        return new StopVerdict(Known: true, Safe: cEl.GetBoolean(), Why: why);
+    }
+
+    /// <summary>读不懂时的统一出口。★ 措辞里必须留下"读不到"的意思 —— 见 <see cref="ConfirmText"/>。</summary>
+    static StopVerdict Unreadable(string why)
+        => new(Known: false, Safe: false,
+               Why: "读不到副机在不在用 —— " + why + "。\n"
+                  + "★ 这里不替你猜:猜【应该没人用】然后替你关掉,正是 D102 撤掉的那种推断。");
+
+    /// <summary>
+    /// 问一次「现在关栈会不会切断别人」。★ V25 起它**真的发一次请求**。
+    ///
+    /// <para>★★ 拨的是回环网关,端口取 <see cref="HostSetup.GatewayPort"/> ——
+    /// 与「管理端把网关起在哪儿」读**同一个数**(那份源码两个 csproj 编同一份)。
+    /// 这里另写一个 8080 字面量的话,换端口那天关栈判据会静默失联,
+    /// 而它失联的表现恰好是"读不到" —— 一句看起来很正常的话。</para>
+    ///
+    /// <para>★ 超时给得短(2 秒):这一问挡在人点「关闭」和弹窗之间。
+    /// 网关卡住时**宁可如实说读不到**,也不要让界面白等 —— 卡住的界面比一句
+    /// 「读不到」更容易被理解成"程序坏了"。</para>
+    /// </summary>
+    public static async Task<StopVerdict> QueryAsync(int timeoutMs = 2000)
+    {
+        var url = $"http://127.0.0.1:{HostSetup.GatewayPort}{SafeToStopRoute}";
+        HttpResponseMessage resp;
+        string body;
+        try
+        {
+            // ★ UseProxy=false:与 HostSetup.GatewayUpAsync / HubClient.LoopHttp 逐字对齐。
+            //   走系统代理的话,在配了代理的机器上"探得到网关"与"问得到判据"会一真一假。
+            using var c = new HttpClient(new SocketsHttpHandler { UseProxy = false })
+                { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
+            resp = await c.GetAsync(url);
+            body = await resp.Content.ReadAsStringAsync();
+        }
+        catch (Exception ex)
+        {
+            // ★★ ① 拒连 / 超时。**这是最常见的一种**,而它的下一步很具体:去起网关。
+            //   ★ 注意它**不**等于"没人在用所以可以关" —— 网关没起时栈本来就停了一半,
+            //     但副机可能正连在 Edge 上,而 Edge 不归这条判据管。仍旧交给人。
+            return new StopVerdict(Known: false, Safe: false,
+                Why: $"读不到副机在不在用 —— 问不到回环网关({url}):"
+                   + ex.GetType().Name + ": " + ex.Message + "。\n"
+                   + "★ 多半是网关没起(那时这一栏读不到是正常的)。"
+                   + "★ 这里不替你猜:猜【应该没人用】然后替你关掉,正是 D102 撤掉的那种推断。");
+        }
+
+        if (!resp.IsSuccessStatusCode)
+            // ★ ② 非 200:网关在,但它拒了或出错了。与"连不上"是两件事 ——
+            //   前者去看网关日志,后者去起网关。说成同一句会把人送去错地方。
+            return new StopVerdict(Known: false, Safe: false,
+                Why: $"读不到副机在不在用 —— 回环网关应答了,但返回 {(int)resp.StatusCode}"
+                   + $"(不是连不上,是网关拒了或内部出错)。\n{Trim(body)}\n"
+                   + "★ 这里不替你猜:猜【应该没人用】然后替你关掉,正是 D102 撤掉的那种推断。");
+
+        // ★ ③④ 交给纯解析器 —— 它同时是这条契约的客户端半边。
+        return ParseVerdict(body);
+    }
+
+    static string Trim(string s)
+        => s.Length <= 300 ? s : s[..300] + " …";
 
     /// <summary>
     /// 关栈之前给人看的那句话。★ 三种处境要说三句**不同**的话 ——

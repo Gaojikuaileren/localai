@@ -6514,6 +6514,99 @@ public static class Selftest
                     //   能确定的恰恰是"中枢在"。判成 Offline 会把人支去重启 Edge / 查防火墙 / 改地址。
                     Assert(call is not null && call.Contains("HubState.HubServerError"),
                            "★★ 中枢应答 5xx 要单列一态 —— 那证明中枢【在】,说成\"未连接\"是整整一趟无用功");
+
+                    // ══════════════════════════════════════════════════════════
+                    //  ★★★★ V25 · 那句**把人送去错地方**的报错(用户裁定 2026-08-09)
+                    //
+                    //  上游 8080 拒连 ⇒ lan-edge 的 Proxy 原来没有 try/catch ⇒ 框架兜成 5xx
+                    //  ⇒ 撞上面那条 ⇒ 界面说「中枢内部出错,**请看中枢日志**」。
+                    //  ★ 而中枢日志里没有网关的事。判词:给错原因的提示比不给提示更坏。
+                    // ══════════════════════════════════════════════════════════
+
+                    // ── 判据本身:认那个**明确给出的词**,不拿状态码猜 ──────────
+                    Assert(HubClient.LooksUpstreamGatewayDown(
+                               "{\"error\":{\"type\":\"upstream_gateway_unreachable\"}}"),
+                           "★★★ 认得出 Edge 给的「上游网关够不着」那个词");
+                    Assert(!HubClient.LooksUpstreamGatewayDown(
+                               "{\"error\":{\"type\":\"internal_error\"}}")
+                           && !HubClient.LooksUpstreamGatewayDown("Internal Server Error"),
+                           "★★★ 反向:**别的** 5xx 不许被认成「网关没起」—— "
+                           + "502 可以来自任何一层代理,拿状态码当判据会把别人的故障也归到网关头上");
+
+                    // ── 说法:说清下一步在**哪台机器**上做,且不再指向中枢日志 ──
+                    var upMsg = HubClient.UpstreamGatewayDownMessage(
+                        "{\"error\":{\"type\":\"upstream_gateway_unreachable\"}}");
+                    Assert(upMsg.Contains("主机"),
+                           "★★★ 归因要说清**下一步在主机上做** —— 副机上没有管理端,"
+                           + "那张会说真话的「AI 栈」卡它根本看不到,不在这句话里说全就没地方说了");
+                    Assert(!upMsg.Contains("中枢日志"),
+                           "★★★ 反向:**不许**再把人送去看中枢日志 —— 这一条是那句错归因的墓碑");
+                    Assert(upMsg.Contains("不要") && upMsg.Contains("配对"),
+                           "★★ 并且明说【不要重新配对】—— 重配会删掉本机私钥,"
+                           + "为一件「主机没起栈」的事销毁一个完好的身份");
+                    // ★ Edge 给了自己的话就用它那句(它知道自己的上游地址);读不出来才退回本地措辞。
+                    Assert(HubClient.UpstreamGatewayDownMessage(
+                               "{\"error\":{\"type\":\"upstream_gateway_unreachable\","
+                               + "\"message\":\"EDGE-SAYS-THIS\"}}") == "EDGE-SAYS-THIS",
+                           "★★ 有 Edge 的原话就用原话(它知道上游地址);本地那句只是兜底");
+
+                    // ── ★★★ 顺序:新分支必须排在**光秃秃的 >= 500 前面** ──────────
+                    //   排到后面去的话它一行都执行不到,而症状恰好是"改了等于没改" ——
+                    //   这类缺陷编译不报、行为断言也未必碰得到,只有顺序判据抓得住。
+                    //   ★★ 同样先剥注释:注释里提到这两个分支是**正常的**(它们正在解释顺序),
+                    //     拿原文找下标就会被自己的说明文字带偏 —— 与上面那条同源的坑。
+                    var hcCode = CodeOnly(hcSrc);
+                    var callCode = Slice(hcCode, "public async Task<(int status, string body)> CallAsync",
+                                                 "public async Task EndSessionAsync");
+                    var iUp = callCode?.IndexOf("LooksUpstreamGatewayDown", StringComparison.Ordinal) ?? -1;
+                    var iBare = callCode?.IndexOf("else if (r.status >= 500)", StringComparison.Ordinal) ?? -1;
+                    Assert(iUp >= 0 && iBare >= 0 && iUp < iBare,
+                           "★★★ 「上游网关没起」那条分支排在光秃秃的 `>= 500` **前面**(判据已剥注释)—— "
+                           + "反过来的话它永远执行不到,而那句错归因原样活着");
+
+                    // ── ★★★ 跨进程约定:两侧那个词必须**逐字**一样 ────────────────
+                    //   两边各写一个字面量,改一处、另一处静默失配,
+                    //   而失配的表现恰好是**退回到那句错的归因**。
+                    var leSrc = TryReadSource(Path.Combine("..", "..", "10-core", "lan-edge", "Program.cs"));
+                    if (leSrc is null)
+                        // ★ 发布产物旁边没有源码 ⇒ 这一趟【跳过】,不是判红(第 11 条)。
+                        Console.WriteLine("  SKIP  跨进程约定「上游网关够不着」两侧同词"
+                                          + "(读不到 10-core/lan-edge/Program.cs)");
+                    else
+                        Assert(leSrc.Contains("UpstreamUnreachableType = \"" + HubClient.UpstreamGatewayDownType + "\""),
+                               "★★★ lan-edge 那侧的 `Edge.UpstreamUnreachableType` 与客户端这侧的 "
+                               + "`HubClient.UpstreamGatewayDownType` **逐字相同** —— "
+                               + "改一处不改另一处,归因会静默退回那句错的话");
+
+                    // ── ★★★ 配对成功后**真的探一次**(用户裁定:主动探)──────────
+                    //  ★★★★ 判据必须先过 `CodeOnly` —— 这一条**红测时当场抓到过**:
+                    //    第一版直接在原文里 `Contains("ProbeBusinessAfterPairAsync()")`,
+                    //    而把那行调用**注释掉**之后断言**照样绿**(注释里那串字还在)。
+                    //    ⇒ 一条"接线还在不在"的判据,被一句解释它已被删掉的注释喂绿了 ——
+                    //      ASSERTION-PITFALLS 第 1 条,本仓已踩 10 次的那个形状。
+                    //    ★ 正解是**收紧判据**(CodeOnly:剥注释 + 剥字符串字面量),
+                    //      不是把断言删掉、也不是改注释去迁就它。
+                    var pair = Slice(hcCode, "public async Task PairAsync", "async Task ProbeBusinessAfterPairAsync");
+                    Assert(pair is not null && pair.Contains("ProbeBusinessAfterPairAsync()"),
+                           "★★★ PairAsync 结尾**真的探一次业务面**(判据已剥注释)—— "
+                           + "配对整条链只用 8443+8442、一次都不碰网关,不探的话"
+                           + "「配得上但用不了」这个空档可以一直存在,"
+                           + "而副机上没有管理端、看不到那张「AI 栈」卡");
+                    var probe = Slice(hcCode, "async Task ProbeBusinessAfterPairAsync", "public async Task<(int status, string body)> CallAsync");
+                    Assert(probe is not null && probe.Contains("CallAsync("),
+                           "★★ 探的那一下真的发出去了(判据已剥注释)");
+                    Assert(probe is not null && probe.Contains("catch"),
+                           "★★★ 探失败**不上抛、不回滚配对** —— 设备已经在主机成员表里 active 了,"
+                           + "把它当成配对失败会引导用户再配一次,而再配一次会删掉本机私钥");
+                    // ★ 探的是 `/v1/models`:它**就是业务流量真正走的那条路**,而且是
+                    //   已登记的契约(CONTRACT:models.list)⇒ 本轮零新增契约。
+                    //   ★★ 这一条查的是**原文**而不是 CodeOnly —— 路径是个字符串字面量,
+                    //     CodeOnly 会把它一起剥掉(上面那条 `CallAsync(` 才是剥完还在的部分)。
+                    Assert(probe is not null
+                           && (Slice(hcSrc, "async Task ProbeBusinessAfterPairAsync",
+                                     "public async Task<(int status, string body)> CallAsync")
+                               ?.Contains("\"/v1/models\"") ?? false),
+                           "★★ 探的是已登记契约 CONTRACT:models.list 那条路 ⇒ 本轮零新增契约");
                     var mwMap = TryReadSource("MainWindow.xaml.cs");
                     if (mwMap is not null)
                         Assert(mwMap.Contains("status.hub_error") && mwMap.Contains("status.proto_mismatch"),

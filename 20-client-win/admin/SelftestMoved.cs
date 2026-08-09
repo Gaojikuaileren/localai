@@ -1373,27 +1373,75 @@ public static partial class Selftest
                     //    ⇒ 本条当场红。
                     // ════════════════════════════════════════════════════════
                     // ════════════════════════════════════════════════════════
-                    //  ★★★★ 同一条通则的**另一半今天不满足**,而且是通则自己不满足自己。
+                    //  ★★★★ V25:上面那条 SKIP **撤掉了** —— 通则终于满足自己。
                     //
-                    //  `DECISIONS.md:5240` 逐字写着:
-                    //    「`safe_to_stop_stack` **必须有调用点** —— 这正是 D102 立的通则」
-                    //  而实测(V22):`10-core/gateway/gateway.py:898` 定义了它,
-                    //  **全仓只有 `test_gpu_broker.py` 引用它** —— 没有 HTTP 路由、生产调用点 0。
-                    //  于是管理端 `StackStop.QueryAsync()` 恒返回 `Known=false`
-                    //  (`Task.FromResult`,一次请求都不发),关栈弹窗只能说「读不到副机在不在用」。
+                    //  它当年逐字登记的是:「`safe_to_stop_stack` 生产调用点 0、没有 HTTP 路由,
+                    //  所以 `StackStop.QueryAsync` 恒返回 `Known=false`」,并注明
+                    //  「修它要动 `10-core/gateway/**`(当时的禁区)⇒ 本轮只登记不修」。
+                    //  V25 把那条路由开出来了(`GET /v1/stack/safe-to-stop`),
+                    //  `QueryAsync` 现在**真的发一次请求**,SKIP 的前提整个消失。
                     //
-                    //  ★ 本轮**不修它**:开那条路由要动 `10-core/gateway/**` ——
-                    //    那是本车道明令的**禁区**,而且 V16 正在那儿动(最近一笔 13878de)。
-                    //    在别人手里的文件上加路由,换来的是一次合并冲突和两份都对不上的账。
-                    //  ★★ 但**不许让它继续静默**:登记成一条看得见的 SKIP。
-                    //    这条与本文件上面那条元断言是同一个病的两侧 ——
-                    //    上面那条管 C# 的「唯一入口」,这条管 Python 那个「必须有调用点」。
+                    //  ★★ 换上的不是一条"看起来像"的断言,是这条契约的**客户端半边**:
+                    //    服务端在 `10-core/gateway/test_gpu_broker.py` 钉顶层键集合,
+                    //    这里钉「拿那个形状**解析得出目标字段**」——
+                    //    两半共用锚点 CONTRACT:stack.safe_to_stop(D92 元规则,审计 A1 的病灶)。
+                    //  ★★★ 承重的那一格是**倒数第二条**:`known=false` 与 `can_stop=false`
+                    //    必须解析成**两件不同的事**。把它们合并的实现能过前面每一条,
+                    //    唯独过不了那一条 —— 而合并正是本仓最爱犯的那个错
+                    //    (「读不到」伪装成「不能关」⇒ 又一条恒假判据)。
                     // ════════════════════════════════════════════════════════
-                    Skip("★★ 通则「safe_to_stop_stack 必须有调用点」(DECISIONS.md:5240)",
-                         "实测它今天**生产调用点 0、没有 HTTP 路由**,只有 test_gpu_broker.py 引用 —— "
-                         + "所以 StackStop.QueryAsync 恒返回 Known=false。"
-                         + "★ 修它要动 10-core/gateway/**(本车道禁区,且 V16 正在动)⇒ 本轮只登记不修。"
-                         + "★★ 这不是「没什么可测」,是**通则自己不满足通则**,已写进 D115 决议包未了项。");
+                    {
+                        // 正向:中枢说"读到了、可以关"
+                        var okBody = "{\"known\":true,\"can_stop\":true,\"why\":\"没有点名组件的租约\","
+                                   + "\"blocking\":0,\"resident\":0}";
+                        var vOk = StackStop.ParseVerdict(okBody);
+                        Assert(vOk.Known && vOk.Safe && vOk.Why.Contains("租约"),
+                            "★★★ CONTRACT:stack.safe_to_stop 客户端半边:【可以关】那个形状解得出"
+                            + "(理由原样带出来 —— 弹窗要把它摆到人面前)");
+
+                        // 正向:中枢说"读到了、不能关"
+                        var noBody = "{\"known\":true,\"can_stop\":false,\"why\":\"有 2 份租约点名了组件\","
+                                   + "\"blocking\":2,\"resident\":0}";
+                        var vNo = StackStop.ParseVerdict(noBody);
+                        Assert(vNo.Known && !vNo.Safe && vNo.Why.Contains("2 份租约"),
+                            "★★★ 【不能关】那个形状也解得出,且说得出**是哪一条**理由 —— "
+                            + "合并成一句「条件不满足」的话,人再也不知道该修哪一条");
+
+                        // ★★★ 承重格:中枢自己说"我读不到 Broker"(known=false)
+                        var unkBody = "{\"known\":false,\"can_stop\":false,"
+                                    + "\"why\":\"读不到 Broker 状态(RuntimeError)\","
+                                    + "\"blocking\":null,\"resident\":null}";
+                        var vUnk = StackStop.ParseVerdict(unkBody);
+                        Assert(!vUnk.Known,
+                            "★★★★ known=false ⇒ 判【读不到】,**不是**判【不能关】。"
+                            + "两者在弹窗上说两句不同的话:前者「你自己判断」,后者「副机正在用」。"
+                            + "★ 把两个键合并成一个布尔的实现,前面每一条都能过,唯独过不了这一条");
+                        Assert(vUnk.Why.Contains("Broker"),
+                            "★★ 而且带出的是**中枢给的那句原因**(Broker 读不到),"
+                            + "不是我们自己编的措辞 —— 编一句会盖掉真正的下一步");
+                        Assert(StackStop.ConfirmText(vUnk) != StackStop.ConfirmText(vNo),
+                            "★★★ 两种处境的**弹窗文案**也必须不同(D99 裁定④:给错原因比不给更坏)");
+
+                        // 反向:三个承重键各缺一次 ⇒ 一律判读不懂,不给默认值
+                        foreach (var (bad, name) in new[]
+                        {
+                            ("{\"can_stop\":true,\"why\":\"w\"}", "known"),
+                            ("{\"known\":true,\"can_stop\":true}", "why"),
+                            ("{\"known\":true,\"why\":\"w\"}", "can_stop"),
+                        })
+                        {
+                            var v = StackStop.ParseVerdict(bad);
+                            Assert(!v.Known,
+                                $"★★ 反向 CONTRACT:stack.safe_to_stop:少了 `{name}` ⇒ 判读不懂。"
+                                + "缺键就给默认值的话,一次**解析失败**会长得和一次"
+                                + "**「有人在用」**一模一样,而这两件事的下一步完全不同");
+                        }
+                        Assert(!StackStop.ParseVerdict("not json").Known
+                               && !StackStop.ParseVerdict("[1,2]").Known,
+                            "★★ 反向:正文不是 JSON 对象 ⇒ 如实报读不懂,不猜、不抛");
+                        Assert(StackStop.ParseVerdict("not json").Why.Contains("读不到"),
+                            "★ 读不懂时措辞仍带【读不到】—— ConfirmText 的三分支判据靠它");
+                    }
 
                     {
                         var cwRoot = ClientWinRoot();
