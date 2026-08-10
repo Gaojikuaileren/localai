@@ -25,6 +25,46 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ 发布失败时**必须把 dotnet 的原话打出来**(2026-08-10 实测踩到)。
+#
+#  那天 `[1]` 报了一句「X 发布失败」就退出,**dotnet 一个字都没吐** ——
+#  于是唯一的查法是把同一条 publish 手工再跑一遍(那次跑出来是 exit 0,偶发)。
+#  ★ 根因是 `-v q`:它把一切压到只剩 error 级。而这一趟连 error 都没有,
+#    说明是 MSBuild 进程层面的死法(节点崩了 / 被杀 / restore 没起来)——
+#    **恰恰是最需要原文的那一类**,却什么都没留下。
+#
+#  ★★ 处置不是把 `-v q` 改成 normal(那会让正常一趟刷几千行,把真正的 warning 淹掉),
+#    而是**把输出接住**:成功时照旧只见 warning,失败时把接住的尾巴原样打出来。
+#  ★ 明确**不加重试**:偶发重跑一次多半能过,但"自动重试"会把一类真实的
+#    间歇性缺陷永久藏起来 —— 那是本仓最恨的形状。红了就红了,把原文交出来让人看。
+# ══════════════════════════════════════════════════════════════════════════════
+function Invoke-Publish {
+    # ★ 参数名**不能叫 $Args**:那是 PowerShell 的自动变量,在函数里会和它打架
+    #   (声明得下去,但 `@Args` 展开的到底是谁,取决于你不该需要知道的细节)。
+    param([string]$Label, [string[]]$PubArgs)
+    # ★★ **不要**在这儿写 `2>&1`:PS 5.1 会把原生命令的每行 stderr 包成 ErrorRecord
+    #   (NativeCommandError),配上本脚本顶上的 `$ErrorActionPreference = 'Stop'`,
+    #   一行无害的 stderr 就能让**成功的**发布当场抛异常。
+    #   ⇒ 只接 stdout(MSBuild 的错误本来就走 stdout);stderr 照旧直接显示在控制台。
+    $out = & dotnet publish @PubArgs
+    $code = $LASTEXITCODE
+    $out | ForEach-Object { Write-Host $_ }
+    if ($code -ne 0) {
+        Write-Host "X $Label 发布失败(dotnet 退出码 $code)" -ForegroundColor Red
+        if (@($out).Count -eq 0) {
+            Write-Host "  ★★ dotnet **一个字都没输出** —— 这不是编译错误,是进程层面的死法:" -ForegroundColor Red
+            Write-Host "     MSBuild 节点崩了 / 被杀 / restore 没起来 / 输出目录被占。" -ForegroundColor Red
+            Write-Host "     ⇒ 先查:有没有第二个构建在跑、驻留编译器在不在" -ForegroundColor Red
+            Write-Host "       (它跑在 dotnet.exe 里,`taskkill /IM VBCSCompiler.exe` 杀不到,见下方注释)。" -ForegroundColor Red
+        } else {
+            Write-Host "  ---- dotnet 原话(末 40 行)----" -ForegroundColor Red
+            @($out) | Select-Object -Last 40 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        }
+        exit 1
+    }
+}
 $app  = Join-Path $repo '20-client-win\app'
 if (-not (Test-Path $app)) { Write-Host "X 找不到客户端工程:$app" -ForegroundColor Red; exit 1 }
 
@@ -238,13 +278,13 @@ Write-Host "[1] 发布单文件 exe(自包含,win-x64)…"
 Push-Location $app
 # ★ 把版本戳烧进程序集 —— 客户端才能自报"我是哪一版"。
 #   不烧的话,版本只存在 VERSION.txt 里,而那个文件拷丢了就永远说不清手上这个 exe 是什么。
-& dotnet publish -c Release -r win-x64 --self-contained true `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true -p:InformationalVersion=$ver `
-    -o $Out --nologo -v q
-$code = $LASTEXITCODE
-Pop-Location
-if ($code -ne 0) { Write-Host "X 发布失败" -ForegroundColor Red; exit 1 }
+try {
+    Invoke-Publish '客户端' @(
+        '-c','Release','-r','win-x64','--self-contained','true',
+        '-p:PublishSingleFile=true','-p:IncludeNativeLibrariesForSelfExtract=true',
+        '-p:EnableCompressionInSingleFile=true',"-p:InformationalVersion=$ver",
+        '-o',$Out,'--nologo','-v','q')
+} finally { Pop-Location }   # ★ 失败也要退栈:Invoke-Publish 里是 exit,但留个 finally 免得将来改成 throw 时漏掉
 
 $exe = Join-Path $Out 'localai-client.exe'
 if (-not (Test-Path $exe)) { Write-Host "X 没有产出 exe" -ForegroundColor Red; exit 1 }
@@ -512,11 +552,11 @@ if (-not (Test-Path $adminProj)) {
     # ★ 零命中判红:找不到 = 路径写错或工程被删,两种都得当场知道,不许静默跳过。
     Write-Host "X 找不到管理端工程:$adminProj" -ForegroundColor Red; exit 1
 }
-& dotnet publish $adminProj -c Release -r win-x64 --self-contained true `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true -p:InformationalVersion=$ver `
-    -o $AdminOut --nologo -v q
-if ($LASTEXITCODE -ne 0) { Write-Host "X 管理端发布失败" -ForegroundColor Red; exit 1 }
+Invoke-Publish '管理端' @(
+    $adminProj,'-c','Release','-r','win-x64','--self-contained','true',
+    '-p:PublishSingleFile=true','-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:EnableCompressionInSingleFile=true',"-p:InformationalVersion=$ver",
+    '-o',$AdminOut,'--nologo','-v','q')
 $adminExe = Join-Path $AdminOut 'localai-admin.exe'
 if (-not (Test-Path $adminExe)) { Write-Host "X 没有产出管理端 exe" -ForegroundColor Red; exit 1 }
 
@@ -746,8 +786,8 @@ foreach ($hp in $hostProjects) {
     # ★ 框架依赖发布(不带 -r / 不带 --self-contained)—— 与盘上现有形态一致,理由见上。
     #   `-p:InformationalVersion=$ver` 是把版本戳**烧进二进制**:VERSION.txt 会被拷丢,
     #   ProductVersion 不会。这次能挖出"落后 137 个提交",靠的正是它。
-    & dotnet publish $hp.Proj -c Release -p:InformationalVersion=$ver -o $HostOut --nologo -v q
-    if ($LASTEXITCODE -ne 0) { Write-Host "X 主机端发布失败($($hp.Name))" -ForegroundColor Red; exit 1 }
+    Invoke-Publish "主机端($($hp.Name))" @(
+        $hp.Proj,'-c','Release',"-p:InformationalVersion=$ver",'-o',$HostOut,'--nologo','-v','q')
     if (-not (Test-Path (Join-Path $HostOut $hp.Exe))) {
         Write-Host "X 没有产出 $($hp.Exe)" -ForegroundColor Red; exit 1
     }
