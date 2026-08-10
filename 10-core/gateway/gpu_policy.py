@@ -206,6 +206,25 @@ TIER_CAPS: Dict[str, Caps] = {
         why="D30『降档不断连』:本机但不在账户 allowlist 里(实测本机就有两个外部 AI 沙箱账户)。"
             "读得到状态,改不动 —— 改 GPU 状态比聊天高一个量级,不该跟着『不断连』一起放行。",
     ),
+    # ★★★★ V32b(用户裁定 2026-08-10):「**没查出来**」从 unregistered-local 里拆出来。
+    #   能力与 unregistered-local **逐字相同** —— 本次**不改任何权限**。
+    #   ★ 为什么不趁机收紧:被降到这一档的**可能就是机主自己**(一次端口表/WMI 抖动即可),
+    #     收紧等于让一次瞬时故障把机主本人锁在门外,而他看不到任何原因。
+    #   ★★ 为什么不趁机放宽:那就等于宣布"认不出人也当自己人",D30 修正推翻的正是这条。
+    #   ⇒ 这一档该算出境 sink 还是本地 sink 是 **D81 待裁 1**;
+    #     `sink-axis-change-list-2026-08-06.md` 明写「不得先于待裁 1 动手」。
+    #     本车道只做**拆分 + 可观测**,把那一刀留给裁定。
+    #   ★ 拆分本身就是那条裁定的前置:不拆就裁 = 埋一颗「机主偶发失能且无提示」的雷。
+    "identity-unresolved": Caps(
+        tier="identity-unresolved",
+        actions=frozenset({"read"}),
+        lease_kinds=frozenset(), max_ttl_s=0.0, max_components=0,
+        changes_per_min=0, max_leases=0,
+        why="认人链断了(端口表抖动 / WMI 超时 / 进程已退出),**不是**「这个人没登记」。"
+            "★ 能力与 unregistered-local 逐字相同:本次只拆分与留痕,不改权限(D81 待裁 1)。"
+            "★★ 与它的**区别**在别处:每一次落到这一档都会被计数并写进 "
+            "identity_unresolved.jsonl(带断在哪一环),而 unregistered-local 是个稳定事实,不需要告警。",
+    ),
     "lan-edge": Caps(
         tier="lan-edge",
         actions=frozenset(),

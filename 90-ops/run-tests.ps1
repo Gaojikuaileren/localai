@@ -409,6 +409,9 @@ $ENV_VERIFIERS = @{
     '90-ops\state-acl\verify-state-acl.ps1' = '只读。验 {state} 的 ACL 断继承与 Deny。实测 35 PASS · 0 FAIL'
     '90-ops\ai-op-account\verify-ai-op.ps1' = '只读。★★ **本机注定在第 ① 节 exit 1** —— 它验的 ai-op 账户在本机不存在(见 D? 决议包)。' +
                                               '这不是脚本坏了,是它所验的东西没建起来'
+    '90-ops\verify-backend-auth.ps1'        = '只读。D? 后端鉴权的**实证半边**:密钥目录 ACL(按 SID 点名 ai-exec/ai-asset 不在) + ' +
+                                              '★★ 反向「不带 key 打 18081 必须 401」。实测 9 PASS · 0 FAIL(后端在跑时);' +
+                                              '后端没起时端口那一组 SKIP —— **SKIP 不是通过**'
 }
 $foundVerifiers = @(Get-ChildItem -Path (Join-Path $repo '90-ops') -Recurse -Filter 'verify-*.ps1' -File -ErrorAction SilentlyContinue |
                     ForEach-Object { $_.FullName.Replace($repo + '\', '') } | Sort-Object)
@@ -638,6 +641,57 @@ if (-not (Test-Path $cpScript)) {
     } else {
         $broken += [pscustomobject]@{ File = '90-ops\gate\check_contract_pairs.py'; Why = '没有汇总行 —— 多半没跑起来' }
         Write-Host "  X 契约配对元规则没跑起来" -ForegroundColor Red
+    }
+}
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ★★★ 后端鉴权元规则(D?)—— 「凡起模型后端的地方都必须带上钥匙」
+#
+#  用户选方向 B 时被明确告知的代价就是这一条:
+#    「加第二个后端时那扇门默认又开着,**而没有任何测试会因此变红**。」
+#  这个门禁就是来消掉那笔代价的 —— 没有它,B 只是这一次生效,不是从此生效。
+#
+#  ★ 与上面那条契约元规则**同款接线**:文件不在 = 判红,不是跳过。
+#    它守的不是可移除件:缺了它,新加一处起后端的地方而不上锁,不会有任何东西响。
+# ══════════════════════════════════════════════════════════════════════════
+$backendAuth = $null
+$baScript = Join-Path $repo '90-ops\gate\check_backend_auth.py'
+if (-not (Test-Path $baScript)) {
+    $broken += [pscustomobject]@{ File = '90-ops\gate\check_backend_auth.py'
+                                  Why = '后端鉴权元规则的脚本不在了 —— 缺了它,新加一处起模型后端的地方而【不带 --api-key-file】不会有任何东西变红,方向 B 当场退回只对当下这两处有效' }
+    Write-Host "  X 后端鉴权元规则:脚本不见了(这不是可选件)" -ForegroundColor Red
+} elseif (-not $SysPy) {
+    $broken += [pscustomobject]@{ File = '90-ops\gate\check_backend_auth.py'
+                                  Why = 'PATH 上找不到 python —— 元规则跑不了。★ 不当作通过' }
+    Write-Host "  X 后端鉴权元规则:找不到 python" -ForegroundColor Red
+} else {
+    $baOut = & $SysPy $baScript '--quiet' 2>&1 | Out-String
+    $baLine = ($baOut -split "`r?`n" |
+               Where-Object { $_ -match '^\s*===.*\d+\s*PASS.*\d+\s*FAIL' } |
+               Select-Object -Last 1)
+    if ($baLine -match '(\d+)\s*PASS.*?(\d+)\s*FAIL') {
+        $bp = [int]$Matches[1]; $bf = [int]$Matches[2]
+        $totalPass += $bp; $totalFail += $bf
+        $ran += '90-ops\gate\check_backend_auth.py'
+        $c = if ($bf -gt 0) { 'Red' } else { 'DarkGray' }
+        Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}" -f '90-ops\gate\check_backend_auth.py', $bp, $bf) -ForegroundColor $c
+        if ($bf -gt 0) { ($baOut -split "`r?`n" | Where-Object { $_ -match '^\s*X\s' } | Select-Object -First 8) | ForEach-Object { Write-Host "        $_" -ForegroundColor Red } }
+        # ★ 豁免数抬进覆盖账 —— 与契约欠债同一条纪律:exit 0 不等于"没有欠账"。
+        #   今天 speech 后端就是一条豁免(它没有鉴权层),那件事必须看得见。
+        $baDebtLine = ($baOut -split "`r?`n" |
+                       Where-Object { $_ -match '^\s*===\s*backend-auth:' } |
+                       Select-Object -Last 1)
+        if ($baDebtLine -match 'SITES=(\d+)\s+KINDS=(\d+)\s+KEYED=(\d+)\s+EXEMPT=(\d+)') {
+            $backendAuth = [pscustomobject]@{ Sites = [int]$Matches[1]; Kinds = [int]$Matches[2]
+                                              Keyed = [int]$Matches[3]; Exempt = [int]$Matches[4] }
+        } else {
+            $broken += [pscustomobject]@{ File = '90-ops\gate\check_backend_auth.py'
+                                          Why = '读不到 `=== backend-auth: SITES= … EXEMPT= ===` 那一行 —— 豁免数抬不进覆盖账。★ 不当作「没有豁免」' }
+            Write-Host "  X 后端鉴权元规则:读不到豁免行" -ForegroundColor Red
+        }
+    } else {
+        $broken += [pscustomobject]@{ File = '90-ops\gate\check_backend_auth.py'; Why = '没有汇总行 —— 多半没跑起来' }
+        Write-Host "  X 后端鉴权元规则没跑起来" -ForegroundColor Red
     }
 }
 
@@ -1084,6 +1138,13 @@ if ($null -ne $contractDebt -and $contractDebt.Debt -gt 0) {
     Write-Host "      这不是 FAIL,也不是「已裁定没问题」—— 是一张【只许变短】的欠债表。" -ForegroundColor DarkYellow
     Write-Host "      审计 A 级 6 条里有 4 条是这个形状:两边各自都绿,断的是中间那根线。" -ForegroundColor DarkYellow
     Write-Host "      逐条(含消费者与后果):python 90-ops\gate\check_contract_pairs.py" -ForegroundColor DarkYellow
+}
+# ── 后端鉴权:豁免也是欠账,必须看得见(D?)──────────────────────────────
+if ($null -ne $backendAuth -and $backendAuth.Exempt -gt 0) {
+    Write-Host ("  ★ 后端鉴权豁免: {0} / {1} 种后端 kind **不带钥匙**(已上锁 {2};起法 {3} 处)" -f `
+                $backendAuth.Exempt, $backendAuth.Kinds, $backendAuth.Keyed, $backendAuth.Sites) -ForegroundColor Yellow
+    Write-Host "      这不是 FAIL,是一张【只许变短】的欠债表:被豁免的那种后端今天仍是「同机任何进程都连得上」。" -ForegroundColor DarkYellow
+    Write-Host "      逐条(含豁免理由):python 90-ops\gate\check_backend_auth.py" -ForegroundColor DarkYellow
 }
 # ══════════════════════════════════════════════════════════════════════════
 #  ★★★ 环境验证脚本 —— **跑没跑都要出现在这里**

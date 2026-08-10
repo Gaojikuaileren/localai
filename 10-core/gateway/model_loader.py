@@ -42,6 +42,8 @@ from typing import Dict, List, Optional, Set
 
 import httpx
 
+import backend_key
+
 #: 已验证过启动方式的 kind。★ 反向全表:不在表里的一律拒绝,不试着用别的方式起。
 #
 #  ★★★ 2026-08-06(P5 语音 v1 / D?):`speech` **加进来了**,而加它的依据不是
@@ -244,11 +246,44 @@ class ModelLoader:
         ★ V16:实现改走 `_port_state`,判据一个字没变 —— 只是把"还活着"那一档分了出来。"""
         return await self._port_state(port, timeout) == self.PORT_READY
 
-    async def _wait_ready(self, cid: str, port: int) -> None:
+    async def _auth_ok(self, port: int, timeout: float = 5.0) -> bool:
+        """**带钥匙**打一次受保护的端点 —— 回答的是「钥匙对不对」,不是「起来没起来」。
+
+        ★★★ 它为什么必须存在(2026-08-10 实测):llama-server 的 `/health` 与
+          `/v1/models` **不受 api-key 约束**,不带 key 也回 200。
+          ⇒ 只看 `/health` 的就绪闸**看不见钥匙不匹配** —— 栈会"启动成功",
+            然后每一次对话都 401。那正是 §12.3 禁止的静默降级:
+            失败发生在启动,却要等用户第一次说话才显形。
+        ★ 打 `/props`(GET,不吃 token、不占 slot)而不是真发一次对话。
+        ★ 独立于 `_port_state` 另开一个洞是**有意的**:那个洞回答"端口三态",
+          判据是状态码分档;这个洞回答"我方身份被不被接受",判据是 2xx/401。
+          混进同一个方法会让 401 变成 PORT_ALIVE,而 `running()` 会据此说它活着 —— 它确实活着,
+          但**我们用不了它**,那是两件事。
+        """
+        try:
+            hdrs = backend_key.auth_header()
+        except backend_key.BackendKeyError:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as c:
+                r = await c.get(f"http://127.0.0.1:{port}{backend_key.AUTH_PROBE_PATH}",
+                                headers=hdrs)
+        except Exception:                                    # noqa: BLE001
+            return False
+        return 200 <= r.status_code < 300
+
+    async def _wait_ready(self, cid: str, port: int, auth_required: bool = False) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + READY_TIMEOUT_S
         while True:
             if await self._health_ok(port):
+                if auth_required and not await self._auth_ok(port):
+                    raise LoaderError(
+                        f"{cid} 的后端起来了,但**不认我们的钥匙**(带 key 打 "
+                        f"{backend_key.AUTH_PROBE_PATH} 没回 2xx)。\n"
+                        f"  ★ /health 是绿的 —— 它本来就不受 key 约束,所以这一格只有带鉴权探一次才看得见。\n"
+                        f"  最常见的成因:端口上那个后端是**上一把钥匙**起的(密钥文件被删过/换过)。\n"
+                        f"  修法:把这个端口上的 llama-server 停掉再装一次。")
                 return
             proc = self._procs.get(cid)
             if proc is not None and proc.poll() is not None:
@@ -469,9 +504,16 @@ class ModelLoader:
                 # ★ 端口已经有人 —— 认领而不是再起一个(否则端口冲突)
                 self._adopted.add(cid)
                 continue
+            auth_required = False
             if str(c.get("kind")) == "speech":
                 # ★ speech 后端:自己那个 venv 的 python 起 10-core/speech/server.py。
                 #   档位由组件 id 决定(speech.full -> --full),与 D27 的档位映射一致。
+                # ★★ D?:speech **不带**这把 key —— 它不是 llama-server,没有
+                #   `--api-key-file`。这一条是**如实的边界,不是遗漏**:语音后端至今
+                #   仍是"同机任何进程都连得上"。要堵它得给 10-core/speech/server.py
+                #   自己加一层,那是 P5 的账,不在本车道。
+                #   ⇒ `90-ops/gate/check_backend_auth.py` 把这条边界写成了断言:
+                #     它只对 **llama 系**的起法要求带 key,而 speech 那一处**登记在案**。
                 spec = self._speech_spec()
                 py = _speech_python(spec)
                 args = [str(py), str(_repo_root() / "10-core" / "speech" / "server.py")]
@@ -480,9 +522,16 @@ class ModelLoader:
             else:
                 exe = self._llama_exe()
                 model = self._model_path(str(c["model_rel"]))
+                # ★★★ D?:**起后端就必须上锁**。没有这一段,同机任何进程
+                #   (尤其是跑成 ai-exec 的跑腿 worker)都能直连这个端口绕过网关与 E1/审计
+                #   —— 回环不过防火墙、ACL 管不了 TCP,钥匙是唯一拦得住的东西。
+                # ★ `ensure_key_file()` 会顺带把密钥目录的 ACL 重新收紧并核验,
+                #   失败就抛 —— 于是"锁没上"永远不会长得像"起来了"。
                 args = [str(exe), "-m", str(model), "-ngl", str(int(c["ngl"])),
                         "-c", str(int(c["ctx"])), "--host", "127.0.0.1", "--port", str(port),
-                        "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+                        "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0",
+                        "--api-key-file", str(backend_key.ensure_key_file())]
+                auth_required = True
             try:
                 # ★ 不继承父进程的控制台:中枢将来做成服务时没有控制台可继承。
                 proc = subprocess.Popen(
@@ -492,7 +541,7 @@ class ModelLoader:
                 raise LoaderError(f"{cid} 起不来:{type(e).__name__}: {e}") from e
             self._procs[cid] = proc
             try:
-                await self._wait_ready(cid, port)
+                await self._wait_ready(cid, port, auth_required=auth_required)
             except Exception:
                 # ★ 就绪失败要**把自己起的那个收掉** —— 留一个半死的进程占着端口,
                 #   下一次装载会以为"端口有人"而认领它,于是账本指向一个不能服务的后端。

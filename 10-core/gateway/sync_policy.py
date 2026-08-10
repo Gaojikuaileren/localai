@@ -58,6 +58,13 @@ TIER_CAPS: Dict[str, SyncCaps] = {
         why="D30 降档不断连:读得到,但写不了。写共享数据会影响另一台机器,"
             "不该跟着「不断连」一起放行。",
     ),
+    # ★★★★ V32b:「没查出来」从 unregistered-local 里拆出来(理由见 gpu_policy 同名条目)。
+    #   ★ 能力与 unregistered-local **逐字相同**:sync_read,不能写。本次不改任何权限。
+    "identity-unresolved": SyncCaps(
+        "identity-unresolved", frozenset({"sync_read"}), max_batch=0, pushes_per_min=0,
+        why="认人链断了,不是「这个人没登记」。能力与 unregistered-local 逐字相同 —— "
+            "本次只拆分与留痕(D81 待裁 1 未裁,不得先于它动手)。",
+    ),
     "lan-edge": SyncCaps(
         "lan-edge", frozenset(), 0, 0,
         why="★ 代理进程档、非业务档。带指纹的请求会被解析成 lan-device;"

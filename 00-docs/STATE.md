@@ -818,8 +818,15 @@ P3b 局域网身份与准入 · P3c 统一客户端 v1(唯一入口)· P3d 外�
    (A7 协议写 P99,而定出 6.53 的那轮 n=64,**P99 必然退化为 max**)· 驱动口径 ·
    `unregistered-local` 算不算出境 sink(D81 的五条待裁之一)。
 2. **方向 B(响应回程出境闸)** —— 方向 A 已于 2026-07-31 落地,方向 B 仍是空的。
-   ★ 它同时卡**三条线**:P3d 外联通道 · Hermes H2(D65)· 桌宠显示记忆内容 ——
-   做一次解锁三处,**按性价比可以排在 P4 之前**;
+   ★★★ **2026-08-10 更正**:此处原文写「它同时卡三条线…做一次解锁三处,按性价比可以排在 P4 之前」
+   —— **那是一句记错的话,复核已做完**(`decision-packets/egress-b-gates-impact-2026-08-06.md`
+   §2 两道闸签名互不相交 · §7 判据表):**实际只解开一件**(P3d)。
+   · 「让 AI 自己上网干活」要防的是**读回来的网页里藏指令**,不是靠认凭据的扫描器能拦的;
+   · 「桌宠说记忆」走的是**另一条门**(回客户端那条),而且 v1 的猫**结构上不会开口**
+     (意图枚举里没有 `Speak`,方案书 :2644-2646)。
+   ⇒ 它就是 P3d 自己的前置,**按 P3d 的优先级排即可**;而「排在 P4 之前」这半句
+   今天更没有意义 —— **P4 已于 2026-08-09 实机复验完**。
+   ★ 这条是 D81 五条待裁里的第五条,**它不需要裁,它需要有人回来划掉** —— 现已划掉。
 3. **同声传译接语音链路**(采集 / ASR / 合成 / 虚拟麦注入,VB-CABLE 路线)—— 界面骨架已成形;
 4. 其后:其余工作空间(用户裁定等主页/聊天/翻译三块搭好再回来)。
 
@@ -1007,7 +1014,14 @@ vram_budget  =  15.92 − desktop_floor − 0.8      ← 导出值,不单独设
 | **TLS 资产** | **无**。全仓库零证书/私钥;`install-qdrant.ps1` 明写 `enable_tls: false`(回环故不需要)。★ 这是 P3b 绑 LAN 的硬前置 | 2026-07-28 |
 | speech venv | `D:\AI\venvs\speech`(faster-whisper + Piper + CUDA12 运行时) | 2026-07-27 |
 | **记忆库** | `D:\AI\state\memory\` · **不加密(D22)** · ACL:ai-mem+SYSTEM+Admins FullControl / ai-asset+ai-exec **Deny** | 2026-07-27 |
-| **★ UAC** | **`EnableLUA = 0` —— 彻底关闭**(`ConsentPromptBehaviorAdmin=0` · `PromptOnSecureDesktop=0`)。机主 `Zori Ma` 在 Administrators 组 ⇒ **该账户没有分裂 token,它启动的每一个进程都是 High + Administrators enabled**,双击 `.cmd`、Explorer 拉起、计划任务 `/rl LIMITED`、`runas /trustlevel` **全都一样是 High**(2026-08-06 逐条实测)。<br>**⇒ 这台机器上不存在「普通用户 / Medium」上下文。** 两处连带后果:① **D46 那条「双击 = 普通用户 = 与 init 同级」的前提不成立** —— 故 `lan-edge` 的提权护栏已改成「直接试着打开 CA 私钥」而不是判管理员身份(`Program.cs:205-213`,见 `decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md`);② **任何「靠降权来保证安全」的设计在本机一律失效** —— 例如 AppContainer 的回环豁免,机主开它**零摩擦、零提示**。<br>★ 本条此前只活在两份决议包里,已因此**咬过两次**(身份护栏那轮 · AppContainer 勘察那轮),故上表 | **2026-08-06** |
+| **★ UAC** | **`EnableLUA = 0` —— 彻底关闭**(`ConsentPromptBehaviorAdmin=0` · `PromptOnSecureDesktop=0`)。机主 `Zori Ma` 在 Administrators 组 ⇒ **该账户没有分裂 token,它启动的每一个进程都是 High + Administrators enabled**,双击 `.cmd`、Explorer 拉起、计划任务 `/rl LIMITED`、`runas /trustlevel` **全都一样是 High**(2026-08-06 逐条实测)。<br>**⇒ 这台机器上不存在「普通用户 / Medium」上下文。** 两处连带后果:① **D46 那条「双击 = 普通用户 = 与 init 同级」的前提不成立** —— 故 `lan-edge` 的提权护栏已改成「直接试着打开 CA 私钥」而不是判管理员身份(`Program.cs:205-213`,见 `decision-packets/integrity-guard-asks-wrong-question-2026-08-03.md`);② ★★★ **2026-08-10 更正 —— 此处原文是「任何『靠降权来保证安全』的设计在本机一律失效」,
+那句话 literally 是假的**,2026-08-06 审计已单列为一条发现(`AUDIT-2026-08-06-full.md:351`,B19),
+理由逐字是「**它会让下一个人直接否掉路线 C**」——**而它至今仍原样留着,并且真的差点做到了**。
+实测的真相**窄得多**:关在 AppContainer 里的程序**自己拆不开**那道墙(实测 exit 5「拒绝访问」),
+子孙进程也一起被关住;**能拆的只有机主本人**,而且是**零摩擦、零提示、无端口粒度**。
+⇒ 正确的说法是:**降权在本机挡得住「被关进去的那个程序」,挡不住机主自己**。
+两者差别决定了 C 可不可用 —— 前一句会否掉它,后一句只要求给它捆一条
+「墙被撤 ⇒ 拒绝启动并如实说明」的纪律。<br>★ 本条此前只活在两份决议包里,已因此**咬过两次**(身份护栏那轮 · AppContainer 勘察那轮),故上表 | **2026-08-06** |
 | **剪贴板** | 历史与跨设备同步均已关闭(P0 实测)。⚠ 策略层未配置,需复检 | 2026-07-26 |
 | ComfyUI | `D:\ComfyUI` · **`extra_model_paths.yaml` 未配置** | 2026-07-26 |
 

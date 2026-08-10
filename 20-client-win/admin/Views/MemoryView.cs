@@ -148,8 +148,12 @@ public sealed class MemoryView : UserControl
         RefreshMemory();
     }
 
-    /// <summary>编辑:只改标题与正文(为什么只改这两样,见 MemoryCenter.EditText 的说明)。</summary>
-    FrameworkElement EditBlock(MemoryEntry m)
+    /// <summary>编辑:只改标题与正文(为什么只改这两样,见 MemoryCenter.EditText 的说明)。
+    /// <para>★ V29 从 <c>private</c> 放到 <c>internal</c>,只为一件事:滚轮那条护栏要拿**真的这个框**
+    /// 去测(它就是用户报的那一处 —— 正文框 <c>AcceptsReturn</c>+<c>MaxHeight</c>+滚动条,
+    /// 吞滚轮的是它模板里的 <c>PART_ContentHost</c>)。自造一个形状相同的替身也能跑,
+    /// 但那测的是替身,不是这一处(ASSERTION-PITFALLS 第 14 条)。</para></summary>
+    internal FrameworkElement EditBlock(MemoryEntry m)
     {
         var title = new TextBox { Text = m.Title, Margin = new Thickness(0, 6, 0, 4), Padding = new Thickness(6, 4, 6, 4) };
         var body = new TextBox { Text = m.Body, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,

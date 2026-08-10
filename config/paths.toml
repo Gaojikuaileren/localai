@@ -63,6 +63,31 @@ identity     = 'D:\AI\state\identity'     # ★★ P3b 成员表/证书公共材
 # 恢复语义:这些东西**不在备份里**。换机/恢复后需重新签发、重新配对、重新链接设备
 #   —— 这正是「换主机 = 所有客户端重新配对」那条安全性质的物理载体。
 
+backend_auth = 'D:\AI\state\backend-auth'   # ★★ 网关↔模型后端的共享密钥(D?)
+# ★★★ 为什么**不**放进上面那个 secrets —— 实测,不是偏好(2026-08-10):
+#   `{state}\secrets` 的 ACL 只给 SYSTEM / BUILTIN\Administrators / ai-mem。
+#   而 UAC 过滤令牌里 Administrators 是 **deny-only 组**,那条 allow ACE 不生效。
+#   实测(`runas /trustlevel:0x20000` 读 `{state}\secrets`):**READ_DENIED**。
+#   ⇒ 中等完整性的进程读不到它。而网关**就是**中等完整性的进程,并且是**有意的**:
+#     `20-client-win/admin/Program.cs` 的 D46 护栏发现自己被提权时会主动降权重开
+#     (TPM/CNG 用户密钥绑定铸造时的完整性等级),网关由它拉起 ⇒ 继承 medium。
+#   把密钥放进 secrets = 用户双击管理端时**栈起不来**。这不是推测,是上面那条实测。
+#   ★ 也别想着「那就给 secrets 加一条机主 ACE」:那会让机主身份下**任何**中等完整性
+#     进程都能读到 CA 私钥与 L4 批准密钥 —— 为了一把可再生的口令,拆掉一道真的墙。
+#
+# ★ 语义上它也确实不属于 secrets:secrets 是「长期第三方凭据与私钥」,
+#   丢了会被**接管**、必须重新签发;而本密钥是**本机自产、随时可重新生成**的
+#   进程间共享口令,丢了的代价只有一个 —— 已经在跑的后端要跟着重启一次。
+#   两类东西恢复语义不同,混在一个目录里迟早有人按错的那套规矩处置它。
+#
+# ★ 它的强度来自**目录 ACL**(断继承 + 只留 机主/Administrators/SYSTEM):
+#   `ai-exec` / `ai-asset` 不在授权表里 ⇒ 读不到。这正是要挡的那个进程
+#   (D65:跑腿 worker 即使跑成 ai-exec 也**挡不住**它直连 18081 —— 除非它拿不到 key)。
+#   ★★ ACL 由 `10-core/gateway/backend_key.py` 在**每次用之前重新施加**,
+#     而不是「假定装机时设过了」—— 那种假定正是本文件 §sysmem 那段的教训。
+#   ★ 注意 {state} 根继承下来的是 `Authenticated Users:(M)` ⇒ **不断继承就等于没设**。
+# ★ 不进备份:同 secrets 的理由,但结论更轻 —— 它本来就该在换机后重新生成。
+
 # -----------------------------------------------------------------------------
 #  记忆库骨架 — P2/P3a · 见 00-docs/memory-backbone-design.md · 决议 D30
 #  · 全部在 {state}/memory 下,继承已核验的强 ACL(ai-mem FullControl / ai-asset,ai-exec Deny)
