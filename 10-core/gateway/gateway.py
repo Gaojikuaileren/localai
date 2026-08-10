@@ -28,6 +28,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import backend_key
 import e1_detector as e1
 import e4_egress as e4
 import caller_identity
@@ -2310,13 +2311,37 @@ async def chat_completions(request: Request):
     #   「界面上要看得见」,而且**别做成弹窗** —— 一行状态、可点开看详情)。
     hdrs = {"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias,
             **identity_headers(effective_tier)}
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ D?:出站带**后端钥匙**。这是「网关是唯一咽喉」这句话的物理载体。
+    #
+    #  在此之前 llama-server 无鉴权 ⇒ 同机任何进程都能直连 18081,网关的
+    #  E1/审计/档位全成了摆设(STATE「已知技术债」原文,D65 升级为待决 6 的一半)。
+    #  ⇒ 后端上了锁之后,**这一处就是全仓唯一持钥匙的出站口**。
+    #
+    #  ★★ 取不到钥匙就 **503,绝不"不带头继续发"**:那样会在后端还没上锁的机器上
+    #    "碰巧还能用",于是这条债在没人察觉的情况下重新打开 —— 而所有测试照样绿。
+    #    §8.1.4:503 带缺口,不静默降级。
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        up_hdrs = backend_key.auth_header()
+    except backend_key.BackendKeyError as e:
+        log_upstream_problem(alias, backend, "backend_key_unavailable", str(e))
+        return JSONResponse(
+            status_code=503, headers=hdrs,
+            content={"error": {"message": "拿不到后端鉴权密钥,拒绝以无鉴权方式转发",
+                               "type": "backend_key_unavailable",
+                               "alias": alias,
+                               "hint": "详细诊断已记入主机日志 upstream_problem.jsonl"}},
+        )
+
     try:
         if stream:
             # ★★ 必须【先建立连接、拿到状态码】再返回 StreamingResponse。
             #    原写法 `return StreamingResponse(gen(), ...)` 会立即返回 —— gen() 尚未执行,
             #    后端连不上时异常发生在 return 之后、响应头(200)已发出 → 客户端收到
             #    「200 + 空 body」,正是 §8.1.4 明令禁止的静默降级(实测复现)。
-            req = _client.build_request("POST", upstream_url, json=fwd)
+            req = _client.build_request("POST", upstream_url, json=fwd, headers=up_hdrs)
             r = await _client.send(req, stream=True)
             if r.status_code >= 400:                     # 上游错误:读完转发真实状态码,不吞
                 raw = await r.aread()
@@ -2366,7 +2391,7 @@ async def chat_completions(request: Request):
             return StreamingResponse(gen(), media_type="text/event-stream",
                                      status_code=r.status_code, headers=hdrs)
         else:
-            r = await _client.post(upstream_url, json=fwd)
+            r = await _client.post(upstream_url, json=fwd, headers=up_hdrs)
             try:
                 data = r.json()
             except Exception:                            # 上游返回非 JSON/空体:不静默变成 200

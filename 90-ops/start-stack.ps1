@@ -113,11 +113,36 @@ if (-not $NoBackend) {
 
   if (-not (Test-Path $Llama))   { Write-Host "  X 找不到 $Llama" -ForegroundColor Red; exit 1 }
   if (-not (Test-Path $Model8B)) { Write-Host "  X 找不到 $Model8B" -ForegroundColor Red; exit 1 }
+  # ==========================================================================
+  #  ★★★ D?:起后端之前先备好钥匙 —— 「网关是唯一咽喉」这句话的物理载体。
+  #
+  #  在此之前 llama-server 无鉴权 ⇒ 这台机器上**任何**程序都能直连 18081,
+  #  绕过网关的 E1 / 审计 / 档位(STATE「已知技术债」原文;D65 把它升级成待决 6 的一半:
+  #  回环不过防火墙、账户 ACL 管不了 TCP ⇒ 把 worker 跑成 ai-exec 也挡不住它)。
+  #  ACL 管不了 TCP,但管得了**文件**:钥匙放在 ai-exec / ai-asset 读不到的目录里。
+  #
+  #  ★ 生成/校验/目录 ACL 的实现**只有一份**(10-core/gateway/backend_key.py),
+  #    这里只是**调用**它 —— 与显存闸「预览与准入必须是同一段代码」同一条纪律。
+  #    两处各写一份的话,总有一天两处的判据会分家,而分家那天没有任何东西会红。
+  #  ★ 命令行上出现的是**密钥文件路径**,不是密钥本身 —— 命令行谁都读得到。
+  # ==========================================================================
+  $keyTool = Join-Path $GwDir 'backend_key.py'
+  $keyOut  = & $py $keyTool ensure 2>&1
+  $keyRc   = $LASTEXITCODE
+  $KeyFile = ''
+  if ($keyOut) { $KeyFile = (($keyOut | Select-Object -Last 1) -as [string]).Trim() }
+  if ($keyRc -ne 0 -or -not $KeyFile -or -not (Test-Path -LiteralPath $KeyFile)) {
+    Write-Host "  X 备不出后端鉴权密钥 —— 拒绝起一个**不上锁**的后端。" -ForegroundColor Red
+    $keyOut | ForEach-Object { Write-Host ("    " + $_) -ForegroundColor DarkGray }
+    exit 1
+  }
+
   Write-Host ("[1] 起 llama 后端 assistant.fast({0} · ctx {1} · q8_0 KV)…" -f $comp, $Ctx)
   $procs += Start-Process -FilePath $Llama -PassThru -NoNewWindow -ArgumentList @(
     '-m', $Model8B, '-ngl', '99', '-c', "$Ctx",
     '--host', '127.0.0.1', '--port', '18081',
-    '-fa', 'on', '-ctk', 'q8_0', '-ctv', 'q8_0')
+    '-fa', 'on', '-ctk', 'q8_0', '-ctv', 'q8_0',
+    '--api-key-file', $KeyFile)
   # ★ -f:HTTP 非 2xx 即失败。llama-server 在加载模型时 /health 会回 503,
   #   不加 -f 会误以为已就绪(踩过)。
   $ok = $false
@@ -128,7 +153,30 @@ if (-not $NoBackend) {
     if ($LASTEXITCODE -eq 0) { $ok = $true; break }
   }
   if (-not $ok) { Write-Host "  X 后端未就绪(显存不足?换 -Ctx 更小值试试)" -ForegroundColor Red; Stop-All; exit 1 }
-  Write-Host "    OK 127.0.0.1:18081"
+
+  # ★★★ 上面那个 /health 判不了「钥匙对不对」。实测(2026-08-10 · llama-server 10107):
+  #   `/health` 与 `/v1/models` **不受 api-key 约束**,不带 key 也回 200;
+  #   受约束的是 `/props` 与 `/v1/chat/completions`(不带 key → 401)。
+  #   ⇒ 好消息:加了 key **不会**让上面那道就绪闸变红(动工前最担心的就是这一格)。
+  #   ⇒ 坏消息:钥匙不匹配时,栈会**报「已就绪」**,然后每一次对话都 401 ——
+  #     失败发生在启动,却要等用户第一次说话才显形。§12.3 明令禁止这种形状。
+  #   所以这里**带着钥匙再探一次**。
+  # ★ 用 Invoke-WebRequest 而不是 curl.exe:key 要放进请求头,而 curl 的话它就落到
+  #   **命令行**上 —— 命令行是同机任何进程都读得到的东西,那等于把钥匙又交出去了。
+  $bkey = (Get-Content -LiteralPath $KeyFile -Raw -Encoding ASCII).Trim()
+  $authOk = $false
+  try {
+    $probe = Invoke-WebRequest -Uri 'http://127.0.0.1:18081/props' -UseBasicParsing -TimeoutSec 10 `
+                               -Headers @{ Authorization = "Bearer $bkey" }
+    $authOk = ($probe.StatusCode -ge 200 -and $probe.StatusCode -lt 300)
+  } catch { $authOk = $false }
+  if (-not $authOk) {
+    Write-Host "  X 后端起来了,但**不认这把钥匙**(带 key 打 /props 没回 2xx)。" -ForegroundColor Red
+    Write-Host "    最常见的成因:18081 上那个后端是**上一把钥匙**起的(密钥文件被删过/换过)," -ForegroundColor DarkGray
+    Write-Host "    或者它根本不是本脚本起的。修法:把该端口上的 llama-server 停掉再起栈。" -ForegroundColor DarkGray
+    Stop-All; exit 1
+  }
+  Write-Host "    OK 127.0.0.1:18081(已上锁,钥匙已核对)"
 } else { Write-Host "[1] 跳过后端(-NoBackend)" }
 
 # ---- 网关 ----

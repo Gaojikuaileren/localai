@@ -82,6 +82,19 @@ public sealed record ModelGate(ModelReadyState State, string Headline, string Wh
 
     /// <summary>气泡里显示的全文(标题 + 理由)。★ 理由为空时不留一个孤零零的换行。</summary>
     public string Bubble => Why is { Length: > 0 } ? Headline + "\n" + Why : Headline;
+
+    /// <summary>
+    /// 一格状态文字(任务横条与任务抽屉共用)。★★ 它必须只有这一份:
+    /// 横条和抽屉画的是**同一条**模型装载,两处各写一遍的那天,
+    /// 横条会说「正在载入」而抽屉说「已启用」—— 用户会当场看到两个自相矛盾的界面,
+    /// 而没有任何东西会红。(2026-08-10 实机反馈里就是这个形状。)
+    /// </summary>
+    public string StateLabel => State switch
+    {
+        ModelReadyState.Ready => "已启用",
+        ModelReadyState.Starting => "正在启用中",
+        _ => "未启用",
+    };
 }
 
 /// <summary>
@@ -116,6 +129,11 @@ public sealed class ModelReadiness
         public int InFlight;
         /// <summary>上一次意图的结果(本别名的,不是全局那个 LastIntent)。</summary>
         public IntentOutcome? Last;
+        /// <summary>
+        /// <see cref="Last"/> 落地的时刻。★ 用来判断「快照里没有它」这句话**够不够新**——
+        /// 见 <see cref="ResidentOf"/>:比意图更旧的那一帧说不了"它不在"。
+        /// </summary>
+        public DateTime SettledAt = DateTime.MinValue;
         /// <summary>上一次广播出去的闸 —— 边沿判据(见文件头)。</summary>
         public ModelGate? Announced;
     }
@@ -160,6 +178,19 @@ public sealed class ModelReadiness
     /// <summary>能不能用的那半句。★ 只是 <see cref="Gate"/> 的糖,判据只有一处。</summary>
     public bool CanUse(string alias) => Gate(alias).CanUse;
 
+    /// <summary>
+    /// 自检用:这个别名此刻有意图在路上吗(<c>InFlight &gt; 0</c>)。
+    /// <para>★★★ 为什么要这个缝:「闸**会离开** Starting」这件事,在自检环境里
+    /// 用 <see cref="Gate"/> 是观察不到的 —— 那儿没配对,<see cref="Decide"/> 在①就返回了,
+    /// 永远轮不到 InFlight 那一格。⇒ 删掉 <c>InFlight--</c> 那一行,闸会**永远 Starting、
+    /// 发送键永远灰**,而自检全绿。这个缝让那条断言真的能红。</para>
+    /// </summary>
+    internal bool HasIntentInFlightForSelftest(string alias)
+    {
+        var r = RecOf(alias);
+        lock (_lock) return r.InFlight > 0;
+    }
+
     Rec RecOf(string alias)
     {
         lock (_lock)
@@ -184,6 +215,7 @@ public sealed class ModelReadiness
         {
             if (r.InFlight > 0) r.InFlight--;
             r.Last = res;
+            r.SettledAt = DateTime.UtcNow;
         }
         Recheck();
     }
@@ -235,6 +267,7 @@ public sealed class ModelReadiness
             //   ★★ 挂在**边沿**上而不是每次重算:清冷却是个动作,不是一个查询的副产物;
             //     每帧都清等于把去抖整个废掉(而去抖挡的是每敲一个字符发一次网络请求)。
             if (fellOutOfReady && !IsLocalPlane(a)) _gpu.ForgetIntentCooldown(a);
+            RetireModelTask(a, now);
             changed = true;
         }
         if (!changed) return;
@@ -273,6 +306,25 @@ public sealed class ModelReadiness
         // ② 最硬的证据:中枢此刻真的装着它。★ 压过下面所有推断(见文件头的顺序说明)。
         if (residentByCatalog == true)
             return new ModelGate(ModelReadyState.Ready, "", "");
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★★ 中枢说「**正在装**」—— 这一格必须排在③前面,而且它是本闸最容易说假话的地方。
+        //
+        //  `gpu_broker.py` 在同一组件已有装载在途时回的是
+        //      200 + code=ALREADY_RESIDENT + **plane="loading"**
+        //  而 `ParseIntent` 把 ALREADY_RESIDENT 判成 `Ok: true` ⇒ 落进下面③;
+        //  这时组件**还没进驻留集合**(它正在装)⇒ residentByCatalog == false ⇒
+        //  闸会输出「**模型刚才起来过,现在已经被卸下了…打字就会重新启用它**」。
+        //  ★★★ 每一个字都是假的:模型**从没起来过**,正在头一次装。
+        //    而用户照它说的去打字,只会撞上 20 秒去抖,**什么都不会发生**。
+        //  ★ 触发条件极普通:第一次装载超过 20 秒(几 GiB 权重读进显存)+ 用户继续打字。
+        //
+        //  ⇒ 认中枢自己给的 plane。`ChatClient.cs` 早就在读它了(那边把 "loading" 说成
+        //    「正在装载,等一会儿再发」),而闸没读 —— **同一个字段,两处口径不一致**。
+        // ══════════════════════════════════════════════════════════════════
+        if (last is { Plane: "loading" })
+            return new ModelGate(ModelReadyState.Starting, StartingText,
+                "中枢说它正在装载 —— 第一次装要把几 GiB 权重读进显存,通常几十秒。");
 
         // ③ 上一次意图成功 —— 除非②刚刚**明确**说它已经不在了。
         if (last is { Ok: true })
@@ -350,8 +402,10 @@ public sealed class ModelReadiness
         }
         bool inFlight;
         IntentOutcome? last;
-        lock (_lock) { inFlight = rec.InFlight > 0; last = rec.Last; }
-        return Decide(_hub.IsPaired, _hub.State == HubState.Online, inFlight, last, ResidentOf(alias, last));
+        DateTime settledAt;
+        lock (_lock) { inFlight = rec.InFlight > 0; last = rec.Last; settledAt = rec.SettledAt; }
+        return Decide(_hub.IsPaired, _hub.State == HubState.Online, inFlight, last,
+                      ResidentOf(alias, last, settledAt));
     }
 
     /// <summary>
@@ -361,22 +415,61 @@ public sealed class ModelReadiness
     /// ② 上一次意图里中枢**自己挑完告诉我们**的那个组件名。</para>
     /// <para>★ 快照不新鲜就返回 null 而不是 false:「我没看到」不等于「它不在」。</para>
     /// </summary>
-    bool? ResidentOf(string alias, IntentOutcome? last)
+    bool? ResidentOf(string alias, IntentOutcome? last, DateTime settledAt)
     {
         if (!_gpu.HasFreshData) return null;                  // 快照读不到 ⇒ 说不出
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ 快照必须**比这次意图更新**,才有资格说"它不在"。
+        //
+        //  中枢回 code=OK(刚给你装上了)之后,驻留集合要到**下一帧**快照才带上它。
+        //  拿那一帧更旧的快照去判,会得出「装上了、但它不在驻留集合里」⇒ 闸说「已经被卸下了」。
+        //  ★ 那句话在装载刚成功的那一两秒里是**假的**,而它恰好出现在用户最可能看的时刻。
+        //  ⇒ 比意图更旧的帧一律返回 null(说不出),而不是 false(它不在)。
+        //    这与「false 与 null 绝不合并」是同一条纪律的延伸:**旧的观察也是没观察**。
+        // ══════════════════════════════════════════════════════════════════
+        var stale = settledAt != DateTime.MinValue && _gpu.LastDataAt <= settledAt;
         var resident = TokenBudget.ResidentOf(_gpu.Snapshot);  // ★ 并集算法只在那一处
         EnsureCatalog();
+        // ★ 「装着」永远说得出口(它是正面证据);「没装着」只有在快照够新时才说得出口。
+        //   ⇒ 用一个小函数把这条纪律写死,免得下面两条证据各写一遍、漏一条。
+        bool? Verdict(bool inSet) => inSet ? true : (stale ? null : false);
+
         // ① 目录里查:哪些组件登记着这个别名。
         if (_gpu.LastCatalog is { } cat)
         {
             var serving = cat.Components.Where(c => c.Aliases.Contains(alias, StringComparer.Ordinal)).ToList();
             if (serving.Count > 0)
-                return serving.Any(c => resident.Contains(c.Id, StringComparer.Ordinal));
+                return Verdict(serving.Any(c => resident.Contains(c.Id, StringComparer.Ordinal)));
         }
         // ② 没有目录时退到"中枢上次挑的那个组件"。★ 只有它非空才说得出话。
         if (last is { Ok: true, Component.Length: > 0 })
-            return resident.Contains(last.Component, StringComparer.Ordinal);
+            return Verdict(resident.Contains(last.Component, StringComparer.Ordinal));
         return null;
+    }
+
+    /// <summary>
+    /// 这个别名的模型装载任务**没有理由再留在任务列表里**了 ⇒ 撤掉它。
+    ///
+    /// <para>★★★ 为什么必须有这一条:<c>HubGpu.RegisterIntentTask</c> **只 Add 不 Remove**
+    /// (全文没有任何移除路径)。⇒ 模型早就装完、甚至早就被空闲卸掉了,
+    /// 「正在进行的任务」里还挂着一条 —— 底部横条会一直轮播它。
+    /// 那比用户抱怨的那个假进度条更假:它连"有一件事在进行"这个前提都不成立。</para>
+    ///
+    /// <para>★★ 判据是 <b>NotStarted 且没有被暂停</b>,两个条件缺一不可:
+    /// <b>暂停的必须留着</b> —— D87③ 的「在任务进度里面可以再开」全靠它,
+    /// 撤掉暂停任务等于把用户唯一的恢复入口删了。</para>
+    ///
+    /// <para>★ 「已启用」也留着:那一条此刻**是真的**(模型确实驻留着,而且随时可能
+    /// 被压力让位转成暂停)。它现在显示成一颗绿点 + 「已启用」,不是进度条,不假装在进行。</para>
+    /// </summary>
+    void RetireModelTask(string alias, ModelGate now)
+    {
+        if (now.State != ModelReadyState.NotStarted) return;
+        if (_gpu.Tasks is not { } tasks) return;
+        var dead = tasks.Tasks.FirstOrDefault(
+            t => t.IsModelLoad && !t.IsPaused
+                 && string.Equals(t.ResumeAlias, alias, StringComparison.Ordinal));
+        if (dead is not null) tasks.Remove(dead.Id);
     }
 
     /// <summary>上一次去取组件目录的时刻(节流用)。</summary>

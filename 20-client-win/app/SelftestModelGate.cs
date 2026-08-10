@@ -32,7 +32,9 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 using System.Text.RegularExpressions;
+using System.Windows.Media;
 using LocalAI.Client.Services;
+using LocalAI.Client.Views;
 
 namespace LocalAI.Client;
 
@@ -47,7 +49,10 @@ public static class SelftestModelGate
         Console.WriteLine("\n-- 模型就绪闸(会发起模型调用的入口,都得挂在同一个闸上)--");
         try
         {
-            Behaviour(assert);      // ★ 先测判据本身:它是下面每一条的地基
+            Behaviour(assert);          // ★ 先测判据本身:它是下面每一条的地基
+            InFlightBookkeeping(assert);// ★ A②:闸会不会离开 Starting
+            TaskRow(assert);            // ★ ⑥ 两处呈现(横条 + 抽屉)
+            Interaction(assert);    // ★ ⑦ 气泡按钮:**驱动真界面**,不是查词元
             Wiring(assert);
         }
         catch (Exception ex)
@@ -151,6 +156,212 @@ public static class SelftestModelGate
             "★ 就绪时气泡是空的 —— 没有坏消息就不该占地方");
         assert(new ModelGate(ModelReadyState.NotStarted, "甲", "乙").Bubble == "甲\n乙",
             "★ 气泡 = 短标题 + 具体理由(两行)。合成一句的话,短的那半会被长理由挤没");
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★★ A①:中枢说「正在装」时,闸**不许**说它被卸了。
+        //    `gpu_broker.py` 在同组件已有装载在途时回 200 + ALREADY_RESIDENT + plane="loading",
+        //    而 ParseIntent 把它判成 Ok:true ⇒ 若不读 plane,就会落进「上次成功 + 现在不在驻留集」
+        //    那一支,输出「模型刚才起来过,现在已经被卸下了……打字就会重新启用它」。
+        //    ★ 每个字都是假的(它从没起来过,正在头一次装),而用户照做只会撞上 20 秒去抖。
+        // ══════════════════════════════════════════════════════════════════
+        var loading = new IntentOutcome(true, "ALREADY_RESIDENT", ModelReadiness.ChatAlias,
+                                        "llm.assistant.8b@8k", "正在装载中", "loading");
+        var g载 = ModelReadiness.Decide(true, true, false, loading, residentByCatalog: false);
+        assert(g载.State == ModelReadyState.Starting,
+            "★★★★ 中枢说 plane=\"loading\" ⇒ 闸是【正在启用中】,**不是**「已经被卸下了」。"
+            + "后者在第一次装载(几 GiB 权重进显存,常常超过 20 秒去抖窗口)时**每个字都是假的**,"
+            + "而它还会叫用户去打字 —— 那只会撞上去抖,什么都不会发生");
+        assert(!g载.Why.Contains("被卸下"),
+            "★★★ 「正在装」那一格的理由里**不许**出现「被卸下」—— 归错因比不给原因更坏");
+
+        // ★★ 同一族的第二格:装载**刚成功**时,快照还是上一帧(不含它)——
+        //   那一帧比这次意图更旧,没资格说"它不在"。判据在 ResidentOf,这里钉住它的语义。
+        assert(ModelReadiness.Decide(true, true, false, ok, residentByCatalog: null).State
+               == ModelReadyState.Ready,
+            "★★★ 比意图更旧的那一帧快照 ⇒ 传进来的是 null(说不出),而不是 false(它不在)。"
+            + "**旧的观察也是没观察** —— 拿它判会在装载成功后的一两秒里说「已经被卸下了」");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  A②:闸**会离开** Starting。
+    //
+    //  ★★★★ 这一条上一轮零判据:删掉 `ModelReadiness.cs` 里那句 `if (r.InFlight > 0) r.InFlight--;`
+    //    ⇒ 闸永远 Starting、发送键**永远灰**、整个聊天功能死掉 —— 而自检全绿。
+    //  ★ 走的是真事件口(`HubGpu` 的两个自检缝,它们和生产路径是**同一对** Raise 方法),
+    //    不是直接去改字段。
+    // ══════════════════════════════════════════════════════════════════════
+    static void InFlightBookkeeping(Action<bool, string> assert)
+    {
+        var app = (App)System.Windows.Application.Current;
+        var readiness = new ModelReadiness(app.Gpu, app.Hub);
+        const string a = "selftest.inflight";
+
+        assert(!readiness.HasIntentInFlightForSelftest(a),
+            "★ 起点:没发过意图 ⇒ 没有在途");
+
+        app.Gpu.StartIntentForSelftest(a);
+        assert(readiness.HasIntentInFlightForSelftest(a),
+            "★★ 意图发出去了 ⇒ 记成在途(闸据此进入「正在启用中」)");
+
+        app.Gpu.SettleIntentForSelftest(a, new IntentOutcome(true, "OK", a, "c", "", "transient"));
+        assert(!readiness.HasIntentInFlightForSelftest(a),
+            "★★★★ 意图落地 ⇒ 在途**必须清掉**。删掉 `InFlight--` 那一行时这条要红 —— "
+            + "否则闸永远停在「正在启用中」、发送键永远灰,而聊天功能整个死掉");
+
+        // ★ 落地比发出多一次也不许把计数压到负数(负数会让下一次真的在途被吃掉)。
+        app.Gpu.SettleIntentForSelftest(a, new IntentOutcome(true, "OK", a, "c", "", "transient"));
+        app.Gpu.StartIntentForSelftest(a);
+        assert(readiness.HasIntentInFlightForSelftest(a),
+            "★★ 多余的落地不许把计数压成负数 —— 压负了之后,下一次真的在途会被它抵消掉");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ⑥ 一条任务长什么样。★★ 验的是 `TaskRowLook.For` 这个**纯函数本身** ——
+    //    底部横条与任务抽屉调的都是它,所以这一组同时守住了两处。
+    // ══════════════════════════════════════════════════════════════════════
+    static void TaskRow(Action<bool, string> assert)
+    {
+        var model = new RunningTask { Title = "按需模型:assistant.fast", Progress = -1, IsModelLoad = true };
+        var real = new RunningTask { Title = "正在计算", Progress = 0.4 };
+
+        var starting = ModelReadiness.Decide(true, true, true, null, null);
+        var ready = ModelReadiness.Decide(true, true, false, null, residentByCatalog: true);
+
+        // ★★★★ 用户裁定那一条:模型装载**不画进度条**。
+        assert(!TaskRowLook.For(model, starting).ShowProgressBar,
+            "★★★★ 模型装载**不画进度条**(用户裁定:「底部的任务进行栏…现在有个正在载入中的"
+            + "进度条,不对,修」)。判词:一个不知道自己进度的进度条,是在假装它知道");
+        assert(!TaskRowLook.For(model, ready).ShowProgressBar,
+            "★★ 装完了也不画 —— 它从头到尾都不是一件有进度的活");
+        assert(TaskRowLook.For(real, ready).ShowProgressBar,
+            "★★★ 反向:**真任务照旧画进度条** —— 用户明说这个功能本身「很好」,"
+            + "只改模型那一类的呈现,别顺手把它删了");
+
+        // ★★★ 文字态:两处必须是同一句(横条与抽屉画的是同一条任务)。
+        assert(TaskRowLook.For(model, starting).StateText == "正在启用中"
+               && TaskRowLook.For(model, ready).StateText == "已启用"
+               && TaskRowLook.For(model, ModelReadiness.Decide(true, true, false, null, null)).StateText == "未启用",
+            "★★★ 模型那一行的文字态取自就绪闸的 StateLabel(未启用 / 正在启用中 / 已启用)");
+        assert(TaskRowLook.For(real, ready).StateText == real.PercentText,
+            "★★ 真任务的那一格仍然是它自己的百分比 —— 与模型就绪毫无关系");
+
+        // ★ 暂停的真任务不画进度条(一条停着的进度条会让人以为它还在动)——旧纪律,别被本轮改掉。
+        var paused = new RunningTask { Title = "被让位的活", Progress = 0.4 };
+        paused.State = TaskState.Paused;
+        assert(!TaskRowLook.For(paused, ready).ShowProgressBar,
+            "★★ 暂停的任务也不画进度条(旧纪律:停着的进度条会被读成还在动)");
+
+        // ★★ 状态点:三态**真的是三种颜色**。写成一个颜色的话,「形上分得开」只剩文字那一半。
+        var c1 = ((SolidColorBrush)Views.TaskDrawerView.StateDotOf(ModelReadyState.Ready).Background).Color;
+        var c2 = ((SolidColorBrush)Views.TaskDrawerView.StateDotOf(ModelReadyState.Starting).Background).Color;
+        var c3 = ((SolidColorBrush)Views.TaskDrawerView.StateDotOf(ModelReadyState.NotStarted).Background).Color;
+        assert(c1 != c2 && c2 != c3 && c1 != c3,
+            "★★ 状态点三态三色互不相同 —— 删掉取色那一段、三格同一个颜色时这条要红");
+        assert(Views.TaskDrawerView.StateDotOf(ModelReadyState.Ready).Width > 0,
+            "★ 状态点真的有大小(整个方法被删掉时这条会红)");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ⑦ 气泡上的「复制 / 引用」。★★★ 这一组**驱动真界面**:离屏挂载 → 排版 →
+    //    发真的鼠标事件 → 读剪贴板与输入框。
+    //  ★ 上一轮这个功能**一条断言都没有**:把 WithBubbleActions 的函数体换成
+    //    `return shell;`,两颗按钮全消失而自检全绿。查词元也挡不住那种改法。
+    // ══════════════════════════════════════════════════════════════════════
+    static void Interaction(Action<bool, string> assert)
+    {
+        Theme.ThemeManager.Initialize(Skin.Breeze);   // 气泡用 FindResource,缺字典会抛
+        var app = (App)System.Windows.Application.Current;
+        var cv = new Views.ChatView("chat");
+        var host = new System.Windows.Controls.Grid { Width = 900, Height = 620 };
+        host.Children.Add(cv);
+        host.Measure(new System.Windows.Size(900, 620));
+        host.Arrange(new System.Windows.Rect(0, 0, 900, 620));
+        host.UpdateLayout();
+
+        // ★ 造一条**超过折叠阈值**的消息:这样"复制的是原文还是屏幕上那份"才分得开 ——
+        //   屏幕上只画前 30 行,而复制必须给全文。
+        var sess = app.Chat.NewSession(null, "chat");
+        var full = string.Join("\n", Enumerable.Range(1, 45).Select(i => $"第 {i} 行"));
+        app.Chat.SeedMessage(sess.SessionId, Services.ChatRole.Assistant, full, DateTime.Now);
+        cv.OpenSession(sess);
+        host.UpdateLayout();
+
+        var slots = Views.ChatView.ActionSlotsIn(cv);
+        assert(slots.Count >= 1,
+            $"★★★ 元断言:真界面里找得到气泡动作槽(实得 {slots.Count} 个)—— "
+            + "找不到就说明按钮那条路整条没挂上,而「零个槽」与「每个槽都对」在输出里长得一模一样");
+        if (slots.Count == 0) return;
+
+        var slot = slots[0];
+        // ① **按需建**:没碰过之前,槽里什么都没有。
+        assert(slot.Content is null,
+            "★★★ 悬停之前槽是空的 —— 「hover/焦点时才建」这条路子的**全部理由**就在这儿。"
+            + "改成建界面时就造出来,这条要红");
+
+        // ② 发一次真的 MouseEnter(不是调内部方法)——走的就是用户鼠标走的那条路。
+        var row = System.Windows.Media.VisualTreeHelper.GetParent(slot) as System.Windows.UIElement;
+        row?.RaiseEvent(new System.Windows.Input.MouseEventArgs(
+            System.Windows.Input.Mouse.PrimaryDevice, 0)
+        { RoutedEvent = System.Windows.UIElement.MouseEnterEvent });
+        host.UpdateLayout();
+
+        var col = slot.Content as System.Windows.Controls.StackPanel;
+        assert(col is not null && col.Children.Count == 2,
+            $"★★★★ 悬停之后长出**两颗**按钮(复制 + 引用),实得 "
+            + (col?.Children.Count.ToString() ?? "槽还是空的")
+            + " —— 把 WithBubbleActions 换成 `return shell;` 时这条要红");
+        if (col is null || col.Children.Count < 2) return;
+
+        // ★★ 按钮上写的是**文字**,不是字形:本 App 全局关掉了 ToolTip,
+        //   靠 ToolTip 解释自己的字形按钮 = 用户看到两个不认识的符号且无从问起。
+        var labels = col.Children.OfType<System.Windows.Controls.Border>()
+                        .Select(b => (b.Child as System.Windows.Controls.TextBlock)?.Text ?? "")
+                        .ToList();
+        assert(labels.Contains("复制") && labels.Contains("引用"),
+            "★★★★ 两颗按钮上写的是**文字**(复制 / 引用),不是字形 —— "
+            + "这个 App 在 Theme/Controls.xaml 里**全局关掉了 ToolTip**(还有一条断言守着它已关),"
+            + $"字形按钮在这里就是两个没人认识、也问不出来的符号。实得:[{string.Join(", ", labels)}]");
+
+        // ③ 复制:点**真的按钮**,读**真的剪贴板**。
+        var clipWhy = "";
+        try { System.Windows.Clipboard.SetText("selftest-probe"); }
+        catch (Exception ex) { clipWhy = ex.GetType().Name + ": " + ex.Message; }
+        if (clipWhy.Length > 0)
+        {
+            // ★ 把**原因**印出来:一句光秃秃的 SKIP 与"验过了"在输出里差别太小。
+            //   ★★ 这一格跳过**不留缺口**:下面「引用」那条同样吃 WithBubbleActions 的
+            //     同一个 text 参数,而它断言输入框里出现了第 45 行 ——
+            //     「给的是原文而不是折叠后的 30 行」由那一条**行为地**证明了。
+            Console.WriteLine("  SKIP  剪贴板在这个进程里打不开(" + clipWhy + ")—— "
+                            + "「复制到剪贴板」这一格本次没验过;"
+                            + "但「用的是原文全文」由下面那条【引用】的断言证明着,不是缺口");
+        }
+        else
+        {
+            Click(col.Children[0]);
+            assert(System.Windows.Clipboard.GetText() == full,
+                "★★★★ 复制给出的是**原文全文**(45 行),不是屏幕上那份被折叠到 30 行的。"
+                + "折叠是显示,不是数据 —— 用户要的是「这条消息」,不是「我此刻看见的这几行」");
+        }
+
+        // ④ 引用:先打一半草稿,再点引用 —— 草稿必须**还在**。
+        cv.InputForSelftest.Text = "我本来打的字";
+        Click(col.Children[1]);
+        var after = cv.InputForSelftest.Text;
+        assert(after.StartsWith("我本来打的字", StringComparison.Ordinal),
+            "★★★ 引用是**追加**不是覆盖 —— 覆盖等于把人正在写的东西吃掉");
+        assert(after.Contains("\n> 第 1 行") && after.Contains("> 第 45 行"),
+            "★★★ 引用进去的是 markdown 引用记号 + **全文**(45 行都在)—— "
+            + "模型认得这个记号,人也认得");
+    }
+
+    /// <summary>发一次真的左键松开。★ 走按钮自己挂的那个处理器,不是绕过去直接调回调。</summary>
+    static void Click(object child)
+    {
+        if (child is not System.Windows.UIElement el) return;
+        el.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(
+            System.Windows.Input.Mouse.PrimaryDevice, 0, System.Windows.Input.MouseButton.Left)
+        { RoutedEvent = System.Windows.UIElement.MouseLeftButtonUpEvent });
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -271,33 +482,40 @@ public static class SelftestModelGate
             "★ 每条登记都写清了**为什么**" + (noWhy.Count > 0 ? ":" + string.Join("、", noWhy) + " 没写" : ""));
 
         // ══════════════════════════════════════════════════════════════════
-        //  反向钉:三处**只有源码看得见**的缺陷。行为断言与编译都抓不到它们。
+        //  反向钉:**只有源码看得见**的那些接线。
+        //
+        //  ★★★★ 一律走 `CodeOnly()`(注释与字面量都剔掉),**不许对原始文本 Contains**。
+        //    `ASSERTION-PITFALLS` 第 21 条(2026-08-09 · V26 立的)记的正是这个形状:
+        //    **正向断言被注释喂绿** —— 把代码删掉、在同一区间留一句含那个词元的注释,断言照样全绿。
+        //    ★ 上一轮我在这个文件里两套写法并存(:293/:318 用 CodeOnly,:280/:287/:299/:309/:328
+        //      对原始文本 Contains),而后者每一条都能被一句注释喂绿。已逐条改齐。
         // ══════════════════════════════════════════════════════════════════
         var cv = Read(files, "ChatView.cs");
         if (cv is not null)
         {
+            var cvCode = CodeOnly(cv);
             // ★★★ 两条路一个判据 —— 这个仓栽过一次:目标池空着时按钮是灰的,**回车却照发**。
-            var send = Slice(cv, "void SendCurrent()", "TheApp.Chat.Send(");
+            var send = Slice(cvCode, "void SendCurrent()", "TheApp.Chat.Send(");
             assert(send is not null && send.Contains("ModelGateNow().CanUse"),
                 "★★★★ 发送键与**回车**走同一条前置条件:闸判在 SendCurrent 里,不是只判在按钮上。"
                 + "只灰按钮而回车照发,那种禁用纯属做样子(本仓已经栽过一次)");
 
             // ★★★ 禁用的控件收不到鼠标事件 ⇒ 外层容器必须是**可命中**的,
             //   而没有画刷的 Border 在命中测试里是个洞 —— 少这一句,气泡永远弹不出来。
-            var wrap = Slice(cv, "var sendWrap = new Border", "DockPanel.SetDock(sendWrap");
+            var wrap = Slice(cvCode, "var sendWrap = new Border", "DockPanel.SetDock(sendWrap");
             assert(wrap is not null && wrap.Contains("Background = Brushes.Transparent"),
                 "★★★ 发送键外面那层容器有 Background —— 没有画刷的 Border 在命中测试里是**透明的洞**,"
                 + "鼠标会径直穿过去。少这一句,「点禁用的发送键弹气泡」那条裁定就是空的");
 
             // ★★ 绝不许「看着灰但其实是启用的」:真禁用的是按钮本身。
-            assert(CodeOnly(cv).Contains("_sendBtn.IsEnabled = ok;"),
+            assert(cvCode.Contains("_sendBtn.IsEnabled = ok;"),
                 "★★★ 按钮是**真禁用**(IsEnabled=false),不是只把透明度调低 —— "
                 + "「看着灰但其实是启用的」点下去会真的发出去");
 
             // ★ 闸只在**答案变了**时响,所以界面可以老老实实接它;
             //   直接接 Gpu.Changed 会把输入框每秒重建一次(V20-② 那条纪律仍然成立)。
-            assert(cv.Contains("TheApp.Ready.Changed += OnReadyChanged")
-                   && !CodeOnly(cv).Contains("TheApp.Gpu.Changed +="),
+            assert(cvCode.Contains("TheApp.Ready.Changed += OnReadyChanged")
+                   && !cvCode.Contains("TheApp.Gpu.Changed +="),
                 "★★★ 聊天界面接的是就绪闸(边沿),**不是** Gpu.Changed(每秒一帧)—— "
                 + "后者会把输入框每秒重建一次,打字当场被打断");
         }
@@ -305,38 +523,92 @@ public static class SelftestModelGate
         var gpu = Read(files, "HubGpu.cs");
         if (gpu is not null)
         {
+            var gpuCode = CodeOnly(gpu);
             // ★★★★ 会真的卡死的那一条:落地信号必须**无条件**响。
-            var note = Slice(gpu, "public void NoteIntent(string alias)", "记下最后一次意图的结果");
+            //   ★ 切片切的是 **CodeOnly 之后**的文本 —— 切原文的话,
+            //     把 RaiseIntentSettled 删掉、在 NoteIntent 里留一句提到它的注释就能喂绿。
+            var note = Slice(gpuCode, "public void NoteIntent(string alias)", "void SetLastIntent");
             assert(note is not null && note.Contains("RaiseIntentSettled(alias, res)"),
                 "★★★★ 意图落地时**无条件**报一次 —— 与 SetLastIntent 那条「说法变了才广播」是两条信号。"
                 + "合并会造出一个真的会卡死的闸:模型被卸→重发意图→中枢又回 code=OK("
                 + "与上次逐字相同)⇒ 去重把它整条吃掉 ⇒ 闸永远停在「正在启用中」,而模型其实已经好了");
-            var setLast = Slice(gpu, "void SetLastIntent(IntentOutcome res)", "最后一次意图的**说法**变了");
+            var setLast = Slice(gpuCode, "void SetLastIntent(IntentOutcome res)", "public event Action? IntentChanged");
             assert(setLast is not null && !setLast.Contains("IntentSettled"),
                 "★★★ 落地信号**不许**挂在 SetLastIntent 里 —— 那个方法带着「说法变了才广播」的去重,"
                 + "挂进去就等于把无条件信号又变成有条件的(上面那条卡死原样复现)");
-            assert(CodeOnly(gpu).Contains("ForgetIntentCooldown"),
+            assert(gpuCode.Contains("public void ForgetIntentCooldown"),
                 "★★ 被卸之后要能重新起:去抖冷却(20 秒)的前提是「它已经起来了,别再问」,"
                 + "前提没了冷却就变成一道把人关在门外的闸 —— 按钮灰着,而 20 秒里没有任何人在试着修好它");
         }
 
-        var td = Read(files, "TaskDrawerView.cs");
-        if (td is not null)
+        // ══════════════════════════════════════════════════════════════════
+        //  ⑥ 两处呈现都必须走**同一个** TaskRowLook。
+        //  ★★★ 「不画进度条」那件事本身由 TaskRow() 那组**行为断言**守着(验的是纯函数的返回值,
+        //    注释喂不绿);这里只钉**接线**:两处都得真的去调它,而不是各判各的。
+        //  ★ 上一轮这儿只有一条「`t.IsModelLoad` 这个词出现在 !IsPaused 那段里」——
+        //    写成 `if (t.IsModelLoad) bar.IsIndeterminate = true;` 同样保绿,
+        //    它**根本没验模型那一支里没有 bar**。
+        // ══════════════════════════════════════════════════════════════════
+        foreach (var (name, why) in new[]
         {
-            // ★★★ 用户裁定⑥:模型装载不画进度条,而且**在形上**与真任务分得开。
-            var running = Slice(td, "if (!t.IsPaused)", "// ★ 暂停不画进度条");
-            assert(running is not null && running.Contains("t.IsModelLoad"),
-                "★★★★ 模型装载那一条**不走进度条那条渲染路径** —— "
-                + "判词:一个不知道自己进度的进度条,是在假装它知道(它的 Progress 恒为 -1)");
-            assert(CodeOnly(td).Contains("TheApp.Ready.Gate("),
-                "★★★ 抽屉里那条模型的状态取自**同一个就绪闸**,不在这儿另判一次 —— "
-                + "两套口径岔开的那天,发送键亮着而抽屉里还写着「正在启用中」,且没有任何东西会红");
+            ("TaskDrawerView.cs", "任务抽屉"),
+            ("MainWindow.xaml.cs", "底部任务横条(**用户裁定原文点名的就是它**)"),
+        })
+        {
+            var src = Read(files, name);
+            if (src is null) { assert(false, $"★ 元断言:编译集里找得到 {name}"); continue; }
+            assert(CodeOnly(src).Contains("TaskRowLook.For("),
+                $"★★★★ {why}走 `TaskRowLook.For(...)` —— 两处各判一次的那天,"
+                + "横条说「正在载入」而抽屉说「已启用」,**同一条任务在两个界面互相打脸**,"
+                + "而不会有任何东西红(2026-08-10 实机反馈就是这个形状)");
+        }
+
+        var mw = Read(files, "MainWindow.xaml.cs");
+        if (mw is not null)
+        {
+            var mwCode = CodeOnly(mw);
+            // ★ 结束锚点用 `OnToggleTaskDrawer` 而不是 `RotateTask` —— 后者在文件里排在
+            //   ShowTask **前面**,拿它当终点会切出 null,断言当场红得理由是假的(自己刚踩了一次)。
+            var show = Slice(mwCode, "void ShowTask(RunningTask t", "void OnToggleTaskDrawer");
+            assert(show is not null, "★ 元断言:切得到 ShowTask 的正文(锚点还在)");
+            assert(show is not null && show.Contains("TaskBarProgress.Visibility"),
+                "★★★ 横条要真的**把进度条藏起来**(不是只把它设成 0)—— "
+                + "一条停在 0 的进度条会被读成「有个任务卡住了」,那比不显示更坏");
+            assert(mwCode.Contains("TheApp.Ready.Changed"),
+                "★★★ 横条接了就绪闸 —— 少这一条订阅,它会永远停在「正在启用中」,"
+                + "而抽屉(它自己接了闸)显示「已启用」");
         }
 
         var tc = Read(files, "TaskCenter.cs");
         assert(tc is null || CodeOnly(tc).Contains("public bool IsModelLoad"),
-            "★★ 「这条是模型装载」是个**显式字段**,不是去嗅 WorkspaceKey==\"model\" —— "
+            "★★ 「这条是模型装载」是个**显式字段**,不是去嗅 WorkspaceKey==「model」—— "
             + "嗅探问的是一个**相关**的问题,不是那个问题;将来有真任务也带别名时它会误判,而不会红");
+
+        var mr = Read(files, "ModelReadiness.cs");
+        assert(mr is null || CodeOnly(mr).Contains("void RetireModelTask"),
+            "★★★ 模型装完/被卸之后,那条任务要**撤掉**(暂停的除外 —— D87③ 的「再开」靠它)。"
+            + "`RegisterIntentTask` 只 Add 不 Remove:少了这条,横条会一直轮播一件早就结束的事");
+
+        var ip = Read(files, "InterpretPanel.cs");
+        if (ip is not null)
+        {
+            var ipCode = CodeOnly(ip);
+            assert(ipCode.Contains("ProbeSpeechAsync") && ipCode.Contains("_reprobe"),
+                "★★★★ 语音面**闸红了之后还有人在探**。上一轮这条是死锁:重探的唯一触发是"
+                + "「转写失败之后」,而转写要按钮可按、按钮可按要闸就绪 ⇒ 闸一红就再也探不了,"
+                + "必须切走再切回 —— 而旁边的注释白纸黑字写着「不是等用户切走再切回来」");
+            assert(!ipCode.Contains("ChatView.BubbleShell(body, fromMe))"),
+                "★★★ 同传的气泡不许绕过 `WithBubbleActions` 直接用 BubbleShell —— "
+                + "绕过去的那一版,转写气泡一颗按钮都没有,而**转写恰恰是最该能复制的东西**");
+            assert(!ipCode.Contains("ToolTipService.SetShowOnDisabled"),
+                "★ 反向钉:别再用 ToolTip 当解释 —— 本 App 全局关掉了它(见 Theme/Controls.xaml)");
+        }
+
+        var tdNoTip = Read(files, "TaskDrawerView.cs");
+        assert(tdNoTip is null || !CodeOnly(tdNoTip).Contains("ToolTipService.SetShowOnDisabled"),
+            "★★★ `ToolTipService.SetShowOnDisabled` 在本 App 里是**空操作**(ToolTip 被全局关掉,"
+            + "一个像素都不画)⇒ 不许留着它冒充「已修好按钮自己解释自己」。"
+            + "多一行代码宣称某件事被修好了,比那件事没修更坏");
     }
 
     // ────────────────────────────────────────────────────────── 小工具
