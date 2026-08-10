@@ -316,7 +316,7 @@ public partial class App : Application
         //   下一次他会以为「关栈根本没用」——而真相是我们**有意**没动它。
         if (report.Unattributed.Count > 0)
             ReportCloseNotice(report.ToText()
-                              + "\n\n★ 管理端现在就关闭。上面那些**不是**我们起的(至少我们证明不了),"
+                              + "\n\n★ 管理端现在就关闭。上面那些【不是】我们起的(至少我们证明不了),"
                               + "所以没动 —— 要停请你自己确认后再停。");
 
         _settingsWatcher?.Dispose();

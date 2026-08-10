@@ -241,7 +241,7 @@ public sealed class HostHubView : UserControl
             if (live.AllUp)
             {
                 box.Children.Add(Ui.Body("整套栈都在跑。"));
-                box.Children.Add(Ui.Caption("★ 判据是**探到的**:网关 /health 答话、Edge 回环管理面答话。"
+                box.Children.Add(Ui.Caption("★ 判据是【探到的】:网关 /health 答话、Edge 回环管理面答话。"
                                             + "不是「进程起来了」就算 —— 那两件事经常不一样。"));
             }
             else if (live.HalfUp)
@@ -251,9 +251,9 @@ public sealed class HostHubView : UserControl
                 var upOne = down == "网关" ? "LAN Edge" : "网关";
                 box.Children.Add(Ui.Body($"★★ 【起了一半】:{upOne} 在跑,{down} 没起来。"));
                 box.Children.Add(Ui.Caption(down == "网关"
-                    ? "　这台的中枢在,副机连得上 —— 但**没有任何模型用得了**:"
+                    ? "　这台的中枢在,副机连得上 —— 但【没有任何模型用得了】:"
                       + "「模型」页会是空的,聊天会说后端没应答。缺的就是上面那一条。"
-                    : "　模型用得了(本机客户端走回环网关)—— 但**副机连不上这台**:"
+                    : "　模型用得了(本机客户端走回环网关)—— 但【副机连不上这台】:"
                       + "对外的 8443 没人在听。"));
                 box.Children.Add(Ui.Caption("　★ 这一档在此之前【看不见】:页面只探 Edge 的管理面,"
                                             + "网关不通时照样显示「就是中枢主机」。"));

@@ -254,10 +254,10 @@ public static class StackStop
             //   那句话会和它下面那张「还在跑但没动」的单子当场自相矛盾。
             s.AppendLine(!AllGone ? "★ 没有完全停干净 —— 下面是还剩的东西。"
                        : Unattributed.Count > 0
-                         ? "AI 栈的入口**都不通了(已验)**。★ 但下面这些**还在跑** —— "
+                         ? "AI 栈的入口【都不通了(已验)】。★ 但下面这些【还在跑】 —— "
                            + "我们认不出它们是不是自己起的,所以没动。请你自己看一眼。"
                        : Untouched.Count > 0
-                         ? "我们起的那些都停掉了(已验:端口不通)。★ 下面是**有意没动**的那批。"
+                         ? "我们起的那些都停掉了(已验:端口不通)。★ 下面是【有意没动】的那批。"
                          : "整套 AI 栈已经停掉了(已验)。");
             if (Did.Count > 0) { s.AppendLine(); s.AppendLine("停掉了:"); foreach (var d in Did) s.AppendLine("  · " + d); }
             if (Unattributed.Count > 0)
@@ -314,7 +314,7 @@ public static class StackStop
         if (adopted.Count > 0)
             untouched.Add($"起栈之前就在跑的 {adopted.Count} 个 {StackOwnership.BackendProcName}"
                           + $"(PID {string.Join("、", adopted)})—— 那是网关 adopt_running() 认领的那一批,"
-                          + "不是我们起的,**不动**。");
+                          + "不是我们起的,【不动】。");
 
         var (ledgerGw, ledgerEdge) = StackOwnership.Owned();
         var (handleGw, handleEdge) = HostProvision.StartedHandles;
@@ -339,9 +339,9 @@ public static class StackStop
             else
                 unattributed.Add($"机器上有 {strays.Count} 个 {StackOwnership.EdgeProcName}"
                               + $"(PID {string.Join("、", strays.Select(p => p.Id))}),"
-                              + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)—— "
+                              + "而我们【没有它的归属账】(本进程没起过它,账本里那条也对不上)—— "
                               + "手工跑 start-stack.ps1 起的 Edge 就长这样。"
-                              + "★ 分不出是不是我们起的,所以**没动它**;要停请自己确认后再停。");
+                              + "★ 分不出是不是我们起的,所以【没动它】;要停请自己确认后再停。");
         }
 
         // ── ③ 网关:连同它生出来的后端一起(进程树 = 我们起的那些)────
@@ -355,10 +355,10 @@ public static class StackStop
             else
                 unattributed.Add($"127.0.0.1:{HostSetup.GatewayPort} 上有人在听"
                               + $"(PID {onPort.Value.Pid} · {onPort.Value.Name}),"
-                              + "而我们**没有它的归属账**(本进程没起过它,账本里那条也对不上)。"
-                              + "★ 在这个口上听、进程名像 python 的**不一定是网关** —— "
+                              + "而我们【没有它的归属账】(本进程没起过它,账本里那条也对不上)。"
+                              + "★ 在这个口上听、进程名像 python 的【不一定是网关】 —— "
                               + "你自己的 http.server / Flask / uvicorn / Jupyter 长得一模一样,"
-                              + "而这里一旦认错就是连着子进程树一起杀掉。⇒ **没动它**。");
+                              + "而这里一旦认错就是连着子进程树一起杀掉。⇒ 【没动它】。");
         }
 
         // ── ④ 收尾:被甩掉的后端(改过父进程的那种)────────────────────
@@ -372,7 +372,7 @@ public static class StackStop
             if (live.Count > 0)
                 unattributed.Add($"机器上还有 {live.Count} 个 {StackOwnership.BackendProcName}"
                               + $"(PID {string.Join("、", live.Select(p => p.Id))})—— {snapWhy}。"
-                              + "⇒ 分不出哪些是我们起的、哪些是你自己开着的,所以**一个都没动**。"
+                              + "⇒ 分不出哪些是我们起的、哪些是你自己开着的,所以【一个都没动】。"
                               + "要停的话请自己确认后再停。");
         }
         else

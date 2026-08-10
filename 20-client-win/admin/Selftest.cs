@@ -82,6 +82,7 @@ public static partial class Selftest
             RunMoved();     // ★ V21:跟着 3100 行一起搬过来的那批(admin/SelftestMoved.cs)
             RunLiveViews(); // ★ V21:那两页**真的点开用**(admin/SelftestLiveViews.cs)
             RunWheel();     // ★ V29:滚轮真的全局可滚 + 四页普查(admin/SelftestWheel.cs)
+            RunChrome();    // ★ V29b:自绘标题栏真的在、三个键真的管用(admin/SelftestChrome.cs)
             RunIcon();      // ★ V29:管理端图标真的在 exe 里、是红的、与客户端是镜像(admin/SelftestIcon.cs)
             RunOnDemand();  // ★ V29:「按需」默认全勾的两支各走一遍(admin/SelftestOnDemand.cs)
             RunLive();
