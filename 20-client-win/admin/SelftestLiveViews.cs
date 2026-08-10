@@ -262,6 +262,38 @@ public static partial class Selftest
         Assert(texts.Any(t => t.Contains(cat.Components[0].PeakGiB.ToString("0.0"), StringComparison.Ordinal)
                               || t.Contains(cat.Components[0].PeakGiB.ToString("0.00"), StringComparison.Ordinal)),
             "★★ 峰值显存也是**中枢下发的那个数**(唯一权威是主机的 vram-budget.toml)");
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V29(实机反馈②)· 「按需」那一列的默认值。用户 2026-08-09 一次性授权全部组件。
+        //
+        //  ★ 判据按**中枢此刻的真实状态**分两支写,而不是"现在应该是全勾" ——
+        //    后者只在写它的那天成立,中枢那边一被授权过就变成恒假(本仓踩过这个形状)。
+        //  ★★ 两支都真的走过一遍:哪一支跑了,输出里说得出来。
+        // ══════════════════════════════════════════════════════════════════
+        var hubPermitted = cat.Components.Where(c => c.PermittedOnDemand).Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
+        if (hubPermitted.Count == 0)
+        {
+            Assert(view.DefaultedAllOnDemand,
+                $"★★★★ 中枢那份授权是空的 ⇒ 面板按 **2026-08-09 那次一次性授权**把「按需」默认全勾上"
+                + $"(实测 {view.PermittedNow.Count}/{cat.Components.Count} 个)—— "
+                + "这是用户原话「我需要所有模型一开始都是默认按需被勾上的」的落点");
+            Assert(cat.Components.All(c => view.PermittedNow.Contains(c.Id)),
+                $"★★★ **每一个**组件都勾上了,不是勾了一部分"
+                + $"(实测 {view.PermittedNow.Count}/{cat.Components.Count})");
+            Assert(TextsOf(view).Any(t => t.Contains("一次性授权", StringComparison.Ordinal)),
+                "★★★★ 默认勾上这件事**在界面上说出来了** —— 一次性授权省掉的是「逐个点」,"
+                + "不是「让人知道自己被默认授权了什么」。不说的话,用户看到的就是一排"
+                + "他没点过的勾,而 D90 裁定①防的正是这个");
+        }
+        else
+        {
+            Assert(!view.DefaultedAllOnDemand && hubPermitted.SetEquals(view.PermittedNow),
+                $"★★★★ 中枢已经记着 {hubPermitted.Count} 个授权 ⇒ **以中枢为准**,面板不再默认全勾"
+                + $"(实测面板 {view.PermittedNow.Count} 个)—— ★ 少了这一条,用户取消勾选、"
+                + "点确定、再打开这一页时会被**重新勾回去**,于是这一页永远撤不掉授权");
+        }
+        Console.WriteLine($"     (这一趟走的是:中枢授权 {hubPermitted.Count} 个 ⇒ "
+                          + $"{(hubPermitted.Count == 0 ? "默认全勾那一支" : "以中枢为准那一支")})");
         }
     }
 

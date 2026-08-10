@@ -81,6 +81,9 @@ public static partial class Selftest
             RunStackStop(); // ★ V23:关栈那一半的**行为**判据(admin/SelftestStackStop.cs)
             RunMoved();     // ★ V21:跟着 3100 行一起搬过来的那批(admin/SelftestMoved.cs)
             RunLiveViews(); // ★ V21:那两页**真的点开用**(admin/SelftestLiveViews.cs)
+            RunWheel();     // ★ V29:滚轮真的全局可滚 + 四页普查(admin/SelftestWheel.cs)
+            RunIcon();      // ★ V29:管理端图标真的在 exe 里、是红的、与客户端是镜像(admin/SelftestIcon.cs)
+            RunOnDemand();  // ★ V29:「按需」默认全勾的两支各走一遍(admin/SelftestOnDemand.cs)
             RunLive();
             RunLifecycle(); // ★ V23:托盘右键「关闭」→ 栈真的没了(子进程,理由见那儿)
             RunAnchorTally();
