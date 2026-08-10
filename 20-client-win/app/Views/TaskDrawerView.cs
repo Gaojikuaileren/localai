@@ -75,23 +75,23 @@ public sealed class TaskDrawerView : UserControl
     //  ⇒ 一个源:`TheApp.Ready.Gate(alias)`。抽屉只负责把它**画**出来。
     // ══════════════════════════════════════════════════════════════════════
 
-    /// <summary>模型装载那一行右侧的文字态。★ 取自就绪闸,不在这儿另判一次。</summary>
-    static string ModelStateText(RunningTask t) => TheApp.Ready.Gate(t.ResumeAlias).State switch
-    {
-        ModelReadyState.Ready => "已启用",
-        ModelReadyState.Starting => "正在启用中",
-        _ => "未启用",
-    };
+    /// <summary>
+    /// 这一条该怎么画。★★ 走 <see cref="TaskRowLook"/> —— 底部横条调的是**同一个函数**。
+    /// 两处各判一次的那天,横条说「正在载入」而抽屉说「已启用」(2026-08-10 实机就是这个形状)。
+    /// </summary>
+    static TaskRowLook LookOf(RunningTask t) => TaskRowLook.For(t, TheApp.Ready.Gate(t.ResumeAlias));
 
     /// <summary>
     /// 模型装载那一行的状态点。★★ 它替掉的是进度条 —— 一个**不动的**图元
     /// 说的正是实话:「我知道自己在哪个态,但我不知道还要多久」。
-    /// <para>★ 三态三色**外加**三种文字(见 <see cref="ModelStateText"/>)——
+    /// <para>★ 三态三色**外加**三种文字(见 <see cref="TaskRowLook"/>)——
     /// 颜色只是辅助;真正把两类任务分开的是"有没有进度条"这个形状差异。</para>
     /// </summary>
-    static UIElement StateDot(RunningTask t)
+    internal static Border StateDot(RunningTask t) => StateDotOf(TheApp.Ready.Gate(t.ResumeAlias).State);
+
+    /// <summary>★ 抽成按**状态**取色,自检才验得了「三态三色真的不一样」(而不是三格同一个颜色)。</summary>
+    internal static Border StateDotOf(ModelReadyState st)
     {
-        var st = TheApp.Ready.Gate(t.ResumeAlias).State;
         var dot = new Border
         {
             Width = 8, Height = 8,
@@ -154,8 +154,9 @@ public sealed class TaskDrawerView : UserControl
         {
             foreach (var t in app.Tasks.Tasks)
             {
+                var look = LookOf(t);
                 var head = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 4) };
-                var pct = new TextBlock { Text = t.IsModelLoad ? ModelStateText(t) : t.PercentText, VerticalAlignment = VerticalAlignment.Center };
+                var pct = new TextBlock { Text = look.StateText, VerticalAlignment = VerticalAlignment.Center };
                 pct.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
                 pct.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
                 DockPanel.SetDock(pct, Dock.Right);
@@ -191,9 +192,9 @@ public sealed class TaskDrawerView : UserControl
                     //    换皮肤、色觉差异、灰度截图三种情况下它们会重新长得一模一样。
                     // ══════════════════════════════════════════════════════════════
                     list.Children.Add(Ui.Card(
-                        t.IsModelLoad
-                            ? Ui.Stack(head, Ui.Caption(t.Detail))       // ★ 没有 bar —— 这就是那条裁定
-                            : Ui.Stack(head, Ui.Caption(t.Detail), bar),
+                        look.ShowProgressBar
+                            ? Ui.Stack(head, Ui.Caption(t.Detail), bar)
+                            : Ui.Stack(head, Ui.Caption(t.Detail)),      // ★ 没有 bar —— 这就是那条裁定
                         new Thickness(0, 0, 0, 10)));
                     continue;
                 }
@@ -228,17 +229,22 @@ public sealed class TaskDrawerView : UserControl
                     // ★★★ 裁定原文:「前提是显存允许的情况,不然开始按钮是不可用的」。
                     //   ★ 它旁边那行 `gate` 永远在说**为什么** —— 置灰但不说原因等于骗人。
                     IsEnabled = canStart,
-                    // ★ 悬停也给同一句:按钮本身也要能自己解释自己
+                    // ══════════════════════════════════════════════════════════════
+                    //  ★★★ 这个 ToolTip **在本 App 里永远不会画出一个像素**,而这是**有意的**:
+                    //    `Theme/Controls.xaml` 全局把 ToolTip 关掉了(Visibility=Collapsed + 空模板),
+                    //    那是 2026-07-30 的用户裁定「取消所有鼠标悬停弹小窗」,
+                    //    还有一条断言专门守着它「已关」。留在这里是那条裁定明说允许的用法:
+                    //    「代码里仍可留 ToolTip 作为**说明性注解**(也方便无障碍),但一律不再弹出」。
+                    //  ★★ ⇒ **给人看的那一份不能靠它**:真正在说原因的是下面那行 `gate`,
+                    //    它常驻在按钮旁边,不用悬停、不用点击。
+                    //  ★★★ V30b 更正:上一轮我在这儿加了 `ToolTipService.SetShowOnDisabled(start, true)`
+                    //    并在提交正文里宣称「修好了『按钮自己解释自己』那句假话」——
+                    //    **那一行是空操作**:它只解决「禁用控件上 ToolTip 不弹」,
+                    //    而这个 App 里 ToolTip 压根不画。⇒ 已删掉。
+                    //    多一行代码宣称某件事被修好了,比那件事没修更坏。
+                    // ══════════════════════════════════════════════════════════════
                     ToolTip = reason,
                 };
-                // ★★★ V30 顺手修:WPF 的 ToolTip **默认在禁用的控件上不显示**。
-                //   ⇒ 上面那句 `ToolTip = reason` 恰恰在**最需要它的时候**(按钮灰着、
-                //     人正想知道为什么)一个字都不显示,而它旁边的注释写着
-                //     「按钮本身也要能自己解释自己」—— 那句话此前是假的。
-                //   ★ 与本轮发送键那颗气泡是同一族缺陷:禁用的控件收不到输入,
-                //     挂在它身上的解释就够不着。这里一行就能修好(发送键那边要外包容器,
-                //     因为用户点名要的是**点击**弹气泡,而 ToolTip 是悬停)。
-                ToolTipService.SetShowOnDisabled(start, true);
                 var self = t;
                 start.Click += async (_, _) =>
                 {

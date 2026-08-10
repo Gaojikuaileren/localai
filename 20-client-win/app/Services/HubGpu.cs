@@ -496,12 +496,14 @@ public sealed partial class HubGpu : IDisposable
         try { IntentSettled?.Invoke(alias, res); } catch { }
     }
 
-    /// <summary>自检用:走**同一对**广播口 —— 自检里再发一遍事件就是第二套口径。</summary>
-    internal void SettleIntentForSelftest(string alias, IntentOutcome res)
-    {
-        RaiseIntentStarted(alias);
-        RaiseIntentSettled(alias, res);
-    }
+    // ★★ 自检缝:两条**分开**,不能合成一个。
+    //   合起来的话「发出去了」与「回来了」在一次调用里净抵消,
+    //   而闸的 InFlight 记账正是要在这两点之间被观察 —— 合并等于把要测的那段直接跳过。
+    /// <summary>自检用:走**同一个**广播口报"发出去了"。</summary>
+    internal void StartIntentForSelftest(string alias) => RaiseIntentStarted(alias);
+
+    /// <summary>自检用:走**同一个**广播口报"落地了"。</summary>
+    internal void SettleIntentForSelftest(string alias, IntentOutcome res) => RaiseIntentSettled(alias, res);
 
     /// <summary>
     /// 忘掉这个别名的去抖冷却,让**下一次**意图立刻发得出去。

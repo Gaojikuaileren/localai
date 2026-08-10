@@ -205,6 +205,27 @@ public sealed class ChatView : UserControl
     /// <summary>自检用:当前挂着的消息滚动壳。★ 只读 —— 断言要量的是它**真实的**偏移。</summary>
     internal ScrollViewer? MessageScrollForSelftest => _msgScroll;
 
+    /// <summary>自检用:当前的输入框(验「引用到输入框」真的写进去了、且没吃掉原来的草稿)。</summary>
+    internal TextBox InputForSelftest => _input;
+
+    /// <summary>
+    /// 自检用:把可视树里所有【气泡动作槽】找出来。
+    /// ★ 认的是 <c>WithBubbleActions</c> 挂在行上的那个 <c>Tag</c> —— 走的是**真实的可视树**,
+    ///   不是另建一份影子结构。找不到就是零个,而"零个"会被上面的元断言判红。
+    /// </summary>
+    internal static List<ContentControl> ActionSlotsIn(DependencyObject root)
+    {
+        var found = new List<ContentControl>();
+        void Walk(DependencyObject n)
+        {
+            if (n is StackPanel { Tag: ContentControl slot }) found.Add(slot);
+            var count = VisualTreeHelper.GetChildrenCount(n);
+            for (int i = 0; i < count; i++) Walk(VisualTreeHelper.GetChild(n, i));
+        }
+        Walk(root);
+        return found;
+    }
+
     /// <summary>
     /// 这一块面板挂上去【之后】要做的定位。由 DockWithInput 填,BuildConversationCore 挂完就跑。
     /// ★ 非空 = 有一次定位还没落地;跑完必须清掉,否则下一次重建会拿着旧闭包再定位一次
@@ -239,7 +260,23 @@ public sealed class ChatView : UserControl
         if (all.Count != _liveCount) return false;                     // 新增/删除了消息
         var m = all.FirstOrDefault(x => x.MessageId == _liveMsgId);
         if (m is null) return false;
-        // ★ 跨过折叠阈值那一下要长出「展开全部」那颗按钮 = 结构变了。整场最多发生一次。
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30b 更正:这里原来写「跨过折叠阈值那一下……**整场最多发生一次**」。
+        //    **是错的**,而且错得很贵:这一句是 `return false`(交回整块重建),
+        //    而条件是「行数 > 30」—— 一旦回复长过 30 行,它**此后每一帧都成立**。
+        //    ⇒ 快路径不是"多重建一次",是**从此永久失效**:
+        //      长回答的后半段,每个 token 都在整块重建热层的全部气泡。
+        //    ★ 「最多一次」说的是**结构变化**那件事(「展开全部」那颗按钮只长出来一次),
+        //      而写的却像是**重建**只发生一次。两者差着一整场生成的开销。
+        //
+        //  ★★ 这条今天**没修**,只把它说准了(修法要动 _liveText / 折叠 / 展开三处状态机:
+        //    折叠态下正文其实**冻住了**(永远是前 30 行),真正在变的只有那颗按钮上的行数,
+        //    所以快路径是做得到的 —— 但那是另一轮的事,已写进交回的「没做的」)。
+        //  ★★★ 顺带如实记一笔本轮加进来的代价:气泡旁那条动作槽是**每次重建都建**的
+        //    (ContentControl + StackPanel + 3 个事件订阅)⇒ 纯文本气泡从 3 个元素变 5 个。
+        //    在 >30 行这个区间里,这笔代价会跟着上面那条重建一起被放大。
+        //    上一轮的交回把它说成了"不存在",那是不对的 —— 它不是零,只是不在每条路径上。
+        // ══════════════════════════════════════════════════════════════════
         if (m.Text.Split('\n').Length > CollapseLines) return false;
 
         // ★ 先量"当时贴没贴底",再改文字 —— 改完 ScrollableHeight 就变了,那时再问已经晚了。
@@ -925,8 +962,14 @@ public sealed class ChatView : UserControl
             //  意图信号(比"打开 APP"晚、比"按发送"早)。
             //  ★ 别名与 ChatClient.StreamAsync 用的是**同一个**(assistant.fast):
             //    客户端只点别名不点组件(§8.1),别名 → 组件的桥在中枢。
-            //  ★ 即发即忘 + 去抖 + 异常全吞,都在 HubGpu.NoteIntent 里 ——
+            //  ★ 即发即忘 + 去抖,都在 HubGpu.NoteIntent 里 ——
             //    这里必须只有一行:输入框的职责是收字,不是等模型。
+            //  ★★★ V30b 更正:这句话原来写的是「即发即忘 + 去抖 + **异常全吞**」。
+            //    最后四个字**从 V20-② 起就是假的** —— 那一轮把 `catch { }` 换成了
+            //    「写一条 intent_unreachable 失败码 + 广播」,失败从此有落点。
+            //    ★ 而这句过期的话**真的骗到了人**:2026-08-10 协调层照它把一条**已修**的缺陷
+            //      当成待核隐患写进了车道任务书。`HubGpu` 那边写的是「**改之前**这里是 catch { }」——
+            //      带时态的留痕不会骗人,不带时态的会。
             //  ★★ 归属:本行属于 V2 车道(GPU 面身份与租约收口),已在决议包里点名。
             // ══════════════════════════════════════════════════════════
             TheApp.Gpu.NoteIntent("assistant.fast");
@@ -2110,7 +2153,9 @@ public sealed class ChatView : UserControl
                 stack.Children.Add(toggle);
             }
         }
-        return WithBubbleActions(BubbleShell(stack, user), m, user, withQuote);
+        // ★ 只读浏览没有输入框 ⇒ 不给「引用」那颗(传 null),但「复制」照给。
+        return WithBubbleActions(BubbleShell(stack, user), m.Text, user,
+                                 withQuote ? () => QuoteToInput(m) : null);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -2134,20 +2179,29 @@ public sealed class ChatView : UserControl
     //    在一个**已经不疼**的地方冒这个险不划算。这条选择与理由写进交回。
     // ══════════════════════════════════════════════════════════════════════
 
-    /// <summary>动作槽的宽度。★ **始终预留**——按钮出现/消失时布局一个像素都不动。</summary>
-    const double ActionSlotWidth = 30;
+    /// <summary>
+    /// 动作槽的宽度。★ **始终预留**——按钮出现/消失时布局一个像素都不动。
+    /// <para>★★ 46 是被**文字**逼出来的,不是随便定的:见 <see cref="BubbleActionButton"/> ——
+    /// 这个 App 全局关掉了 ToolTip,所以按钮只能自己写清楚自己叫什么。</para>
+    /// </summary>
+    internal const double ActionSlotWidth = 46;
 
     /// <summary>
     /// 给气泡挂上「复制 / 引用」。★ 按钮**只在鼠标悬停或键盘焦点进来时才建**(见上面那段)。
+    /// <para>★ <c>static</c> + 回调:同传那一侧(<c>InterpretPanel</c>)也要用它 ——
+    /// 那边此前直接调 <c>BubbleShell</c>,**绕过了唯一挂动作的出口**,于是转写气泡一颗按钮都没有。
+    /// 而转写恰恰是最该能复制的东西。</para>
     /// </summary>
-    /// <param name="withQuote">
-    /// 给不给「引用到输入框」。★ 只读浏览(已删除/已完成项目)传 false ——
-    /// 那种形态**根本没有输入框**,给一颗按下去什么都不会发生的按钮,比不给更坏。
+    /// <param name="onQuote">
+    /// 「引用到输入框」的动作;<c>null</c> = **不给这颗按钮**。
+    /// ★ 只读浏览(已删除/已完成项目)与同传面板都传 null —— 那两种形态**根本没有输入框**,
+    /// 给一颗按下去什么都不会发生的按钮,比不给更坏。
     /// </param>
-    FrameworkElement WithBubbleActions(Border shell, ChatMessage m, bool user, bool withQuote)
+    internal static FrameworkElement WithBubbleActions(Border shell, string text, bool user,
+                                                      Action? onQuote)
     {
         // ★ 没有正文(纯附件消息)⇒ 复制什么、引用什么都答不上来,不摆这两颗按钮。
-        if (m.Text.Length == 0) return shell;
+        if (text.Length == 0) return shell;
 
         var slot = new ContentControl
         {
@@ -2168,9 +2222,8 @@ public sealed class ChatView : UserControl
         {
             if (slot.Content is not null) { slot.Visibility = Visibility.Visible; return; }
             var col = new StackPanel();
-            col.Children.Add(ActionButton("⧉", "复制这条消息的全文", () => CopyBubble(m)));
-            if (withQuote)
-                col.Children.Add(ActionButton("❝", "引用到输入框", () => QuoteToInput(m)));
+            col.Children.Add(BubbleActionButton("复制", () => CopyText(text)));
+            if (onQuote is not null) col.Children.Add(BubbleActionButton("引用", onQuote));
             slot.Content = col;
         }
         row.MouseEnter += (_, _) => Build();
@@ -2178,23 +2231,32 @@ public sealed class ChatView : UserControl
         // ★ 键盘也够得着:气泡正文是**只读 TextBox**,Tab 走得进去 ——
         //   只挂 hover 的话,不用鼠标的人永远碰不到这两颗按钮。
         row.GotKeyboardFocus += (_, _) => Build();
+        // ★ 自检要能拿到这个槽,才验得了"真的是按需建"以及"建出来的是两颗可点的东西"。
+        row.Tag = slot;
         return row;
     }
 
-    /// <summary>气泡旁边那颗小按钮。★ 单字符 + ToolTip:槽只有 30 宽,放不下文字。</summary>
-    static FrameworkElement ActionButton(string glyph, string tip, Action onClick)
+    /// <summary>
+    /// 气泡旁边那颗小按钮。
+    /// <para>★★★ 写**文字**而不是字形(⧉ / ❝),理由是硬的:这个 App
+    /// **全局关掉了 ToolTip**(<c>Theme/Controls.xaml</c> 里 <c>Visibility=Collapsed</c> + 空模板,
+    /// 还有一条断言专门守着它「已关」)。⇒ 一颗只有字形、靠 ToolTip 解释自己的按钮,
+    /// 在这个 App 里就是**两个用户不认识的符号,而且没有任何途径能问出它们干什么**。
+    /// 上一轮我写的正是那种,而同一个提交里还写了 TipBubble 专门解决这类问题。</para>
+    /// </summary>
+    internal static FrameworkElement BubbleActionButton(string label, Action onClick)
     {
         var t = new TextBlock
         {
-            Text = glyph, TextAlignment = TextAlignment.Center,
+            Text = label, TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
         t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
         t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
         var b = new Border
         {
-            Child = t, Width = 24, Height = 22, Margin = new Thickness(3, 2, 3, 0),
-            Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = tip,
+            Child = t, Width = 40, Height = 22, Margin = new Thickness(3, 2, 3, 0),
+            Cursor = Cursors.Hand, Background = Brushes.Transparent,
             BorderThickness = new Thickness(1),
         };
         b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
@@ -2213,11 +2275,11 @@ public sealed class ChatView : UserControl
     /// <para>★ 剪贴板会被别的进程锁住(Windows 上很常见)⇒ 失败要**说出来**:
     /// 静默失败时用户会去别处粘贴,粘到的是上一次的内容。</para>
     /// </summary>
-    void CopyBubble(ChatMessage m)
+    internal static void CopyText(string text)
     {
         try
         {
-            Clipboard.SetText(m.Text);
+            Clipboard.SetText(text);
         }
         catch (Exception ex)
         {
@@ -2235,14 +2297,17 @@ public sealed class ChatView : UserControl
     /// </summary>
     void QuoteToInput(ChatMessage m)
     {
-        if (!_input.IsLoaded) return;   // ★ 没有输入框的形态(只读浏览)—— 静默返回,不假装做了
+        // ★ 没有输入框的形态(只读浏览 / 同传面板)压根**不会有这颗按钮** ——
+        //   `WithBubbleActions` 的 onQuote 传 null 就不建它。⇒ 这里不再拿 IsLoaded 早退:
+        //   那个判据既是多余的,又让这条路**在离屏自检里永远走不到**(IsLoaded 要挂在窗口上才为真),
+        //   于是「引用真的写进输入框了」那条断言恒绿 —— 一个测不到的守卫,守的是它自己。
         var quoted = string.Join("\n", m.Text.Split('\n').Select(l => "> " + l));
         var head = _input.Text.Length > 0 && !_input.Text.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
         _input.Text = _input.Text + head + quoted + "\n";
         // ★ _draft 由 _input 的 TextChanged 顺手更新(那个处理器同时会发一次「意图即起」——
         //   引用也是"我要用它"的信号,顺带把模型起起来正合适)。
         _input.CaretIndex = _input.Text.Length;
-        _input.Focus();
+        if (_input.IsLoaded) _input.Focus();   // ★ 不在树上时 Focus() 只会静默返回 false
     }
 
     /// <summary>气泡外壳(自己发的靠右、强调色;AI 的靠左、沉底色)。与正文同理:渲染诊断画的就是它。</summary>
