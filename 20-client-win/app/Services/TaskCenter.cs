@@ -83,6 +83,21 @@ public sealed class RunningTask : INotifyPropertyChanged
     /// <summary>持有的租约 id —— 让位通知按它匹配"这条任务被打断了没有"。</summary>
     public string LeaseId { get; set; } = "";
 
+    /// <summary>
+    /// 这条是【模型装载】,不是一件在算的活。★★★ 用户裁定(2026-08-09):
+    /// 「任务栏里载入中的模型要和真任务分开,而且**不要进度条**。」
+    ///
+    /// <para>★ 为什么是一个显式字段,而不是去嗅 <c>WorkspaceKey == "model"</c> 或
+    /// <c>ResumeAlias != ""</c>:那两个都是**相关**的问题,不是**那个**问题
+    /// (ASSERTION-PITFALLS 第 9 条的形状)。将来有一条真在算的活也带上别名时,
+    /// 嗅探会把它误画成状态点,而**不会有任何东西红**。</para>
+    ///
+    /// <para>★★ 判词:**一个不知道自己进度的进度条,是在假装它知道。**
+    /// 模型装载的 <c>Progress</c> 恒为 -1(它真的不知道),走通用渲染就会拿到一条
+    /// 来回跑的假进度条 —— 那条动画在说"我在推进",而它什么都不知道。</para>
+    /// </summary>
+    public bool IsModelLoad { get; init; }
+
     // ★ 暂停时不显示百分比:那个数字会让人以为它还在动。
     public string PercentText => _state == TaskState.Paused ? "已暂停"
                                  : _progress < 0 ? "进行中" : $"{_progress * 100:0}%";

@@ -73,8 +73,21 @@ public sealed class InterpretPanel : UserControl
 
         Content = dock;
         Refresh();
-        Loaded += (_, _) => TheApp.Interpret.Changed += Refresh;
-        Unloaded += (_, _) => TheApp.Interpret.Changed -= Refresh;
+        Loaded += (_, _) =>
+        {
+            TheApp.Interpret.Changed += Refresh;
+            // ★★ V30:就绪闸也要接 —— 语音服务装完模型的那一刻按钮要自己亮起来,
+            //   而不是等用户切走再切回来。闸只在**答案真的变了**时响,接它不会有噪声。
+            TheApp.Ready.Changed += OnReadyChanged;
+            // ★ 进页面探一次本机语音服务。★★ 这是 `PttHealthAsync` 这条路**第一个真实调用点** ——
+            //   在它之前那个方法零调用,于是这一页从来没真的知道过语音服务起没起。
+            _ = TheApp.Interpret.ProbeSpeechAsync();
+        };
+        Unloaded += (_, _) =>
+        {
+            TheApp.Interpret.Changed -= Refresh;
+            TheApp.Ready.Changed -= OnReadyChanged;
+        };
     }
 
     // ---------------------------------------------------------------- 底部字幕横条
@@ -142,11 +155,33 @@ public sealed class InterpretPanel : UserControl
     void RefreshPtt()
     {
         var st = TheApp.Interpret;
-        _pttButton.IsEnabled = !st.PttTranscribing;
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30(用户裁定「不仅仅是聊天功能,其他所有功能都是一样的」):
+        //    按住说话也挂在**同一个就绪闸**上 —— 只是它问的是**另一个面**
+        //    (本机 127.0.0.1:18085 的 /health,不是中枢的显存)。
+        //  ★ 这一格是这套设计成不成立的检验:两个证据源完全不同,而这里读到的
+        //    是**同一种** ModelGate,这颗按钮不需要知道自己问的是哪个面。
+        //  ★★ 顺带修掉一处旧的静默:`PttHealthAsync` 此前**一个调用点都没有** ——
+        //    这一页从来没真的探过语音服务,底下那句"本机语音服务(回环)"是无条件印的,
+        //    服务没起时它照样那么说。现在由闸来说,而闸是探出来的。
+        // ══════════════════════════════════════════════════════════════════
+        var gate = TheApp.Ready.Gate(ModelReadiness.SpeechAsr);
+        // ★★★★ `|| st.PttRecording` 不是可有可无:**正在录的时候绝不许禁用这颗按钮**。
+        //   松开与移出都是挂在按钮上的事件(PreviewMouseLeftButtonUp / MouseLeave),
+        //   而**禁用的控件收不到鼠标事件** —— 录音途中闸一变(比如一次健康重探失败)
+        //   把按钮灰掉,那两个事件就再也不来了 ⇒ **麦克风一直开着停不下来**。
+        //   ★ 本文件头写着:「忘了关的麦克风,正是这一页最不能出的事」。
+        //   ⇒ 闸只决定**能不能开始**;已经开始的那一段,由手决定何时结束。
+        _pttButton.IsEnabled = !st.PttTranscribing && (st.PttRecording || gate.CanUse);
+        _pttButton.Opacity = _pttButton.IsEnabled ? 1 : 0.45;
         _pttButton.Content = st.PttRecording ? $"正在录…{st.PttSeconds:0.0}s(松开结束)" : "按住说话";
 
         if (st.PttTranscribing) { _pttStatus.Text = "正在转写…"; return; }
         if (st.PttError.Length > 0) { _pttStatus.Text = st.PttError; return; }
+        // ★ 模型没起来 ⇒ 按钮已经灰了,这一行**必须**说清为什么、以及下一步。
+        //   ★★ 这里不用气泡而用常驻的一行:气泡要点一下才看得见,而这一行本来就在按钮旁边 ——
+        //     一个够不着的解释,和没有解释是一回事。
+        if (!gate.CanUse) { _pttStatus.Text = gate.Bubble.Replace("\n", " —— "); return; }
         if (st.PttResult is { } r)
         {
             // ★ 把 provenance 如实显示出来:它决定这段话能不能进记忆库,
@@ -161,6 +196,12 @@ public sealed class InterpretPanel : UserControl
             ? "按住说话:本机语音服务(回环)。★ 副机上还用不了 —— 网关代理那一段还没接。"
             : "按住说话。";
     }
+
+    /// <summary>
+    /// 就绪闸的答案变了 -> **只刷按住说话那一条**,不重建整页。
+    /// ★★ 闸可能在后台线程上响(探针跑在 Task 上)⇒ 切回 UI 线程再动控件。
+    /// </summary>
+    void OnReadyChanged() => Dispatcher.BeginInvoke(new Action(RefreshPtt));
 
     /// <summary>字幕逐字生长(识别侧每来一小段就调一次)。★ 还没定稿,只待在底部横条里。</summary>
     public void AppendSubtitle(string partial) => _subtitle.Text += partial;

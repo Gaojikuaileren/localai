@@ -328,6 +328,11 @@ public sealed partial class HubGpu : IDisposable
             Progress = -1,                       // 不确定进度:它不是一件有终点的活
             ResumeAlias = alias,
             NeedsComponents = new[] { res.Component },
+            // ★★★ V30(用户裁定):模型装载在任务栏里**要和真任务分开、而且不要进度条**。
+            //   ★ 上面那句 `Progress = -1` 说的是"我不知道进度";这一句说的是
+            //     "**别给我画进度条**" —— 两件事。此前只有前者,于是通用渲染路径
+            //     把它变成一条 IsIndeterminate 的、来回跑的**假**进度条。
+            IsModelLoad = true,
         };
         Tasks.Tasks.Add(t);
     }
@@ -388,6 +393,10 @@ public sealed partial class HubGpu : IDisposable
                 && DateTime.UtcNow - last < IntentCooldown) return;
             _lastIntent[alias] = DateTime.UtcNow;
         }
+        // ★★★ V30:这一条**真的要发出去了** —— 就绪闸据它进入「正在启用中」。
+        //   ★ 位置在去抖之后是判据的一部分:被去抖挡下的那些**没有**发起任何装载,
+        //     给它们也报一次"开始了"会让闸在一个什么都没发生的时刻亮起"正在启用中"。
+        RaiseIntentStarted(alias);
         // ══════════════════════════════════════════════════════════════════
         //  ★ 不 await:意图是"顺手说一声",不是用户在等的操作。
         //    一次起不来的模型**不该把输入框掀翻** —— 这条意图仍然成立,一个字没改。
@@ -418,6 +427,9 @@ public sealed partial class HubGpu : IDisposable
                                         $"{ex.GetType().Name}: {ex.Message}", "");
             }
             SetLastIntent(res);
+            // ★★★ V30:**无条件**报一次"这一条落地了"。见 RaiseIntentSettled 的说明 ——
+            //   它与 SetLastIntent 的「变了才广播」是两条不同的信号,合并会把闸卡死。
+            RaiseIntentSettled(alias, res);
             RegisterIntentTask(alias, res);
             Notify();
         });
@@ -446,6 +458,62 @@ public sealed partial class HubGpu : IDisposable
     /// 这条**只在有新话要说时**响,所以界面可以老老实实接它。</para>
     /// </summary>
     public event Action? IntentChanged;
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ V30:给【就绪闸】用的两条信号。与上面那条 `IntentChanged` **不能合并**。
+    //
+    //  `IntentChanged` 是给**文案**用的:「说法变了才响」——重复同一句是在训练人忽略它。
+    //  而闸要的是**这一趟走完了没有**,那是另一个问题。合并会造出一个真的会卡死的闸:
+    //
+    //    模型装上了(code=OK)→ 空闲被卸 → 闸落回「未启用」→ 用户打字 → 意图重发
+    //    → 中枢又回 code=OK,**与上一次逐字相同** ⇒ `IntentChanged` 不响
+    //    ⇒ 闸永远停在「正在启用中」,而模型其实已经好了。
+    //
+    //  ★ 这不是假想:`SetLastIntent` 的去重判据就是 `Code == Code && Advice == Advice`,
+    //    而「起来了」这件事**每次成功的说法都一样**——去重恰好把它全吃掉。
+    //  ⇒ 落地信号**无条件**响,由订阅方自己决定要不要理。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>一条意图**真的发出去了**(已过去抖)。★ 闸据它进入「正在启用中」。</summary>
+    public event Action<string>? IntentStarted;
+
+    /// <summary>
+    /// 一条意图**落地了**(成功或失败都算)。★★ **无条件**响 —— 理由见上面那段。
+    /// <para>★ 带上**请求时的别名**而不是只给 IntentOutcome:响应读不懂时
+    /// (<c>unreadable_response</c>)里面的 alias 是空的,而闸必须知道这是哪一条落地了 ——
+    /// 不然它会给一个别名记账、让另一个别名永远停在"正在启用中"。</para>
+    /// </summary>
+    public event Action<string, IntentOutcome>? IntentSettled;
+
+    void RaiseIntentStarted(string alias)
+    {
+        // ★ 与 Notify() 同款护栏:订阅方抛异常不该反噬发布方(尤其这里在 UI 事件线上)。
+        try { IntentStarted?.Invoke(alias); } catch { }
+    }
+
+    void RaiseIntentSettled(string alias, IntentOutcome res)
+    {
+        try { IntentSettled?.Invoke(alias, res); } catch { }
+    }
+
+    /// <summary>自检用:走**同一对**广播口 —— 自检里再发一遍事件就是第二套口径。</summary>
+    internal void SettleIntentForSelftest(string alias, IntentOutcome res)
+    {
+        RaiseIntentStarted(alias);
+        RaiseIntentSettled(alias, res);
+    }
+
+    /// <summary>
+    /// 忘掉这个别名的去抖冷却,让**下一次**意图立刻发得出去。
+    /// <para>★★★ 只有一个调用场景,而它是必需的:模型**被卸掉之后**。
+    /// 去抖(20 秒)的前提是"它已经起来了,别再问";这个前提一旦不成立,
+    /// 冷却就变成了一道**把人关在门外**的闸 —— 按钮灰着,而且长达 20 秒里
+    /// 没有任何人在试着把它修好。用户打了字却什么都不发生,那是最坏的一种"禁用"。</para>
+    /// </summary>
+    public void ForgetIntentCooldown(string alias)
+    {
+        lock (_intentLock) _lastIntent.Remove(alias);
+    }
 
     /// <summary>发一次意图并解析结果。★ 抽成公开方法是为了让自检能直接喂形状。</summary>
     public async Task<IntentOutcome> RequestIntentAsync(string alias, CancellationToken ct = default)

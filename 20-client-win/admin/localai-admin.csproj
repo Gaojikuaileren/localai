@@ -10,6 +10,22 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>LocalAI.Admin</RootNamespace>
     <AssemblyName>localai-admin</AssemblyName>
+    <!-- ══════════════════════════════════════════════════════════════════════
+         V29(实机反馈⑩)· 管理端**自己的**图标。在此之前这里**根本没有这一行**,
+         于是 exe / 任务栏用的是 .NET 默认图标,托盘用的是 `SystemIcons.Application`
+         (通用 Windows 图标)—— 两处都是默认,不是"有一个但不合适"。
+
+         图案 = 客户端那只猫**左右镜像** + **黑换成红**(#D93025,仓里那条恒定风险语义色)。
+         · 镜像成立的前提先确认过:图案**不对称**(星芒压一侧、一只耳朵有缺口),
+           对称的话镜像等于什么都没做;
+         · 白色与 alpha 原样保留,抗锯齿灰按亮度在 红↔白 之间插值 ——
+           不是"整块涂红",不然边缘会毛。
+         ★★ 为什么托盘也必须换(不是好看):`RealCloseAsync` 是**唯一**的真关闭入口,
+            全靠用户在托盘里认出是哪一个。两个 exe 的托盘图标长得一样,用户会点错。
+         ★ 资产在 `app/Assets/icon/admin/`(全套尺寸 PNG + admin.ico),
+           与客户端那套**并排放**,一眼看得出是同一族的两只。
+         ══════════════════════════════════════════════════════════════════════ -->
+    <ApplicationIcon>..\app\Assets\icon\admin\admin.ico</ApplicationIcon>
     <!-- 自定义入口:先做单实例与提权判断,再进 WPF(同客户端 Program.cs 的理由) -->
     <StartupObject>LocalAI.Admin.Program</StartupObject>
   </PropertyGroup>
@@ -45,6 +61,25 @@
     <Compile Include="..\app\Views\Flyout.cs"><Link>Views\Flyout.cs</Link></Compile>
     <Compile Include="..\app\Views\MenuHost.cs"><Link>Views\MenuHost.cs</Link></Compile>
     <Compile Include="..\app\Views\Overlay.cs"><Link>Views\Overlay.cs</Link></Compile>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         V29(2026-08-09 实机反馈①)· 滚轮让路。**V21 搬 3100 行时漏的就是这一个。**
+         `Ui.Page(...)` 返回的外层 ScrollViewer 一直都在,而内层(尤其是 TextBox 模板里的
+         `PART_ContentHost`)把滚轮**无条件吞掉** ⇒ 用户报的「滚轮不是全局可滚」。
+         接线在 `admin/Views/AdminScroll.cs`(类处理器,一网打尽),让路逻辑就是这一份。
+
+         ★★ WheelPicker.cs 是**被迫**一起链的,不是顺手:`Wheel.cs:28` 调
+            `WheelColumn.IsInsideWheel(...)`,只链 Wheel.cs 会 CS0103。
+            ⇒ 管理端今天没有转盘,但**这一份不许在管理端另写一个空壳替身** ——
+              替身会让「转盘里让路」这条规矩在两个 exe 里各有一份判断。
+         ★ 两条都是 `<Compile Link>`,与裁定④ / D93 裁定④同款手法:不复制。 -->
+    <Compile Include="..\app\Views\Wheel.cs"><Link>Views\Wheel.cs</Link></Compile>
+    <Compile Include="..\app\Views\WheelPicker.cs"><Link>Views\WheelPicker.cs</Link></Compile>
+
+    <!-- V29(实机反馈④)· 窗口圆角跟皮肤走。管理端换成自绘标题栏之后要和客户端一样圆 ——
+         ★ 这是**同一份** DWM 调用(`WindowCorners.Apply`),不在管理端另写一套:
+           「哪套皮肤圆多少」是一条判断,两份漂了不会有任何东西红。 -->
+    <Compile Include="..\app\Services\WindowCorners.cs"><Link>Services\WindowCorners.cs</Link></Compile>
 
     <!-- 上面那些依赖的:Skin 枚举与设置读写(皮肤同步要读它)· 称谓(Ui.Title 等会过 Vocab)·
          客户端状态目录(管理端要读客户端的 settings.json、也要探它的锁文件) -->

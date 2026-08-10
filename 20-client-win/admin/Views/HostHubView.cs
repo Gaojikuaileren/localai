@@ -81,6 +81,11 @@ public sealed class HostHubView : UserControl
     Button? _addToggle;
     System.Windows.Threading.DispatcherTimer? _pendTimer;
 
+    /// <summary>上一次「打开这台的客户端」失败的原因;成功或没点过是 <c>null</c>。
+    /// ★ 存成字段是因为点完要 `Build()` 重画整页 —— 不存的话那一行当场被自己刷掉,
+    /// 而那与"点了没反应"在屏幕上一模一样(实机反馈③要修的正是这个形状)。</summary>
+    string? _clientStartError;
+
     readonly StackPanel _root = new();
 
     public HostHubView()
@@ -659,11 +664,19 @@ public sealed class HostHubView : UserControl
                                           + "跨进程之后没法既保住那条捷径又保住纪律,\n"
                                           + "  而在两者之间,逐字比对是不能让的那一个(D47)。"));
             if (!ClientLink.IsClientRunning())
+            {
                 stack.Children.Add(Ui.Secondary("打开这台的客户端", (_, _) =>
                 {
-                    ClientLink.StartClient(tray: false);
+                    // ★★ 实机反馈③的**第二处**。这里原来把 `(ok, why)` 整个丢掉了 ——
+                    //   起不来时用户点完**什么也不会发生**,连个说法都没有。
+                    //   「不要弹窗」要的是别拿弹窗报喜,不是把报忧也一起吞掉。
+                    //   判词:跑不了和跑过了必须长得不一样。
+                    var (ok, why) = ClientLink.StartClient(tray: false);
+                    _clientStartError = ok ? null : "没能打开:" + why;
                     Build();
                 }));
+                if (_clientStartError is { Length: > 0 } err) stack.Children.Add(AdminNotice.Failure(err));
+            }
         }
 
         stack.Children.Add(new Border { Height = 10 });

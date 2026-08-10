@@ -42,6 +42,10 @@ public partial class App : Application
         _skin = ReadSkin();
         ThemeManager.Initialize(_skin);
 
+        // ★ 滚轮让路(实机反馈①):进程级、一次就够。★ `AdminWindow` 构造里也调一次 ——
+        //   两处都调是有意的:确认弹窗等**不经过 AdminWindow** 的窗口也要盖到。幂等。
+        Views.AdminScroll.Install();
+
         // ══════════════════════════════════════════════════════════════════
         //  ★★★ V21:记忆库的一次性迁移。**排在建窗口之前**,理由是承重的:
         //    迁移失败时界面必须能把这件事说出来(纪律③),而窗口是在
@@ -163,10 +167,25 @@ public partial class App : Application
 
         _tray = new WinForms.NotifyIcon
         {
-            // ★ 待定(lifecycle 包 §6.1):客户端与管理端会在托盘里各有一个图标,今天没有区分方案。
-            //   16×16 上加角标在高 DPI 下经常糊成一团 —— 这里先用**不同的提示文字**区分,
-            //   图标本身的区分留给那条待定,不假装已经解决了。
-            Icon = System.Drawing.SystemIcons.Application,
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★ V29(实机反馈⑩):lifecycle 包 §6.1 那条待定**结清了**。
+            //    原文是「客户端与管理端会在托盘里各有一个图标,今天没有区分方案;
+            //    16×16 上加角标在高 DPI 下经常糊成一团 —— 先用不同的提示文字区分」。
+            //    ⇒ 用户 2026-08-09 裁定:管理端要**红色 + 镜像**当前那个图标。
+            //      区分手段因此不是角标(那条顾虑成立),是**整体颜色** ——
+            //      红 vs 黑在 16×16 上一眼分得开,实测两种任务栏底色下都分得开。
+            //
+            //  ★★ 这一条承重的理由不是好看:`RealCloseAsync` 是**唯一**的真关闭入口,
+            //    全靠用户在托盘里认出哪个是管理端。两个 exe 的托盘图标长得一样,
+            //    用户会点错 —— 而点错的那一下关掉的是另一个程序。
+            //
+            //  ★ 取法与客户端**同一套**(`app/App.xaml.cs:727`):从 exe 自身提取
+            //    Win32 图标资源(由 csproj 的 `<ApplicationIcon>` 编进去)。
+            //    这样发布后没有散落文件也照样有图标;取不到再退回系统默认。
+            //    ★ 不另写一套"从磁盘读 png" —— 那会多出一条只有管理端有的失败路径。
+            // ══════════════════════════════════════════════════════════════════
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "")
+                   ?? System.Drawing.SystemIcons.Application,
             Visible = true,
             Text = "本地 AI · 主机管理端",
             ContextMenuStrip = menu,

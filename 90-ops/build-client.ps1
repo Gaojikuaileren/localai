@@ -8,12 +8,19 @@
 #     所以「装」= 把这个目录放到你想放的位置、双击一次。这条要写进说明里,不能让人猜。
 #
 # 用法:  pwsh -File 90-ops\build-client.ps1 [-Out <目录>]
-# 产物:  <Out>\localai-client.exe · SHA256.txt · VERSION.txt · 安装说明.txt
+# 产物(★ V31 起是**三件**,不是两件):
+#   <Out>\localai-client.exe        · SHA256.txt · VERSION.txt · 安装说明.txt
+#   <Out>\..\admin\localai-admin.exe · SHA256.txt · VERSION.txt
+#   <Out>\..\host\localai-lan-edge.exe + localai-identity.exe · SHA256.txt · VERSION.txt
+# ★ 第三件是 2026-08-09 挖出来的:它此前**从来没有被任何脚本发布过**,见 [5] 那段。
 
 param(
     [string]$Out = "",
     # V14b:管理端的产物目录。★ 默认与客户端产物**并排**(见 [3]/[4] 那两段的理由)。
-    [string]$AdminOut = ""
+    [string]$AdminOut = "",
+    # V31:主机端程序(lan-edge + identity)的产物目录。★ 默认同样与客户端**并排**,
+    #   而且目录名不是挑的,是从客户端那条探测里抠出来的 —— 见 [5] 那段。
+    [string]$HostOut = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +109,96 @@ if (-not $Out) {
     Write-Host "      要落位就别带 -Out。" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [0] ★★★ V31:主机端产物目录 + **开工前的占用闸**。
+#
+#  ★ 为什么这两件事放在**最前面**而不是放在 [5] 那一节里(实测教训,2026-08-09):
+#    第一版把闸放在 [5],于是一次被挡下的运行**已经把客户端与管理端重出并覆盖了落位**,
+#    只有 host 是旧的 —— 三个目录当场分裂,而这正是本轮要治的病本身。
+#    ⇒ 会让整趟失败的检查,必须在**动任何产物之前**跑完。
+#
+#  ★★ 目录名与 exe 名是**算出来的,不是挑出来的**(与 [3b] 完全同一手法):
+#    客户端逐字探  <客户端 exe 目录>\..\host\localai-lan-edge.exe
+#    (`AdminApp.HostToolsDirNextTo`,喂 `HostSetup.IdentityExistsAsync` 那条角色证据)。
+#    抠不出来**判红**:零命中与全清白长得一模一样,更不许静默用 'host' 兜底。
+# ══════════════════════════════════════════════════════════════════════════════
+$hostProbeSrc = Join-Path $repo '20-client-win\app\Services\AdminApp.cs'
+if (-not (Test-Path $hostProbeSrc)) {
+    Write-Host "X 找不到 $hostProbeSrc —— 主机端目录名的【唯一来源】不见了。" -ForegroundColor Red
+    Write-Host "  ★ 不许猜一个 'host':猜对了也只是这一次对,下一次改名照样断。" -ForegroundColor Red
+    exit 1
+}
+$hostProbeRaw = Get-Content $hostProbeSrc -Raw
+# ★ 先切到 HostToolsDirNextTo 这个方法之后再抠,免得将来同文件里多一个 Path.Combine 就抠错。
+$hpIdx = $hostProbeRaw.IndexOf('HostToolsDirNextTo(string? clientExeDir)')
+if ($hpIdx -lt 0) {
+    Write-Host "X 在 AdminApp.cs 里找不到 HostToolsDirNextTo(string? clientExeDir)。" -ForegroundColor Red
+    Write-Host "  ★ 这条判据的两端有一端不见了,不许静默兜底。" -ForegroundColor Red
+    exit 1
+}
+$hostProbeBody = $hostProbeRaw.Substring($hpIdx)
+# `Path.Combine(clientExeDir, "..", "host")` —— 注意 AdminAppPathNextTo 那条第三段是常量
+# (AdminDirName,没有引号),所以下面这个"引号里的字面量"只会命中主机端这一条。
+$hdm = [regex]::Match($hostProbeBody, 'Path\.Combine\(\s*clientExeDir\s*,\s*"\.\."\s*,\s*"([^"]+)"\s*\)')
+# `Path.Combine(host, "localai-lan-edge.exe")`
+$hem = [regex]::Match($hostProbeBody, 'Path\.Combine\(\s*host\s*,\s*"([^"]+)"\s*\)')
+if (-not $hdm.Success -or -not $hem.Success) {
+    Write-Host "X 读不出客户端探主机端时用的目录名/exe 名(AdminApp.HostToolsDirNextTo)。" -ForegroundColor Red
+    Write-Host "  ★ 抠不出来就判红:零命中与全清白长得一模一样。" -ForegroundColor Red
+    exit 1
+}
+$hostDirName = $hdm.Groups[1].Value
+$hostExeName = $hem.Groups[1].Value
+
+if (-not $HostOut) {
+    $HostOut = Join-Path (Split-Path $Out -Parent) $hostDirName
+} else {
+    Write-Host "  ! 指定了 -HostOut:$HostOut" -ForegroundColor Yellow
+    Write-Host "    ★ 这【不是】部署位 —— 出完包 dist\$hostDirName 不会动。" -ForegroundColor Yellow
+}
+New-Item -ItemType Directory -Force -Path $HostOut | Out-Null
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ 开工前先问一句:**要被覆盖的那个 Edge** 此刻在不在跑。
+#
+#  这不是理论顾虑,是实测:2026-08-09 跑本脚本时 Edge 就活着(PID 15452)。
+#  主机上 `启动Edge.cmd` 起来的就是这个 exe,而出包多半发生在栈还活着的时候。
+#  exe/dll 被占用时 `dotnet publish` 会在写文件那一步失败,而它的报错
+#  (MSB3021 / 拒绝访问)**不会提到"Edge 在跑"** —— 排查方向会跑偏到权限或杀软上。
+#
+#  ★★ 判据比的是**路径**,不是进程名:
+#    往 `-HostOut <别处>` 出一份拿去比对的包,与"落位那份正被占用"是两件事,
+#    只按进程名拦的话前者会被无辜挡下 —— 而一条会误挡的闸,会被人加 `-Force` 绕过去。
+#  ★★★ 但读不到路径时**fail-closed**(当成"就是它"):
+#    读不到的原因通常是权限,而"猜它不是"猜错的后果是发布在写文件时炸掉,
+#    并且报错指不到这儿。宁可多问一句。
+#
+#  ★★ 明确**不**自动去杀它:D116 立的是「关栈动谁」要有裁定 ——
+#    Edge 一停,所有副机连接当场断,而这是用户可见、不可自动恢复的后果。
+#    出包脚本没有资格替用户做这个决定。⇒ 说清楚,然后停下,让人自己关。
+# ══════════════════════════════════════════════════════════════════════════════
+$edgeProcName = [IO.Path]::GetFileNameWithoutExtension($hostExeName)
+$hostOutNorm  = (Resolve-Path -LiteralPath $HostOut).Path.TrimEnd('\')
+$edgeBlockers = @()
+foreach ($ep in @(Get-Process -Name $edgeProcName -ErrorAction SilentlyContinue)) {
+    $epPath = $null
+    try { $epPath = $ep.Path } catch { $epPath = $null }
+    if (-not $epPath) {
+        $edgeBlockers += "PID $($ep.Id)(★ 读不到它的路径 —— 按 fail-closed 当成就是它)"
+    } elseif ((Split-Path $epPath -Parent).TrimEnd('\') -eq $hostOutNorm) {
+        $edgeBlockers += "PID $($ep.Id)  $epPath"
+    }
+}
+if ($edgeBlockers.Count -gt 0) {
+    Write-Host "X 要被覆盖的那个 Edge 正在运行 —— 发布会写不进去,而且现在停下**什么都还没动**。" -ForegroundColor Red
+    $edgeBlockers | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    Write-Host "  ★ 请先把「启动Edge」那个窗口关掉,再重跑本脚本。" -ForegroundColor Red
+    Write-Host "  ★★ 本脚本【有意】不替你杀它:Edge 一停,所有副机连接当场断" -ForegroundColor Red
+    Write-Host "     (D116:关栈动谁要有裁定 —— 用户可见、不可自动恢复的后果)。" -ForegroundColor Red
+    Write-Host "  ★ 只想出一份拿去比对、不碰落位的包:加 -Out <别处>(host 会跟着去 <别处>\..\$hostDirName)。" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "[1] 发布单文件 exe(自包含,win-x64)…"
 Push-Location $app
@@ -549,6 +646,177 @@ localai-admin(主机管理端)
 $verNote
 "@
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  [5] ★★★ V31:主机端程序(dist\host)—— 这条出包线**漏掉的第三件产物**。
+#
+#  ★ 实况(2026-08-09 协调层用 ProductVersion 挖出来的,不是推测):
+#      dist\host\localai-lan-edge.exe  ProductVersion = 1.0.0+0c86261f(2026-08-06)
+#      dist\client / dist\admin        版本戳         = 20260809-2355+c340b3d
+#    两者之间隔着 **137 个提交**,而 `git diff 0c86261..HEAD -- 10-core\lan-edge`
+#    = **Program.cs +107/-3,是产品代码** —— 正是 V25 那条
+#    `upstream_gateway_unreachable` / 502 的归因修复。
+#
+#  ★★ 后果不是"少发一个文件":V25 的副机归因是【三个半边一条链】,
+#    而 lan-edge 那一半**在已部署二进制里根本不存在** ⇒ 重出 client+admin 也修不好它。
+#    危害面要说准:网关活着时那条错归因**不会发生**;它在**网关一掉的瞬间**发生,
+#    而那恰是副机验收会撞的形态 ⇒ 下一次副机出问题时,它会给出一个错误的原因。
+#
+#  ★★★ 为什么它躺了 137 个提交没人发现 —— 两个洞叠在一起:
+#      ① `90-ops\*.ps1` 里**没有任何脚本发布 dist\host**(全目录 grep 过);
+#      ② 那个目录里**一个版本戳都没有**(没有 VERSION.txt / SHA256.txt),
+#         于是"它落后了"这件事**没有任何人会看见**。
+#    ⇒ 本节把①②一起补上。只补①的话,下一次分裂照样是隐形的。
+#
+#  ★★ 目录名/exe 名怎么来的、以及"要被覆盖的 Edge 在不在跑"这道闸,都在 **[0]**
+#    (脚本最前面)。放在那儿是实测教训:第一版把闸放在这里,于是一次被挡下的运行
+#    **已经把客户端与管理端重出并覆盖了落位**,只有 host 是旧的 —— 三个目录当场分裂。
+#
+#  ★ 为什么连 localai-identity.exe 一起发:dist\host 里那两个 exe 是**同一次构建**的产物
+#    (两个 ProductVersion 逐字相同),而 `重置并铸身份.cmd` / `续签服务器证书.cmd`
+#    调的是 identity 那一个。只发一个的话,VERSION.txt 里那个戳只解释得了目录里的一半 ——
+#    而"一个数说不清它在描述什么"正是本文件 V28 那段刚治过的病。
+#    (查实:`git diff 0c86261..HEAD -- 10-core\identity` **为空** ——
+#     identity 的源码没变,重发只是让它拿到一个说得清的戳。)
+#
+#  ★★ 发布形态**照抄盘上现有的那一份**(框架依赖,非单文件):
+#    dist\host 今天就是 exe + dll + deps.json + runtimeconfig.json 这一形态。
+#    改成自包含单文件是另一件事(体积、启动、TPM 取密钥的路径都要重验),
+#    而本节要治的是"根本没发"——**不要把两件事捆在一次改动里**。
+#    ⇒ 想改形态,单独一条车道,并且要在主机上实跑一次 Edge。
+#
+#  ★★★ 这个目录里还有**手写的、仓库里没有的**东西:
+#    启动Edge.cmd · 重置并铸身份.cmd · 续签服务器证书.cmd · 吊销测试.cmd ·
+#    续签验证清单.txt · 主机-开机上线.txt · renew-server-verify.ps1。
+#    `dotnet publish` **不清空**输出目录,所以它们不会被删。
+#    ★ **不许**为了"发得干净"往这里加任何清空/删除动作 —— 那会把主机上唯一一份
+#      铸身份/续签的操作入口删掉,而它们在仓库里没有备份。
+# ══════════════════════════════════════════════════════════════════════════════
+Write-Host "[5] 发布主机端程序(lan-edge + identity)…"
+Write-Host "     目录名/exe 名取自 AdminApp.HostToolsDirNextTo:$hostDirName\$hostExeName" -ForegroundColor DarkGray
+$hostProjects = @(
+    @{ Name = 'lan-edge'; Proj = (Join-Path $repo '10-core\lan-edge\localai-lan-edge.csproj');  Exe = $hostExeName }
+    @{ Name = 'identity'; Proj = (Join-Path $repo '10-core\identity\localai-identity.csproj'); Exe = 'localai-identity.exe' }
+)
+foreach ($hp in $hostProjects) {
+    if (-not (Test-Path $hp.Proj)) {
+        # ★ 零命中判红:找不到 = 路径写错或工程被删,两种都得当场知道,不许静默跳过。
+        Write-Host "X 找不到主机端工程($($hp.Name)):$($hp.Proj)" -ForegroundColor Red; exit 1
+    }
+    # ★ 框架依赖发布(不带 -r / 不带 --self-contained)—— 与盘上现有形态一致,理由见上。
+    #   `-p:InformationalVersion=$ver` 是把版本戳**烧进二进制**:VERSION.txt 会被拷丢,
+    #   ProductVersion 不会。这次能挖出"落后 137 个提交",靠的正是它。
+    & dotnet publish $hp.Proj -c Release -p:InformationalVersion=$ver -o $HostOut --nologo -v q
+    if ($LASTEXITCODE -ne 0) { Write-Host "X 主机端发布失败($($hp.Name))" -ForegroundColor Red; exit 1 }
+    if (-not (Test-Path (Join-Path $HostOut $hp.Exe))) {
+        Write-Host "X 没有产出 $($hp.Exe)" -ForegroundColor Red; exit 1
+    }
+}
+$hostExe     = Join-Path $HostOut $hostExeName
+$identityExe = Join-Path $HostOut 'localai-identity.exe'
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [5b] ★★★ 验:客户端旁边找得到主机端 —— 而且是**这一次发的**那一个。
+#
+#  ★★★ 只问"那个路径上有没有 exe"是**远远不够**的,这不是理论顾虑:
+#    dist\host 里本来就躺着一个 2026-08-06 的 localai-lan-edge.exe。
+#    存在性判据在把上面整段发布摘掉之后**照样绿** —— 它守不住这次要治的那个病
+#    (那份 exe 恰恰是"存在但落后 137 个提交")。
+#  ⇒ 判据必须问【这一次发的】:比 ProductVersion 的前缀是不是本轮的 $ver。
+#    ★ 必须是**前缀比**,不是全等:SourceLink 会在 InformationalVersion 后面再接一段
+#      完整 sha(实测:$ver 里已经有 `+` 时接成 `…+c340b3d.c340b3d6022…`,
+#      没有 `+` 时接成 `…+27daab2f7cc…`)。写成 `-eq` 的话**每一轮都会红**,
+#      而一条每轮都红的判据会在三天内被人删掉。
+#  ★ 红测:把上面 [5] 那个 foreach 注释掉 ⇒ 本条当场红(旧 exe 的戳是 1.0.0+…)。
+# ══════════════════════════════════════════════════════════════════════════════
+Write-Host "[5b] 验:客户端旁边找得到【这一次发的】主机端…"
+$expectedHostDir    = Join-Path (Split-Path $Out -Parent) $hostDirName
+$asIfClientSeesHost = Join-Path $expectedHostDir $hostExeName
+if ((Resolve-Norm $HostOut) -ne (Resolve-Norm $expectedHostDir)) {
+    Write-Host "X 主机端发错了地方。" -ForegroundColor Red
+    Write-Host "  这一次发到:  $(Resolve-Norm $HostOut)" -ForegroundColor Red
+    Write-Host "  客户端会去看:$(Resolve-Norm $expectedHostDir)" -ForegroundColor Red
+    Write-Host "  ★ 客户端探的是 <自己所在目录>\..\$hostDirName\$hostExeName" -ForegroundColor Red
+    Write-Host "    (AdminApp.HostToolsDirNextTo,喂 HostSetup.IdentityExistsAsync 的角色证据)。" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $asIfClientSeesHost)) {
+    # ★ `${}` 不是洁癖:`"$hostExeName:$path"` 会被 PS 当成 `${hostExeName:...}` 作用域限定符,
+    #   整个脚本**解析失败**(实测,2026-08-09 就在这一行踩到)。变量后面紧跟冒号一律加 `${}`。
+    Write-Host "X 目录对了,但那儿没有 ${hostExeName}:$asIfClientSeesHost" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     OK 客户端会去看的那个目录,就是这一次发到的目录($expectedHostDir)" -ForegroundColor DarkGray
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [5c] ★★★ 「三件产物是不是同一轮」—— 在此之前**从来没有判据守着**。
+#
+#  这正是 dist\host 能落后 137 个提交而无人发觉的根本原因:
+#  三个目录各自独立,谁也不问一句"你们是一起出的吗"。
+#  ★ 判据读的是**烧进 exe 里的 ProductVersion**,不是旁边那个 VERSION.txt ——
+#    文本文件会被拷错、拷丢、手改;ProductVersion 跟着二进制走。
+#  ★★ 注意这条与 V28 在管理端 VERSION.txt 里写的那句**不矛盾**:
+#    那句说的是「不要拿两个**已落盘目录**的戳互相推断」(只重出改动的那个是正确做法);
+#    这里说的是「**这一次构建**同时发出去的四个 exe 必须同戳」——
+#    同一次 dotnet publish 都发了,戳还不一样的话只有一种解释:某一步根本没跑。
+#  ★ 红测:把 [5] 那段发布摘掉 ⇒ 本条列出 lan-edge/identity 两行并判红。
+# ══════════════════════════════════════════════════════════════════════════════
+Write-Host "[5c] 验:三件产物出自同一轮…"
+$roundParts = @(
+    @{ Name = '客户端 localai-client.exe';       Path = $exe }
+    @{ Name = '管理端 localai-admin.exe';        Path = $adminExe }
+    @{ Name = "主机端 $hostExeName";             Path = $hostExe }
+    @{ Name = '主机端 localai-identity.exe';     Path = $identityExe }
+)
+$roundBad = @()
+foreach ($rp in $roundParts) {
+    $pv = $null
+    try { $pv = (Get-Item -LiteralPath $rp.Path).VersionInfo.ProductVersion } catch { $pv = $null }
+    if ([string]::IsNullOrWhiteSpace($pv) -or (-not $pv.StartsWith($ver))) {
+        $roundBad += ("     · {0}`n       烧进去的戳: {1}" -f $rp.Name, $(if ($pv) { $pv } else { '(读不到)' }))
+    }
+}
+if ($roundBad.Count -gt 0) {
+    Write-Host "X 这一轮的产物里有对不上版本戳的 —— 说明某一步【根本没跑】,不是「数字不好看」。" -ForegroundColor Red
+    Write-Host "  本轮版本戳:$ver" -ForegroundColor Red
+    $roundBad | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    Write-Host "  ★ 这正是 2026-08-09 那次的形状:dist\host 落后 137 个提交,而三个目录谁也不问一句。" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     OK 四个 exe 的 ProductVersion 都是本轮的 $ver" -ForegroundColor DarkGray
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★ 版本戳与校验和(主机端)—— 在此之前 dist\host **一个都没有**。
+#    没有它们的后果不是"不好查",是**落后这件事不可见**:
+#    要靠有人想到去读 exe 的 ProductVersion 才能发现,而那次是隔了 137 个提交才有人想到。
+# ══════════════════════════════════════════════════════════════════════════════
+$hostHash     = (Get-FileHash -Algorithm SHA256 $hostExe).Hash
+$identityHash = (Get-FileHash -Algorithm SHA256 $identityExe).Hash
+Set-Content -Path (Join-Path $HostOut 'SHA256.txt') -Encoding utf8 -Value @"
+$hostHash  $hostExeName
+$identityHash  localai-identity.exe
+"@
+Set-Content -Path (Join-Path $HostOut 'VERSION.txt') -Encoding utf8 -Value @"
+localai 主机端程序(LAN Edge + identity)
+版本戳: $ver
+内含:   $hostExeName · localai-identity.exe(两个都由本轮构建发出,戳相同)
+构建于: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+形态:   框架依赖发布(需要本机已装 .NET 9 运行时)——**不是**自包含单文件,
+        与 client\ / admin\ 那两件不同。这是有意的:改形态要单独一条车道并在主机上实跑。
+
+★ 这个目录必须与 client\ 并排:客户端逐字探 ..\$hostDirName\$hostExeName
+  (AdminApp.HostToolsDirNextTo),那是"这台能不能当主机"的一条证据。
+
+★★ 这个目录里除了发布产物,还有**手写的、仓库里没有备份的**操作入口:
+   启动Edge.cmd · 重置并铸身份.cmd · 续签服务器证书.cmd · 吊销测试.cmd ·
+   续签验证清单.txt · 主机-开机上线.txt · renew-server-verify.ps1
+   出包**不会**删它们(dotnet publish 不清空输出目录)。整目录搬走时请一起搬。
+
+★★★ 本文件是 2026-08-09 才有的。在此之前这个目录**没有任何版本戳**,
+   于是它落后 137 个提交(lan-edge 的 Program.cs +107/-3,V25 的 502 归因修复)
+   这件事没有任何人会发现 —— 是拿 exe 的 ProductVersion 挖出来的。
+$verNote
+"@
+
 Set-Content -Path (Join-Path $Out '安装说明.txt') -Encoding utf8 -Value @"
 本地 AI 中枢 · 客户端
 版本戳 $ver
@@ -590,8 +858,72 @@ SHA256.txt 里是这份 exe 的哈希。从别处拿到这个包时先对一遍�
 · 这不是安装器:没有卸载项、没有自动升级。删除 = 直接删这个目录。
 "@
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  [6] ★★ dist\README.txt —— **反向全表**:这个盘上还躺着什么,逐个列出来。
+#
+#  起因(2026-08-09):dist 下除了 client / admin / host,还躺着
+#  `client-stage`(2026-08-03 的 exe,没有任何版本戳)·`_backup-20260806` ·
+#  `_retired-2nd-pc-P3b`。前两个**没有任何东西说明它们是什么** ——
+#  于是每个新来的人都要自己猜"哪个才是要拷走的那份",而猜错过不止一次。
+#
+#  ★ 这里用的是本脚本开篇那条纪律的同一手法(run-tests.ps1 的"反向全表"):
+#    **不写死一张清单**,而是扫目录 —— 凡是不是这一轮发出来的,一律列出来。
+#    写死清单的话,下一个人再堆一个目录进来,这份 README 会安静地漏掉它。
+#
+#  ★★ 只列不删,而且**不判红**:
+#    · 不删 —— 这些目录里的东西没有版本戳、复现不出来,而"识别不出来"恰恰是
+#      不该替别人删的理由。删除的裁定权在用户,不在出包脚本。
+#    · 不判红 —— 让出包因为盘上的历史遗留而失败,只会训练人绕开门禁。
+#    ⇒ 列出来 + 末尾黄字提醒,处置由人来定。
+# ══════════════════════════════════════════════════════════════════════════════
+$distRoot  = Split-Path $Out -Parent
+$knownDirs = @($Out, $AdminOut, $HostOut) | ForEach-Object { Resolve-Norm $_ }
+$otherDirs = @(Get-ChildItem -LiteralPath $distRoot -Directory -ErrorAction SilentlyContinue |
+               Where-Object { $knownDirs -notcontains (Resolve-Norm $_.FullName) })
+$otherLines = ""
+foreach ($od in $otherDirs) {
+    $newest = (Get-ChildItem -LiteralPath $od.FullName -Recurse -File -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+    $when   = if ($newest) { $newest.LastWriteTime.ToString('yyyy-MM-dd') } else { '(空目录)' }
+    $hasVer = if (Test-Path (Join-Path $od.FullName 'VERSION.txt')) { '有 VERSION.txt' } else { '★ 没有版本戳 —— 说不清它是哪一版' }
+    $note   = @(Get-ChildItem -LiteralPath $od.FullName -Filter '*退役*' -ErrorAction SilentlyContinue)
+    $retire = if ($note.Count -gt 0) { '(旁边有退役说明)' } else { '' }
+    $otherLines += "  · $($od.Name)`n      最新文件 $when · $hasVer $retire`n"
+}
+if (-not $otherLines) { $otherLines = "  (没有别的目录)`n" }
+
+Set-Content -Path (Join-Path $distRoot 'README.txt') -Encoding utf8 -Value @"
+dist —— 出包产物目录。本文件由 90-ops\build-client.ps1 **每次出包重新生成**,不要手改。
+生成于 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') · 本轮版本戳 $ver
+
+【这一轮发出来的三件(★ 要拷走的就是这三个,而且要并排)】
+  client\  客户端        $(Split-Path $Out -Leaf)
+  admin\   主机管理端    $(Split-Path $AdminOut -Leaf)
+  host\    主机端程序    $(Split-Path $HostOut -Leaf)(LAN Edge + identity)
+  ★ 三个目录必须并排:客户端逐字探 ..\$adminDirName\ 与 ..\$hostDirName\,
+    单独拷走任何一个都会让「客户端拉起管理端 ⇒ 自动起栈」或角色判定走不到。
+  ★★ 三件的 exe 里都烧着同一个版本戳($ver),出包时逐个对拍过(见 [5c])。
+    在此之前 host\ **从来没有被任何脚本发过**,曾经落后 137 个提交而无人发现。
+
+【这个盘上还躺着的别的目录(★ 不是这一轮出的,处置未定的请自己裁)】
+$otherLines
+  ★ 上面这份是**扫出来的**,不是手写清单 —— 再堆一个目录进来它也会出现在这里。
+  ★★ 没有版本戳的那些:说不清是哪一版、也复现不出来。
+    要拷去装机的话**不要用它们**,用上面那三个。
+"@
+
 Write-Host ""
-Write-Host "=== 出包完成 ===" -ForegroundColor Green
-Write-Host "  $Out"
-Write-Host "  版本戳 $ver"
-Write-Host "  SHA256 $hash"
+Write-Host "=== 出包完成(三件,同一轮)===" -ForegroundColor Green
+Write-Host "  客户端  $Out"
+Write-Host "          SHA256 $hash"
+Write-Host "  管理端  $AdminOut"
+Write-Host "          SHA256 $adminHash"
+Write-Host "  主机端  $HostOut"
+Write-Host "          SHA256 $hostHash  ($hostExeName)"
+Write-Host "          SHA256 $identityHash  (localai-identity.exe)"
+Write-Host "  版本戳  $ver  —— 四个 exe 的 ProductVersion 已逐个对拍过(见 [5c])"
+if ($otherDirs.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  ! dist 下还有 $($otherDirs.Count) 个不是这一轮出的目录:$(($otherDirs | ForEach-Object { $_.Name }) -join '、')" -ForegroundColor Yellow
+    Write-Host "    已逐个写进 $distRoot\README.txt。★ 删还是留由你裁,但别默默留着让下一个人猜。" -ForegroundColor Yellow
+}
