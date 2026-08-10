@@ -556,19 +556,124 @@ TRUSTED_LOOPBACK = {"127.0.0.1"}
 E1_OVERRIDE_ALLOWED_TIERS = frozenset({"trusted-local"})
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  ★★★★ V32b · 「没查出来」与「查出来了但不在册」必须**分开**(用户裁定 2026-08-10)
+#
+#  ★★★ 在这之前只有一个 `unregistered-local`,它同时装着两种**处置方向相反**的东西:
+#    · **查得出来,但不在册** —— 访客 `Alle` / `CodexSandboxOffline` / `CodexSandboxOnline`
+#      (2026-08-10 `Get-LocalUser` 实跑核过,这三个账号今天启用着)。这是**稳定的事实**;
+#    · **根本没查出来** —— 认人链断了(端口表抖动 / WMI 超时 / 进程已退出),
+#      而被降档的**可能就是机主自己**。这是**故障**。
+#
+#  ⇒ 一次瞬时抖动会把**任何**调用方降到最低档,**包括 `Zori Ma` 本人**,
+#    而全仓**没有任何一处记录这个降档事件**(2026-08-10 grep 核过:
+#    `unregistered-local` 只出现在注释和能力表里,没有计数、没有日志)。
+#    用户看到的是:拿不到 E1 的放行按钮、拿不到 S2 正文 —— 而这一切
+#    **"看起来只是不太好用"**,没有任何地方告诉他为什么。
+#
+#  ★★ 判词:**给错原因的提示比不给提示更坏,而【没有原因】也是一种给错。**
+#
+#  ★★★★ **本次不改任何权限。** `identity-unresolved` 的能力与 `unregistered-local`
+#    **逐字相同**(见 gpu_policy / sync_policy 两张表)。理由:
+#    「解析失败该算出境 sink 还是本地 sink」是 **D81 待裁 1**,而
+#    `decision-packets/sink-axis-change-list-2026-08-06.md` 明写
+#    「M2 不得先于待裁 1 动手 —— 先写一个默认映射等于把待裁悄悄裁掉,
+#      而且没有决议、没有 diff 提示」。
+#    ⇒ 本车道只做**拆分 + 可观测**,把那一刀留给裁定。
+#    ★ 而拆分正是那条裁定的**前置**:不拆就裁,等于埋一颗
+#      「机主偶发失能且无提示」的雷。
+# ══════════════════════════════════════════════════════════════════════
+IDENTITY_UNRESOLVED_TIER = "identity-unresolved"
+
+#: 认人失败的**累计计数**(按断点分)。★ 进程内,不落盘 —— 落盘的是下面那条日志。
+_identity_unresolved_counts: dict = {}
+#: 最近一次认人失败(界面要能说出"什么时候、断在哪一环")。
+_identity_unresolved_last: dict = {}
+
+
+def note_identity_unresolved(step: str, detail: str) -> None:
+    """记一次降档:计数 + 落盘日志,**带上断在哪一环**。
+
+    ★★ 「记了一次降档」与「记清了它断在哪一环」是两件事。只记前者的话,
+      运维看到的是"今天降了 37 次",而下一步该查端口表还是查 WMI **完全说不出来** ——
+      那是一条**看起来有信息量**的日志,它比没有更费人。
+    ★ 不记账户名:降档时我们**恰恰没有**账户名(那正是失败的内容)。
+      编一个占位账户名进日志,就是往审计里写一个假事实。
+    """
+    _identity_unresolved_counts[step] = _identity_unresolved_counts.get(step, 0) + 1
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "tier": IDENTITY_UNRESOLVED_TIER, "step": step, "detail": detail[:300],
+           "count_for_step": _identity_unresolved_counts[step]}
+    _identity_unresolved_last.clear()
+    _identity_unresolved_last.update(rec)
+    try:
+        d = _logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "identity_unresolved.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:                                        # noqa: BLE001
+        # ★ 写不进日志**不许**把请求打挂 —— 但计数已经加过了,
+        #   所以"日志盘满了"不会让这件事整个消失(两条痕迹不同源)。
+        pass
+
+
+#: 界面那一行要读的响应头。★ 与 `X-LocalAI-E1` 同一条既有做法:
+#:   「这一轮发生了什么」跟着**这一轮的响应**回去,不另开一条要轮询的路。
+IDENTITY_HEADER = "X-LocalAI-Identity"
+IDENTITY_STEP_HEADER = "X-LocalAI-Identity-Step"
+IDENTITY_TOTAL_HEADER = "X-LocalAI-Identity-Unresolved-Total"
+
+
+def identity_headers(effective_tier: str) -> dict:
+    """认人失败时给这一轮响应带上的头。★ 没失败就是空 dict(不发恒定的头)。
+
+    ★★ 判据用 **effective_tier** 而不是 caller:带证书指纹的 LAN 请求权限来自成员表,
+      认人失败**没有影响它** —— 给副机的人显示"你被当成未登记账号"是**给错原因**,
+      而给错原因比不给更坏。只有当降档**真的决定了这一轮的档位**时才说。
+    ★ 头里只放 ASCII(step 是登记过的常量):HTTP 头走 latin-1,
+      中文 detail 放进去会在编码那一步炸掉整个响应 —— 那就把"提示"变成了"故障"。
+      给人看的那句话在界面侧,详情在 identity_unresolved.jsonl。
+    """
+    if effective_tier != IDENTITY_UNRESOLVED_TIER:
+        return {}
+    return {IDENTITY_HEADER: "unresolved",
+            IDENTITY_STEP_HEADER: str(_identity_unresolved_last.get("step", "unknown")),
+            IDENTITY_TOTAL_HEADER: str(sum(_identity_unresolved_counts.values()))}
+
+
+def identity_health() -> dict:
+    """降档的可观测面 —— 界面拿它说话。
+
+    ★ 顶层键固定:`unresolved_total` · `by_step` · `last`。
+    ★★ `last` 为空 dict = 从没降过档(**不是** null:界面要能区分
+      "没发生过"与"读不到这个字段")。
+    """
+    return {"unresolved_total": sum(_identity_unresolved_counts.values()),
+            "by_step": dict(_identity_unresolved_counts),
+            "last": dict(_identity_unresolved_last)}
+
+
 def classify_caller(request: Request) -> str:
     host = request.client.host if request.client else ""
     if host not in TRUSTED_LOOPBACK:
         return "remote-unauthenticated"       # 含 ::1:身份不可解析 → 按远程处理(fail-closed)
     ident = caller_identity.account_from_request(request)
-    if ident and ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
+    if ident is None:
+        # ★★★ 认人**失败** —— 这不是"这个人没登记",是"我们没认出人来"。
+        #   走到这儿的可能就是机主本人,所以它必须**留痕**且**与未登记账户分开**。
+        #   ★ 诊断只在失败路径上跑,且不重跑 WMI(见 diagnose_from_request)。
+        d = caller_identity.diagnose_from_request(request)
+        note_identity_unresolved(d.step, d.detail)
+        return IDENTITY_UNRESOLVED_TIER
+    if ident[1].lower() in {a.lower() for a in LOCAL_DENY_ACCOUNTS}:
         return "denied-account"               # ai-asset / ai-exec 绝不放行(§6.8)
-    if ident and LAN_EDGE_ACCOUNT and ident[1].lower() == LAN_EDGE_ACCOUNT.lower():
+    if LAN_EDGE_ACCOUNT and ident[1].lower() == LAN_EDGE_ACCOUNT.lower():
         return "lan-edge"                     # ★ Edge 代理进程档:非业务档,永不落 trusted-local(纵深防御)
     # ★★ D30 修正(2026-08-03):allowlist,不是 denylist。
     #   只有【显式登记在 config/caller-accounts.toml】的账户才配 trusted-local。
-    #   解析不到身份的、以及登记表外的一切账户 → unregistered-local。
-    if ident and ident[1].lower() in {a.lower() for a in TRUSTED_LOCAL_ACCOUNTS}:
+    #   ★ V32b 起,这一行只剩「**查出来了**但不在登记表里」这一种含义 ——
+    #     "没查出来"已经在上面被 identity-unresolved 接走了。
+    if ident[1].lower() in {a.lower() for a in TRUSTED_LOCAL_ACCOUNTS}:
         return "trusted-local"
     return "unregistered-local"               # ★ 降档不断连:chat 仍可用,但无 E1 解除权、无 S2 正文
 
@@ -2082,7 +2187,11 @@ async def chat_completions(request: Request):
             log_gate_rejection(session_id, e1r.categories, "blocked")
             msg = e1.block_message(e1r.categories)
             hdrs = {"X-LocalAI-E1": "blocked",
-                    "X-LocalAI-E1-Categories": ",".join(sorted(e1r.categories))}
+                    "X-LocalAI-E1-Categories": ",".join(sorted(e1r.categories)),
+                    # ★★ 这一支**尤其**要带上:E1 拦截时用户看到的正是"放行按钮没了",
+                    #   而"没了"可能是因为**认人失败**把他降了档 —— 不说的话,
+                    #   他会以为是 E1 变严了,去找一个不存在的开关。
+                    **identity_headers(effective_tier)}
             # ★ 必须按客户端要的形态回:Open WebUI 等主力客户端默认 stream:true,
             #   给它一个非流式 JSON 会解析失败 —— 用户看到的是报错,而不是「这一轮没有发送」的说明。
             if bool(body.get("stream", False)):
@@ -2197,7 +2306,10 @@ async def chat_completions(request: Request):
     upstream_url = backend.rstrip("/") + "/v1/chat/completions"
     stream = bool(body.get("stream", False))
 
-    hdrs = {"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias}
+    # ★★★ 认人失败要**跟着这一轮的回答**回到界面上(用户裁定 2026-08-10:
+    #   「界面上要看得见」,而且**别做成弹窗** —— 一行状态、可点开看详情)。
+    hdrs = {"X-LocalAI-Contract": contract, "X-LocalAI-Alias": alias,
+            **identity_headers(effective_tier)}
     try:
         if stream:
             # ★★ 必须【先建立连接、拿到状态码】再返回 StreamingResponse。
