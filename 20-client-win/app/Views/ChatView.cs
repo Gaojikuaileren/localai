@@ -126,6 +126,17 @@ public sealed class ChatView : UserControl
         //   ★★ 接的是 IntentChanged 而**不是** Gpu.Changed:后者跟着显存快照每秒一帧,
         //   拿它当刷新信号会把输入框每秒重建一次 —— 打字当场被打断(见 HubGpu 里那段说明)。
         TheApp.Gpu.IntentChanged += OnIntentChanged;
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30(用户裁定):模型没起来就把发送键**灰掉并禁用**,起完再亮。
+        //
+        //  ★ 接的是**共享的就绪闸**,不是自己在这儿判一遍 —— 用户那句
+        //    「不仅仅是聊天功能,其他所有功能都是一样的」只有这一种落法能被强制执行。
+        //  ★★ 闸只在【答案真的变了】时响(边沿),所以这里可以老老实实接:
+        //    它内部已经把 `Gpu.Changed` 那每秒一帧吸收掉了(见 ModelReadiness 文件头)。
+        //    自己直接接 Gpu.Changed 的话,输入框会每秒重建一次、打字当场被打断。
+        //  ★★★ 闸**可能在后台线程上响**(意图结果落在 Task.Run 里)⇒ 必须切回 UI 线程。
+        // ══════════════════════════════════════════════════════════════════
+        TheApp.Ready.Changed += OnReadyChanged;
         Unloaded += (_, _) =>
         {
             TheApp.Chat.Changed -= OnChatChanged;
@@ -133,6 +144,7 @@ public sealed class ChatView : UserControl
             TheApp.Translation.Changed -= RefreshSendEnabled;
             TheApp.History.JumpRequested -= OnJumpToHistory;
             TheApp.Gpu.IntentChanged -= OnIntentChanged;
+            TheApp.Ready.Changed -= OnReadyChanged;
             if (_wsKey == "chat")
             {
                 TheApp.Reply.Changed -= OnReplyChanged;
@@ -963,7 +975,34 @@ public sealed class ChatView : UserControl
         // 输入框会随文字长高,两侧按钮【贴底】才不会被拉伸或错位
         send.VerticalAlignment = VerticalAlignment.Bottom;
         attach.VerticalAlignment = VerticalAlignment.Bottom;
-        var sendWrap = new Border { Child = send, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Bottom };
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30(用户裁定):「如果用户点击禁用的发送按钮,应该在按钮上气泡提示」。
+        //
+        //  ★★ WPF 的坑:**禁用的控件根本收不到鼠标事件** —— 把 Click/MouseDown 挂在
+        //    `send` 上,按钮一灰它就再也不响,那颗气泡永远弹不出来。
+        //  ⇒ 外面这层 `sendWrap` 就是那个「可命中的容器」:它自己**始终是启用的**,
+        //    由它接住那一下点击。★ 必须显式给一个 Background —— 没有画刷的 Border
+        //    在命中测试里是**透明的洞**,鼠标会径直穿过去,事件一样收不到。
+        //
+        //  ★★★ 绝不许改成「看着灰但其实是启用的」:那样点下去会**真的发出去**。
+        //    这里灰的是 `send`(IsEnabled=false,真禁用),可点的是外层容器,
+        //    而容器的处理器**只弹提示、不发送**(下面 e.Handled = true 也说明了这件事)。
+        // ══════════════════════════════════════════════════════════════════
+        var sendWrap = new Border
+        {
+            Child = send,
+            Margin = new Thickness(10, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Background = Brushes.Transparent,   // ★ 没有它 = 命中测试穿过去,点击收不到
+        };
+        _sendWrap = sendWrap;
+        sendWrap.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            // ★ 按钮是启用的 ⇒ 这一下不归我们管,交给它自己去 Click(别把正常发送吃掉)。
+            if (_sendBtn is null || _sendBtn.IsEnabled) return;
+            e.Handled = true;
+            ShowSendBlockedBubble();
+        };
         DockPanel.SetDock(sendWrap, Dock.Right);
         DockPanel.SetDock(attach, Dock.Left);
         inputRow.Children.Add(sendWrap);
@@ -1110,7 +1149,31 @@ public sealed class ChatView : UserControl
         return bad.Advice is { Length: > 0 } a ? a : null;
     }
 
-    /// <summary>按当前条件刷新发送键的可用状态。目标池一变就会被叫到。</summary>
+    /// <summary>发送键外面那层【可命中的容器】—— 禁用的按钮收不到点击,靠它接住。见建它的地方。</summary>
+    Border? _sendWrap;
+    /// <summary>发送键上那颗气泡。★ 实现在 TipBubble 里 —— 它不是菜单,不走 MenuHost(理由见那个文件头)。</summary>
+    readonly TipBubble _sendTip = new();
+
+    /// <summary>
+    /// 这个视图要用的模型别名。★ 聊天/翻译/回信三个场景**都走 assistant.fast** ——
+    /// 与 <c>ChatClient.StreamAsync</c> 里写死的那个是同一个,常量在就绪闸里。
+    /// </summary>
+    internal ModelGate ModelGateNow() => TheApp.Ready.Gate(ModelReadiness.ChatAlias);
+
+    /// <summary>
+    /// 就绪闸的答案变了 -> **只刷按钮**,不重建会话区。
+    /// <para>★ 与 Translation.Changed / IntentChanged 两处同一条纪律:重建会换掉输入框、
+    /// 打断正在打的字 —— 而这条提示恰恰是在**打字过程中**变的(打字就是它的触发点)。</para>
+    /// <para>★★ 闸可能在后台线程上响(意图结果落在 Task.Run 里)⇒ 切回 UI 线程。</para>
+    /// </summary>
+    void OnReadyChanged() => Dispatcher.BeginInvoke(new Action(() =>
+    {
+        RefreshSendEnabled();
+        // ★ 模型起来了就把那颗"未启用"的气泡收掉 —— 留着它就是界面在说一句已经过期的话。
+        if (ModelGateNow().CanUse) HideSendTip();
+    }));
+
+    /// <summary>按当前条件刷新发送键的可用状态。目标池一变、就绪闸一变都会被叫到。</summary>
     void RefreshSendEnabled()
     {
         // 目标池变了 -> 之前那条"没有可翻目标"的解释可能已经不成立,别赖着不走
@@ -1121,10 +1184,36 @@ public sealed class ChatView : UserControl
             return;
         }
         if (_sendBtn is null) return;
-        var ok = _canSend is null || _canSend();
+        // ★★★ V30:两个条件【与】起来 —— 各自说各自的事,不合并成一个 bool:
+        //   · _canSend  = 这一次输入本身发得出去吗(翻译空间的目标池…)
+        //   · 就绪闸    = 模型现在能不能用
+        //   合并的话,气泡就说不出到底是哪一种挡住了,而这两种的下一步完全不同。
+        var ok = (_canSend is null || _canSend()) && ModelGateNow().CanUse;
         _sendBtn.IsEnabled = ok;
         _sendBtn.Opacity = ok ? 1 : 0.45;
     }
+
+    /// <summary>
+    /// 在发送键上弹一颗气泡,说清**为什么**现在按不了。
+    /// <para>★★ 文案的头一句就是用户裁定里点名的那两句之一(「模型未启用」/「正在启用中,请稍等」),
+    /// 后面跟中枢给的具体理由 —— 置灰而不说原因等于骗人,而给个**错的**原因比不给更坏。</para>
+    /// <para>★ 气泡贴在**外层容器**上而不是按钮上:禁用的按钮虽然还占着位置,
+    /// 但把浮层锚在一个禁用控件上没有好处,而容器的位置与按钮逐像素重合。</para>
+    /// </summary>
+    void ShowSendBlockedBubble()
+    {
+        if (_sendWrap is null) return;
+        var gate = ModelGateNow();
+        // ★ 模型是好的、被挡住的是另一件事(翻译空间目标池空)⇒ 说那件事,别赖给模型。
+        //   ★★ 归错因比不给原因更坏 —— 用户会跑去修一个根本没坏的东西。
+        var text = gate.CanUse
+            ? (_blockReason?.Invoke(_draft) ?? _sendBlockedHint ?? "现在还发不出去。")
+            : gate.Bubble;
+        // ★ 记号剃掉:这是一颗小气泡,画不了粗体,而中枢那句 Advice 里就有 `**主机**`。
+        _sendTip.Show(_sendWrap, MarkdownLite.ToPlainText(text));
+    }
+
+    void HideSendTip() => _sendTip.Hide();
 
     /// <summary>正要跳去的那条消息(跳完清空)。用稳定标识,归档来回之后仍指向同一条。</summary>
     string? _jumpToKey;
@@ -1162,6 +1251,9 @@ public sealed class ChatView : UserControl
         //     于是"发完第一条得重新点一下输入框"那个老 bug 会原样复发。用鼠标发送时靠意图,不靠嗅探。
         var refocus = _input.IsKeyboardFocusWithin || _justSent;
         _justSent = false;
+        // ★ V30:整块重建会换掉发送键(以及它外面那层锚点)—— 气泡挂在旧锚点上就成了孤儿,
+        //   停在屏幕上一个不再对应任何按钮的位置。先收掉它,重建完该说的话会重新说。
+        HideSendTip();
         BuildConversationCore();
         // ★★ 面板已经挂上去了 —— 现在【同步】排一次版并定位。
         //   见 DockWithInput 里那段说明:排进 DispatcherPriority.Loaded(6 < Render 7)的定位
@@ -1653,7 +1745,9 @@ public sealed class ChatView : UserControl
         var seen = animate && _seenMsgCount.TryGetValue(sessionId, out var n) ? n : all.Count;
         for (int i = 0; i < all.Count; i++)
         {
-            var bubble = Bubble(all[i], i);
+            // ★ animate=false 就是【只读浏览】那一路(见本方法的文档注释)—— 那种形态没有输入框,
+            //   所以不给「引用」那颗按钮:一颗按下去什么都不会发生的按钮,比不给更坏。
+            var bubble = Bubble(all[i], i, withQuote: animate);
             if (animate && i >= seen) AnimateIn(bubble, delayMs: (i - seen) * 70);
             msgs.Children.Add(bubble);
         }
@@ -1898,7 +1992,11 @@ public sealed class ChatView : UserControl
         return tb;
     }
 
-    FrameworkElement Bubble(ChatMessage m, int index = -1)
+    /// <param name="withQuote">
+    /// 给不给「引用到输入框」那颗按钮。★ 只读浏览(已删除/已完成项目)传 false ——
+    /// 那种形态根本没有输入框。见 <see cref="WithBubbleActions"/>。
+    /// </param>
+    FrameworkElement Bubble(ChatMessage m, int index = -1, bool withQuote = true)
     {
         if (m.Role == ChatRole.System)
         {
@@ -2012,7 +2110,139 @@ public sealed class ChatView : UserControl
                 stack.Children.Add(toggle);
             }
         }
-        return BubbleShell(stack, user);
+        return WithBubbleActions(BubbleShell(stack, user), m, user, withQuote);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ V30(用户裁定):每个气泡加「复制」与「引用到输入框」。
+    //
+    //  ══════ 那笔性能账:先核,再选路 ═════════════════════════════════════
+    //  协调层给的说法是「每个 token 重建 200 个气泡,再挂两颗按钮会把它放大一倍」。
+    //  ★ **今天已经不成立了** —— V20-① 的快路径就在本文件上方:
+    //    `onTick → OnStreamTick → TryStreamTextInPlace()`,流式增量只改**一条正文的 Text**,
+    //    一个气泡都不重建(整块重建只在结构真的变了时才走:新增/删除消息、换会话、跨折叠阈值)。
+    //  ⇒ 于是这两颗按钮的代价**不在每个 token 上**,只在每次结构性重建上。
+    //
+    //  ══════ 选的是哪条路,以及为什么 ═══════════════════════════════════
+    //  即便如此,仍然走 **hover/焦点时才建**,理由有两条,都不是"以防万一":
+    //   ① 200 条消息的会话每次结构性重建会多造 400 个控件,而**其中 398 个不会被看**;
+    //   ② 更要紧的是它**不影响布局**:按钮住在一条**始终预留**的窄槽里(见 ActionSlot),
+    //      所以出现/消失时**一个像素都不动**。若改成"出现时才占位",鼠标扫过一列气泡
+    //      会让整个列表上下跳 —— 那种抖动比多造几百个控件糟得多。
+    //  ★ 没有顺带去治整块重建:那条路今天已经被快路径绕开了,而动它要碰
+    //    `_carryOffset` / `_liveText` / 折叠阈值三处状态机 —— 本轮改动面已经不小,
+    //    在一个**已经不疼**的地方冒这个险不划算。这条选择与理由写进交回。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>动作槽的宽度。★ **始终预留**——按钮出现/消失时布局一个像素都不动。</summary>
+    const double ActionSlotWidth = 30;
+
+    /// <summary>
+    /// 给气泡挂上「复制 / 引用」。★ 按钮**只在鼠标悬停或键盘焦点进来时才建**(见上面那段)。
+    /// </summary>
+    /// <param name="withQuote">
+    /// 给不给「引用到输入框」。★ 只读浏览(已删除/已完成项目)传 false ——
+    /// 那种形态**根本没有输入框**,给一颗按下去什么都不会发生的按钮,比不给更坏。
+    /// </param>
+    FrameworkElement WithBubbleActions(Border shell, ChatMessage m, bool user, bool withQuote)
+    {
+        // ★ 没有正文(纯附件消息)⇒ 复制什么、引用什么都答不上来,不摆这两颗按钮。
+        if (m.Text.Length == 0) return shell;
+
+        var slot = new ContentControl
+        {
+            Width = ActionSlotWidth,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 6),
+        };
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = user ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+        };
+        // 自己的消息靠右 ⇒ 按钮放左边;AI 的靠左 ⇒ 按钮放右边。两侧都不越过屏幕边。
+        if (user) { row.Children.Add(slot); row.Children.Add(shell); }
+        else { row.Children.Add(shell); row.Children.Add(slot); }
+
+        void Build()
+        {
+            if (slot.Content is not null) { slot.Visibility = Visibility.Visible; return; }
+            var col = new StackPanel();
+            col.Children.Add(ActionButton("⧉", "复制这条消息的全文", () => CopyBubble(m)));
+            if (withQuote)
+                col.Children.Add(ActionButton("❝", "引用到输入框", () => QuoteToInput(m)));
+            slot.Content = col;
+        }
+        row.MouseEnter += (_, _) => Build();
+        row.MouseLeave += (_, _) => { if (slot.Content is not null) slot.Visibility = Visibility.Hidden; };
+        // ★ 键盘也够得着:气泡正文是**只读 TextBox**,Tab 走得进去 ——
+        //   只挂 hover 的话,不用鼠标的人永远碰不到这两颗按钮。
+        row.GotKeyboardFocus += (_, _) => Build();
+        return row;
+    }
+
+    /// <summary>气泡旁边那颗小按钮。★ 单字符 + ToolTip:槽只有 30 宽,放不下文字。</summary>
+    static FrameworkElement ActionButton(string glyph, string tip, Action onClick)
+    {
+        var t = new TextBlock
+        {
+            Text = glyph, TextAlignment = TextAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+        t.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+        t.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
+        var b = new Border
+        {
+            Child = t, Width = 24, Height = 22, Margin = new Thickness(3, 2, 3, 0),
+            Cursor = Cursors.Hand, Background = Brushes.Transparent, ToolTip = tip,
+            BorderThickness = new Thickness(1),
+        };
+        b.SetResourceReference(Border.CornerRadiusProperty, "RadiusSm");
+        b.SetResourceReference(Border.BorderBrushProperty, "Border");
+        b.MouseEnter += (_, _) => b.SetResourceReference(Border.BackgroundProperty, "BgHover");
+        b.MouseLeave += (_, _) => b.Background = Brushes.Transparent;
+        b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };
+        return b;
+    }
+
+    /// <summary>
+    /// 复制这条消息的全文。
+    /// <para>★★ 复制的是 <c>m.Text</c> —— **原文**,不是屏幕上那份:屏幕上的可能被折叠
+    /// (只画了前 30 行)、也可能被富文本渲染吃掉了记号。用户要的是"这条消息",
+    /// 而不是"我此刻看见的这几行"。</para>
+    /// <para>★ 剪贴板会被别的进程锁住(Windows 上很常见)⇒ 失败要**说出来**:
+    /// 静默失败时用户会去别处粘贴,粘到的是上一次的内容。</para>
+    /// </summary>
+    void CopyBubble(ChatMessage m)
+    {
+        try
+        {
+            Clipboard.SetText(m.Text);
+        }
+        catch (Exception ex)
+        {
+            ConfirmDialog.Show("没能复制到剪贴板",
+                "剪贴板这会儿被别的程序占着(Windows 上常见,通常再点一次就好)。\n\n" + ex.Message,
+                confirmText: "好", cancelText: "关闭");
+        }
+    }
+
+    /// <summary>
+    /// 把这条消息引用到输入框。★ 用 markdown 的引用记号(每行前面一个 <c>&gt; </c>)——
+    /// 模型认得它,人也认得它。
+    /// <para>★ 追加而不是覆盖:输入框里可能已经打了字,替换掉等于把人写的东西吃了。</para>
+    /// <para>★★ 引的是 <c>m.Text</c> 全文,与复制同一条理由(折叠的是显示,不是数据)。</para>
+    /// </summary>
+    void QuoteToInput(ChatMessage m)
+    {
+        if (!_input.IsLoaded) return;   // ★ 没有输入框的形态(只读浏览)—— 静默返回,不假装做了
+        var quoted = string.Join("\n", m.Text.Split('\n').Select(l => "> " + l));
+        var head = _input.Text.Length > 0 && !_input.Text.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
+        _input.Text = _input.Text + head + quoted + "\n";
+        // ★ _draft 由 _input 的 TextChanged 顺手更新(那个处理器同时会发一次「意图即起」——
+        //   引用也是"我要用它"的信号,顺带把模型起起来正合适)。
+        _input.CaretIndex = _input.Text.Length;
+        _input.Focus();
     }
 
     /// <summary>气泡外壳(自己发的靠右、强调色;AI 的靠左、沉底色)。与正文同理:渲染诊断画的就是它。</summary>
@@ -2143,6 +2373,16 @@ public sealed class ChatView : UserControl
         var text = _input.Text;
         if (string.IsNullOrWhiteSpace(text) && _pending.Count == 0) return;   // 空且无附件不发
 
+        // ══════════════════════════════════════════════════════════════
+        //  ★★★ V30(用户裁定):模型没起来就不发。**判据放在这里**,不是只放在按钮上。
+        //
+        //  ★ 回车与发送键走的是**同一条**前置条件 —— 这个仓已经栽过一次:
+        //    目标池空着时按钮是灰的,**回车却照发**(审查发现的实缺口)。
+        //    只灰按钮而不管回车,那种禁用纯属做样子。
+        //  ★★ 弹气泡而不是静默返回:静默 = 用户按了没反应,他会以为程序卡了。
+        // ══════════════════════════════════════════════════════════════
+        if (!ModelGateNow().CanUse) { ShowSendBlockedBubble(); return; }
+
         // ★ 会话里有一条【还没答的语言提问】时,这次输入先当作"作答"处理:
         //   用户回一句语言名 -> 记上、按钮置灰、语言进目标池,然后这次输入不当消息发出去。
         if (_answerPending is { } answer && !string.IsNullOrWhiteSpace(text))
@@ -2180,6 +2420,12 @@ public sealed class ChatView : UserControl
         //  ★ 不在这里判"后端起没起" —— 那要发出去才知道,而猜一个"起了吧"再显示成功
         //    正是本项目最恨的形状。让它真的失败,再如实说该做什么。
         // ══════════════════════════════════════════════════════════════
+        // ★★★ V30 记一笔:这条分支**今天已经走不到了** —— 上面那道就绪闸把「没配对」
+        //   也算作「模型未启用」(它确实是),于是没配对时根本进不来 SendCurrent 的这一段。
+        //   ★ 留着它而不是删掉,是因为这是一个**产品裁定**可能会回摆的地方:
+        //     「没配对时还能不能把话先记在本机」是一句可以改的话,而不是一个技术限制。
+        //     真要回摆,改的是闸(让没配对时也放行本地记录),不是在这里再开一条旁路。
+        //   ★★ 已在交回里点名:这是本轮**唯一**一处减少了既有能力的改动。
         if (!TheApp.Hub.IsPaired)
         {
             TheApp.Chat.Send(_sessionId, text, atts);

@@ -66,9 +66,69 @@ public sealed class TaskDrawerView : UserControl
 
     static App TheApp => (App)Application.Current;
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ V30:模型装载那条的【状态从哪儿来】—— 与发送键**同一个就绪闸**。
+    //
+    //  ★ 这是本轮最要紧的一条纪律,而它很容易被写反:抽屉里再判一次
+    //    「装完没有」就是**第二套口径**,而两套口径岔开的那天,发送键亮着、
+    //    抽屉里还写着"正在启用中"(或反过来)—— 而不会有任何东西红。
+    //  ⇒ 一个源:`TheApp.Ready.Gate(alias)`。抽屉只负责把它**画**出来。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>模型装载那一行右侧的文字态。★ 取自就绪闸,不在这儿另判一次。</summary>
+    static string ModelStateText(RunningTask t) => TheApp.Ready.Gate(t.ResumeAlias).State switch
+    {
+        ModelReadyState.Ready => "已启用",
+        ModelReadyState.Starting => "正在启用中",
+        _ => "未启用",
+    };
+
+    /// <summary>
+    /// 模型装载那一行的状态点。★★ 它替掉的是进度条 —— 一个**不动的**图元
+    /// 说的正是实话:「我知道自己在哪个态,但我不知道还要多久」。
+    /// <para>★ 三态三色**外加**三种文字(见 <see cref="ModelStateText"/>)——
+    /// 颜色只是辅助;真正把两类任务分开的是"有没有进度条"这个形状差异。</para>
+    /// </summary>
+    static UIElement StateDot(RunningTask t)
+    {
+        var st = TheApp.Ready.Gate(t.ResumeAlias).State;
+        var dot = new Border
+        {
+            Width = 8, Height = 8,
+            CornerRadius = new CornerRadius(4),
+            Margin = new Thickness(0, 0, 7, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(st switch
+            {
+                ModelReadyState.Ready => Color.FromRgb(0x2E, 0xA0, 0x43),     // 绿:能用了
+                ModelReadyState.Starting => Color.FromRgb(0xD9, 0x8A, 0x0B), // 琥珀:还在起
+                _ => Color.FromRgb(0x8A, 0x8A, 0x8A),                        // 灰:没起
+            }),
+        };
+        DockPanel.SetDock(dot, Dock.Left);
+        return dot;
+    }
+
     GpuCatalog? _catalog;
 
     public TaskDrawerView()
+    {
+        Build();
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30:模型装载那一行要**跟着闸动**。
+        //    抽屉此前是"构造时画一次"就完事 —— 而模型往往正是在抽屉开着的时候装完的,
+        //    于是那一行会一直停在「正在启用中」,而模型其实已经好了。
+        //    ★ 那正是本仓最恨的形状:**一句曾经为真的话没跟着改**。
+        //  ★★ 闸只在【答案真的变了】时响,所以整块重画不会变成每秒一次。
+        // ══════════════════════════════════════════════════════════════════
+        Loaded += (_, _) => TheApp.Ready.Changed += OnReadyChanged;
+        Unloaded += (_, _) => TheApp.Ready.Changed -= OnReadyChanged;
+    }
+
+    /// <summary>★ 闸可能在后台线程上响 ⇒ 切回 UI 线程再重画。</summary>
+    void OnReadyChanged() => Dispatcher.BeginInvoke(new Action(Build));
+
+    void Build()
     {
         var app = (App)Application.Current;
         var list = new StackPanel();
@@ -95,7 +155,7 @@ public sealed class TaskDrawerView : UserControl
             foreach (var t in app.Tasks.Tasks)
             {
                 var head = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 4) };
-                var pct = new TextBlock { Text = t.PercentText, VerticalAlignment = VerticalAlignment.Center };
+                var pct = new TextBlock { Text = t.IsModelLoad ? ModelStateText(t) : t.PercentText, VerticalAlignment = VerticalAlignment.Center };
                 pct.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
                 pct.SetResourceReference(TextBlock.FontSizeProperty, "FontCaption");
                 DockPanel.SetDock(pct, Dock.Right);
@@ -103,6 +163,9 @@ public sealed class TaskDrawerView : UserControl
 
                 var title = new TextBlock { Text = t.Title, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
                 title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                // ★★★ V30:模型装载在标题**左边**多一颗状态点 —— 见 StateDot 那段说明。
+                //   形上就分得开(多一个图元),不是靠颜色:色觉差异 / 深浅皮肤下颜色都可能对不上。
+                if (t.IsModelLoad) head.Children.Add(StateDot(t));
                 head.Children.Add(title);
 
                 var bar = new ProgressBar { Height = 4, Minimum = 0, Maximum = 1, BorderThickness = new Thickness(0), Margin = new Thickness(0, 6, 0, 0) };
@@ -113,8 +176,25 @@ public sealed class TaskDrawerView : UserControl
                 // ── D87③:暂停态那一段 ────────────────────────────
                 if (!t.IsPaused)
                 {
-                    list.Children.Add(Ui.Card(Ui.Stack(head, Ui.Caption(t.Detail), bar),
-                                              new Thickness(0, 0, 0, 10)));
+                    // ══════════════════════════════════════════════════════════════
+                    //  ★★★ V30(用户裁定):「任务栏里载入中的模型要和真任务分开,
+                    //    而且**不要进度条**。」★ 用户明说这个功能本身「很好」——
+                    //    ⇒ 只改**呈现**,一个字节的行为都不动(任务照常在、照常能再开)。
+                    //
+                    //  ★★ 判词:**一个不知道自己进度的进度条,是在假装它知道。**
+                    //    模型装载的 Progress 恒为 -1,走到这条通用路径上就变成
+                    //    `IsIndeterminate = true` —— 一条来回跑的动画,而那条动画在说
+                    //    "我在推进";它其实什么都不知道。
+                    //
+                    //  ★★★ 「在形上就分得开」而不是靠颜色:状态点(●)+ 文字态,
+                    //    与"正在计算"那种带进度条的任务多/少一个图元。只改颜色的话,
+                    //    换皮肤、色觉差异、灰度截图三种情况下它们会重新长得一模一样。
+                    // ══════════════════════════════════════════════════════════════
+                    list.Children.Add(Ui.Card(
+                        t.IsModelLoad
+                            ? Ui.Stack(head, Ui.Caption(t.Detail))       // ★ 没有 bar —— 这就是那条裁定
+                            : Ui.Stack(head, Ui.Caption(t.Detail), bar),
+                        new Thickness(0, 0, 0, 10)));
                     continue;
                 }
 
@@ -151,6 +231,14 @@ public sealed class TaskDrawerView : UserControl
                     // ★ 悬停也给同一句:按钮本身也要能自己解释自己
                     ToolTip = reason,
                 };
+                // ★★★ V30 顺手修:WPF 的 ToolTip **默认在禁用的控件上不显示**。
+                //   ⇒ 上面那句 `ToolTip = reason` 恰恰在**最需要它的时候**(按钮灰着、
+                //     人正想知道为什么)一个字都不显示,而它旁边的注释写着
+                //     「按钮本身也要能自己解释自己」—— 那句话此前是假的。
+                //   ★ 与本轮发送键那颗气泡是同一族缺陷:禁用的控件收不到输入,
+                //     挂在它身上的解释就够不着。这里一行就能修好(发送键那边要外包容器,
+                //     因为用户点名要的是**点击**弹气泡,而 ToolTip 是悬停)。
+                ToolTipService.SetShowOnDisabled(start, true);
                 var self = t;
                 start.Click += async (_, _) =>
                 {
