@@ -307,6 +307,26 @@ if ($identityRoot) {
     throw "paths.toml 缺 state.identity —— 拒绝在不知道成员表落点的情况下产出备份。"
 }
 
+# ★★ {state}\backend-auth 同样不进备份(D?)—— 网关↔模型后端的共享密钥。
+#
+# 与上面两条的理由**不同**,别照抄:secrets/identity 是「丢了会被接管」;
+# 这一把是**本机自产、随时可重新生成**的进程间口令。不备份的理由是
+# 「备了没用而且多一份泄露面」:
+#   · 没用 —— 恢复到另一台机器后,那把旧钥匙对不上任何一个新起的后端,
+#     而下一次起栈本来就会自动生成一把新的;
+#   · 多一份泄露面 —— 备份盘是 G:(SanDisk · USB · exFAT · **不加密**,D21),
+#     把它复制上去,等于把「谁都能直连 18081」这条债又原样搬到一块随身盘上。
+#
+# 恢复语义:恢复后这里是空的,**这是设计**。起栈自动重建;
+# 若此刻还有后端握着旧钥匙,带鉴权的就绪探测会当场报出来(而 /health 看不见)。
+$backendAuthRoot = $P['state.backend_auth']
+if ($backendAuthRoot) {
+    $excludeAbs += $backendAuthRoot
+    $report.Add('- **backend-auth**: ★ 已排除出备份(网关↔后端共享密钥)。恢复后起栈自动重新生成')
+} else {
+    throw "paths.toml 缺 state.backend_auth —— 拒绝在不知道后端密钥落点的情况下产出备份。"
+}
+
 # 1. STATE — 全量,唯一不可重建的数据
 #    排除 quarantine:隔离区装的是你**打算删掉**的东西。把它备份进来,
 #    等于让已经决定丢弃的数据在 12 个备份代里继续存活,并且会把
