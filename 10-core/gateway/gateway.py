@@ -584,6 +584,70 @@ def resolve_lan_principal(cert_sha256: str):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  ★★★★ V32 · 吊销要能掐掉**在途的流**(清单 S6③)
+#
+#  ★★★ 它补的洞:在这之前,吊销一台副机的证书,它**正在接收的那条流会照常跑完**。
+#    不是"此刻没发生",是结构上做不到中止 —— 复查只在 `chat_completions` 的**入口**
+#    (:1965 那段 `resolve_lan_principal`),而流一旦开起来,下面这个生成器的循环体
+#    **只有一行 `yield chunk`**:没有任何一个能插判据的地方。
+#    ⇒ 主机上点了"解除",副机上那段回答**继续一个字一个字冒出来**。
+#
+#  ★★ 判据放在**流自己身上**(每条流周期性地问"我还算数吗"),而不是等 Edge 推一条通知:
+#    · 推通知**会失败**(Edge 与网关是两个进程;网关可能正在重启)。一旦它是唯一通路,
+#      失败就意味着 Edge 那侧已经断、网关这侧还在吐 —— 那是「断了一半」,比不断更难查。
+#    · 而且把设备变成非 active 的入口**不止**管理端那一个(续签改 superseded、
+#      各种 Sweep 都会)。"每个入口都记得通知一次"不是设计,是一份会漏的清单。
+#    ⇒ 两侧**各自独立**保证自己会停,谁也不依赖谁把消息送到。
+#      Edge 那侧另有一份按指纹索引的登记表(`LiveStreams`)负责**0 延迟**掐断,
+#      因为它才是持有 mTLS 连接、能立刻让副机感知到的那一层。
+#
+#  ★ 参考实现:`20-client-win/spikes/s1-revocation/`(P3b S1 / Spike 7,D43)。
+#    那份尖刀验证过整套机制却从没进产品;D43 给在途中止的 SLO 是 **≤2 秒**,
+#    所以下面这个复查周期必须**小于**它才留得出余量。
+# ══════════════════════════════════════════════════════════════════════
+
+#  ★★ 与 lan-edge 的 `Edge.StreamRevokedType` **必须是同一个字符串** ——
+#    两侧掐断的流说两句不同的话,副机就没法把它们归成一件事。
+#  ★ 故意含 `revoked` 子串:客户端 `HubClient.LooksRevoked` 就按这个子串判"被解除"。
+LAN_REVOKED_TYPE = "lan_device_revoked"
+
+LAN_REVOKED_MESSAGE = (
+    "本设备已被【主机】解除授权,这次回答被中途停下 —— 它**没有说完**,"
+    "请不要把已经显示出来的部分当成完整答案。"
+    "★ 这不是网络问题,也不是主机出故障:重试、重启、换网都不会有用。"
+    "★ 下一步:找主机上的人在管理端重新批准这台设备(需要重新配对)。"
+)
+
+#  复查周期(秒)。★ < D43 的 2 秒 SLO。
+_LAN_REVOKE_RECHECK_S = 1.0
+
+
+def lan_revoked_frame() -> bytes:
+    """掐断在途流时补发的那一帧。
+
+    ★★ 用 `{"error": {type, message}}` **信封**,而不是 gpu/sync 那两条推送流的平铺
+    `{type, message}`:聊天这条路上唯一存在的错误读取器是客户端 `ChatClient.ParseError`,
+    它读的就是这个信封。跟着**真正的消费者**走,不跟着"别处也是 SSE"走。
+    ★ 这处不一致是**有意的**,写在这里而不是让它成为一处沉默的差异。
+    """
+    return ("event: error\ndata: "
+            + json.dumps({"error": {"type": LAN_REVOKED_TYPE,
+                                    "message": LAN_REVOKED_MESSAGE}}, ensure_ascii=False)
+            + "\n\n").encode("utf-8")
+
+
+def lan_stream_still_allowed(cert_sha256: str) -> bool:
+    """这条在途流现在还算不算数。
+
+    ★ 判据就是入口那条(`resolve_lan_principal` → `membership.active_device`),
+      **同一个函数**。两处各写一份"什么叫还算数"必然漂开,而漂的那天会出现
+      「新请求被 401 但老流还在跑」—— 恰好就是本节要修的那个形状。
+    ★★ fail-closed 由 `active_device` 自带:store 读不到 / 坏了 / 指纹不在 ⇒ None ⇒ 掐。
+    """
+    return resolve_lan_principal(cert_sha256) is not None
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  P4-S10 · GPU 面的主体解析 + 六元组判定(**唯一**入口)
 #
 #  ★★ 此前 GPU 面每个端点只有一行 `classify_caller(request) == "remote-unauthenticated"`,
@@ -2157,8 +2221,33 @@ async def chat_completions(request: Request):
                 )
 
             async def gen():
+                # ★★★★ V32:这个循环体原本**只有一行 `yield chunk`** —— 那就是 S6③ 那条
+                #   缺陷在网关侧的结构:一条流开起来之后,吊销**没有任何地方能被看见**。
+                #   ★ 只对**带指纹的 LAN 请求**复查:本机回环调用没有指纹,也不受成员表管辖,
+                #     给它加复查只会让本机自己的流被一个不相干的判据掐掉。
+                next_check = time.monotonic() + _LAN_REVOKE_RECHECK_S
                 try:
                     async for chunk in r.aiter_raw():
+                        # ★ 到点才查(一条流每秒几十块,块块读盘是白费的);
+                        #   ★★ 查在 **yield 之前** —— 查在之后的话,被吊销之后仍然会**多吐一块**,
+                        #     而"吐了一块"与"没吐"在用户那边是两件事(半句话会显示出来)。
+                        if fp and time.monotonic() >= next_check:
+                            next_check = time.monotonic() + _LAN_REVOKE_RECHECK_S
+                            if not lan_stream_still_allowed(fp):
+                                # ★ 补一帧说清原因,再结束。**静默断流是不允许的** ——
+                                #   客户端会把它当成"上游说完了",而这段回答其实是被掐断的。
+                                #   ★★ 但补帧**不能代替** Edge 那一侧的连接中止:今天客户端的
+                                #     `ChatClient.ParseDeltaPayload` 对读不懂的帧一律跳过,
+                                #     于是"补帧 + 干净结束"会被它读成**成功**(半截答案冒充完整答案)。
+                                #     ⇒ 这一帧是给读得懂的消费者的;让今天的客户端**报错**的是
+                                #       Edge 那侧的 `ctx.Abort()`。两半各管一件事,缺一不可。
+                                # ★ 这里**没有**记审计:现成的 `log_denied_access` 把 reason
+                                #   写死成 "isolated-service-account-denied",而这次不是那件事。
+                                #   拿一个现成的记录器写下一个错的原因,比不记更坏 —— 审计日志
+                                #   一旦有假条目,读它的人就再也不能凭它下判断。
+                                #   ⇒ 要记的话得先给它一个如实的 reason,那是另一件事,不在本车道。
+                                yield lan_revoked_frame()
+                                return
                         yield chunk
                 finally:
                     await r.aclose()

@@ -9,6 +9,7 @@
 //   run       start the Edge from {state}/identity against upstream 127.0.0.1:8080 (loopback)
 //   selftest  self-contained integration test against a scratch identity + a stub upstream
 
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -429,9 +430,29 @@ static async Task<int> ClientE2E()
                 await Task.Delay(200);
             }
         });
+        // ★★★★ V32:一条**足够长**的流,用来测「吊销能不能掐掉在途的流」。
+        //   10 秒足够让吊销发生在**流的中间** —— 而"中间"是这条判据的全部意义:
+        //   在流开始前或结束后吊销,测到的都是别的东西。
+        //   ★ 用 c.RequestAborted 收尾:Edge 掐断连接之后这个 stub 要跟着停,
+        //     不然它会在后台一直吐到测试结束,把别的断言的时序搅乱。
+        upstream.MapGet("/__sse_long", async (HttpContext c) =>
+        {
+            c.Response.Headers["Content-Type"] = "text/event-stream";
+            c.Response.Headers["Cache-Control"] = "no-cache";
+            try
+            {
+                for (int i = 0; i < 200; i++)                  // 200 × 50ms = 10 秒
+                {
+                    await c.Response.WriteAsync($"data: long{i}\n\n", c.RequestAborted);
+                    await c.Response.Body.FlushAsync(c.RequestAborted);
+                    await Task.Delay(50, c.RequestAborted);
+                }
+            }
+            catch (OperationCanceledException) { /* 下游走了 —— 正常收尾 */ }
+        });
         await upstream.StartAsync();
 
-        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upPort}", 18444), pairingOverride: pairing);
+        edge = Edge.Build(new EdgeConfig(idDir, secDir, $"http://127.0.0.1:{upPort}", 18444, AdminPort: 18446), pairingOverride: pairing);
         await edge.StartAsync();
         var baseUrl = $"https://{hub.ServerName}:18444";
 
@@ -521,6 +542,220 @@ static async Task<int> ClientE2E()
             Assert(spread >= 300,
                    $"★★ 代理是【流式】直通:首末块间隔 {spread}ms ≥ 300ms " +
                    "(若 ≈0 说明代理把整个响应缓冲完才发,S5 推送不能走这条路)");
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★★★★★ V32 · 吊销要能掐掉**在途的流**(清单 S6③)
+        //
+        //  ★★★ 这条判据**能不能为假**,是本车道的成败点。
+        //    一条「吊销后流断了」的断言,如果它测的是「**下一次**请求被 401」,
+        //    那它测的是别的东西 —— 那一半在 V32 之前**本来就成立**(:1584 每请求复查)。
+        //    ⇒ 下面**真的起一条流、真的在流中吊销、真的断言这一条流当场结束**。
+        //
+        //  ★★ 判据借自 `20-client-win/spikes/s1-revocation/Program.cs` 的 Test A
+        //    (P3b S1 / Spike 7,D43):起流 → 让它流一会儿 → 流中 Revoke + AbortAll →
+        //    `await readA` → 断言中止发生在 SLO 内。这里照搬那个形状,并补了尖刀没有的三件:
+        //      ① 前置断言(流**真的**在流、吊销时它**还没**结束)—— 少了这两条,
+        //         "流结束了"可能只是它压根没起来,而那种判据恒真;
+        //      ② 断言它**提前**结束(上游本该吐 10 秒)—— 这一条把"被掐断"与"跑完了"分开;
+        //      ③ 断言副机拿到的是**异常**而不是干净的流末 —— 见下面 ③ 那段。
+        //
+        //  ★ D43 给在途中止的 SLO 是 ≤2 秒(尖刀里的 ABORT_SLO_MS)。
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            const int AbortSloMs = 2000;
+            const int UpstreamFullRunMs = 10_000;    // __sse_long 跑满要 10 秒
+
+            using var adm = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:18446") };
+            var devList = JsonDocument.Parse(await adm.GetStringAsync("/admin/devices")).RootElement;
+            var devId = devList.GetProperty("devices").EnumerateArray().First().GetProperty("deviceId").GetString()!;
+
+            // ── 起一条真的长流,把到达情况记下来 ──────────────────────────────
+            //  ★ 这些字段跨线程读写:reader 任务在写,主线程在读。用 volatile 语义的
+            //    局部变量做不到,所以用一个小对象兜住(值都是 long/int/bool,读到旧值
+            //    只会让断言**更严**,不会让它变松)。
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long firstFrameMs = -1, endedMs = -1;
+            var got = new StringBuilder();
+            Exception? streamEx = null;
+            bool cleanEnd = false;
+
+            var reader = Task.Run(async () =>
+            {
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/__sse_long");
+                    using var rsp = await mtls.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+                    using var stream = await rsp.Content.ReadAsStreamAsync();
+                    var b = new byte[1024];
+                    int n;
+                    while ((n = await stream.ReadAsync(b)) > 0)
+                    {
+                        if (Interlocked.Read(ref firstFrameMs) < 0) Interlocked.Exchange(ref firstFrameMs, sw.ElapsedMilliseconds);
+                        lock (got) got.Append(Encoding.UTF8.GetString(b, 0, n));
+                    }
+                    cleanEnd = true;          // ★ 读到 0 字节 = 流**干净地**结束了(没有被掐)
+                }
+                catch (Exception ex) { streamEx = ex; }
+                Interlocked.Exchange(ref endedMs, sw.ElapsedMilliseconds);
+            });
+
+            // 等它**真的**流起来,再多流 400ms —— 让吊销落在流的中间
+            while (Interlocked.Read(ref firstFrameMs) < 0 && sw.ElapsedMilliseconds < 5000)
+                await Task.Delay(20);
+            await Task.Delay(400);
+
+            // ── ① 前置:没有这两条,下面那条承重断言可以恒真 ────────────────────
+            Assert(Interlocked.Read(ref firstFrameMs) >= 0,
+                   "★★ 前置:吊销**之前**这条流真的在流(收到过帧)—— 少了这一条,"
+                   + "「流结束了」可能只是它压根没起来,而那样的判据恒真");
+            Assert(!reader.IsCompleted,
+                   "★★ 前置:吊销**之前**这条流还没结束(上游本该吐 10 秒)—— "
+                   + "少了这一条,吊销可能发生在流**结束之后**,那测的是别的东西");
+
+            // ── ② 流**中间**吊销 —— 走真实的管理端路由,不是直接改盘 ────────────
+            long revokeMs = sw.ElapsedMilliseconds;
+            using (var rv = await adm.PostAsync("/admin/devices/revoke",
+                       new StringContent(JsonSerializer.Serialize(new { deviceId = devId }),
+                                         Encoding.UTF8, "application/json")))
+                Assert((int)rv.StatusCode == 200, "★ 吊销落盘 -> 200 (" + (int)rv.StatusCode + ")");
+
+            // ── ③ ★★★★ 承重:**这一条**流当场结束 ──────────────────────────────
+            var finished = await Task.WhenAny(reader, Task.Delay(AbortSloMs + 1500)) == reader;
+            await Task.WhenAny(reader, Task.Delay(500));     // 让 endedMs 落定
+            // ★ 没结束就别算出一个**负数毫秒**印在断言消息里 —— 那个数字会让人以为
+            //   "断得比吊销还早",而真相是"它根本没断"。红的原因要说对(实测踩过一次)。
+            long endedAt = Interlocked.Read(ref endedMs);
+            long killedInMs = endedAt >= 0 ? endedAt - revokeMs : -1;
+            string killedTxt = killedInMs >= 0 ? $"{killedInMs}ms" : "★ 它根本没结束";
+
+            Assert(finished,
+                   $"★★★★ 吊销**掐掉了正在跑的那条流**(等了 {AbortSloMs + 1500}ms 它还在跑 = 没掐掉)"
+                   + " —— 这是 S6③ 那条真缺陷的判据,它红就意味着吊销对在途流仍然无效");
+            Assert(killedInMs >= 0 && killedInMs < AbortSloMs,
+                   $"★★★ 中止在 D43 的 SLO 内(实测 {killedTxt} < {AbortSloMs}ms)");
+
+            // ★★★★ 这一条把**两条中止路**分开,是本组判据能不能为假的关键。
+            //   Edge 有两个能掐流的机制:登记表(`LiveStreams.AbortAll`,0 延迟)与
+            //   流里的周期复查(`RevokeRecheck` = 1 秒)。只断言"在 2 秒 SLO 内断了"的话,
+            //   **把登记表整个摘掉**,周期复查照样会在 ~600ms 时把它断掉 ⇒ 判据仍然绿。
+            //   也就是说那样的判据**测不出登记表在不在** —— 而登记表正是本车道加的东西。
+            //   ⇒ 判据收紧到 200ms:登记表实测 ~20ms,周期复查最快也要几百毫秒(吊销发生在
+            //     首帧后 400ms,而复查的下一跳在 1000ms),两者**分得开**。
+            Assert(killedInMs >= 0 && killedInMs < 200,
+                   $"★★★★ 中止走的是**登记表**那条 0 延迟的路(实测 {killedTxt} < 200ms)—— "
+                   + "它红而上面那条绿,说明登记表没起作用、是周期复查兜住的:"
+                   + "那意味着「点解除」到「流真的断」之间有肉眼可见的延迟");
+
+            // ★★★ 把「被掐断」与「跑完了」**分开** —— 少了这一条,一条根本没被掐、
+            //   只是自己跑完的流也会让上面那两条变绿(上游 10 秒,SLO 窗口 3.5 秒,
+            //   今天分得开;而这条断言让它**结构上**分得开,不依赖那两个数字的相对大小)。
+            Assert(Interlocked.Read(ref endedMs) < UpstreamFullRunMs - 1000,
+                   $"★★★ 它是**被掐断**的,不是跑完的(结束于 {Interlocked.Read(ref endedMs)}ms,"
+                   + $"上游跑满要 {UpstreamFullRunMs}ms)");
+
+            // ★★★ 这一条钉的是 `ctx.Abort()`,而它防的是**最坏的那个结局**:
+            //   今天客户端 `ChatClient.ParseDeltaPayload` 对读不懂的帧一律跳过,
+            //   所以"补一帧 error + 让流干净结束"会被它读成 `ChatOutcome(true, …)` ——
+            //   **半截答案冒充完整答案**。掐死连接才让它落到 `stream_broken`。
+            //   ⇒ 判据必须是"副机拿到的是**异常**",不是"流结束了"。
+            Assert(!cleanEnd && streamEx is not null,
+                   "★★★★ 副机拿到的是**连接被掐断**(异常),不是干净的流末 —— "
+                   + "干净结束的话,今天的客户端会把这段被掐断的半截回答当成**完整答案**呈现出去"
+                   + $"(cleanEnd={cleanEnd}, ex={streamEx?.GetType().Name ?? "null"})");
+
+            // ★★ 中止之后副机要收到**一句说得清的话**,不是无声断流。
+            //   判词:给错原因的提示比不给提示更坏,而**没有原因**也是一种给错。
+            //  ★★ 判据钉的是**解析出来的形状**,不是原始字节:`JsonSerializer` 默认把非 ASCII
+            //    转义成 `\uXXXX`(网关那侧用 `ensure_ascii=False` 则不转义)。两侧的**字节**
+            //    因此不同,而**解析结果**必须相同 —— 消费者读的是后者。
+            //    ★ 上一版这里按原始字节找中文,于是它红了一次:红得对,错的是判据不是被判的东西。
+            string body;
+            lock (got) body = got.ToString();
+            var errLine = body.Split('\n')
+                              .FirstOrDefault(l => l.StartsWith("data: ", StringComparison.Ordinal)
+                                                   && l.Contains(Edge.StreamRevokedType, StringComparison.Ordinal));
+            Assert(body.Contains("event: error", StringComparison.Ordinal) && errLine is not null,
+                   $"★★★ 掐断前补发了带原因的那一帧(event: error + {Edge.StreamRevokedType})—— "
+                   + "无声断流会被读成「网络抖了一下」,而它其实是主机主动解除");
+            if (errLine is not null)
+            {
+                var fr = JsonDocument.Parse(errLine["data: ".Length..]).RootElement;
+                // ★ 信封形状与客户端 `ChatClient.ParseError` 读的那一个一致({error:{type,message}})。
+                Assert(fr.TryGetProperty("error", out var fe)
+                       && fe.TryGetProperty("type", out var ft)
+                       && ft.GetString() == Edge.StreamRevokedType,
+                       $"★★★ 那一帧的 type 是 {Edge.StreamRevokedType} —— 客户端 `ChatClient.ParseError` "
+                       + "读的就是 {error:{type,message}} 这个信封");
+                var msg = fr.GetProperty("error").TryGetProperty("message", out var fm) ? (fm.GetString() ?? "") : "";
+                Assert(msg.Contains("已被【主机】解除", StringComparison.Ordinal),
+                       "★★★ 那一帧里有**给人看的**那句话(副机上没有管理端,这是它唯一能看到的说明)—— "
+                       + $"实得:{(msg.Length > 40 ? msg[..40] + "…" : msg)}");
+                Assert(msg.Contains("没有说完", StringComparison.Ordinal),
+                       "★★★ 那句话明说了这段回答**没说完** —— 只说「已被解除」的话,"
+                       + "用户仍然会把屏幕上那半截当成完整答案");
+            }
+
+            // ── ④ 反向:把设备放回 active,同一条路必须**恢复正常** ──────────────
+            //  ★ 少了这一条,上面全部断言可以靠"这条路一直是断的"变绿 ——
+            //    那正是本仓反复吃亏的那种恒真判据。
+            Store.Mutate(idDir, s =>
+            {
+                foreach (var d in s.Devices.Where(x => x.DeviceId == devId)) d.Status = "active";
+                foreach (var cc in s.Certs.Where(x => x.DeviceId == devId && x.Status == "revoked")) cc.Status = "active";
+            });
+            using (var again = await mtls.GetAsync(baseUrl + "/v1/models"))
+                Assert((int)again.StatusCode == 200,
+                       "★★ 反向:放回 active 之后同一条路恢复 200 (" + (int)again.StatusCode + ") —— "
+                       + "证明上面测到的「断」是**吊销造成的**,不是这条路本来就坏");
+
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★★ 第二条路:**不经管理端**的吊销也必须掐掉在途流
+            //
+            //  ★★★ 为什么这条必须单独测:上面那条走的是 `/admin/devices/revoke` →
+            //    `LiveStreams.AbortAll`(0 延迟)。但把设备变成非 active 的入口**不止那一个**
+            //    —— 续签把旧证改 superseded、各种 Sweep 都会,将来还会有新的。
+            //    只测管理端那条路的话,判据说的是"吊销能掐流",实际钉住的只是
+            //    "**点了那个按钮**能掐流" —— 而两者的差别正是本仓的 3b 陷阱。
+            //  ⇒ 这里**直接改成员表**(登记表完全不知情),只剩流自己的周期复查能救它。
+            // ══════════════════════════════════════════════════════════════════
+            {
+                var sw2 = System.Diagnostics.Stopwatch.StartNew();
+                long firstMs2 = -1, ended2 = -1;
+                bool clean2 = false;
+                var reader2 = Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var req = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/__sse_long");
+                        using var rsp = await mtls.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+                        using var stream = await rsp.Content.ReadAsStreamAsync();
+                        var b = new byte[1024];
+                        while (await stream.ReadAsync(b) > 0)
+                            if (Interlocked.Read(ref firstMs2) < 0) Interlocked.Exchange(ref firstMs2, sw2.ElapsedMilliseconds);
+                        clean2 = true;
+                    }
+                    catch { /* 掐断 */ }
+                    Interlocked.Exchange(ref ended2, sw2.ElapsedMilliseconds);
+                });
+                while (Interlocked.Read(ref firstMs2) < 0 && sw2.ElapsedMilliseconds < 5000) await Task.Delay(20);
+                await Task.Delay(200);
+                Assert(Interlocked.Read(ref firstMs2) >= 0 && !reader2.IsCompleted,
+                       "★★ 前置(第二条路):吊销前这条流真的在流、且还没结束");
+
+                long rv2 = sw2.ElapsedMilliseconds;
+                Store.Mutate(idDir, s => s.RevokeDevice(devId));      // ★ 登记表**完全不知情**
+                var fin2 = await Task.WhenAny(reader2, Task.Delay(AbortSloMs + 1500)) == reader2;
+                await Task.WhenAny(reader2, Task.Delay(500));
+                Assert(fin2,
+                       "★★★★ **不经管理端**的吊销同样掐掉了在途流 —— 它红就意味着中止只挂在"
+                       + "「点了那个按钮」上,而别的吊销入口(续签改 superseded / 各种 Sweep)一条都掐不掉");
+                long ended2At = Interlocked.Read(ref ended2);
+                Assert(ended2At >= 0 && ended2At - rv2 < AbortSloMs,
+                       $"★★★ 第二条路也在 SLO 内(实测 {(ended2At >= 0 ? (ended2At - rv2) + "ms" : "★ 它根本没结束")} < {AbortSloMs}ms)");
+                Assert(!clean2,
+                       "★★ 第二条路同样是**掐断**而不是干净流末(理由同上:干净结束会被客户端读成成功)");
+            }
         }
     }
     finally
@@ -1255,6 +1490,89 @@ record EdgeConfig(string IdentityDir, string SecretsDir, string UpstreamBase, in
                   bool OpenPairingWindowOnStart = true);
 record EnrollNotice(string RequestId, string DisplayName, string[] Sas);
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  ★★★★ V32 · 按【证书指纹】索引的在途流登记表 —— 吊销之后能定位并掐掉那条流。
+//
+//  ★★★ 它补的那个洞(清单 S6③,结构判据):在这之前,吊销一台副机的证书,
+//    它**正在接收的那条流会照常跑完**。不是"此刻没发生",是结构上做不到中止:
+//      ① `Store.RevokeDevice` 只改一个 JSON 的状态位 + generation ——
+//         没有 CRL / OCSP / 任何广播,改完没有任何东西去通知**已建立的连接**;
+//      ② 复查只在**每次请求进来时**(Program.cs:1584 + 网关 gateway.py:1965)——
+//         两层都在**请求入口**,不在**流的生命周期**里;
+//      ③ 而流式那条路**连一个能插判据的地方都没有**:`Proxy` 的尾行是**单次**
+//         `CopyToAsync`,连 per-chunk 循环都没有。
+//    ⇒ 于是"吊销"这个动作对一条 300 秒的聊天流**完全无效**,而界面上它显示成功了。
+//
+//  ★★ 本类是那三条里的第 ①+③ 条的落点:有了它,`/admin/devices/revoke` 才有
+//    **可以定位的对象**;有了 `Proxy` 里的 per-chunk 循环,才有**可以中止的时机**。
+//
+//  ★ 参考实现出处:`20-client-win/spikes/s1-revocation/SpikeState.cs` 的 `LiveStreams`
+//    (P3b S1 / Spike 7,D43)。那份尖刀**当年就验证过这套机制**,但从没进产品。
+//    这里照搬它的形状(ConcurrentDictionary<fp, {id → 条目}> + Register/Unregister/AbortAll),
+//    并加了尖刀没有的一件事:**中止原因**(见 Entry.Revoked)。
+//
+//  ★★★ 为什么中止原因必须记在条目上、而不是拿 `ctx.RequestAborted` 反推:
+//    副机自己走了(关窗口/切网)与被主机吊销,在 CTS 那一层长得**一模一样**,
+//    而它们该说的话完全相反 —— 一个什么都不该说,一个必须说"你被解除了"。
+//    拿"RequestAborted 没触发"去反推"那就是吊销",在**两者同时发生**时会猜错,
+//    而猜错的方向恰好是给一句错的归因。本仓判词:**给错原因的提示比不给提示更坏。**
+// ══════════════════════════════════════════════════════════════════════════════
+sealed class LiveStreams
+{
+    sealed class Entry
+    {
+        public required CancellationTokenSource Cts { get; init; }
+        /// <summary>true = 这条流是**被吊销掐掉的**,不是副机自己走的。volatile:掐的线程与流的线程不同。</summary>
+        public volatile bool Revoked;
+    }
+
+    readonly ConcurrentDictionary<string, ConcurrentDictionary<Guid, Entry>> _byFp = new();
+
+    /// <summary>登记一条在途流,返回它的句柄。★ 必须在 finally 里配一次 <see cref="Unregister"/>。</summary>
+    public Guid Register(string fp, CancellationTokenSource cts)
+    {
+        var id = Guid.NewGuid();
+        _byFp.GetOrAdd(fp, _ => new()).TryAdd(id, new Entry { Cts = cts });
+        return id;
+    }
+
+    /// <summary>
+    /// 摘掉一条流。★★ 空掉的那一格也要摘走 —— 不摘的话每个配过对的指纹都会永久留一个空字典,
+    /// 而 Edge 是**开机自启常驻**的进程,那就是一处无界增长。
+    /// </summary>
+    public void Unregister(string fp, Guid id)
+    {
+        if (!_byFp.TryGetValue(fp, out var m)) return;
+        m.TryRemove(id, out _);
+        if (m.IsEmpty) _byFp.TryRemove(KeyValuePair.Create(fp, m));
+    }
+
+    /// <summary>
+    /// 掐掉这个指纹名下**全部**在途流,返回掐了几条。
+    /// <para>★ 先置 Revoked 再 Cancel —— 反过来的话流那一侧可能在读到标志之前就醒了,
+    /// 于是一次真的吊销被当成"副机自己走了",**静默断流**。</para>
+    /// </summary>
+    public int AbortAll(string fp)
+    {
+        if (!_byFp.TryGetValue(fp, out var m)) return 0;
+        int n = 0;
+        foreach (var kv in m)
+        {
+            kv.Value.Revoked = true;
+            try { kv.Value.Cts.Cancel(); n++; }
+            catch (ObjectDisposedException) { /* 那条流刚好自己结束了 —— 不是失败 */ }
+        }
+        return n;
+    }
+
+    /// <summary>这条流是不是被吊销掐的(而不是副机自己走的)。判据只有这一处,不许在别处反推。</summary>
+    public bool WasRevoked(string fp, Guid id)
+        => _byFp.TryGetValue(fp, out var m) && m.TryGetValue(id, out var e) && e.Revoked;
+
+    /// <summary>当前登记着几条在途流(自检用:断言"登记表真的有东西",否则 AbortAll 恒返回 0 也叫"通过")。</summary>
+    public int CountFor(string fp) => _byFp.TryGetValue(fp, out var m) ? m.Count : 0;
+}
+
 static class Edge
 {
     /// <summary>
@@ -1300,6 +1618,11 @@ static class Edge
         var pairing = pairingOverride ?? new Pairing(idDir, cfg.SecretsDir);
         if (pairingOverride is null && cfg.OpenPairingWindowOnStart) pairing.OpenWindow(TimeSpan.FromMinutes(30));
         var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
+
+        // ★★★ V32:在途流登记表。**每个 Edge 实例一份**(不是 static)——
+        //   自检里会同时起好几个 Edge,共用一份 static 表会让一次测试的吊销掐掉另一次测试的流,
+        //   而那种串扰在别的测试里表现成随机的红。
+        var live = new LiveStreams();
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.SetMinimumLevel(LogLevel.Warning);   // ← temporarily surface handshake errors
@@ -1508,11 +1831,34 @@ static class Edge
             var r = (await JsonDocument.ParseAsync(c.Request.Body)).RootElement;
             try
             {
-                var gen = Store.Mutate(idDir, s =>   // ★ 命名 Mutex 串行:吊销不能被并发配对写掉
+                var deviceId = r.GetProperty("deviceId").GetString()!;
+                // ★★ V32:**在同一次 Mutate 里**把这台设备名下的指纹一并取出来。
+                //   为什么不在 Mutate 之后再读一遍:两次读之间可能插进一次续签(新证书落盘),
+                //   那张新证的指纹就不在我们手上 —— 而它正在跑的那条流会**漏掉不掐**。
+                //   ★ 取的是**全部**证书(含已 superseded / 已 revoked 的),不是只取 active:
+                //     RevokeDevice 已经把它们全改成 revoked 了,而**握着旧证的那条流仍然在跑**。
+                var (gen, fps) = Store.Mutate(idDir, s =>   // ★ 命名 Mutex 串行:吊销不能被并发配对写掉
                 {
-                    s.RevokeDevice(r.GetProperty("deviceId").GetString()!);
-                    return s.IdentityGeneration;
+                    s.RevokeDevice(deviceId);
+                    return (s.IdentityGeneration,
+                            s.Certs.Where(x => x.DeviceId == deviceId)
+                                   .Select(x => x.CertSha256)
+                                   .Where(x => !string.IsNullOrEmpty(x))
+                                   .Distinct(StringComparer.OrdinalIgnoreCase)
+                                   .ToArray());
                 });
+
+                // ── ★★★★ 吊销**落盘之后**才掐流 ─────────────────────────────────
+                //  ★ 顺序不能反:先掐后落盘的话,掐的瞬间成员表里它还是 active,
+                //    副机立刻重连就**又建得起来**一条流 —— 掐了等于没掐。
+                //  ★★ 这里掐的是 **Edge 这一层**(持有 mTLS 连接的那层),0 延迟。
+                //    **网关那一层**(真正在 yield chunk 的那层)不靠这里通知 —— 它自己
+                //    在流里复查成员表(gateway.py 的 `_LAN_REVOKE_RECHECK_S`)。
+                //    ★★★ 为什么不从这儿推一条通知过去:那条通知**会失败**(网关没起 / 正在重启),
+                //      而它一旦是唯一的通路,失败就意味着网关那侧继续吐、Edge 这侧已经断
+                //      —— 正是「断了一半」。⇒ 两侧各自**独立**保证自己会停,谁也不依赖谁送到。
+                foreach (var f in fps) live.AbortAll(f);
+
                 return Results.Json(new { ok = true, generation = gen });
             }
             catch (Exception ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 409); }
@@ -1587,7 +1933,7 @@ static class Edge
                 await ctx.Response.WriteAsJsonAsync(new { error = new { type = "lan_device_unknown" } });
                 return;
             }
-            await Proxy(ctx, http, cfg.UpstreamBase, fp);
+            await Proxy(ctx, http, cfg.UpstreamBase, fp, live, idDir);
         });
 
         return app;
@@ -1600,6 +1946,41 @@ static class Edge
             // TLS layer: accept any cert that chains to our CA + carries clientAuth EKU, so the cert is
             // available to routes. Membership (active member) is enforced on business routes; the candidate
             // match is enforced on /pair/complete. This lets a not-yet-active candidate complete pairing.
+            //
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★★ V32 · 上面那句话**只说了一半**,这里把另一半补上。
+            //
+            //  它说的是"为什么放行 candidate",没说**代价**:
+            //  ★★ **已吊销的证书照样握得上手。** 判据只有链 + EKU,而吊销既不动链
+            //     也不动 EKU(它只改成员表里的一个状态位)。没有 CRL、没有 OCSP,
+            //     TLS 这一层**结构上**看不见吊销。
+            //  ⇒ 兜住它的是 :1584 那条**每请求复查**(`Store.LoadOrEmpty(idDir).IsActive(fp)`,
+            //    每次重新读盘、无缓存 ⇒ 吊销立刻生效)+ V32 加的**在途流中止**
+            //    (`LiveStreams`,让已经建立的那条流也能被掐掉)。
+            //
+            //  ★★★ 反问过一遍:**能不能只放行 candidate、挡住 revoked?**
+            //    —— **技术上能**(`Store.FindByFingerprint` 分得出 candidate / revoked /
+            //    superseded,不是一个笼统的"不 active"),**但不该做**,而且理由
+            //    不是麻烦,是它**会把今天唯一说对了话的那条路弄坏**:
+            //
+            //      · 今天:已吊销的副机握手成功 → 撞上 :1584 → **401 + `lan_device_unknown`**
+            //        → 客户端 `LooksRevoked`(HubClient.cs:710)命中
+            //        → 界面说「**本设备已被主机解除,需要重新配对**」。**这是对的那句话。**
+            //      · 改成握手就拒之后:客户端拿到的是一次 TLS 失败,
+            //        经 `TlsFailure.Classify` 落到 `_ => null`(HubClient.cs:794「判不出来就别猜」)
+            //        → `HubState.Offline` → 界面说「**连不上**」。
+            //
+            //    ★★★★ 而「连不上」会把人送去查防火墙、改拨号地址、最后**重新配对** ——
+            //      *而重新配对会删掉本机私钥*,把一个本可以被主机重新批准的身份亲手销毁。
+            //      也就是说:为了在 TLS 层多挡一道(那一道**本来就已经被每请求复查挡住了**),
+            //      代价是把一句准确的归因换成一句会造成实际损害的猜测。
+            //      本仓判词:**给错原因的提示比不给提示更坏。**
+            //
+            //  ⇒ 裁定:**保持放行,不在 TLS 层查成员表**。这一层只回答"这张证是不是我们签的",
+            //    "它今天还算不算数"由 :1584 与 `LiveStreams` 回答 —— 那两处**都能把原因说出口**。
+            //  ★ 留给将来:真要在握手层挡,前提是客户端先有一条能把
+            //    「握手被拒 = 已被解除」说对的归因(那是 20-client-win 的活,不在本车道)。
+            // ══════════════════════════════════════════════════════════════════
             return Ca.VerifyChainAndEku(cert, caPublic, Ca.OidClientAuth);
         }
         catch (Exception ex)
@@ -1653,7 +2034,61 @@ static class Edge
     /// </summary>
     public const string UpstreamUnreachableType = "upstream_gateway_unreachable";
 
-    static async Task Proxy(HttpContext ctx, HttpClient http, string upstreamBase, string fp)
+    /// <summary>
+    /// ★★★ V32:在途流**被吊销掐断**时给副机的那个词。它同样是**跨进程约定** ——
+    /// 网关那一侧(`gateway.py` 的 `LAN_REVOKED_TYPE`)必须用**同一个字符串**,
+    /// 否则两侧掐断的流会说两句不同的话,而副机没法把它们归成一件事。
+    /// <para>★★ 为什么选 `lan_device_revoked` 而不是复用业务面那个 `lan_device_unknown`:
+    /// 后者是**每请求复查**那条路的词,含义是"未知/未激活/已吊销"三合一;
+    /// 而这里能确定的**恰恰就是**"已吊销"—— 用一个更模糊的词等于把已知的信息丢掉。
+    /// ★★★ 同时它是**故意**含 `revoked` 子串的:客户端 `HubClient.LooksRevoked`
+    /// today 就按这个子串判"被解除"(HubClient.cs:710)。将来任何一条把它喂进那个判据的路
+    /// 都会直接落在**对的**分支上,而不是落到"中枢拒绝了这次请求"那句含糊话。</para>
+    /// </summary>
+    public const string StreamRevokedType = "lan_device_revoked";
+
+    /// <summary>
+    /// 掐断在途流时补发的那一帧(SSE)。★★ 用 `{"error":{type,message}}` **信封**而不是
+    /// gpu/sync 那两条推送流的**平铺** `{type,message}`:聊天这条路上唯一存在的错误读取器是
+    /// `ChatClient.ParseError`,它读的就是这个信封。跟着**真正的消费者**走,不跟着"别处也是 SSE"走。
+    /// <para>★ 这条差异是**有意的**,写在这里而不是让它成为一处沉默的不一致。</para>
+    /// </summary>
+    static byte[] RevokedFrame(string message) => Encoding.UTF8.GetBytes(
+        "event: error\ndata: " + JsonSerializer.Serialize(new
+        {
+            error = new { type = StreamRevokedType, message },
+        }) + "\n\n");
+
+    /// <summary>
+    /// 掐断在途流时给副机的那句话。★ 它要在**副机**那台机器上说得通 ——
+    /// 那台机器上**没有管理端**,人看不到主机的设备列表,所以必须说清
+    /// 「是主机主动解除的」+「下一步去哪」,而不是只丢一个错误码。
+    /// </summary>
+    const string StreamRevokedMessage =
+        "本设备已被【主机】解除授权,这次回答被中途停下 —— 它**没有说完**,"
+        + "请不要把已经显示出来的部分当成完整答案。"
+        + "★ 这不是网络问题,也不是主机出故障:重试、重启、换网都不会有用。"
+        + "★ 下一步:找主机上的人在管理端重新批准这台设备(需要重新配对)。";
+
+    /// <summary>
+    /// ★★★ V32:在途流**复查成员表**的周期。到点就重读一次 store.json,不 active 就掐。
+    ///
+    /// <para>★★★★ 为什么中止**不能**只靠 `/admin/devices/revoke` 那条路去推:
+    /// 那条路只覆盖「人在管理端点了解除」这**一个**入口。而把设备变成非 active 的地方
+    /// **不止那一个** —— `SweepStaleProvisioning`(Store.cs:203)、
+    /// `SweepStaleRenewalCandidates`(:279)、续签把旧证改 superseded(:242)都会,
+    /// 而且将来还会有新的。⇒ 一个"每个吊销入口都记得去掐一次流"的设计**不是设计**,
+    /// 它只是一份会漏的清单(与本仓「靠每个调用方自觉带上的底线不是底线」同一条纪律)。</para>
+    /// <para>★★ 所以判据放在**流自己身上**:每条在途流周期性地问一次"我还算数吗"。
+    /// 登记表(<see cref="LiveStreams"/>)负责**快**(点解除的那一刻就掐,0 延迟),
+    /// 这条复查负责**一定会发生**(不管吊销是从哪个入口来的)。两者缺一:
+    /// 只有登记表 ⇒ 别的入口吊销掐不掉;只有复查 ⇒ 最坏多吐一个周期。</para>
+    /// <para>★ 取 1 秒:D43 给在途中止的 SLO 是 ≤2 秒(spikes/s1-revocation 的 ABORT_SLO_MS),
+    /// 而复查周期必须**小于**它才留得出余量。</para>
+    /// </summary>
+    static readonly TimeSpan RevokeRecheck = TimeSpan.FromSeconds(1);
+
+    static async Task Proxy(HttpContext ctx, HttpClient http, string upstreamBase, string fp, LiveStreams live, string idDir)
     {
         var target = upstreamBase.TrimEnd('/') + ctx.Request.Path + ctx.Request.QueryString;
         var req = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target);
@@ -1668,13 +2103,42 @@ static class Edge
         }
         req.Headers.TryAddWithoutValidation("X-LocalAI-Cert-Sha256", fp);   // inject the VERIFIED fingerprint
 
+        // ★★★ V32:整条转发(**含还没拿到响应头的那一段**)都登记进在途流表。
+        //   为什么从 SendAsync 之前就登记:上游正在装模型时,SendAsync 能挂上几十秒 ——
+        //   那段时间这条连接**真的在途**,而它不在表里的话吊销就掐不到它,
+        //   表现成"偶尔掐得掉、偶尔掐不掉",比稳定掐不掉更难查。
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        var streamId = live.Register(fp, cts);
+        try
+        {
+            await ProxyCore(ctx, http, upstreamBase, req, cts, fp, streamId, live, idDir);
+        }
+        finally { live.Unregister(fp, streamId); }
+    }
+
+    static async Task ProxyCore(HttpContext ctx, HttpClient http, string upstreamBase,
+                                HttpRequestMessage req, CancellationTokenSource cts,
+                                string fp, Guid streamId, LiveStreams live, string idDir)
+    {
         HttpResponseMessage sent;
         try
         {
-            sent = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
+            sent = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
         }
         catch (Exception ex)
         {
+            // ★★ V32:被吊销掐在**响应头之前** —— 这时候还没发过状态码,可以如实用 401 说清楚,
+            //   比补一帧 SSE 更好(那时候还没有流)。★ 这一支排在 RequestAborted 之前:
+            //   两者可能同时为真,而"被解除"是更该说出口的那个。
+            if (live.WasRevoked(fp, streamId))
+            {
+                ctx.Response.StatusCode = 401;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = new { type = StreamRevokedType, message = StreamRevokedMessage },
+                });
+                return;
+            }
             // ★ 副机自己走了(关窗口/切网)⇒ 不是上游的事,也没人在听这个回答了。
             //   不区分的话,每一次正常的取消都会被记成一次"网关连不上"。
             if (ctx.RequestAborted.IsCancellationRequested) return;
@@ -1705,6 +2169,85 @@ static class Edge
         foreach (var h in resp.Headers) ctx.Response.Headers[h.Key] = h.Value.ToArray();
         foreach (var h in resp.Content.Headers) ctx.Response.Headers[h.Key] = h.Value.ToArray();
         ctx.Response.Headers.Remove("transfer-encoding");
-        await resp.Content.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★★★★ V32:这里原本是**一行** `await resp.Content.CopyToAsync(...)`。
+        //
+        //  那一行就是 S6③ 那条缺陷的**结构**所在:一次 CopyToAsync 从头跑到尾,
+        //  中途**没有任何一个能插判据的地方** —— 连 per-chunk 循环都没有。
+        //  于是"吊销"对一条正在跑的流**完全无效**,它会照常跑完;
+        //  而副机下一次请求才会撞上 :1584 的每请求复查收到 401。
+        //  ⇒ 用户看到的是:主机上点了"解除",副机上那段回答**继续一个字一个字冒出来**。
+        //
+        //  ★ 换成 per-chunk 循环**不改变流式性质**:上游给什么就发什么、发完就 flush,
+        //    与 CopyToAsync 一样是边到边(client-e2e 的 `__sse_probe` 那条首末块间隔
+        //    ≥300ms 的断言正是钉这件事的,它必须继续绿)。
+        //  ★★ 变的只有一件事:每一块之间**有了一个可以被取消的点**。
+        // ══════════════════════════════════════════════════════════════════════
+        var isSse = (resp.Content.Headers.ContentType?.MediaType ?? "")
+                    .Equals("text/event-stream", StringComparison.OrdinalIgnoreCase);
+        await using var upstreamBody = await resp.Content.ReadAsStreamAsync(cts.Token);
+        var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(16 * 1024);
+        var nextRecheck = DateTime.UtcNow + RevokeRecheck;
+        try
+        {
+            while (true)
+            {
+                int n = await upstreamBody.ReadAsync(buf.AsMemory(), cts.Token);
+                if (n == 0) break;                      // 上游正常结束
+
+                // ★★★ 每块之间复查一次成员表(到点才查,不是每块都查:一条流每秒几十块,
+                //   块块读盘是白费的)。★ 判据与 :1584 那条**每请求复查**是同一个
+                //   `IsActive` —— 两处各写一份"什么叫还算数"必然漂开,而漂的那天
+                //   会出现「新请求被 401 但老流还在跑」,恰好就是本车道要修的那个形状。
+                if (DateTime.UtcNow >= nextRecheck)
+                {
+                    nextRecheck = DateTime.UtcNow + RevokeRecheck;
+                    if (!Store.LoadOrEmpty(idDir).IsActive(fp))
+                    {
+                        live.AbortAll(fp);              // ★ 走同一条掐流的路,好让下面的 catch 认出原因
+                        cts.Token.ThrowIfCancellationRequested();
+                    }
+                }
+
+                await ctx.Response.Body.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                await ctx.Response.Body.FlushAsync(cts.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // ★★★ 两种取消**必须分开**,它们该做的事完全相反:
+            //   · 副机自己走了 ⇒ 没人在听,什么都别做(补帧只会往一个已经关掉的连接上写);
+            //   · 被主机吊销   ⇒ **必须说一句**,然后把连接掐死。
+            if (!live.WasRevoked(fp, streamId)) throw;
+
+            // ── ① 先补一帧说清原因 ────────────────────────────────────────────
+            //  ★ 用 `ctx.RequestAborted` 而不是 `cts.Token`:cts 已经被我们自己取消了,
+            //    拿它去写必然立刻再抛一次 —— 那就等于**没补**,而且看起来像是补过了。
+            if (isSse && !ctx.RequestAborted.IsCancellationRequested)
+            {
+                try
+                {
+                    await ctx.Response.Body.WriteAsync(RevokedFrame(StreamRevokedMessage),
+                                                       ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+                catch { /* 副机在这一瞬走了 —— 补不上就算了,下面的 Abort 才是承重的那一半 */ }
+            }
+
+            // ── ② ★★★★ 然后**必须**把连接掐死,补帧不能代替它 ─────────────────
+            //  为什么:今天客户端的 `ChatClient.ParseDeltaPayload` 对**读不懂的帧一律跳过**
+            //  (ChatClient.cs:207-231,那条纪律本身是对的 —— 把 JSON 原文塞进回答里更坏)。
+            //  ⇒ 只补帧、然后让流**正常结束**的话,客户端那边是:
+            //      我们的 error 帧被静默丢掉 → 流干净地结束 → `sb.Length > 0`
+            //      → `ChatOutcome(true, …)` = **成功**。
+            //    也就是说:一个**被掐断的半截回答**会被当成**完整答案**呈现给用户。
+            //  ★★★ 那比不补帧更坏,而且坏在最要命的方向上 —— 它不是"提示不好",
+            //    是**把失败伪装成成功**。掐死连接则让今天的客户端落到
+            //    `stream_broken`(ChatClient.cs:174),那条路至少是"这次没成"。
+            //  ⇒ 补帧是给**读得懂的**消费者的;Abort 是给**今天这个**消费者的。两半都要。
+            ctx.Abort();
+        }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(buf); }
     }
 }
