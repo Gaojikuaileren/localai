@@ -66,6 +66,40 @@ if ($dirty) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ★★★★ 脏树 ⇒ **直接判红,一个产物都不产**(2026-08-10,协调层裁定)。
+#
+#  判词:**一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。**
+#
+#  ★ 在此之前(上面那整段)的做法是:算一个工作树指纹、拼进 `.dirty-xxxxxxxx`,
+#    然后**照样出包**。那比什么都不写强,但它治的是"事后能不能认出来",
+#    治不了"这份包能不能用" —— 而后者才是出包的目的:
+#      · 一个 `.dirty` 包没法从任何一个提交重建,SHA256 对得上也说明不了它是什么;
+#      · 更要命的是它会被当成基线:2026-08-10 就是靠读 exe 的 ProductVersion 才发现
+#        dist\host 落后 137 个提交 —— 换成一个 `.dirty` 戳,那次根本查不下去。
+#  ⇒ 所以不是"警告一下然后出",是**停在这里**,而且是在
+#    `New-Item $Out` 之前 —— **一个字节都还没往 dist 里写**。
+#
+#  ★★ 未跟踪文件(`??`)**同样算脏**,这是有意的:`git status --porcelain` 收它们,
+#    而一个未跟踪的 `.cs` 会被 MSBuild 的默认 glob **编进 exe**。
+#    把它们放行等于留一条"改了代码但戳是干净的"的路。
+#
+#  ★ 没有 `-AllowDirty` 之类的开关。要出包就先提交或先 `git stash` ——
+#    一个能被绕过的判据,在赶时间的那一次一定会被绕过,而那一次正是最需要它的一次。
+# ══════════════════════════════════════════════════════════════════════════════
+if ($dirtyFiles.Count -gt 0) {
+    Write-Host "X 工作树不干净 —— **不出包**。" -ForegroundColor Red
+    Write-Host "  这一趟的戳会是:$ver" -ForegroundColor Red
+    Write-Host "  ★ 一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。" -ForegroundColor Red
+    Write-Host "  git status --porcelain($($dirtyFiles.Count) 行,原样):" -ForegroundColor Red
+    $dirtyFiles | ForEach-Object { Write-Host "     $_" -ForegroundColor Red }
+    Write-Host "  ⇒ 先提交(或 git stash),再重跑。" -ForegroundColor Red
+    Write-Host "  ★★ 现在停下**没有动过 dist**:这一条在 New-Item `$Out 之前。" -ForegroundColor Red
+    Write-Host "  ★ 多条车道共用一棵工作树时,脏的那几行可能**不是你改的** ——" -ForegroundColor Red
+    Write-Host "    先看清是谁的,别顺手 checkout 掉别人正在写的东西。" -ForegroundColor Red
+    exit 1
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ★★★ V28:`$Out` 默认值从 `dist\client-pack` 改成**落位目录** ——
 #    补上 V22 只做了一半的那件事。V22 把 `$AdminOut` 改成并排的 `admin\`(管理端出包即落位),
 #    **而 `$Out` 一个字没动**。后果不是"名字不好看":
@@ -596,17 +630,24 @@ Write-Host "    $($last -split "`n" | Select-Object -First 1)"
 Write-Host "[3] 校验和与版本戳…"
 $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash
 Set-Content -Path (Join-Path $Out 'SHA256.txt') -Encoding utf8 -Value "$hash  localai-client.exe"
+# ══════════════════════════════════════════════════════════════════════════════
+#  $verNote —— 这一段**从 2026-08-10 起结构上到不了**:脏树在脚本开头就判红了。
+#
+#  ★ 留着它不是忘了删,是把它改成一条**兜底断言**:
+#    如果执行流真的走到了这里而 $dirtyFiles 非空,那说明开头那道闸被绕过了
+#    (被人加了开关、被改坏了、或者工作树是在开头那次检查**之后**才变脏的
+#     —— 最后这一种真会发生:构建要十几分钟,期间别人动了同一棵树)。
+#  ★★ 那种情况下**不能**照旧写一段"本 exe 是脏树构建的"免责声明然后把包发出去:
+#    那正是这条裁定要废掉的做法。⇒ 当场判红。
+#  ★ "构建期间才变脏"那一半**不在这里查**,在 [5c] —— 这里只到 [1]~[3],
+#    而那种变化要等整趟跑完才问得完整。两条判据一头一尾,与 [5c] 的 HEAD 对拍同一手法。
+# ══════════════════════════════════════════════════════════════════════════════
 $verNote = ""
 if ($dirtyFiles.Count -gt 0) {
-    # ★ 脏树构建:必须把「这份 exe 里多了/少了什么」摊开写,否则 .dirty 只是个免责声明,
-    #   拿到包的人(包括三个月后的自己)仍然说不清手上这个二进制到底是什么代码。
-    $verNote = @"
-
-★ 本 exe 是在【工作树不干净】的情况下构建的 —— 版本戳里的提交 $sha
-   【不能】完整解释它的内容。工作树指纹已附在版本戳末尾(.dirty-xxxxxxxx)。
-   构建时这些文件与该提交不一致(git status --porcelain 原样):
-$($dirtyFiles | ForEach-Object { "     $_" } | Out-String)
-"@
+    Write-Host "X 走到这里时 `$dirtyFiles 非空 —— 开头那道脏树闸被绕过了。" -ForegroundColor Red
+    Write-Host "  ★ 一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。" -ForegroundColor Red
+    Write-Host "  ★★ 注意 dist 已经被这一趟写过一半 —— 等树稳下来整个重出,别只补一半。" -ForegroundColor Red
+    exit 1
 }
 Set-Content -Path (Join-Path $Out 'VERSION.txt') -Encoding utf8 -Value @"
 localai-client
@@ -810,8 +851,22 @@ if ($roundBad.Count -gt 0) {
 # ★★★ 前缀一致还不够:四个必须**逐字相同**。不同 = 构建期间源码树动过。
 $roundDistinct = @($roundSeen | ForEach-Object { $_.Pv } | Sort-Object -Unique)
 Push-Location $repo
-$headNow = (& git rev-parse --short HEAD 2>$null)
+$headNow  = (& git rev-parse --short HEAD 2>$null)
+# ★★ 顺带**收尾再采一次样**:开头那道脏树闸只问了"开工时干不干净",
+#   而构建要十几分钟 —— 别人在这十几分钟里动了同一棵树,产物里就混进了没提交的代码,
+#   而戳仍然是那个干净提交。⇒ 一头一尾各问一次,与上面 HEAD 对拍同一手法。
+$dirtyNow = @((& git status --porcelain 2>$null) -split "`r?`n" | Where-Object { $_ -match '\S' })
 Pop-Location
+if ($dirtyNow.Count -gt 0) {
+    Write-Host "X 工作树在构建【期间】变脏了 —— 这份产物说不清自己是哪一版。" -ForegroundColor Red
+    Write-Host "  开工时是干净的,此刻 $($dirtyNow.Count) 行(原样):" -ForegroundColor Red
+    $dirtyNow | ForEach-Object { Write-Host "     $_" -ForegroundColor Red }
+    Write-Host "  ★ 一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。" -ForegroundColor Red
+    Write-Host "  ★★ dist 已经被这一趟写过了 —— 等树稳下来整个重出,别只补一半。" -ForegroundColor Red
+    Write-Host "  ★ 治本:从钉死在某提交的临时 worktree 出包,那棵树不会被人动" -ForegroundColor Red
+    Write-Host "    (决议包 v31-persona-floor-and-host-pack §3b.5 有两行命令)。" -ForegroundColor Red
+    exit 1
+}
 if ($roundDistinct.Count -gt 1 -or ($headNow -and $sha -ne 'nogit' -and $headNow -ne $sha)) {
     Write-Host "X 这一趟【构建期间源码树动过】—— 四个 exe 不是同一份代码编出来的。" -ForegroundColor Red
     Write-Host "  注进去的戳(四个一样,所以它骗得过前缀判据):$ver" -ForegroundColor Red
