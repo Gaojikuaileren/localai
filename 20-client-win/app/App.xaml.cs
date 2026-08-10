@@ -42,6 +42,14 @@ public partial class App : Application
     //   任何在 OnStartup 之前碰到 Gpu 的代码都会 NRE ——
     //   V20 给聊天界面接「意图即起」的提示行时当场撞上(自检里 ChatView 一构造就炸)。
     public HubGpu Gpu { get; }
+    /// <summary>
+    /// ★★★ V30:【模型就绪闸】。全客户端**唯一**一处回答「这个功能的模型现在能不能用」。
+    /// <para>用户裁定原文那句「**其他所有功能都是一样的,按需的模型没起来就禁用**」——
+    /// 它说的不是"聊天要加个判断",而是"这件事对每个入口都成立",⇒ 判断只能有一处。
+    /// 见 ModelReadiness 文件头;新增入口没挂上来时 `SelftestModelGate` 的元断言判红。</para>
+    /// <para>★ 与 Gpu 同一手法在构造函数里建:它的构造是纯赋值 + 挂三个事件,完全惰性。</para>
+    /// </summary>
+    public ModelReadiness Ready { get; }
     /// <summary>★ P4-S16b:这台客户端在中枢那边的"有人在用"凭据。见 LeaseKeeper 文件头。</summary>
     public LeaseKeeper Lease { get; private set; } = null!;
     /// <summary>
@@ -81,6 +89,13 @@ public partial class App : Application
         History = new TranslationHistory(Chat);
         // ★ V20-②:与 History 同一手法,在构造里建(不再等 OnStartup)。理由见 Gpu 的声明。
         Gpu = new HubGpu(Hub);
+        // ★★ V30:就绪闸必须在**这里**建,不能等 OnStartup —— 界面一构造就会问它
+        //   (ChatView 的发送键在构造里就要知道能不能按),而 `null!` 那种写法在 V20-② 已经
+        //   当场炸过一次(自检里 ChatView 一构造就 NRE)。同一个坑不踩第二次。
+        Ready = new ModelReadiness(Gpu, Hub);
+        // ★ 语音那一面的证据由 InterpretState 报进来 —— SpeechClient 的持有者只有它一个,
+        //   闸自己再开一个客户端去探就是第二个探针、第二套口径。
+        Interpret.Readiness = Ready;
         _instance = instance;
         _startHidden = startHidden;
         // 窗口全关也不退出 —— 退出只能由用户显式触发(托盘「退出」)或系统关机。
@@ -722,7 +737,7 @@ public partial class App : Application
         _tray = new WinForms.NotifyIcon
         {
             // 暂用系统图标;墨白皮肤的自制黑白图标随视觉资源一起补(用户指定设计理念)。
-            // ★ 托盘用自家图标(Assets\iconavicon.ico 已作为 Win32 资源编进 exe):
+            // ★ 托盘用自家图标(Assets\icon\favicon.ico 已作为 Win32 资源编进 exe):
             //   从 exe 自身提取,发布后没有散落文件也照样有图标;取不到再退系统默认。
             Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "")
                    ?? System.Drawing.SystemIcons.Application,
