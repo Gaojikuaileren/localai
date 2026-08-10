@@ -42,6 +42,18 @@ public static class AdminChrome
     /// <summary>标题栏高度。★ 与客户端 `MainWindow.xaml:72` 的 `RowDefinition Height="38"` 同一个数。</summary>
     public const double BarHeight = 38;
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★ 三个窗口键的**名字**。自检**按身份**找它们,不按显示文案去猜。
+    //    ★ 这条手法是从托盘那边搬来的(`App.TrayCloseItemName` 的注释逐字):
+    //      「按文案找的断言会在改文案那天红,而它本来要守的是『这条路通不通』」。
+    //    ★★ V29b 补:在此之前这一整个文件**零判据** —— 把它整个删掉、
+    //      `AdminWindow` 改回 `Content = Ui.Page(_body)`,build 过、自检全绿、门禁全过。
+    //      判据见 `admin/SelftestChrome.cs`。
+    // ══════════════════════════════════════════════════════════════════════════
+    internal const string MinButtonName = "ChromeMinimize";
+    internal const string MaxButtonName = "ChromeMaximizeRestore";
+    internal const string CloseButtonName = "ChromeClose";
+
     /// <summary>
     /// 给窗口装上自绘标题栏,并把 <paramref name="body"/> 放到它下面。
     /// ★ 调用方**不再自己设 `Content`** —— 顶栏与正文的排布归这里一处管。
@@ -58,10 +70,12 @@ public static class AdminChrome
         });
 
         // ── 三个窗口键 ────────────────────────────────────────────────────
-        var min = CaptionButton(IconName.Minimize, "最小化", () => w.WindowState = WindowState.Minimized);
-        var max = CaptionButton(IconName.Maximize, "最大化", () => ToggleMaximize(w));
-        // ★ 提示文字说的是**真实后果**:管理端的 × 只缩托盘(裁定第 6 条)
-        var close = CaptionButton(IconName.Close, "关闭(留在托盘)", w.Close, danger: true);
+        var min = CaptionButton(MinButtonName, IconName.Minimize, "最小化", () => w.WindowState = WindowState.Minimized);
+        var max = CaptionButton(MaxButtonName, IconName.Maximize, "最大化", () => ToggleMaximize(w));
+        // ★ 提示文字说的是**真实后果**:管理端的 × 只缩托盘(裁定第 6 条)。
+        //   ★★ 这句话里的「托盘」两个字是被断言钉住的 —— 见 `SelftestChrome`:
+        //     写成光秃秃的「关闭」就是骗人,因为点完进程还活着。
+        var close = CaptionButton(CloseButtonName, IconName.Close, "关闭(留在托盘)", w.Close, danger: true);
 
         void SyncMax()
         {
@@ -84,7 +98,15 @@ public static class AdminChrome
         buttons.Children.Add(close);
 
         // ── 拖动区:整条空白都可以拖(与客户端一样,CaptionHeight=0 所以自己接)──
-        var drag = new Border { Background = System.Windows.Media.Brushes.Transparent };
+        //  ★★ 底色用 `BgNav` 而**不是** `Brushes.Transparent`。两个理由,第二个才是承重的:
+        //    ① 看起来一模一样 —— 它盖在同样是 BgNav 的标题栏上;
+        //    ② `Brushes.Transparent` 是**颜色字面量**,而管理端有一条断言禁着它
+        //       (客户端自检那条「颜色一律取自令牌」)。★ V29 第一版就是写的 Transparent,
+        //       **被那条断言当场抓住** —— 而它抓得对:走令牌的这个版本换肤时跟着变,
+        //       写死的那个不会。★ 关键是**有底色才接得到鼠标**(null 不参与命中测试),
+        //       换成令牌之后这一条仍然成立。
+        var drag = new Border();
+        drag.Dyn(Border.BackgroundProperty, "BgNav");
         drag.MouseLeftButtonDown += (_, e) => OnDrag(w, e);
 
         var barGrid = new Grid();
@@ -141,15 +163,18 @@ public static class AdminChrome
     //  ★★ Border + 手工 hover 正是本仓给图标按钮用的写法(`Ui.PlusButton` 同款),
     //    不是新发明;而且客户端那三个键本来就 `Focusable=False` / `IsTabStop=False`,
     //    做成 Border 不丢任何键盘可达性 —— 它本来就没有。
-    static Border CaptionButton(IconName icon, string tip, Action onClick, bool danger = false)
+    static Border CaptionButton(string name, IconName icon, string tip, Action onClick, bool danger = false)
     {
         var b = new Border
         {
+            Name = name,          // ★ 自检按身份找它,不按显示文案猜
             Width = 46, Height = BarHeight,
-            Background = System.Windows.Media.Brushes.Transparent,   // ★ 有底色才接得到鼠标
             Cursor = Cursors.Hand,
             ToolTip = tip,
         };
+        // ★ 常态底色 = 标题栏自己那个令牌(看起来就是"没有底色"),而**有底色才接得到鼠标** ——
+        //   `Background = null` 不参与命中测试,整个 46×38 会失灵。理由同上面拖动区那一段。
+        b.Dyn(Border.BackgroundProperty, "BgNav");
         WindowChrome.SetIsHitTestVisibleInChrome(b, true);
         SetGlyph(b, icon);
         b.MouseEnter += (_, _) =>
@@ -161,7 +186,7 @@ public static class AdminChrome
         };
         b.MouseLeave += (_, _) =>
         {
-            b.Background = System.Windows.Media.Brushes.Transparent;
+            b.Dyn(Border.BackgroundProperty, "BgNav");   // 回到常态 = 标题栏底色
             TintGlyph(b, "FgSecondary");
         };
         b.MouseLeftButtonUp += (_, e) => { e.Handled = true; onClick(); };

@@ -1913,23 +1913,44 @@ public static partial class Selftest
     }
 
     /// <summary>
-    /// 数**限定形式**的调用点(`Type.Method(`)。
-    /// <para>★ 为什么只数限定形式:声明那一行长成 `public static X Foo(`,它**不含** `.Foo(` ——
-    /// 于是"声明"与"调用"天然分得开,不需要去猜哪一行是声明(猜错会让判据恒真或恒假)。
-    /// 这几个入口本来就都是静态工具函数,全仓都写成 `Type.Method(...)`。</para>
+    /// 数生产源码里的调用点:**所有形式的 `Method(` 减去它自己的声明**。
+    ///
+    /// <para>★★★ 带时态的留痕 —— **V29b 之前**这里只数**限定形式**(`Type.Method(`),
+    /// 理由原文是:「声明那一行长成 `public static X Foo(`,它不含 `.Foo(`,
+    /// 于是声明与调用天然分得开;**这几个入口本来就都是静态工具函数**」。
+    /// <br/>那句"本来就都是"在 V30b 之后**不成立了**:`ModelReadiness.RetireModelTask`
+    /// 是个 `private` 实例方法,在**自己类里**被 `RetireModelTask(a, now);` 无限定地调用
+    /// (`ModelReadiness.cs:270`)。⇒ 限定形式数到 0,断言判红,而**红得理由是假的** ——
+    /// 它说「一个调用点都没有」,而调用点就在那儿。
+    /// ★ 这正是本仓最恨的形状的镜像:不是恒真,是**恒假**;两者一样坏,
+    /// 因为一条红得理由是假的判据会训练人忽略它。</para>
+    ///
+    /// <para>★ 新写法:数所有 `Method(`(不管限不限定),再**减去声明**。
+    /// 声明的形状是「行首 → 可选特性 → 可选修饰符 → 一个返回类型 token → 方法名 → `(`」,
+    /// 而调用点(`RetireModelTask(a, now);` / `x.Foo(` / `return Foo(`)前面**没有类型 token**。
+    /// ⇒ 两者仍然分得开,只是不再假设入口一定是静态的。</para>
+    ///
     /// <para>★★ 先剥注释再数:注释里提到函数名**不算调用点** —— 恰恰相反,
     /// 「注释里到处都是它、代码里一次都没有」正是这条要抓的病。</para>
     /// </summary>
     static int QualifiedCallSites(List<string> files, string method)
     {
-        var rx = new System.Text.RegularExpressions.Regex(
-            @"\." + System.Text.RegularExpressions.Regex.Escape(method) + @"\s*\(");
+        var esc = System.Text.RegularExpressions.Regex.Escape(method);
+        // 所有出现:`Foo(` / `x.Foo(` / `Foo<T>(` —— 前面不许紧跟标识符字符(防 `MyFoo(`)
+        var any = new System.Text.RegularExpressions.Regex(
+            @"(?<![A-Za-z0-9_])" + esc + @"\s*(?:<[^>()]*>)?\s*\(");
+        // 声明:行首 → 可选特性 → 可选修饰符* → 一个返回类型 token → 方法名 → `(`
+        var decl = new System.Text.RegularExpressions.Regex(
+            @"(?m)^[ \t]*(?:\[[^\]]*\][ \t]*)*"
+            + @"(?:(?:public|private|protected|internal|static|async|override|virtual|sealed|new|partial|extern|unsafe|readonly)[ \t]+)*"
+            + @"[A-Za-z_][A-Za-z0-9_\.\<\>,\[\]\? \t]*[ \t]+" + esc + @"\s*(?:<[^>()]*>)?\s*\(");
         var n = 0;
         foreach (var f in files)
         {
             string src;
             try { src = File.ReadAllText(f); } catch { continue; }
-            n += rx.Matches(NoComments(src)).Count;
+            var clean = NoComments(src);
+            n += any.Matches(clean).Count - decl.Matches(clean).Count;
         }
         return n;
     }

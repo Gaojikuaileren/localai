@@ -56,10 +56,12 @@ public static partial class Selftest
     {
         Console.WriteLine("\n-- 滚轮全局可滚(V29 · 实机反馈①)--");
 
-        // ── ① 结构:让路那份源码**编进了本程序集**,不是引了个类库、更不是复制 ──
+        // ── ① 结构:让路那份源码**编进了本程序集** ────────────────────────
+        //   ★ 这一条只挡住「改成项目引用」那一支。**它挡不住复制**(见下面 ①b)。
         Assert(typeof(Wheel).Assembly == typeof(AdminScroll).Assembly,
-            "★★ `Wheel.PassThrough` 与管理端**编在同一个程序集**里(csproj `<Compile Link>`,"
-            + "不是引用、不是复制)—— V21 搬 3100 行时漏的就是这一个");
+            "★★ `Wheel.PassThrough` 与管理端**编在同一个程序集**里(不是引了个类库)—— "
+            + "V21 搬 3100 行时漏的就是这一个。★ 这一条**不**证明它不是复制的,那一半在下面");
+        WheelNotACopy();
 
         // ── WPF 前提 ─────────────────────────────────────────────────────
         if (Application.Current is null) new Application();
@@ -69,6 +71,59 @@ public static partial class Selftest
 
         WheelGrid();
         WheelInnerKeepsIt();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ①b **不是复制** —— V29 的判词写着这四个字,而当时**没有任何东西守着它**
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ 核实那一轮当场演示了这个洞:把 `app/Views/Wheel.cs` 复制成
+    //    `admin/Views/Wheel.cs`(同 namespace)、再把 csproj 那一行删掉
+    //    ⇒ 程序集判据**照样绿**(复制过来的那份也编在同一个程序集里)。
+    //    ⇒ 判词比判据宽,而宽出来的那一半正是本仓最恨的那件事:两份漂了不会有东西红。
+    //
+    //  ⇒ 两条一起才关得住这个洞,而且是**两个方向**:
+    //    · csproj 里那一行 link **在**(否则它是从别处编进来的);
+    //    · admin/ 底下**没有任何文件**声明 `namespace LocalAI.Client.` ——
+    //      那正是"复制一份过来"的签名(复制必然连 namespace 一起抄,
+    //      改了 namespace 的话 `AdminScroll` 那句 `using LocalAI.Client.Views;` 就编不过)。
+    //  ★ 发布产物旁边没有源码 ⇒ 这一节整段 **Skip**(第 11 条:那一趟本来就测不了)。
+    static void WheelNotACopy()
+    {
+        var root = AdminSourceRoot();
+        if (root is null)
+        {
+            Skip("★★ 「Wheel.cs 是 link 进来的,不是复制的」",
+                 "这一趟旁边没有管理端源码根(发布产物形态)—— 判据要读 csproj 与 admin/*.cs,"
+                 + "**这一条没跑**,不要读成「没有人复制过」");
+            return;
+        }
+
+        var proj = Path.Combine(root, "localai-admin.csproj");
+        var projText = File.Exists(proj) ? File.ReadAllText(proj) : "";
+        Assert(projText.Contains(@"Include=""..\app\Views\Wheel.cs""", StringComparison.Ordinal),
+            @"★★★ csproj 里那一行 `<Compile Include=""..\app\Views\Wheel.cs"">` **在** —— "
+            + "它是「两个 csproj 编同一个文件」的唯一凭据。删掉它而在 admin 里放一份副本,"
+            + "程序集那条判据**照样绿**(核实实测),所以必须单独钉这一行");
+
+        // ★ admin/ 底下不许有客户端命名空间的**声明** —— 那是复制的签名。
+        //  ★★ 判据必须是「**行首的** namespace 声明」,不是"文中出现过这几个字":
+        //    第一版写成 `Contains("namespace LocalAI.Client.")` ⇒ 它把**自己**抓了
+        //    (本文件的断言文案与那个搜索串里都写着这几个字,FAIL=1,而红得理由是假的)。
+        //    ⇒ 这是 ASSERTION-PITFALLS 第 1 条那一族(已踩 10 次)。
+        //    ★ 修法是**收紧判据**,不是把这段文字改写成绕开断言的样子 ——
+        //      后者是把代价转嫁给下一个读代码的人,那条坑明文禁止。
+        var nsDecl = new System.Text.RegularExpressions.Regex(
+            @"(?m)^[ \t]*namespace[ \t]+LocalAI\.Client(?:\.[A-Za-z0-9_]+)*[ \t]*[;{]");
+        var strays = Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                     && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            .Where(f => nsDecl.IsMatch(File.ReadAllText(f)))
+            .Select(f => Path.GetFileName(f)).OrderBy(x => x).ToList();
+        Assert(strays.Count == 0,
+            $"★★★★ `admin/` 底下**没有任何文件**声明 `namespace LocalAI.Client.*`(实测 {strays.Count} 个"
+            + (strays.Count > 0 ? ":" + string.Join("、", strays) : "")
+            + ")—— 那是「把客户端那份复制过来」的签名。复制的那天两份就开始漂,"
+            + "而漂了不会有任何东西红(裁定④ / D93 裁定④的全部理由)");
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -200,6 +255,25 @@ public static partial class Selftest
             $"★★★ 反向:正文框**自己还能滚**的时候,滚的是它、整页**不动**"
             + $"(内层 {inner.VerticalOffset:0} · 外层 {page.VerticalOffset:0})—— "
             + "少了这一条,「一律往上抛」那种实现也全绿,而它让人在框里改不动字");
+
+        // ── 补上普查的一个已知缺口(V29b)────────────────────────────────────
+        //  ★★ `WheelGrid` 那条普查走的是 `AdminWindow` 的四页,而记忆库编辑框里那两个
+        //    `PART_ContentHost` **只有展开编辑时才存在** ⇒ 普查那一刻它们不在树上,
+        //    覆盖不到。类处理器**盖得到**它们(`ScrollChanged` 抓得到后加进树的),
+        //    但"盖得到"与"验过了"是两件事。
+        //  ⇒ 这一节手上正好就有那棵展开后的树,顺手把它也普查一遍,缺口就不是缺口了。
+        var seen = 0; var missed = new List<string>();
+        foreach (var sv in AdminScroll.ScrollViewersIn(editor))
+        {
+            seen++;
+            if (!AdminScroll.IsTamed(sv) && !AdminScroll.IsExempt(sv))
+                missed.Add(sv.Name is { Length: > 0 } n ? n : sv.GetType().Name);
+        }
+        Assert(seen >= 2, $"★ 元断言:展开后的编辑框里真的有滚动区可查(实测 {seen} 个,标题框 + 正文框各一个)");
+        Assert(missed.Count == 0,
+            $"★★★ **展开编辑时才出现的那几个滚动区也让了路**(走过 {seen} 个,漏 {missed.Count} 个"
+            + (missed.Count > 0 ? ":" + string.Join("、", missed) : "")
+            + ")—— ★ 四页那条普查**够不着这里**(普查时没人在编辑),而用户真正会在这里滚");
 
         w.Close();
     }
