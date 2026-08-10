@@ -759,6 +759,29 @@ Write-Host "     OK 客户端会去看的那个目录,就是这一次发到的�
 #    这里说的是「**这一次构建**同时发出去的四个 exe 必须同戳」——
 #    同一次 dotnet publish 都发了,戳还不一样的话只有一种解释:某一步根本没跑。
 #  ★ 红测:把 [5] 那段发布摘掉 ⇒ 本条列出 lan-edge/identity 两行并判红。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★★ 2026-08-10 实测追加:**只比前缀是不够的**,而这一条是当天就被咬到的。
+#
+#  那一趟出包 17:27 开跑、17:41 跑完。**17:38 另一条车道(V32)把它自己合进了 main** ——
+#  于是同一次构建里:
+#      dist\client\localai-client.exe   实际编译修订 959480c   ← [1] 在 17:38 之前编的
+#      dist\admin  / dist\host 三个     实际编译修订 179375a   ← 在 17:38 之后编的
+#  而四个 exe 的 ProductVersion **前缀完全一致**(都是注进去的 $ver),
+#  VERSION.txt 上也写着 959480c。⇒ **那份包的版本戳在说谎**,而 [5c] 全绿放行了。
+#
+#  ★★ 根因是一个隐含前提:`$ver` 在脚本开头算一次,然后**默认这棵树不会动**。
+#    在一个多条车道各自往 main 合的仓库里,那个前提是错的 —— 而且它错得静悄悄。
+#  ★★★ 露馅的是 SourceLink 在 InformationalVersion 后面接的那截**真实编译修订**
+#    (`…+959480c.959480cb8be5…` vs `…+959480c.179375a6490…`)。
+#    ⇒ 判据改成:四个 ProductVersion 必须**逐字完全相同**,不是"都以 $ver 开头"。
+#      这一条不用调 git 就能咬住树动过 —— 它比的是二进制自己说的话。
+#  ★ 再加一条 HEAD 对拍(开头一次、这里一次)兜底:万一哪天 SourceLink 被关掉,
+#    上面那条会退化成恒真,而这条还在。两条都留着,理由与 D95 那张表同源。
+#
+#  ★★ 判红之后**不要**只是重跑就算了:这一趟已经把 dist 写成"混的"了
+#    (客户端一个修订、管理端/主机端另一个)。报错里必须说清这一点 ——
+#    否则下一个人会以为"红了 = 没动过盘"。
 # ══════════════════════════════════════════════════════════════════════════════
 Write-Host "[5c] 验:三件产物出自同一轮…"
 $roundParts = @(
@@ -767,10 +790,12 @@ $roundParts = @(
     @{ Name = "主机端 $hostExeName";             Path = $hostExe }
     @{ Name = '主机端 localai-identity.exe';     Path = $identityExe }
 )
-$roundBad = @()
+$roundSeen = @()
+$roundBad  = @()
 foreach ($rp in $roundParts) {
     $pv = $null
     try { $pv = (Get-Item -LiteralPath $rp.Path).VersionInfo.ProductVersion } catch { $pv = $null }
+    $roundSeen += [pscustomobject]@{ Name = $rp.Name; Pv = $pv }
     if ([string]::IsNullOrWhiteSpace($pv) -or (-not $pv.StartsWith($ver))) {
         $roundBad += ("     · {0}`n       烧进去的戳: {1}" -f $rp.Name, $(if ($pv) { $pv } else { '(读不到)' }))
     }
@@ -782,7 +807,26 @@ if ($roundBad.Count -gt 0) {
     Write-Host "  ★ 这正是 2026-08-09 那次的形状:dist\host 落后 137 个提交,而三个目录谁也不问一句。" -ForegroundColor Red
     exit 1
 }
-Write-Host "     OK 四个 exe 的 ProductVersion 都是本轮的 $ver" -ForegroundColor DarkGray
+# ★★★ 前缀一致还不够:四个必须**逐字相同**。不同 = 构建期间源码树动过。
+$roundDistinct = @($roundSeen | ForEach-Object { $_.Pv } | Sort-Object -Unique)
+Push-Location $repo
+$headNow = (& git rev-parse --short HEAD 2>$null)
+Pop-Location
+if ($roundDistinct.Count -gt 1 -or ($headNow -and $sha -ne 'nogit' -and $headNow -ne $sha)) {
+    Write-Host "X 这一趟【构建期间源码树动过】—— 四个 exe 不是同一份代码编出来的。" -ForegroundColor Red
+    Write-Host "  注进去的戳(四个一样,所以它骗得过前缀判据):$ver" -ForegroundColor Red
+    Write-Host "  而各自**实际的编译修订**:" -ForegroundColor Red
+    $roundSeen | ForEach-Object { Write-Host ("     · {0,-30} {1}" -f $_.Name, $_.Pv) -ForegroundColor Red }
+    if ($headNow -and $headNow -ne $sha) {
+        Write-Host "  HEAD:开跑时 $sha  →  现在 $headNow(多半是另一条车道在这十几分钟里合进了 main)" -ForegroundColor Red
+    }
+    Write-Host "  ★★ 后果:VERSION.txt 会写着开跑时那个提交,而二进制里装的是别的代码 ——" -ForegroundColor Red
+    Write-Host "     **版本戳在说谎**,而这正是本脚本存在的理由。" -ForegroundColor Red
+    Write-Host "  ★★★ 注意:dist 现在是**混的**(已经被这一趟写过一半),不是「红了就等于没动盘」。" -ForegroundColor Red
+    Write-Host "     ⇒ 等树稳下来(问一句还有没有车道要合)再整个重出一次,别只补一半。" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     OK 四个 exe 的 ProductVersion 逐字相同,且 HEAD 全程没动($sha):$ver" -ForegroundColor DarkGray
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ★★ 版本戳与校验和(主机端)—— 在此之前 dist\host **一个都没有**。
