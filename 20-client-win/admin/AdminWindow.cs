@@ -42,6 +42,17 @@ public sealed class AdminWindow : Window
         ("client", "客户端与栈"),
     };
 
+    /// <summary>四页的键。★ V29 放出来只为一件事:让滚轮那条护栏能**逐页**普查
+    /// (`SelftestWheel.WheelSweep`)。写死一份键列表在自检里的话,加了第五页而忘了加进去,
+    /// 那一页就静默地不在普查范围内 —— 而那正是这条护栏要防的形状。</summary>
+    internal static IEnumerable<string> PageKeys => Pages.Select(p => p.Key);
+
+    /// <summary>整窗**唯一**那个页面滚动容器(`Ui.Page` 返回的那个)。
+    /// ★ V29 起 `Content` 是「自绘标题栏 + 正文」的 Grid,不再直接是它 ——
+    /// 滚轮那条护栏要读它的 `VerticalOffset`,靠 `(ScrollViewer)Content` 强转会当场炸。</summary>
+    internal ScrollViewer PageHost => _pageHost;
+    ScrollViewer _pageHost = null!;
+
     string _active = "hub";
 
     /// <summary>★ 每一页**建一次就留着**:`HostHubView` 里有轮询与配对窗口状态,
@@ -50,13 +61,25 @@ public sealed class AdminWindow : Window
 
     public AdminWindow()
     {
+        // ★★ 滚轮让路(实机反馈①)。**排在建内容之前**:`AdminScroll` 是靠类处理器
+        //   在每个 ScrollViewer 第一次排版时装的,晚于内容建出来就会漏掉第一批。
+        //   ★ 放在这里而不是只放在 `App.OnStartup`:自检建的是这个窗口、不跑 OnStartup,
+        //     两处分家的话「自检里绿、真程序里没接上」是可能的 —— 而那种绿最坏。
+        //   ★ 幂等(见 AdminScroll.Install)。
+        Views.AdminScroll.Install();
+
+        // ★ `Title` 留着:它是**任务栏与 Alt+Tab** 认这个窗口的名字。
+        //   界面上不再重复它 —— 自绘标题栏里不放标题文字(与客户端 2026-08-03 的裁定一致,
+        //   见 `AdminChrome.cs` 文件头),所以正文里 `Ui.Title("主机管理端")` 那一处是唯一的一处。
         Title = "本地 AI · 主机管理端";
         Width = 1040; Height = 760;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         this.Dyn(BackgroundProperty, "BgWindow");
         this.Dyn(FontFamilyProperty, "FontUI");
         this.Dyn(FontSizeProperty, "FontBody");
-        Content = Ui.Page(_body);
+        // ★ 顶部栏风格统一(实机反馈④):自绘标题栏 + 正文,由 `AdminChrome` 一处排布。
+        _pageHost = Ui.Page(_body);
+        Views.AdminChrome.Apply(this, _pageHost);
         Refresh();
     }
 
@@ -87,6 +110,10 @@ public sealed class AdminWindow : Window
         _active = key;
         Refresh();
     }
+
+    /// <summary>切页。★ V29 的测试缝:与用户点分页按钮**走同一条路**(`Go`),
+    /// 不是另建一个视图 —— 另建的那种"测过了"什么也不说明(ASSERTION-PITFALLS 第 14 条)。</summary>
+    internal void GoTo(string key) => Go(key);
 
     void Render()
     {
@@ -126,13 +153,19 @@ public sealed class AdminWindow : Window
         if (!running)
             act.Children.Add(Ui.Primary("打开主机客户端", (_, _) =>
             {
+                // ★★ 实机反馈③:**成功不弹窗** —— 客户端窗口本身就是成功的证据,
+                //   而重画之后上面那行会变成「主机客户端:正在运行。」,证据在界面上留着。
+                //   ★ 失败**不静音**:原因存下来,下面那一行会把它印出来(不是弹窗)。
+                //     判词:跑不了和跑过了必须长得不一样。
                 var (ok, why) = ClientLink.StartClient(tray: false);
-                Say(ok ? why : "没能打开:" + why);
+                _clientStartError = ok ? null : "没能打开:" + why;
                 _cache.Remove("client");
                 Refresh();
             }));
         act.Children.Add(Ui.Secondary("刷新", (_, _) => { _cache.Remove("client"); Refresh(); }));
         stack.Children.Add(act);
+        // ★ 失败那一行**排在按钮下面、留在原地** —— 不自动消失,下一次点成功了才清掉。
+        if (_clientStartError is { Length: > 0 } err) stack.Children.Add(AdminNotice.Failure(err));
 
         // ── 关栈那一格(裁定⑤)──────────────────────────────────────
         stack.Children.Add(Ui.Panel("关掉整套 AI 栈",
@@ -153,6 +186,8 @@ public sealed class AdminWindow : Window
         return stack;
     }
 
-    void Say(string text) => MessageBox.Show(this, text, "主机管理端",
-                                             MessageBoxButton.OK, MessageBoxImage.Information);
+    /// <summary>上一次「打开主机客户端」失败的原因;成功或没点过是 <c>null</c>。
+    /// ★ 存成字段是因为点完要 `Refresh()` 重画整张卡 —— 不存的话那一行当场被自己刷掉,
+    /// 表现与"没弹窗也没提示"一模一样,等于失败又被静音了一次。</summary>
+    string? _clientStartError;
 }

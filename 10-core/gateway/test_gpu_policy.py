@@ -406,8 +406,13 @@ finally:
 check("★★★★ 把机主从 allowlist 里拿掉 ⇒ **同一个账户、同一条回环连接**立刻改不动 —— "
       "这条路的开关确实是 config/caller-accounts.toml,不是「走回环就是机主」",
       _c9f.status_code == 403, f"{_c9f.status_code}/{_dim(_c9f)}")
+#  ★ V32b:`_ReqLike` 没有真 socket ⇒ 认人**必然失败** ⇒ 它现在落 `identity-unresolved`
+#    (在这之前"没查出来"和"查出来了但不在册"共用 `unregistered-local`,已按用户裁定拆开)。
+#    ★★ 这条断言问的是「全局状态没被改坏」,所以三个档位都算正常 —— 但**不能**写成
+#      「随便什么值都行」:那样它就恒真了。
 check("★ 而且拿掉之后再放回去,上面那条仍然成立(没有把全局状态改坏)",
-      gateway.classify_caller(_ReqLike()) in ("trusted-local", "unregistered-local"))
+      gateway.classify_caller(_ReqLike())
+      in ("trusted-local", "unregistered-local", gateway.IDENTITY_UNRESOLVED_TIER))
 
 # ── ⑥ ★★★★ 主机上【非机主 Windows 账户】比它原来经 Edge 拿到的**还少** ──
 #   这是 V13 客户端那一侧必须有「档位不对就退回 Edge」的**理由**:

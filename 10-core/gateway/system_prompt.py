@@ -28,10 +28,18 @@
 ★★ 本文件**只写行为底线,不写人设**。
    叫什么名字、什么语气、用什么称呼 —— 那是用户的裁定,不该由我塞进去。
    两者混在一句里的后果是:调人设时会顺手把底线一起改掉。
+
+★★★ 2026-08-09:用户裁了(实机反馈 ⑧「它就是它」),于是人设层建起来了 ——
+   **建在 `persona.py`,不建在这里**,而且注入时是**两条独立的 system 消息**。
+   上面那三行仍然逐字成立:本文件此后依旧只写底线。
+   ⇒ 谁要改人设,去 `persona.py`;`FLOOR` 这 5 条**一个字都不动**
+     (`test_system_prompt.py` 逐条钉着,删任一条即红)。
 """
 from __future__ import annotations
 
 from typing import Dict, List
+
+import persona
 
 #: 助手**不得**做的事。★ 每一条都对应一次真实的失败形态,不是泛泛的"要诚实"。
 FLOOR = """你是一个在用户自己电脑上运行的本地 AI 助手。以下几条是**行为底线**,任何情况下都不放宽:
@@ -54,21 +62,40 @@ FLOOR = """你是一个在用户自己电脑上运行的本地 AI 助手。以�
 
 
 def build(existing: List[Dict] | None = None) -> Dict:
-    """构造要注入的 system 消息。"""
+    """构造要注入的**行为底线** system 消息。"""
     return {"role": "system", "content": FLOOR}
 
 
+def build_persona() -> Dict:
+    """构造要注入的**人设** system 消息(正文住在 `persona.py`)。
+
+    ★ 与 `build()` 是两个函数、两条消息、两个常量 —— 见 `persona.py` 顶上那段:
+      拼成一条的话,下一次调人设就会顺手把底线一起改掉。
+    """
+    return {"role": "system", "content": persona.PERSONA}
+
+
 def ensure(messages: List[Dict]) -> List[Dict]:
-    """把行为底线放到消息列表最前面。
+    """把行为底线与人设放到消息列表最前面(**两条**,不合并)。
 
     ★ 调用方已有 system 消息时**不覆盖、不删除**,而是把底线**放在它前面** ——
       用户/上层可以追加自己的指示,但**删不掉底线**。
       (覆盖的话,一个带 system 的调用方就能把底线整个绕开;
        删除的话,用户的自定义指示会莫名其妙消失。)
     ★ 幂等:已经注入过就不再注入 —— 否则每次转发都会多叠一层。
+    ★★ 两条**各自判各自的幂等**:只补缺的那条。
+      合起来判(「有底线就当两条都有」)会在只带了底线的旧调用方上**静默少注入人设** ——
+      而少注入的表现正是这次要治的病(模型落回自带人设、自称千问),它不会报错。
+    ★★★ 顺序:底线在前、人设在后、调用方自己的 system 再后。
+      但**优先级不靠这个顺序** —— 顺序是可以被下一次改动悄悄换掉的,换掉也不会红。
+      优先级明写在人设正文最后一句(「与行为底线冲突时按底线来」),有断言钉着。
     """
     out = list(messages or [])
-    for m in out:
-        if isinstance(m, dict) and m.get("role") == "system" and m.get("content") == FLOOR:
-            return out            # 已经有了
-    return [build()] + out
+    seen = {m.get("content") for m in out
+            if isinstance(m, dict) and m.get("role") == "system"}
+    head = []
+    if FLOOR not in seen:
+        head.append(build())
+    if persona.PERSONA not in seen:
+        head.append(build_persona())
+    return head + out if head else out

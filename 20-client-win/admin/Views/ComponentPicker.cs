@@ -33,6 +33,29 @@
 //    「用户要先授权一次,才有按需可言 —— 没有它,系统就是在你没同意的情况下自己动显存。」
 //    ⇒ 这一步**不能省**,也不能默认全勾上:默认全勾 = 把那次同意伪造出来。
 //
+//  ══════════════════════════════════════════════════════════════════════
+//  ★★★ V29(2026-08-09):上面那段**一个字都没删**,而它的结论今天变了 ——
+//    变的不是推理,是**那次同意已经给过了**。
+//
+//    用户原话:「我需要所有模型一开始都是默认按需被勾上的。」
+//    ⇒ 新裁定(决议包草稿 `decision-packets/admin-on-demand-default-grant-2026-08-09.md`,
+//      D 号待协调层并入):**2026-08-09 用户一次性授权全部组件按需。**
+//
+//    ★ 为什么这不是违规:D90 那句话保护的是**用户本人** —— 而用户就是要授权的主体,
+//      他亲口给出了这次同意。变的是**同意的方式**:从「每个模型点一次」变成「一次性全给」。
+//      「伪造」指的是**没有人同意过**却勾上;今天有人同意过了。
+//    ★★ 而且写那句注释时 D87③「压力即让」**还没有**(用户自己补的任务暂停 + 恢复路径,
+//      2026-08-09 实机验过 ✅)⇒ 默认全勾的代价比写注释那天小。
+//
+//  ★★★★ 落法上**两处收窄**,不是"无脑全勾"—— 两处都是为了让这次授权仍然可撤销、可看见:
+//    ① **只在中枢那份授权是空的时候**才默认全勾。中枢已经记着一份(哪怕只有一个)⇒
+//       以中枢为准。★ 没有这一条的话,用户取消勾选、点确定、再打开这一页,
+//       它会**把取消掉的那个重新勾回去**,下次确定又悄悄授权回去 ——
+//       等于这一页**永远撤不掉**授权,而那正是 D90 要防的那件事的另一种形状。
+//    ② 默认勾上时**在界面上说出来**(见 `SetStatus` 那一行)。
+//       一次性授权可以省掉逐个点,但不能省掉**让人知道自己被默认授权了什么**。
+//  ══════════════════════════════════════════════════════════════════════
+//
 //  ★★ 这一列**只有主机能写**(审计 B6,服务端有闸)。而这里**不预先灰掉它** ——
 //    「我是不是主机」是个**代理指标**,而真正要问的是「这个操作做不做得成」
 //    (ASSERTION-PITFALLS 第 9 条:判据问的是"我是什么身份"而不是"我做不做得到")。
@@ -79,6 +102,17 @@ public sealed class ComponentPicker : UserControl
     /// ★ 没动过就**不发** permitted_on_demand:省略 = 不动授权,而空数组 = 撤销全部。
     ///   分不清这两者的话,副机每次普通变更都会撞上那道只有主机能过的闸。</summary>
     readonly HashSet<string> _permittedAsFetched = new(StringComparer.Ordinal);
+
+    /// <summary>这一趟是不是**由本面板默认勾上**的那一列(中枢那份为空时)。
+    /// ★ 自检读它 —— 「默认全勾了」与「中枢本来就全授权着」在界面上长得一样,
+    /// 而两者的意义完全不同:前者是这次一次性授权在起作用,后者是权威状态。</summary>
+    internal bool DefaultedAllOnDemand => _defaultedAll;
+    bool _defaultedAll;
+
+    /// <summary>此刻「按需」那一列勾着谁。★ 自检用 —— 读的是**真的那个集合**,
+    /// 不是照着源码猜它填了什么。</summary>
+    internal IReadOnlyCollection<string> PermittedNow => _permitted;
+
     bool _busy;
 
     public ComponentPicker()
@@ -168,9 +202,20 @@ public sealed class ComponentPicker : UserControl
             // ★ 授权那一列的初值来自**中枢**,不是本地记忆 —— 它是权威状态的一部分。
             foreach (var c in cat.Components)
                 if (c.PermittedOnDemand) { _permitted.Add(c.Id); _permittedAsFetched.Add(c.Id); }
+
+            // ★★★ V29:「按需」那一列的初值。决定权在 `InitialPermitted`(纯函数,下面),
+            //   这里只把它算出来的那份装进面板 —— 两处不许各判一次。
+            foreach (var id in InitialPermitted(cat.Components, out _defaultedAll)) _permitted.Add(id);
+
             foreach (var c in cat.Components) _list.Children.Add(Row(c));
             _apply.IsEnabled = true;
-            SetStatus("");
+            // ★ 收窄②:默认勾上就**说出来**。一次性授权省掉的是"逐个点",
+            //   不是"让人知道自己被默认授权了什么"。
+            SetStatus(_defaultedAll
+                ? "★ 中枢那边还没有任何「按需」授权 —— 按你 2026-08-09 的一次性授权,"
+                  + $"这里已经把全部 {cat.Components.Count} 个组件的「按需」默认勾上了。"
+                  + "不想要哪个就取消勾选,再点确定;点确定之前中枢那边什么都没变。"
+                : "");
             Recompute();
         }
         catch (Exception ex)
@@ -179,6 +224,33 @@ public sealed class ComponentPicker : UserControl
             _apply.IsEnabled = false;
             SetStatus("取组件清单失败:" + ex.Message, danger: true);
         }
+    }
+
+    /// <summary>
+    /// 「按需」那一列的初值 —— **V29 那次一次性授权的全部落点**(见文件头 ★★★ 那一段)。
+    ///
+    /// <para>规则两句话:
+    /// ① 中枢那份授权**非空** ⇒ 原样照用(中枢是权威)。
+    /// ② 中枢那份**是空的** ⇒ 按用户 2026-08-09 的一次性授权,**全勾**。</para>
+    ///
+    /// <para>★★ 抽成**静态纯函数**只为一件事:自检要能把**两支都真的走一遍**。
+    /// 中枢那边一旦被授权过(实机上就已经有 9 个),「默认全勾」那一支
+    /// 靠真中枢**永远跑不到** —— 而跑不到的分支等于没有判据,
+    /// 那正是本仓最恨的那种绿(ASSERTION-PITFALLS 第 14 条)。
+    /// ★ 而它同时**就是生产走的那一个**(`LoadAsync` 调的就是它),
+    /// 不是"为了测试另写一份逻辑"。</para>
+    /// </summary>
+    internal static IReadOnlyCollection<string> InitialPermitted(
+        IReadOnlyList<GpuComponent> components, out bool defaultedAll)
+    {
+        var fromHub = components.Where(c => c.PermittedOnDemand).Select(c => c.Id)
+                                .ToHashSet(StringComparer.Ordinal);
+        // ★ 条件写成「中枢为空」而不是「每次都全勾」,理由在文件头收窄①:
+        //   否则用户取消掉的那个会被下一次打开重新勾回去,授权就永远撤不掉。
+        defaultedAll = fromHub.Count == 0 && components.Count > 0;
+        return defaultedAll
+            ? components.Select(c => c.Id).ToHashSet(StringComparer.Ordinal)
+            : fromHub;
     }
 
     FrameworkElement Row(GpuComponent c)
