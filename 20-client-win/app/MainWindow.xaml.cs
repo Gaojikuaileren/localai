@@ -155,6 +155,11 @@ public partial class MainWindow : Window
 
         // 底部任务横条:有任务才出现,多任务时自动轮播
         TheApp.Tasks.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
+        // ★★★ V30b:模型装载那一条的**文字态**取自就绪闸 ⇒ 闸一变横条就得重画。
+        //   少这一条订阅,横条会一直停在「正在启用中」——**模型早就好了**,
+        //   而抽屉那边(它自己接了闸)会显示「已启用」:同一条任务,两个界面互相打脸。
+        //   ★ 闸只在【答案真的变了】时响,所以这不会变成每秒重画一次。
+        TheApp.Ready.Changed += () => Dispatcher.Invoke(RefreshTaskBar);
         _taskRotate.Tick += (_, _) => RotateTask();
         RefreshTaskBar();
 
@@ -349,9 +354,23 @@ public partial class MainWindow : Window
     {
         TaskBarTitle.Text = t.Title;
         TaskBarDetail.Text = t.Detail;
-        TaskBarPercent.Text = t.PercentText;
         TaskBarCount.Text = total > 1 ? $"共 {total} 个" : "";
-        if (t.Progress < 0) TaskBarProgress.IsIndeterminate = true;
+        // ══════════════════════════════════════════════════════════════════
+        //  ★★★ V30b(用户裁定):「**底部的任务进行栏**…现在有个正在载入中的进度条,不对,修」。
+        //
+        //  ★ 上一轮改在了抽屉上,这一行**一个字节没动** —— 而用户说的就是这一条 160px 的横条。
+        //  ★★ 呈现的判据在 `TaskRowLook` 里,抽屉调的是**同一个函数**:
+        //    两处各判一次的那天,横条说「正在载入」而抽屉说「已启用」,
+        //    用户会当场看到两个自相矛盾的界面,而不会有任何东西红。
+        //  ★★★ `Visibility` 这一行是**必须**的,而且它顺带修了一个旧缺陷:
+        //    `ShowNoTasks()` 会把进度条 Collapsed 掉,而此前 `ShowTask` **从不把它设回来** ——
+        //    于是"从空态转到有任务"之后,真任务的进度条也一直是隐藏的。
+        // ══════════════════════════════════════════════════════════════════
+        var look = TaskRowLook.For(t, TheApp.Ready.Gate(t.ResumeAlias));
+        TaskBarPercent.Text = look.StateText;
+        TaskBarProgress.Visibility = look.ShowProgressBar ? Visibility.Visible : Visibility.Collapsed;
+        if (!look.ShowProgressBar) TaskBarProgress.IsIndeterminate = false;   // 藏起来也别让它继续跑动画
+        else if (t.Progress < 0) TaskBarProgress.IsIndeterminate = true;
         else { TaskBarProgress.IsIndeterminate = false; TaskBarProgress.Value = t.Progress; }
 
         if (!animate) { TaskBarSlideT.BeginAnimation(TranslateTransform.YProperty, null); TaskBarSlideT.Y = 0; return; }

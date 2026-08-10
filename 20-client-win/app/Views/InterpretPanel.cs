@@ -45,6 +45,7 @@ public sealed class InterpretPanel : UserControl
 
     public InterpretPanel(string? sessionId = null)
     {
+        _reprobe.Tick += (_, _) => OnReprobeTick();
         _sessionId = sessionId;
         _subtitleBar = SubtitleBar();
         _pttBar = PushToTalkBar();
@@ -82,11 +83,13 @@ public sealed class InterpretPanel : UserControl
             // ★ 进页面探一次本机语音服务。★★ 这是 `PttHealthAsync` 这条路**第一个真实调用点** ——
             //   在它之前那个方法零调用,于是这一页从来没真的知道过语音服务起没起。
             _ = TheApp.Interpret.ProbeSpeechAsync();
+            _reprobe.Start();
         };
         Unloaded += (_, _) =>
         {
             TheApp.Interpret.Changed -= Refresh;
             TheApp.Ready.Changed -= OnReadyChanged;
+            _reprobe.Stop();
         };
     }
 
@@ -203,6 +206,34 @@ public sealed class InterpretPanel : UserControl
     /// </summary>
     void OnReadyChanged() => Dispatcher.BeginInvoke(new Action(RefreshPtt));
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★★ V30b:闸红了之后**必须还有人在探**,否则它永远红着。
+    //
+    //  上一轮的接线是个**死锁**,而且旁边那句注释白纸黑字把它说反了:
+    //    · `NoteSpeechHealth` 的唯一上游是 `ProbeSpeechAsync`;
+    //    · 而它只在 ① 进页面 ② **转写失败之后** 被调;
+    //    · 转写要按钮可按 → 按钮可按要 `gate.CanUse` → 闸红了就转写不了 →
+    //      **于是再也不会有第②种探测**。⇒ 闸一红就锁死,必须切走再切回。
+    //  ★ 而 Loaded 那段注释写着「语音服务装完模型的那一刻按钮要自己亮起来,
+    //    **而不是等用户切走再切回来**」—— 那句话在上一轮是假的。现在这条定时器让它成真。
+    //
+    //  ★★ 与中枢面上的 `ForgetIntentCooldown` 是**同一族**缺陷:
+    //    "闸把修好它自己的那条路也一起关掉了"。中枢面修了,本机面上一轮漏了。
+    //  ★ 只在**闸没就绪**时探:好了就停表 —— 一个已经能用的服务不需要每 5 秒被问一次。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>闸没就绪时的重探间隔。★ 短到人不会觉得卡住,长到不会变成轮询风暴。</summary>
+    static readonly TimeSpan ReprobeEvery = TimeSpan.FromSeconds(5);
+
+    readonly System.Windows.Threading.DispatcherTimer _reprobe = new() { Interval = ReprobeEvery };
+
+    void OnReprobeTick()
+    {
+        // ★ 已经能用了就别再问 —— 停表而不是空转,省得每 5 秒一次无谓的回环请求。
+        if (TheApp.Ready.Gate(ModelReadiness.SpeechAsr).CanUse) return;
+        _ = TheApp.Interpret.ProbeSpeechAsync();
+    }
+
     /// <summary>字幕逐字生长(识别侧每来一小段就调一次)。★ 还没定稿,只待在底部横条里。</summary>
     public void AppendSubtitle(string partial) => _subtitle.Text += partial;
 
@@ -217,7 +248,11 @@ public sealed class InterpretPanel : UserControl
 
         var body = ChatView.MessageText(fromMe);
         body.Text = text;
-        var bubble = ChatView.BubbleShell(body, fromMe);
+        // ★★★ V30b:走**同一个**挂动作的出口。此前这里直接调 BubbleShell,
+        //   绕过了 WithBubbleActions ⇒ 转写气泡一颗按钮都没有 —— 而**转写就是拿来抄的**,
+        //   它恰恰是全 App 最该能一键复制的东西。
+        // ★ onQuote 传 null:这一页没有输入框,给一颗按下去什么都不会发生的按钮比不给更坏。
+        var bubble = ChatView.WithBubbleActions(ChatView.BubbleShell(body, fromMe), text, fromMe, null);
         _messages.Children.Add(bubble);
 
         var lift = new TranslateTransform { Y = SubtitleHeight + 10 };
@@ -276,7 +311,9 @@ public sealed class InterpretPanel : UserControl
             var fromMe = m.Role == ChatRole.User;
             var body = ChatView.MessageText(fromMe);
             body.Text = m.Text;
-            _messages.Children.Add(ChatView.BubbleShell(body, fromMe));
+            // ★ 与 CommitSubtitle 同一条:走挂了动作的出口,别绕过去(理由见那边)。
+            _messages.Children.Add(
+                ChatView.WithBubbleActions(ChatView.BubbleShell(body, fromMe), m.Text, fromMe, null));
         }
     }
 }
