@@ -126,7 +126,14 @@ _NGL = re.compile(r"""['"]-ngl['"]""")
 _KEYFLAG = "--api-key-file"
 
 SCAN_EXT = {".py", ".ps1", ".cs"}
-SKIP_DIRS = {".git", "00-docs", "obj", "bin", "dist", "node_modules"}
+#: ★★★ `.claude` 必须在这张表里 —— **这条是从主工作树跑第一次时当场被咬出来的**:
+#  `.claude/worktrees/` 下挂着**别的车道的整份仓库副本**,rglob 会一头扎进去,
+#  于是本门禁把隔壁车道的 `model_loader.py` / `start-stack.ps1` 全当成"未登记的
+#  新起法"报红(实测一次 29 条假红)。假红比漏报更能毁掉一道门禁:它会训练人
+#  去 `--no-verify`(ASSERTION-PITFALLS 第 5 条量过这个代价)。
+#  ★ 注意它**只在主工作树里才会发生** —— 在车道自己的工作树里跑是绿的。
+#    所以「在我这儿是绿的」不构成证据,门禁要到**主工作树**跑一次才算数。
+SKIP_DIRS = {".git", ".claude", "00-docs", "obj", "bin", "dist", "node_modules"}
 
 #: ★★ **本文件自己**要被排除出扫描 —— 第 ⑤ 组的正反样本里就写着 `'-ngl'`,
 #  不排除的话守卫会当场绊倒自己(同款先例:`90-ops\debug\selfcheck.py` 的文件头)。
@@ -205,6 +212,10 @@ def main() -> int:
           "  ⇒ 新加一处 llama 起法而不登记 ⇒ 红",
           set(found) == set(LAUNCH_SITES))
     check("★ 零命中也判红(扫不到任何起法 = 提取器坏了,而不是【没有起法】)", len(found) > 0)
+    check("★★★ 扫描没有走进**别的工作树**(`.claude/worktrees/` 下挂着别的车道的整份副本)"
+          " —— 走进去会把隔壁车道的起法报成「未登记」,一次 29 条假红。命中的:"
+          + str([r for r in found if r.startswith(".claude/")]),
+          not any(r.startswith(".claude/") for r in found))
     check("★★★ 自排除表恰好只有【本文件】一条 —— 排除表就是一个藏东西的地方,"
           "所以它不许长:往里加一个文件名,这一条立刻红。实得:" + str(sorted(SELF_EXCLUDE)),
           SELF_EXCLUDE == {Path(__file__).resolve().relative_to(REPO).as_posix()})
