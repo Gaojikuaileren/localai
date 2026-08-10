@@ -258,8 +258,16 @@ public sealed class InterpretState
         {
             PttResult = await _speech.TranscribeAsync(wav, ct);
             if (PttResult is null)
+            {
                 // ★★ 说清"录到了、只是没转成" —— 否则用户会以为自己白说了一遍。
                 PttError = (_speech.LastError ?? "转写失败") + " ★ 你的话已经录下来了,没有丢。";
+                // ★★★ V30:转写失败 ⇒ **重新探一次** /health,把就绪闸的账刷新。
+                //   ★ 为什么是"重新探"而不是直接把闸判成未启用:失败有两种,下一步完全不同 ——
+                //     503「还在装模型」应当是【正在启用中】(等一下就好),
+                //     连不上则是【未启用】(服务根本没起)。拿失败本身去猜,必然把两者说成一件事。
+                //   ★★ 只在失败这条路上多一次请求;成功时闸本来就已经是就绪了,不必再问。
+                _ = ProbeSpeechAsync(CancellationToken.None);
+            }
         }
         finally
         {
@@ -270,6 +278,30 @@ public sealed class InterpretState
 
     /// <summary>探一次本机语音服务(界面进页面时调一次,用来如实说明可用性)。</summary>
     public Task<SpeechHealth?> PttHealthAsync(CancellationToken ct = default) => _speech.HealthAsync(ct);
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ★★★ V30:把语音服务的就绪**报给共享的就绪闸**(ModelReadiness)。
+    //
+    //  ★ 为什么由本类报,而不是让闸自己去探:`SpeechClient` 的持有者只有本类一个
+    //    (纪律:一份数据一个持有者)。闸再开一个客户端 = 第二个探针 + 第二套口径,
+    //    而两套口径迟早会岔开,岔开时**不会有任何东西红**。
+    //  ★★ 除了显式探一次,**每一次真实的转写也在报**:成功 = 它此刻确实起着;
+    //    失败 = 把 SpeechClient 给的原因原样带过去。真实流量比定期轮询更准,也不多花一次请求。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>共享的就绪闸。★ 由 App 注入(与 `Gpu.Tasks = Tasks` 同一手法),可以为 null。</summary>
+    public ModelReadiness? Readiness { get; set; }
+
+    /// <summary>
+    /// 探一次本机语音服务**并把结果报给就绪闸**。★ 界面进页面时调一次。
+    /// <para>★ 与 <see cref="PttHealthAsync"/> 分开留着:那个是"我要这个值",
+    /// 这个是"顺便让闸也知道"。合成一个会让任何一次取值都产生副作用。</para>
+    /// </summary>
+    public async Task ProbeSpeechAsync(CancellationToken ct = default)
+    {
+        var h = await _speech.HealthAsync(ct);
+        Readiness?.NoteSpeechHealth(h, _speech.LastError);
+    }
 
     /// <summary>
     /// 按住说话今天**在这台机器上**能不能用。
