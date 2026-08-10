@@ -63,44 +63,6 @@ if ($dirty) {
     $treeId = ([BitConverter]::ToString($sha256.ComputeHash($bytes)) -replace '-','').Substring(0,8).ToLower()
     $sha256.Dispose()
     $ver = "$ver.dirty-$treeId"
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  ★★★★ 2026-08-10 用户裁定:**脏树 ⇒ 直接判红,不产出任何产物。**
-    #
-    #  ★★★ 在这之前,上面那段做的是「把 `.dirty-<指纹>` **烧进戳里然后照出**」——
-    #    它让那份 exe **可被唯一识别**,这一点是对的、也保留着(指纹仍然算,用在报错里)。
-    #    但**可识别 ≠ 可追溯**:`.dirty-4e24d414` 只能告诉你"这是某一棵脏树",
-    #    **它对不回任何一个提交** —— 谁也没法从它翻出那一版的源码。
-    #
-    #  ★★ 今天的实例(17:46 那趟,实测):四个 exe 戳着
-    #    `20260810-1746+36f0feb.dirty-4e24d414`,而它们的**真实编译修订**分别是
-    #    `36f0feb`(client)与 `19283a5`(admin/host 三个)—— 一份戳,两个修订。
-    #    那份包被拿去验任何东西,验出来的结论都挂不到一个确定的版本上。
-    #
-    #  ★★★★ 判词(用户 2026-08-10):
-    #    **一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。**
-    #
-    #  ★ 为什么是**在这里**退出,而不是等到 [5c]:
-    #    [5c] 是**构建后**判据 —— 走到那儿时客户端/管理端/主机端**已经写进部署位**了
-    #    (17:46 那趟就是:判红了,而 dist 已经被写成"新 exe + 旧 VERSION.txt")。
-    #    ⇒ 这道闸必须在**动任何产物之前**,与 [0] 那道占用闸同一条理由。
-    #  ★★ 没有 `-AllowDirty` 之类的开关:那种开关就是 D6-F2 说的那种**无人校验的豁免**,
-    #    加上它,这条闸第一次挡人的那天就会被绕过去,而绕过去之后戳照样在说谎。
-    #    要出包就先提交(或 stash)—— 那本来就是一次**有名字的动作**。
-    # ══════════════════════════════════════════════════════════════════════════
-    Write-Host ""
-    Write-Host "X 工作树不干净($($dirtyFiles.Count) 项)—— 拒绝出包,**没有产出任何产物**。" -ForegroundColor Red
-    Write-Host "  戳会变成 $ver,而「.dirty-$treeId」**对不回任何一个提交**:" -ForegroundColor Red
-    Write-Host "  谁也没法从这个包翻出它到底带的是哪一版代码。" -ForegroundColor Red
-    Write-Host "  ★ 判词:一个说不清自己是哪一版的产物,它验出来的东西也说不清是谁的。" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  脏在这几处:" -ForegroundColor Yellow
-    foreach ($line in ($dirtyFiles | Select-Object -First 20)) { Write-Host "    $line" -ForegroundColor Yellow }
-    if ($dirtyFiles.Count -gt 20) { Write-Host "    …还有 $($dirtyFiles.Count - 20) 项" -ForegroundColor Yellow }
-    Write-Host ""
-    Write-Host "  下一步:把它们提交(或 stash)之后再出包 —— 出包是要落到别人机器上的东西," -ForegroundColor Yellow
-    Write-Host "  它必须能对回一个提交。★ 没有开关可以跳过这一条(有开关的闸等于没有闸)。" -ForegroundColor Yellow
-    exit 1
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
