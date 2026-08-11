@@ -94,6 +94,72 @@ _KNOWN_MISSING = {
 }
 _EXPECTED_DEBT = 16              # ★ 只许变短。变大 = 又漏了一个,当场红。
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★ 第二半:**该取号而没取**(2026-08-11 加)
+#
+#  起因:2026-08-11 那天,**十条车道的裁定一个号都没落**,而这道闸报 **4 PASS · 0 FAIL**。
+#  **为什么没抓到**:它扫的是决议包里的 `D<数字>` —— 而那些包写的是 **`D?`**,
+#  **不是数字** ⇒ 它**扫不到**。
+#  ⇒ 它此前只抓「取了号但没落地」,**抓不到「该取号而没取」**。
+#  ★ 判词:**零命中与全清白长得一模一样。**
+#
+#  ★★ 判据:**该包已经进了 `main` 的树,而它的 Markdown 抬头里还挂着 `D?`** ⇒ 判红。
+#
+#  为什么「已并入」用「文件在不在 `main` 的树里」而不是分支名:
+#    · 车道**在跑的时候**写 `D?` 是**对的**(D82:取号在并入那一刻)——
+#      而车道自己新建的包**不在 main 的树里** ⇒ 绿。一合进来 ⇒ 该取号了,红。
+#    · 它**在主工作树与车道工作树里都成立**,不依赖当前分支名 ——
+#      而分支名在 detached HEAD(本仓真有过两个)或临时分支上会失灵。
+#
+#  为什么只看**抬头**、不 grep 全文:
+#    今天真有好几份包在**讲协议本身**(「草案期一律写 `D?`,并入那刻取号」)——
+#    grep 全文会把这些**最负责任的写法**判成欠号。
+#    这与 DECISIONS 那侧「只认编号抬头」是同一条纪律(ASSERTION-PITFALLS 第 1 条)。
+#
+#  ★★★ 存量同样冻表、**只许变短**:2026-08-11 实测有 **17 份**已并入 main 的包
+#    抬头还挂着 `D?`。让它当天永久红 = 训练人绕过它(D82 已因此失效两条,D117 裁死过这条)。
+#    ★ 而**决议包不在第 0 条车道本轮的边界内**,没法逐份去加 `DRAFT-D:` 豁免 ——
+#      这是**没做完的那一半**,如实冻在下面这张表里,不是"处理过了"。
+# ══════════════════════════════════════════════════════════════════════════════
+_HEADING_ANY = re.compile(r"^#{1,6} .*", re.M)
+_QMARK = "D" + "?"               # ★ 拼出来:否则本文件自己就是它要找的东西(第 1 条,已踩 9 次)
+
+_KNOWN_UNNUMBERED = {
+    "admin-app-packaging-2026-08-08.md",
+    "admin-app-phase2-migration-map-2026-08-08.md",
+    "admin-app-phase2-prereqs-2026-08-08.md",
+    "admin-on-demand-default-grant-2026-08-09.md",
+    "appcontainer-isolation-mcp-transport-2026-08-05.md",
+    "egress-b-gates-impact-2026-08-06.md",
+    "gateway-stopgate-and-attribution-2026-08-09.md",
+    "host-loopback-business-route-2026-08-08.md",
+    "memory-suite-runnability-2026-08-06.md",
+    "out-landing-and-package-text-2026-08-10.md",
+    "revived-assertions-2026-08-09.md",
+    "revoke-inflight-streams-2026-08-10.md",
+    "shared-data-topology-host-authoritative-2026-08-08.md",
+    "stackstop-kill-safety-2026-08-09.md",
+    "sync-snapshot-pull-on-connect-2026-08-08.md",
+    "v20-chat-view-fixes-2026-08-08.md",
+    "worktree-teardown-and-tidy-2026-08-09.md",
+}
+_EXPECTED_UNNUMBERED = 17        # ★ 只许变短。
+
+
+def _in_main(rel: str) -> bool:
+    """该文件在不在 `main` 的树里 —— 即「已并入」。读不出来一律当【不在】(fail-open 到不判红)。
+
+    ★ 方向是有意选的:git 不可用时这条闸**不许**把每一份包都判红 ——
+      一道在别人机器上恒红的闸,和没有闸的区别只是它还会消耗人的注意力。
+    """
+    import subprocess
+    try:
+        r = subprocess.run(["git", "cat-file", "-e", f"main:{rel}"],
+                           cwd=str(REPO), capture_output=True, timeout=20)
+        return r.returncode == 0
+    except Exception:                                        # noqa: BLE001
+        return False
+
 _p = _f = 0
 
 
@@ -168,6 +234,49 @@ def main() -> int:
     check("★★ 存量欠债只许变短(变大 = 又有号没落进中央文档)",
           len(still_owed) <= _EXPECTED_DEBT,
           f"实测 {len(still_owed)} 个 > 期望 {_EXPECTED_DEBT} 个")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  第二半:已并入 main、抬头却还挂着 D-问号 ⇒ 该取号而没取
+    # ══════════════════════════════════════════════════════════════════════
+    overdue: list[str] = []
+    unnumbered_now: list[str] = []
+    for f in files:
+        txt = f.read_text(encoding="utf-8", errors="replace")
+        if not any(_QMARK in h for h in _HEADING_ANY.findall(txt)):
+            continue
+        if _DRAFT.search(txt):          # ★ 包里写了看得见的豁免 ⇒ 放行
+            continue
+        rel = f"00-docs/decision-packets/{f.name}"
+        if not _in_main(rel):           # ★ 还在车道里 ⇒ 写 D-问号 是对的,不判红
+            continue
+        unnumbered_now.append(f.name)
+        if f.name not in _KNOWN_UNNUMBERED:
+            overdue.append(f.name)
+
+    print(f"  ★ 该取号而没取(已并入 main、抬头仍挂着草案标记):"
+          f"**{len(unnumbered_now)} / {_EXPECTED_UNNUMBERED}**（存量冻表,只许变短）")
+
+    check("★★★ 已并入 main 的决议包,抬头里不许还挂着草案标记(存量除外)",
+          not overdue,
+          f"{len(overdue)} 份该取号了:" + " ".join(overdue))
+
+    check("★★ 该取号而没取的存量只许变短(变大 = 又有一份合进来却没取号)",
+          len(unnumbered_now) <= _EXPECTED_UNNUMBERED,
+          f"实测 {len(unnumbered_now)} 份 > 期望 {_EXPECTED_UNNUMBERED} 份")
+
+    # ★ 元断言:判据没有静默失灵。两个方向都要挡 ——
+    #   `_in_main` 恒 False(git 不可用)会让这条闸整段静默跳过,而那与"全清白"长得一样。
+    check("★★ 元断言:「已并入 main」这条探测确实工作(探不到任何一份 = 它坏了,不是包都没并)",
+          len(unnumbered_now) > 0 or len(files) < 5,
+          "一份都没探到:git cat-file 可能不可用,这条闸此刻是静默跳过的")
+
+    if overdue:
+        print()
+        print("  ── 该取号了(已并入 main,抬头仍是草案)──")
+        for n in overdue:
+            print(f"      {n}")
+        print("  ★ 两条出路:① 由第 0 条车道并入 DECISIONS.md 并取号(D82:取号在并入那一刻);")
+        print("    ② 它确实还是草案 ⇒ 在**那份包里**写一行看得见的豁免:  DRAFT-D: <号或 none>")
 
     if missing:
         print()
