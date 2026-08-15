@@ -174,6 +174,11 @@ note_rtf = "★ 实时率(RTF)对这条路**结构上不适用**:成本不随时
 note_floor = "★ [verified] 的 5.6s 不是冷启代价,是每次调用的地板(冷 7.52s / 稳态 7.50s,几乎不差)。"
 # ── GPU(★ 只是量过,**没有启用** —— 改档是裁定,见 [asr] 段)─────────────
 gpu_probed = true
+# ★ 记下**量它时用的参数** —— 一个不带参数的读数,下一个人没法复现,也没法判断它适不适用。
+#   ★★ 留神:上面 [asr] 段的 compute_type 是 `int8`;单把 device 改成 cuda 而不动
+#   compute_type,跑的**不是**下面这个读数量到的那套(CUDA 上 int8 与 float16 都支持,但不同档)。
+gpu_compute_type = "float16"
+cpu_compute_type = "int8"         # ← 与 [asr].compute_type 一致,即今天真在跑的那套
 gpu_transcribe_s = 0.18           # 2.2s 与 12.2s 的话都是这个数(稳态中位)
 gpu_load_s = 1.27
 gpu_vram_gib = 2.226              # nvidia-smi 实测装载前后之差
