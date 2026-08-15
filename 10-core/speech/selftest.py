@@ -22,6 +22,7 @@ import json
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import wave
@@ -103,11 +104,45 @@ def main() -> int:
     check("★★★ asr.local_files_only 与 asr.hub_offline **两条都开** —— "
           "faster-whisper 默认联网拉权重(STATE:643 / D41),缺任一条都会在缺权重时偷偷联网",
           spec["asr"]["local_files_only"] is True and spec["asr"]["hub_offline"] is True)
-    check("★ v1 只走 CPU(不抢租约、不等 GPU 裁定)", spec["asr"]["device"] == "cpu")
+    check("★ 今天这一档跑 CPU(★ 这**不是**「唯一路」—— 见下面那条与 [asr] 段的更正)",
+          spec["asr"]["device"] == "cpu")
     # ★ 反向:规格里**不许**出现 peak —— 显存数只有 vram-budget.toml 说了算。
     #   两处都写一个数,迟早对不上,而准入闸会照着错的那个放行。
     check("★★ 启动规格里**没有** peak/显存字段(准入闸的唯一数据源是 vram-budget.toml)",
           "peak" not in json.dumps(spec))
+
+    # ══════════════════════════════════════════════════════════════════
+    #  1b. ★★★ 启动规格的 device 与准入闸的收费**对不上** —— 这是一条
+    #      **登记在案的不一致**,本条断言守的不是"一致",是
+    #      **「它不会被无声地改掉、也不会无声地长大」**(与欠债表同一条道理)。
+    #
+    #  今天的实况(V38 · 2026-08-15 实测):
+    #    · `[asr].device = "cpu"`  ⇒ 实占 **0.002 GiB**(V16 实测,gpu_broker.py:511)
+    #    · 而 `vram-budget.toml` 给 speech.lite 收 **2.07 GiB**
+    #    ⇒ **在为一个没启用的东西付 2.07 GiB**,而日常预设的余量只有 0.53。
+    #
+    #  ★ 为什么本车道**不直接把收费改掉**:该改成多少**取决于 CPU/GPU 那条裁定**,
+    #    而那是一条待裁(D103 裁定⑤ 的理由已被 V38 证伪,见 launch.toml [asr] 段)。
+    #      · 若裁 CPU ⇒ 收费应 ≈ 0(今天这个 2.07 是纯粹的浪费);
+    #      · 若裁 GPU ⇒ 收费应 ≥ 2.3(V38 实测 GPU 足迹 2.226,今天的 2.07 **偏低**,
+    #        而偏低是 fail-open 方向 —— 那比偏高更该修)。
+    #    ⇒ 现在拍任何一个数,都有一半概率要在裁定落地那天改回来。
+    #
+    #  ★★ 所以这里钉的是**当前这一格的两个值**:任何一侧单独动了,这条就红,
+    #    并把「另一侧也要跟着动」这句话直接说给动它的人听。
+    # ══════════════════════════════════════════════════════════════════
+    _budget_path = HERE.parents[1] / "config" / "vram-budget.toml"
+    # ★ 局部名字**不许**叫 `_f` —— 那是本文件失败计数器的名字,
+    #   在 main() 里赋一次就把它变成局部量,末行那句 FAIL=… 会打印出一个文件对象。
+    #   (写这条时真的踩了一次:PASS=27 FAIL=<BufferedReader …>。)
+    with open(_budget_path, "rb") as _bf:
+        _charged = tomllib.load(_bf)["components"]["speech.lite"]["peak"]
+    check("★★★ 【登记在案的不一致】device=cpu(实占 0.002)而闸按 2.07 收费 —— "
+          "两侧的值都没被单独动过。★ 你若动了其中一侧:另一侧必须同一轮跟着定"
+          "(裁 CPU ⇒ 收费应 ≈0;裁 GPU ⇒ 收费应 ≥2.3,V38 实测足迹 2.226)。"
+          "出处:decision-packets/v38-p5-first-batch-2026-08-15.md",
+          spec["asr"]["device"] == "cpu" and abs(float(_charged) - 2.07) < 1e-9,
+          f"实得 device={spec['asr']['device']} / 收费={_charged}")
 
     # ══════════════════════════════════════════════════════════════════
     #  2. ★★★ 架构底线:本服务**不得**持有任何实时音频通路
