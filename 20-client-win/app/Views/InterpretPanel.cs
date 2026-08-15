@@ -25,8 +25,13 @@
 //     · 合成    🟡 服务端有(`10-core/speech/server.py` 的 /v1/speech/tts),
 //                 **客户端半边没有** —— `SpeechClient` 只实作了 ASR 那一半,没有 TtsAsync;
 //                 ★ 措辞留神:本 app **有**播放代码(`Services/Sfx.cs` 放提示音),
-//                   缺的是**把 tts 回来的 `audio_b64` 播出去**那条路 —— 全仓读它的地方
-//                   只有 `SpeechClient.cs:57` 那行键名常量,没有第二处;
+//                   缺的是**把 tts 回来的 `audio_b64` 播出去**那条路。
+//                   ★★ 范围要写准(V38 第一版把这句写成「全仓……没有第二处」,**那是假的**,
+//                     对抗式复核当场抓出来):本客户端 C# 里读 `audio_b64` 的**只有两处,
+//                     且都不是播放** —— `SpeechClient.cs:57` 那行键名常量,与自检里拿它
+//                     跟 `contracts.json` 对拍的那条(`Selftest.cs:6809` 一带)。
+//                   ★ 而**仓库另一侧真的有一个消费者**:网关 `speech_proxy.py:88` 逐字
+//                     `obj["audio_b64"]` 把它转发出去 ⇒ 将来改这个键名,**那边要一起改**;
 //     · 虚拟麦  ❌ 未接,而且按 D105 **不属于 P5 v1**(它是同传那条线上的东西);
 //     · 同传本体 ❌ 未接 —— `InterpretState.PipelineReady` 恒为 false,字幕区照实说明。
 
