@@ -1,4 +1,4 @@
-# V28 · 拆工作树 + 整理项目文件(D?)
+# V28 · 拆工作树 + 整理项目文件(D131)
 
 > 车道:V28(worktree `xenodochial-chaum-14b2e8`,分支 `claude/v28-worktree-cleanup-a99628`)· 2026-08-09
 > 本车道做的是**删除与移动**,是全项目最不可逆的动作。

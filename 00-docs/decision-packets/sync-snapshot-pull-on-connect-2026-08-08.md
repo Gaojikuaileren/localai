@@ -437,7 +437,7 @@ V15 把它挪到了**开机路上**,而 UI 线程此刻还在 `App.xaml.cs:177` 
 ### 10.1 `DECISIONS.md` 新条目
 
 ```
-## 2026-08-08 · D? · /v1/sync/snapshot 接上「上线 + 每次重连都拉全量」·
+## 2026-08-08 · D113 · /v1/sync/snapshot 接上「上线 + 每次重连都拉全量」·
 ##                   范围判据补上【读】那一侧
 
 > 车道:V15(decision-packets/sync-snapshot-pull-on-connect-2026-08-08.md)。
