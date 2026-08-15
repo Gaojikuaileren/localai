@@ -332,9 +332,10 @@ public static class SelftestModelGate
             //   ★★ 这一格跳过**不留缺口**:下面「引用」那条同样吃 WithBubbleActions 的
             //     同一个 text 参数,而它断言输入框里出现了第 45 行 ——
             //     「给的是原文而不是折叠后的 30 行」由那一条**行为地**证明了。
-            Console.WriteLine("  SKIP  剪贴板在这个进程里打不开(" + clipWhy + ")—— "
-                            + "「复制到剪贴板」这一格本次没验过;"
-                            + "但「用的是原文全文」由下面那条【引用】的断言证明着,不是缺口");
+            // ★★ V36:同上,走 Selftest.Skip 才进得了哨兵的 SKIP= 那一格。
+            Selftest.Skip("剪贴板在这个进程里打不开(" + clipWhy + ")",
+                          "「复制到剪贴板」这一格本次没验过;"
+                          + "但「用的是原文全文」由下面那条【引用】的断言证明着,不是缺口");
         }
         else
         {
@@ -381,8 +382,27 @@ public static class SelftestModelGate
     /// <para>★ 同一个 <c>\.</c> 顺带挡住 <c>ReadAsStreamAsync</c> / <c>OpenBusinessStreamAsync</c>:
     /// 它们的点后面跟的是别的名字,与本闭集对不上。</para>
     /// </summary>
+    /// <para>★★★★ V36 · 前面那个 <c>\.</c> **拿掉了**,理由是隔壁那条一模一样的教训:
+    /// `SelftestMoved.QualifiedCallSites` **V29b 之前**也只数限定形式,当时写的理由逐字是
+    /// 「这几个入口本来就都是静态工具函数」—— 而 `ModelReadiness.RetireModelTask`
+    /// 是个实例方法,在自己类里被 <c>RetireModelTask(a, now);</c> **无限定**地调用,
+    /// 于是那条判据数到 0 并判红,**红得理由是假的**。
+    /// <br/>本判据是**同一个假设的镜像**,而镜像那一面更坏:限定形式漏掉的调用点
+    /// 不会让它变红,只会让它**少扫一个入口** —— 一个没挂闸的模型入口就这么静默地过了闸,
+    /// 而判词说的是「**凡**会发起模型调用的入口」(第 3b 条:范围由判词决定)。
+    /// ★ 新写法:数**所有** <c>Name(</c>(限不限定都算),再把**声明**那一行排掉 ——
+    /// 与 V29b 在隔壁采用的是同一个修法。</para>
     const string ModelCallPattern =
-        @"\.(StreamAsync|SendAndAskAsync|TranscribeAsync|SynthesizeAsync)\s*\(";
+        @"(?<![A-Za-z0-9_])(StreamAsync|SendAndAskAsync|TranscribeAsync|SynthesizeAsync)\s*\(";
+
+    /// <summary>
+    /// 方法**声明**那一行的形状:行首 → 可选特性 → 可选修饰符* → 一个返回类型 token → 方法名 → <c>(</c>。
+    /// ★ 调用点(<c>x.Foo(</c> / <c>return Foo(</c> / <c>Foo(a, b);</c>)前面**没有类型 token**,两者分得开。
+    /// </summary>
+    const string DeclPattern =
+        @"^[ \t]*(?:\[[^\]]*\][ \t]*)*"
+      + @"(?:(?:public|private|protected|internal|static|async|override|virtual|sealed|new|partial|extern|unsafe)[ \t]+)*"
+      + @"[A-Za-z_][A-Za-z0-9_\.<>,\[\]\? \t]*[ \t]+";
 
     /// <summary>闸的读法。★ 登记里点名的 <c>GatedIn</c> 文件必须真的出现它。</summary>
     const string GateRead = "TheApp.Ready.Gate(";
@@ -394,8 +414,11 @@ public static class SelftestModelGate
         {
             // ★ 发布产物旁边没有源码 —— 不是错误(第 11 条)。但要把跳过的事实说出来:
             //   不说的话,「跳过了」与「全绿」在输出里长得一模一样。
-            Console.WriteLine("  SKIP  模型就绪闸接线:找不到客户端源码根(发布产物形态)—— "
-                            + "本次【一个入口都没查过】,别把这趟的 PASS 读成「闸都挂好了」");
+            // ★★ V36:走 Selftest.Skip —— 此前这里是裸 Console.WriteLine,
+            //   客户端哨兵又没有 SKIP 字段 ⇒ 这行字**两条门禁都看不见**(第 19 条那个形状)。
+            Selftest.Skip("模型就绪闸接线",
+                          "找不到客户端源码根(发布产物形态)—— "
+                          + "本次【一个入口都没查过】,别把这趟的 PASS 读成「闸都挂好了」");
             return;
         }
 
@@ -411,13 +434,29 @@ public static class SelftestModelGate
 
         // ---- 扫真实调用点 ----
         var hits = new List<(string File, string Call, int Line)>();
+        var decls = 0;
         foreach (var f in files)
         {
             var name = Path.GetFileName(f);
             var src = CodeOnly(File.ReadAllText(f));   // ★ 注释剔掉 —— 本仓踩过三次
             foreach (Match m in Regex.Matches(src, ModelCallPattern))
+            {
+                // ★ V36:把**声明**那一行排掉 —— 上一版靠 `\.` 顺带排掉声明,
+                //   代价是连**无限定的调用点**一起排掉了(见 ModelCallPattern 上面那段)。
+                var ls = src.LastIndexOf('\n', Math.Max(0, m.Index - 1)) + 1;
+                var line = src[ls..m.Index];
+                if (Regex.IsMatch(line, DeclPattern + Regex.Escape(m.Groups[1].Value) + @"\s*$")
+                    || Regex.IsMatch(line + m.Groups[1].Value + "(", DeclPattern + Regex.Escape(m.Groups[1].Value) + @"\s*\("))
+                { decls++; continue; }
                 hits.Add((name, m.Groups[1].Value, LineOf(src, m.Index)));
+            }
         }
+        // ★ 声明数**印出来**:它是这条修法的活体证据 —— 排掉的必须是声明,不是调用点。
+        //   一个不说自己排掉了什么的扫描器,与一个漏扫的扫描器在输出里长得一模一样(第 15 条)。
+        assert(decls >= 3,
+            $"★★ 元断言:排掉的【方法声明】真的数到了(实得 {decls} 处,四个方法各自的定义至少 3 个在编译集里)—— "
+            + "数到 0 说明声明形状的正则没匹配上,那时候声明会被当成"
+            + "「一个没登记的调用点」,判红且**红得理由是假的**(V29b 在隔壁踩过一模一样的)");
 
         // ★★★ 零命中要判红:提取器坏掉那天,「一个都没扫到」与「一个都没错」输出逐字相同。
         assert(hits.Count >= 3,
@@ -653,23 +692,17 @@ public static class SelftestModelGate
     }
 
     /// <summary>
-    /// 客户端源码根。★ 判据与 <c>Selftest.ClientSourceRoot()</c> 同款(多个锚点必须同时在):
-    /// 只认一个锚点的话,`%TEMP%` 里别的会话留下的一份陈旧文件会被当成源码根 ——
-    /// 2026-08-08 出包闸上真的发生过。
+    /// 客户端源码根。★★★★ V36:**不再自带一份** —— 直接用 <c>Selftest.ClientSourceRoot()</c>。
+    ///
+    /// <para>★ 在此之前这里是一份**自己的拷贝**,而且比共用那份**多要一个第三锚点**
+    /// (`Services/ModelReadiness.cs`)。两件事都坏:
+    /// ① `Selftest.cs` 里那条「源码根锚点只许有一处」的判据**只读它自己那个文件**,
+    ///    于是它报「1 处」并判绿,而工程里真实是 **3 处**(本文件 + SelftestUiPromises.cs)——
+    ///    判词说的是"只许有一处",判据只盖住了它自称范围的一个文件(第 3b 条);
+    /// ② 锚点越多,「找不到源码根」越容易发生,而找不到的后果是**整段跳过** ——
+    ///    那是 fail-open 的方向(第 11 条)。共用那份**有意**只用两个锚点,理由写在它上面。</para>
     /// </summary>
-    static string? ClientSourceRoot()
-    {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir is not null; i++)
-        {
-            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
-                && File.Exists(Path.Combine(dir, "localai-client.csproj"))
-                && File.Exists(Path.Combine(dir, "Services", "ModelReadiness.cs")))
-                return dir;
-            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
-        }
-        return null;
-    }
+    static string? ClientSourceRoot() => Selftest.ClientSourceRoot();
 
     /// <summary>一个 exe **真正会编译**的 .cs 全集 = 隐式 glob + csproj 里逐条 Compile Include。</summary>
     static List<string> CompileSet(string projDir, string csprojPath)

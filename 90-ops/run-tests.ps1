@@ -944,10 +944,43 @@ if ($Full) {
         Remove-Item $log -Force -ErrorAction SilentlyContinue
         if ($out -match 'PASS=(\d+)\s+FAIL=(\d+)') {
             $p = [int]$Matches[1]; $f = [int]$Matches[2]
+            # ══════════════════════════════════════════════════════════════
+            #  ★★★★ V36:SKIP / OWED 在**这条路上**也看得见了
+            #
+            #  D117 的口径(第 19 条)是「SKIP 不判红 · OWED 判红」,而在 V36 之前
+            #  它**只在 build-client.ps1 那一条路上真的成立**:本脚本里 `OWED` 与 `LIFE`
+            #  **零命中**,客户端自检自己也没有这两个字段。
+            #  ⇒ 一条【本该跑得了却没跑成】的断言,在提交门禁里是**完全隐形**的。
+            #  ★ 而提交门禁才是天天跑的那一条 —— 出包一天最多几次。
+            #  ★★ 字段缺失(exe 比本脚本旧)**不判红**,只说"口径不明" ——
+            #    与 build-client.ps1 同一条处置:不拿一个不存在的数去否定一次运行。
+            #  ★★★ 取值顺序:$Matches 是**整个换掉**的,$p/$f 必须先取走(D91 裁定⑤踩过)。
+            # ══════════════════════════════════════════════════════════════
+            $cskip = -1; $cowed = -1
+            if ($out -match 'SKIP=(\d+)') { $cskip = [int]$Matches[1] }
+            if ($out -match 'OWED=(\d+)') { $cowed = [int]$Matches[1] }
             $totalPass += $p; $totalFail += $f
+            if ($cskip -gt 0) { $totalSkip += $cskip }
             $dotnetResults += 'client --selftest'
             $c = if ($f -gt 0) { 'Red' } else { 'DarkGray' }
-            Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}" -f 'client --selftest', $p, $f) -ForegroundColor $c
+            $csk = if ($cskip -gt 0) { "  SKIP=$cskip" } else { '' }
+            Write-Host ("  {0,-46} PASS={1,-5} FAIL={2}{3}" -f 'client --selftest', $p, $f, $csk) -ForegroundColor $c
+            if ($cowed -gt 0) {
+                $broken += [pscustomobject]@{ File = 'client --selftest'
+                                              Why  = "★ 客户端自检有 $cowed 条【本该跑得了却没跑成】(OWED)。" +
+                                                     "这不是「没跑起来」,也不是 SKIP:SKIP 是「这个形态下测不了」," +
+                                                     "OWED 是判据指错了文件 / 那一段一条结果都没写出来。" +
+                                                     "★★ 一条没跑过的断言与一条通过的断言,在 PASS 数里是看不出来的。" +
+                                                     "逐条原因在自检输出里以 `OWED` 开头。" }
+                Write-Host "  X 客户端自检:OWED=$cowed(本该跑而没跑)—— 判红" -ForegroundColor Red
+                ($out -split "`r?`n" | Where-Object { $_ -match '^\s*OWED' }) |
+                    ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+            } elseif ($cowed -lt 0) {
+                Write-Host "     ! 这份 exe 的汇总行里没有 OWED —— 口径不明(比本脚本旧)。不判红,但" -ForegroundColor Yellow
+                Write-Host "       这一趟【本该跑而没跑】的那些在门禁里仍然是隐形的。" -ForegroundColor Yellow
+            } elseif ($cskip -gt 0) {
+                Write-Host "     ★ SKIP=$cskip 不是 PASS(OWED=0):都是【这个形态下测不了】那一类,逐条原因见自检输出" -ForegroundColor Yellow
+            }
         } else {
             $broken += [pscustomobject]@{ File = 'client --selftest'; Why = "没有汇总行(退出码 $($proc.ExitCode))" }
             Write-Host "  X 客户端自检没跑起来" -ForegroundColor Red
@@ -1027,7 +1060,38 @@ if ($Full) {
             # ★ 先取 PASS/FAIL 再匹配 SKIP —— $Matches 是整个换掉的,不是累加(D91 裁定⑤踩过)
             $askip = 0
             if ($aout2 -match 'SKIP=(\d+)') { $askip = [int]$Matches[1] }
+            # ★★★★ V36:OWED / LIFE 也读出来并判红 —— 在此之前本脚本里这两个词**零命中**,
+            #   于是 D117 那条裁定只在 build-client.ps1 那一条路上真的成立。
+            #   ★ 管理端**控制台汇总行**只在 $owed>0 时才印 `OWED=`;LIFE 那一条印的是
+            #     「OK ④ 生命周期三条…是【真跑出来的】」/「!! ④ …【没验到】」两句话之一。
+            #     ⇒ 两个来源都认:有 `OWED=` 就取,没有就按 0;LIFE 认那句「没验到」。
+            #   ★★ 缺字段记 -1(不是 0):「OWED=0」与「这份 exe 根本没这个字段」
+            #     在放行这件事上长得一样,而下一步完全相反 —— 后者该说「口径不明」。
+            $aowed = -1; $alife = -1
+            if ($aout2 -match 'OWED=(\d+)') { $aowed = [int]$Matches[1] }
+            if ($aout2 -match 'LIFE=(\d+)') { $alife = [int]$Matches[1] }
+            # ★ LIFE 另有一个来源:管理端那句「生命周期三条【没验到】」。两个都认,任一成立即判红。
+            $alifeMissing = ($alife -eq 0) -or ($aout2 -match '生命周期三条【没验到】')
+            if ($aowed -lt 0) {
+                Write-Host "     ! 管理端汇总行里没有 OWED —— 口径不明(这份 exe 比本脚本旧)。不判红," -ForegroundColor Yellow
+                Write-Host "       但这一趟【本该跑而没跑】的那些在门禁里仍然是隐形的。" -ForegroundColor Yellow
+            }
             $adminSelftest = [pscustomobject]@{ Pass = $ap; Fail = $af; Skip = $askip }
+            if ($aowed -gt 0) {
+                $broken += [pscustomobject]@{ File = 'admin --selftest'
+                                              Why  = "★ 管理端自检有 $aowed 条【本该跑得了却没跑成】(OWED)—— " +
+                                                     "判据指错了文件 / 子进程挂死 / 那一段一条结果都没写出来。" +
+                                                     "★★ 这与 SKIP 不是一回事(SKIP = 这个形态下测不了,不判红)。" }
+                Write-Host "  X 管理端自检:OWED=$aowed(本该跑而没跑)—— 判红" -ForegroundColor Red
+                ($aout2 -split "`r?`n" | Where-Object { $_ -match '^\s*OWED' }) |
+                    ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+            }
+            if ($alifeMissing) {
+                $broken += [pscustomobject]@{ File = 'admin --selftest'
+                                              Why  = "★ LIFE=0 —— 「托盘右键关闭 → 管理端退出 → 栈真的没了」这一条【没验到】。" +
+                                                     "那是验收④本身,也是关栈那条路唯一算数的证据(扫源码对「点下去做没做事」什么都不会说)。" }
+                Write-Host "  X 管理端自检:生命周期三条【没验到】(LIFE=0)—— 判红" -ForegroundColor Red
+            }
             if ($af -gt 0) {
                 # ★ 措辞要说清它是**哪一种**红:$broken 那一栏的抬头是「应该跑却没跑起来的」,
                 #   而这一条是**跑起来了、而且红了** —— 两件事的下一步完全不同
@@ -1052,8 +1116,100 @@ if ($Full) {
         }
     }
 } else {
-    $skipped += [pscustomobject]@{ File = 'dotnet 自检(identity / lan-edge / transport)+ 客户端 --selftest'
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★★ V36:这一条**漏了管理端**,而漏的方式恰好是本脚本开篇最恨的那种
+    #
+    #  上一版这行 File 字段写的是「dotnet 自检(identity / lan-edge / transport)
+    #  + 客户端 --selftest」—— **没有管理端**;而唯一会提到管理端的那段是
+    #  `elseif ($Full)`,非 -Full 根本走不到。
+    #  ⇒ `.githooks\pre-commit` 跑的正是**非 -Full** ⇒ 每一次提交,
+    #    管理端那三百多条断言**既没跑、也没被记成没跑**,而末行照打
+    #    「√ 门禁通过:FAIL=0」。
+    #  ★ 这与本脚本开篇自立的第一性质**直接冲突**:
+    #    「最重要的性质不是覆盖率,是【诚实】…… 跑不了的套件**逐条列出原因,绝不静默省略**」。
+    #  ★★ 处置是**让"没跑"看得见**,不是让它去跑 —— 让每次提交都多跑几分钟,
+    #    换来的是人开始用 `--no-verify`(第 5 条量过这个代价,D24 就是这么塌的)。
+    #  ★★★ 拆成**三条**而不是一条长句:一条长句里少一个词,没有任何东西会红;
+    #    三条各自成行,少一条时覆盖账的条数会变 —— 而下面那条元断言正是数条数的。
+    # ══════════════════════════════════════════════════════════════════
+    $skipped += [pscustomobject]@{ File = 'dotnet 自检(identity / lan-edge / transport)'
                                    Reason = '慢(数分钟)。加 -Full 一起跑。' }
+    $skipped += [pscustomobject]@{ File = 'client --selftest'
+                                   Reason = '慢(数分钟)。加 -Full 一起跑。★ 本次【没有跑过任何一条客户端断言】。' }
+    $skipped += [pscustomobject]@{ File = 'admin --selftest'
+                                   Reason = '慢(数分钟)。加 -Full 一起跑。' +
+                                            '★★ 本次【没有跑过任何一条管理端断言】—— 而 .githooks\pre-commit 走的正是这一条路,' +
+                                            '也就是说**每一次提交**管理端都没被验过。' +
+                                            '★ 在 V36 之前它连这一行都没有:既没跑、也没被记成没跑。' }
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★★★ V36 · 反向全表(第 5 处):**-Full 才跑的每一个套件,非 -Full 时必须被记成「没跑」**
+#
+#  ★ 为什么需要它:上面那三行覆盖账**只是三行字**。V36 之前那儿是一行长句,
+#    里面漏掉了「管理端」—— 而漏掉的方式是**没有任何东西会红**:
+#    `.githooks\pre-commit` 走的正是非 -Full,于是每一次提交管理端三百多条断言
+#    既没跑、也没被记成没跑,而末行照打「√ 门禁通过:FAIL=0」。
+#    ⇒ 光把那行字补上,下一次改动照样能再漏一次。**补一行字不是护栏。**
+#
+#  ★★ 判据是**源码对源码**,两边都是扫出来的,不是手写的:
+#      A = `if ($Full) {` 那一段里,用**字面量**报出来的套件名
+#          (`Write-Host ("  {0,-46} PASS={1…" -f 'xxx', …)`);
+#      B = 紧接着那个 `else` 里,每条 `$skipped += … File = 'xxx'` 的名字。
+#    要求 **A ⊆ B**。
+#  ★★★ 这条**两种模式下都跑**(它读的是源码,不是这一趟的运行结果)——
+#    所以它在 pre-commit 那条快层路上就会响,而那正是漏账发生的地方。
+#  ★ 零命中判红:A 空 = 抠取方式坏了,而坏掉的表现是**它一直绿**。
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★ 已知边界(说出来,不假装扫全了):A 只收**字面量**标签。
+#    dotnet 那一组的标签是 `"$($s.Name) $a"`(变量拼的),抠不出来 ——
+#    它由覆盖账里那条「dotnet 自检(identity / lan-edge / transport)」兜着,
+#    但**没有机器在钉它**。一个不说自己漏了什么的扫描器比不扫更坏(第 15 条)。
+$selfSrcRaw = Get-Content $PSCommandPath -Raw
+$fullStart  = $selfSrcRaw.IndexOf('if ($Full) {')
+# ★ 这个锚点必须落在**那个 else** 里,而不是"Full 段里第一条 `$skipped +=`" ——
+#   第一版就是那么写的,当场被自己那条「抠到 0 个」的元断言逮住:
+#   Full 段内部(worktree 没有产物那一档)本来就有 `$skipped +=`,
+#   于是区间 A 在真正的标签行**之前**就被截断了,抠出 0 个。
+$elseAnchor = 'V36:这一条**漏了管理端**'
+$elseStart  = if ($fullStart -ge 0) { $selfSrcRaw.IndexOf($elseAnchor, $fullStart) } else { -1 }
+$elseEnd    = if ($elseStart -ge 0) { $selfSrcRaw.IndexOf('# --- 环境验证脚本', $elseStart) } else { -1 }
+if ($fullStart -lt 0 -or $elseStart -lt 0 -or $elseEnd -lt 0) {
+    $broken += [pscustomobject]@{ File = 'run-tests.ps1 自身:-Full 覆盖账反向全表'
+                                  Why  = "在本脚本源码里定位不到 ``if (`$Full) {`` / ``$elseAnchor`` / ``# --- 环境验证脚本`` " +
+                                         '三个锚点之一 —— 这条反向全表在空跑。★ 零命中与全清白长得一模一样,所以判红而不是静默跳过。' }
+    Write-Host "  X -Full 覆盖账反向全表:定位不到锚点,判据在空跑" -ForegroundColor Red
+} else {
+    $fullRegion = $selfSrcRaw.Substring($fullStart, $elseStart - $fullStart)
+    $elseRegion = $selfSrcRaw.Substring($elseStart, $elseEnd - $elseStart)
+    $fullLabels = @()
+    foreach ($ln in ($fullRegion -split "`r?`n")) {
+        if ($ln -notmatch 'PASS=\{1') { continue }
+        foreach ($m in [regex]::Matches($ln, "-f\s+'([^']+)'")) { $fullLabels += $m.Groups[1].Value }
+    }
+    $fullLabels = @($fullLabels | Select-Object -Unique)
+    $ledgerNames = @([regex]::Matches($elseRegion, "File\s*=\s*'([^']+)'") |
+                     ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    # ★ 元断言:真的抠到了。抠到 0 个时下面那条恒真 —— 而恒真的护栏就是没有护栏。
+    if ($fullLabels.Count -lt 2) {
+        $broken += [pscustomobject]@{ File = 'run-tests.ps1 自身:-Full 覆盖账反向全表'
+                                      Why  = "只从 -Full 那一段里抠出 $($fullLabels.Count) 个套件名(要 ≥2)—— " +
+                                             '抠取方式坏了。★ 坏掉的表现是这条判据一直绿:0 个名字自然"全都记过了"。' }
+        Write-Host "  X -Full 覆盖账反向全表:只抠到 $($fullLabels.Count) 个套件名,判据失效" -ForegroundColor Red
+    }
+    $unledgered = @($fullLabels | Where-Object { $ledgerNames -notcontains $_ })
+    if ($unledgered.Count -gt 0) {
+        $broken += [pscustomobject]@{ File = 'run-tests.ps1 自身:-Full 覆盖账反向全表'
+                                      Why  = "-Full 才跑的这 $($unledgered.Count) 个套件,在非 -Full 的覆盖账里**一个字都没有**:" +
+                                             ($unledgered -join '、') +
+                                             '。★ 于是它们在 pre-commit 那条路上既没跑、也没被记成没跑,而末行照打「门禁通过」——' +
+                                             '这与本脚本开篇自立的第一性质(诚实:跑不了的套件逐条列出原因,绝不静默省略)直接冲突。' +
+                                             '⇒ 在那个 else 里补一条 `$skipped += … File = ''<名字>''`,并写清「本次没跑过它的任何一条断言」。' }
+        Write-Host "  X -Full 覆盖账漏了:$($unledgered -join '、')" -ForegroundColor Red
+    } else {
+        Write-Host ("  √ -Full 覆盖账反向全表:{0} 个 -Full 套件都在非 -Full 的「没跑」栏里({1})" -f `
+                    $fullLabels.Count, ($fullLabels -join '、')) -ForegroundColor DarkGray
+    }
 }
 
 # --- 环境验证脚本(只在 -VerifyEnv 时跑)-----------------------------------

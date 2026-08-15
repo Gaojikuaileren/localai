@@ -128,8 +128,11 @@ public static class SelftestUiPromises
         {
             // ★ 发布产物旁边没有源码 —— 这**不是**错误(第 11 条)。但要把跳过的事实说出来:
             //   不说的话,「跳过了」与「全绿」在输出里长得一模一样。
-            Console.WriteLine("  SKIP  界面指路护栏:找不到客户端源码根(发布产物形态)—— "
-                            + "本次【一条指路都没查过】,别把这趟的 PASS 读成「文案没问题」");
+            // ★★ V36:走 Selftest.Skip —— 此前这里是裸 Console.WriteLine,
+            //   客户端哨兵又没有 SKIP 字段 ⇒ 这行字**两条门禁都看不见**(第 19 条那个形状)。
+            Selftest.Skip("界面指路护栏",
+                          "找不到客户端源码根(发布产物形态)—— "
+                          + "本次【一条指路都没查过】,别把这趟的 PASS 读成「文案没问题」");
             return;
         }
 
@@ -348,26 +351,21 @@ public static class SelftestUiPromises
 
     // ────────────────────────────────────────────────────────── 源码根 / 编译集
     /// <summary>
-    /// 客户端源码根。★ 判据与 `Selftest.ClientSourceRoot()` **逐字同款**(两个锚点必须同时在):
-    /// 只认一个锚点的话,`%TEMP%` 里别的会话留下的一份陈旧 `Selftest.cs` 就会被当成源码根
-    /// —— 2026-08-08 出包闸上真的发生过。
-    /// ★★ 这里**重写一份**而不是复用,是因为那个方法是 `Selftest.cs` 的私有成员,
-    /// 而 `Selftest.cs` 是本车道的禁区(V26 在追加)。下面配了元断言:
-    /// 解出来的根里必须有 `Views\DevicesView.cs`,解错地方会红,而不是静默换一棵树去扫。
+    /// 客户端源码根。★★★★ V36:**不再自带一份** —— 直接用 <c>Selftest.ClientSourceRoot()</c>。
+    ///
+    /// <para>★ 上一版这里写着「重写一份而不是复用,是因为那个方法是 `Selftest.cs` 的私有成员,
+    /// 而 `Selftest.cs` 是本车道的禁区(V26 在追加)」—— 那个理由**当时成立**,
+    /// 而它留下的后果一直没人算过:`Selftest.cs` 里那条「源码根锚点只许有一处」
+    /// **只读它自己那个文件** ⇒ 报「1 处」判绿,而工程里真实是 **3 处**
+    /// (本文件 + `SelftestModelGate.cs`)。**判据只盖住了它自称范围的一个文件**(第 3b 条)。
+    /// V36 拥有全部 `Selftest*.cs`,禁区不再存在 ⇒ 三处收拢,并把那条判据的范围拓到整个编译集。</para>
+    ///
+    /// <para>★★ 顺带丢掉的第三锚点(`Views\DevicesView.cs`):锚点越多「找不到源码根」越容易发生,
+    /// 而找不到的后果是**整段跳过** —— 那是 fail-open 的方向(第 11 条)。
+    /// 解错树的那一半仍然守得住:下面两条元断言(编译集 ≥60 个源文件 · 屏幕词 ≥500)
+    /// 在一棵不相干的树上必然红。</para>
     /// </summary>
-    static string? ClientSourceRoot()
-    {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir is not null; i++)
-        {
-            if (File.Exists(Path.Combine(dir, "Selftest.cs"))
-                && File.Exists(Path.Combine(dir, "localai-client.csproj"))
-                && File.Exists(Path.Combine(dir, "Views", "DevicesView.cs")))
-                return dir;
-            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
-        }
-        return null;
-    }
+    static string? ClientSourceRoot() => Selftest.ClientSourceRoot();
 
     /// <summary>
     /// 一个 exe **真正会编译**的 .cs 全集 = 工程目录下的隐式 glob + csproj 里逐条 `&lt;Compile Include&gt;`。

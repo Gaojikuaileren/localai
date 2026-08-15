@@ -91,8 +91,13 @@ public static partial class Selftest
         }
         catch (Exception ex) { _fail++; Console.WriteLine("  FAIL  自检自身抛异常: " + ex); }
 
+        // ★★★ V36:`OWED=` / `LIFE=` **无条件打印**(哪怕是 0/1)。
+        //   `run-tests.ps1` 读的是**控制台汇总行**,而"只在 >0 时才印"会让「字段是 0」
+        //   与「这份 exe 根本没有这个字段」在它眼里长得一模一样 —— 那两件事的下一步完全相反
+        //   (前者放行,后者该说"口径不明")。⇒ 字段恒在。
         Console.WriteLine($"\n主机管理端 selftest: PASS={_pass} FAIL={_fail}"
-                          + (_skip > 0 ? $"  SKIP={_skip}" : "") + (_owed > 0 ? $"  OWED={_owed}" : ""));
+                          + (_skip > 0 ? $"  SKIP={_skip}" : "")
+                          + $"  OWED={_owed}  LIFE={(_lifeVerified ? 1 : 0)}");
         if (_skip > 0)
             Console.WriteLine("  ★ SKIP 不是 PASS —— 上面每条都写了为什么跳过,不要把它读成通过。");
         if (_owed > 0)
@@ -619,7 +624,25 @@ public static partial class Selftest
                 + "留着一条不再成立的登记,就是把一句错话钉在原地");
     }
 
-    /// <summary>只去注释、**保留字符串** —— 查文案/接线用它。剥字符串的那种会让判据恒真(第 3c 条)。</summary>
+    /// <summary>
+    /// 只去注释、**保留字符串** —— 查文案/接线用它。剥字符串的那种会让判据恒真(第 3c 条)。
+    ///
+    /// <para>★★★★★ V36 修:上一版**不认字符串字面量**,于是源码里一句
+    /// <c>$"https://…"</c> 里的 <c>//</c> 被当成行注释起点 ⇒ 那一行的后半截
+    /// **连同收尾的引号一起被吃掉**。两个后果:
+    /// ① 真代码被当注释删了(本行之后的部分);
+    /// ② ★★★ 引号奇偶从此错位 ⇒ 建立在本函数之上的 <see cref="SelftestMoved"/>.<c>CodeOnly</c>
+    ///    (它先跑 NoComments 再剥字符串)从那一行往后**把代码当字符串剥掉** ⇒
+    ///    <c>!CodeOnly(整份源码).Contains("X")</c> 这类**反向**断言**静默恒真**。</para>
+    ///
+    /// <para>★ 这是最坏的一种缺陷:一把**用来看清代码的尺**自己量错了,而错法是无声的。
+    /// ⇒ 判据不是"以后小心",是 <c>SelftestMoved.SelfCheckCommentStrippers()</c> 那六条定标 ——
+    /// 它们喂三份合成源码,两个方向都钉。V36 实测:修之前定标 ①④⑥ **红**,修之后全绿。</para>
+    ///
+    /// <para>★★ 顺带认了**字符字面量**:`'"'` 里那个双引号不是字符串起点。
+    /// 本仓的自检文件里就有这种写法(SelftestMoved.cs 的 CodeOnly 自己),
+    /// 而 <c>TryReadAllSources()</c> 会把它们一起读进来。</para>
+    /// </summary>
     static string NoComments(string src)
     {
         var sb = new System.Text.StringBuilder(src.Length);
@@ -629,6 +652,33 @@ public static partial class Selftest
             { while (i < src.Length && src[i] != '\n') i++; sb.Append('\n'); continue; }
             if (i + 1 < src.Length && src[i] == '/' && src[i + 1] == '*')
             { i += 2; while (i + 1 < src.Length && !(src[i] == '*' && src[i + 1] == '/')) i++; i++; continue; }
+            // ★ 字符串字面量:**原样抄过去**(它里面的 `//` 不是注释)
+            if (src[i] == '"')
+            {
+                bool verbatim = i > 0 && src[i - 1] == '@';
+                sb.Append(src[i]); i++;
+                while (i < src.Length)
+                {
+                    if (verbatim) { if (src[i] == '"') { if (i + 1 < src.Length && src[i + 1] == '"') { sb.Append(src[i]); i++; } else break; } }
+                    else { if (src[i] == '\\') { sb.Append(src[i]); i++; } else if (src[i] == '"') break; }
+                    if (i < src.Length) sb.Append(src[i]);
+                    i++;
+                }
+                if (i < src.Length) sb.Append(src[i]);
+                continue;
+            }
+            // ★ 字符字面量:`'"'` / `'\\'` / `'/'` 三种都会骗过上面几条
+            if (src[i] == '\'')
+            {
+                sb.Append(src[i]); i++;
+                while (i < src.Length && src[i] != '\'')
+                {
+                    if (src[i] == '\\') { sb.Append(src[i]); i++; if (i >= src.Length) break; }
+                    sb.Append(src[i]); i++;
+                }
+                if (i < src.Length) sb.Append(src[i]);
+                continue;
+            }
             sb.Append(src[i]);
         }
         return sb.ToString();

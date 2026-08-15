@@ -26,9 +26,78 @@ namespace LocalAI.Admin;
 public static partial class Selftest
 {
     /// <summary>跟着 3100 行一起搬过来的那批断言。★ 由 <c>Run()</c> 调。</summary>
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★★★ V36 · 去注释器**自己**的定标(ASSERTION-PITFALLS 新增第 27 条)
+    //
+    //  起因(V39 报、V36 实测复核):`admin/Selftest.NoComments` **不认字符串字面量**。
+    //  于是源码里一句 `$"https://…"` 里的 `//` 被当成行注释起点 ⇒ 那一行的**后半截连同
+    //  收尾的引号一起被吃掉** ⇒ 引号奇偶从此错位 ⇒ 建立在它上面的 `CodeOnly`
+    //  (它先跑 NoComments 再剥字符串)从那一行往后**把代码当字符串、把字符串当代码**。
+    //
+    //  ★★★ 后果的方向是最坏的那一种:`!CodeOnly(整份源码).Contains("X")` 这类**反向**断言
+    //    会**静默恒真** —— 永远绿,没有任何迹象。而这正是本仓最恨的形状,
+    //    偏偏长在「用来看清代码的那把尺」上。
+    //  ★ 一把量错了的尺,比没有尺更坏:它让每一条靠它的判据都变成一句没人验过的话。
+    //
+    //  ★★ 定标必须**两个方向都钉**(只钉一个方向的定标会被恒真/恒假的实现骗过):
+    //    ① 真代码必须**留下**(去注释器不许把代码吃掉);
+    //    ② 真注释、真字符串必须**被剥掉**(该剥的确实剥了)。
+    //  ★★★ 这一组**不依赖本仓的任何内容** —— 喂的是三份合成源码,
+    //    它测的是判据本身,不是被判的对象(与 SelftestUiPromises.SelfCheckScanner 同款)。
+    // ══════════════════════════════════════════════════════════════════════════
+    static void SelfCheckCommentStrippers()
+    {
+        Console.WriteLine("\n-- 去注释器定标(V36)--");
+
+        // ★ 针拼出来:写成字面量的话,本文件自己就成了它要找的那个东西(第 1 条,已踩 9 次)。
+        const string url = "https:" + "//example";
+        var src =
+            "class X {\n"
+          // ★★ 标记必须放在**同一行、URL 之后** —— 放到下一行的话,
+          //   `NoComments` 那个病(只吃掉本行后半截)就测不出来,定标会假绿。
+          //   第一版就是放在下一行的,当场被自己抓了一次。
+          + "    string A() => $\"" + url + "/a\"; void MarkerSameLine() { }\n"
+          + "    void MarkerAfterUrl() { }\n"             // ← 它在那一行【之后】,必须活下来
+          + "    char Q() => '\"';\n"                     // ← 字符字面量里的双引号:会骗过只认 " 的实现
+          + "    void MarkerAfterCharQuote() { }\n"
+          + "    // MarkerInComment\n"                    // ← 注释里的,NoComments 必须剥掉
+          + "    string B() => \"MarkerInString\";\n"     // ← 字符串里的:NoComments 留、CodeOnly 剥
+          + "}\n";
+
+        // ① NoComments:代码留、注释剥、字符串留
+        var noc = NoComments(src);
+        Assert(noc.Contains("MarkerSameLine") && noc.Contains("MarkerAfterUrl"),
+            "★★★★ 定标①:`NoComments` 不许把**字符串里的 `//`** 当成注释起点 —— "
+            + "当成了的话,那一行后半截(连同收尾的引号)一起被吃掉:**真代码被当注释删了**,"
+            + "而且引号奇偶从此错位,建立在它上面的 `CodeOnly` 会跟着整份错位");
+        Assert(noc.Contains("MarkerAfterCharQuote"),
+            "★★★ 定标①b:字符字面量 `'\"'` 里的那个双引号**不是**字符串起点 —— "
+            + "当成起点的话,从那儿往后的引号奇偶全反,而本仓的自检文件里就有这种写法");
+        Assert(!noc.Contains("MarkerInComment"),
+            "★★ 定标②:`NoComments` 真的把行注释剥掉了(反方向:剥不掉的话它就是个恒等函数)");
+        Assert(noc.Contains("MarkerInString"),
+            "★★ 定标③:`NoComments` **保留字符串** —— 剥字符串的那种会让文案判据恒真(第 3c 条,已踩 2 次)");
+
+        // ② CodeOnly:代码留、注释剥、字符串也剥
+        var code = CodeOnly(src);
+        Assert(code.Contains("MarkerAfterUrl") && code.Contains("MarkerAfterCharQuote"),
+            "★★★★ 定标④:`CodeOnly` 同上 —— 它先跑 `NoComments`,所以上面那个病会**原样传下来**,"
+            + "而且更坏:引号奇偶一错位,它从那儿往后把代码当字符串剥掉 ⇒ "
+            + "`!CodeOnly(源码).Contains(\"X\")` 这类**反向**断言**静默恒真**");
+        Assert(!code.Contains("MarkerInComment") && !code.Contains("MarkerInString"),
+            "★★ 定标⑤:`CodeOnly` 注释与字符串**都**剥掉了(反方向)");
+
+        // ③ ★ 反向的反向:一条真实形状的反向断言,在**有 `//` 字符串**的源码上必须仍然抓得到
+        Assert(!CodeOnly(src).Contains("MarkerInString") && CodeOnly(src).Contains("MarkerAfterUrl"),
+            "★★★ 定标⑥:同一份源码上,该抓的抓得到、该放的放得过 —— "
+            + "这一条是前五条的合体,专门挡住"
+            + "「把某一条定标改到刚好通过」那种修法");
+    }
+
     static void RunMoved()
     {
         Console.WriteLine("\n-- 跟着迁移搬过来的断言(V21)--");
+        SelfCheckCommentStrippers();
             // ---- 记忆库 + 存储清理(2026-07-30 用户裁定)----
             {
                 var mc = new MemoryCenter();
@@ -1462,6 +1531,54 @@ public static partial class Selftest
                                    $"★★★ 元断言的元断言:全仓「唯一入口」声明只扫到 {claims.Count} 条(要 ≥2)—— "
                                    + "扫不到就说明这条判据自己坏了(措辞换了 / 文件枚举错了),"
                                    + "而坏掉的表现是**它会一直绿**");
+
+                            // ══════════════════════════════════════════════════
+                            //  ★★★★ V36 · 上面那条**下限**撑不住它自己
+                            //
+                            //  实测(V36):今天扫到的是 **4** 条,而其中三条**永远不会失败**:
+                            //    · `Strings.Get`            —— 全仓几十处在调,不可能数到 0;
+                            //    · `RetireModelTask`        —— 那句 `///` 说的是
+                            //      「撤掉暂停任务等于把用户**唯一的恢复入口**删了」,
+                            //      讲的是**人**在界面上的入口,不是这个函数的调用点(**误命中**);
+                            //    · `NotifyPoolChanged`      —— 同样是**人**的入口
+                            //      (「那正是设计上唯一的加语言入口」= 设置页那个「+」)。
+                            //  ⇒ 真正承重的只有 `EnsureStackAsync` 那一条。
+                            //    把它头上那句 `/// ★ **全仓唯一的起栈入口**` 删掉 ⇒
+                            //    claims 掉到 3,`>= 2` **仍然满足**,整段**全绿**,
+                            //    而这条判据存在的那个理由当场蒸发,一声不响。
+                            //
+                            //  ★ 一个下限只能证明"表不空",证明不了"**那一条**还在表里"。
+                            //    ⇒ 补一张**点名**的表(与 ModelReadiness.CallSites 同款的双向写法:
+                            //      正向逐条查、反向查表有没有发霉)。
+                            //  ★★ 表里**不放**那两条误命中 —— 登记一条假条目,
+                            //    下一个人就不会再信这张表(第 15 条那句话的另一半)。
+                            // ══════════════════════════════════════════════════
+                            var loadBearing = new (string Method, string Why)[]
+                            {
+                                ("EnsureStackAsync",
+                                 "admin/Services/HostProvision.cs —— 「全仓唯一的起栈入口」。"
+                               + "它是这条判据**唯一真正承重**的那一格:起栈入口被接空了(函数还在、"
+                               + "界面上没有任何东西会触发它)正是它要抓的形状。"),
+                                ("Get",
+                                 "app/I18n/Strings.cs —— 「i18n 的唯一入口,一钩全覆盖」。"
+                               + "它今天不可能失败(全仓几十处在调),但那句 `///` 一旦被删,"
+                               + "「界面用词表在出口处统一过一遍」这条纪律就再也没有判据钉着了。"),
+                            };
+                            var lostClaims = loadBearing
+                                .Where(lb => !claims.Any(c => c.Method == lb.Method))
+                                .Select(lb => $"{lb.Method} —— {lb.Why}")
+                                .ToList();
+                            Assert(lostClaims.Count == 0,
+                                   $"★★★★ 点名的那几条「唯一入口」声明**还在被扫到**(现扫到 {claims.Count} 条:"
+                                   + string.Join("、", claims.Select(c => c.Method)) + ")"
+                                   + (lostClaims.Count > 0
+                                       ? "\n        —— 下面这 " + lostClaims.Count + " 条**不见了**:\n        "
+                                         + string.Join("\n        ", lostClaims)
+                                         + "\n        ★ 只有 `claims.Count >= 2` 那条下限的话,这里是**全绿**的:"
+                                         + "剩下几条里有的永远不会失败、有的本来就是误命中。"
+                                         + "\n        ★★ 要么把那句 `///` 改回去,要么这张表跟着改 —— "
+                                         + "但**改表要说清楚为什么那件事不再需要被守**。"
+                                       : ""));
                             Assert(prod.Count >= 20,
                                    $"★★ 生产源码只枚举到 {prod.Count} 个 .cs(要 ≥20)—— "
                                    + "枚举不到文件的话,下面每一条的「调用点」都会是 0,红得理由是假的");
