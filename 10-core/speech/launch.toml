@@ -41,7 +41,26 @@ rel  = "venvs/speech/Scripts/python.exe"
 # faster-whisper。★ 档位映射见 D27:large-v3 = full / turbo = lite。
 lite_repo = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
 full_repo = "Systran/faster-whisper-large-v3"
-device = "cpu"                  # ★ v1 只走 CPU:0 显存 ⇒ 不必等任何 GPU 裁定,也不抢租约
+# ★★★ 2026-08-15(V38)更正一条**理由**,不是更正这个值 —— 值仍是 cpu,改不改是裁定。
+#
+#   这一行原本写着「v1 只走 CPU:0 显存 ⇒ **不必等任何 GPU 裁定**,也不抢租约」,
+#   而 D103 裁定⑤ 给的理由是「onnxruntime 实测只有 CPU/Azure 两个 provider(没有 CUDA)
+#   ⇒ 走 CPU 不是取舍,是唯一路」。
+#
+#   ★ 那条理由**只覆盖 TTS**(Piper 跑 onnxruntime,见 [tts] 段,今天复验仍然成立)。
+#     **ASR 跑的是 CTranslate2,不是 onnxruntime** —— 而 V38 实测:
+#       · `ctranslate2.get_cuda_device_count()` = **1**(它看得见这张卡);
+#       · 把 device 换成 cuda 之后 **真的跑通了**,读数见 [measured] 段:
+#         2.2s 的话 **0.17s** 出结果(CPU 是 5.4–7.8s)⇒ **快 30–40 倍**;
+#         实测显存足迹 **2.226 GiB**。
+#   ⇒ 所以对 ASR 而言,`cpu` 是一个**取舍**,不是唯一路;
+#     而「不必等任何 GPU 裁定」这半句今天**不成立** —— 它恰恰是一条待裁。
+#
+#   ★★ V38 **没有**把它改成 cuda:改档是裁定(D103 裁定⑤ 的推翻条件 1 明写
+#     「若 speech 改回需要 GPU / 抢租约 ⇒ 裁定⑤作废,要重进 Broker 的准入面」)。
+#     本车道只做两件不需要裁定的事:把**理由**更正掉,把**改档那一刻会炸的雷**拆掉
+#     (cuBLAS 不在 DLL 搜索路径上,见 server.py 的 add_cuda_dll_dirs —— 那是缺陷,不是配置)。
+device = "cpu"
 compute_type = "int8"
 # ★★★ 权重必须**本地**。faster-whisper 默认联网拉权重(STATE:643 / D41),
 #   所以这里两条都钉死,而且是**双保险**:
@@ -55,6 +74,9 @@ hub_offline = true
 [tts]
 # Piper,全档 CPU。★ onnxruntime 实测只有 CPU/Azure 两个 provider(没有 CUDA),
 #   所以"Piper 走 CPU"不是取舍,是这套装置今天唯一能走的路。
+# ★ 2026-08-15(V38)**复验仍然成立**:`onnxruntime.get_available_providers()`
+#   逐字回 `['AzureExecutionProvider', 'CPUExecutionProvider']`(onnxruntime 1.28.0)。
+#   ⇒ 这一段的理由是**对的**;错的是有人拿它去覆盖 ASR(见 [asr] 段那条更正)。
 voices_rel = "piper"            # 相对 models 根
 default_voice = "en_US-lessac-medium"
 
@@ -62,11 +84,28 @@ default_voice = "en_US-lessac-medium"
 #  [verified] —— ★ 这一段是装载器认这份规格的**唯一依据**
 #
 #  规矩:改了上面任何一个字段,就必须重跑 `python 10-core/speech/verify_launch.py`
-#  并把新读数写回这里。装载器只检查这一段**在不在**、以及它自报的 spec_fingerprint
-#  与上面的字段对不对得上 —— 对不上就退回「启动方式尚未验证」。
+#  并把新读数写回这里。
 #
-#  ★ 为什么这样设计:它让"我改了启动参数但没验证过"变成一件**会红**的事,
-#    而不是一件"下次真去起的时候才发现"的事。那正是文件头那条规矩要防的东西。
+#  ★★★ 2026-08-15(V38)更正 —— **这一段此前描述了一个不存在的机制**:
+#    原文写着「装载器……以及它自报的 **spec_fingerprint** 与上面的字段对不对得上 ——
+#    对不上就退回『启动方式尚未验证』」,并据此声称
+#    「它让『我改了启动参数但没验证过』变成一件**会红**的事」。
+#
+#    **`spec_fingerprint` 全仓只有上面那一行提到过** —— [verified] 里没有这个字段,
+#    也没有任何代码算它或比它。装载器 `model_loader._speech_spec()` 真正检查的只有两件事:
+#      ① `[verified]` 这一段**在不在**;
+#      ② `[verified].asr_offline_load_ok` **是不是真**。
+#
+#    ⇒ **那句「会红」今天不成立**:把上面的 `device` / `compute_type` / `lite_repo`
+#      改成任何东西,只要 [verified] 还在、`asr_offline_load_ok` 还是 true,
+#      装载器照收不误 —— 而那一段读数已经是**在另一套参数下**量出来的了。
+#      这正是 D103 裁定② 声称要防、而实际没防住的那件事。
+#
+#    ★★ 这条对**即将到来的 CPU/GPU 裁定**是承重的:若有人把 device 改成 cuda,
+#      下面这些在 CPU 上量出来的读数**不会有任何东西提醒他重跑 verify_launch.py**。
+#      ⇒ 补法在 `model_loader._speech_spec()`(网关车道),已登记进
+#        decision-packets/v38-p5-first-batch-2026-08-15.md;本车道不改网关。
+#      在补上之前,**改这上面任何一个字段的人请自觉重跑 verify_launch.py**。
 # =============================================================================
 [verified]
 date = "2026-08-06"
@@ -78,6 +117,15 @@ onnxruntime = "1.28.0"
 piper_tts = "1.6.0"
 # 实测原始读数(秒)—— verify_launch.py 的原始输出,**两个档位都真的加载过**
 asr_lite_load_s = 1.9
+# ★★★ 2026-08-15(V38)**更正这两个数的读法**(数本身没动,它们是 08-06 真跑出来的):
+#   下面这两行此前被当成「**冷启**第一次调用」的读数,仓库里也是这么转述的。
+#   **那个读法是错的** —— V38 实测:第 2 次到第 6 次调用与第 1 次**几乎一样慢**
+#   (冷 7.52s / 稳态中位 7.50s)。⇒ 它不是冷启代价,它是**每一次调用的地板**。
+#   ★ 而且「转 1 秒音频」这个说法会误导:whisper 一律把输入补齐到 **30 秒窗**再编码,
+#     ⇒ 在**一段话装得进那个窗**的范围里,耗时**与音频长短几乎无关**
+#       (实测区间 0.8s ~ 24.1s,一样慢)。★ 超过 30s 的音频要切成多个窗,
+#       那时成本才会**随时长增长** —— 本轮**没有量过 >30s**,别把这条外推过去。
+#     拿它换算「实时率」是没有意义的 —— 详见 [measured] 段。
 asr_lite_transcribe_1s_s = 5.6
 asr_full_load_s = 3.6
 asr_full_transcribe_1s_s = 6.5
@@ -92,3 +140,68 @@ asr_offline_load_ok = true
 #   这**不是**「构建期预置」(D41/STATE:643 要求的那个)。见决议包 §2.2。
 #   ⇒ 本字段如实记下今天的位置,不假装它已经合规。
 weights_live_in = "cache_root"   # 应为 models_root;迁移动作见决议包,本车道不搬 3.5 GB
+
+# =============================================================================
+#  [measured] —— ★ V38(2026-08-15)· `measure_asr_latency.py` 的读数
+#
+#  ★ 与 [verified] **分开**,不混进去:[verified] 按 D103 裁定② 是
+#    `verify_launch.py` 的原始输出、且是装载器认规格的依据。本段是**另一支笔**量的
+#    **另一件事**(稳态延迟),把它写进 [verified] 会让那段的出处变成两个。
+#
+#  起因:仓库里关于同一件事有两个差 15 倍的数,而「按住说话到底好不好用」全看哪个真:
+#    · 本文件 [verified] 的 5.6s(被当成冷启)· PROJECT_PLAN:1242 / STATE:996 的 RTF 0.385
+#  ⇒ **两个都不能用来预测用户要等多久**,理由见下面 note_*。
+#
+#  ★★★ 本段是**读数**,不是规格,更**不是准入闸的数据源** —— 装载器只读 [verified],
+#    而显存收费**只由 config/vram-budget.toml 说了算**(文件头那条规矩没有被本段动摇)。
+#    ★ 措辞更正(第一版写的是「gpu_vram_gib 是**第一次有人去量它**」——**那是假的**,
+#      对抗式复核抓出来了):`vram-budget.toml` 那个 2.07 **本来就是一次 GPU 实测**
+#      (该文件 note 逐字「turbo ASR 2.07 GPU + Piper CPU TTS 0(原估 1.4 偏低)」,与 P1 一致)。
+#      ⇒ 下面这个 2.226 **不是从无到有**,它是**对同一件事的第二次、直接的测量**
+#        (nvidia-smi 装载前后之差),而它比在册的 2.07 **高 0.16** —— 这才是它的价值:
+#        在册那个数**偏低**,而偏低是 fail-open 方向。
+#    ★ 不是让谁照着它去改闸 —— 改闸要走 config 车道,见本段末尾 note_admission。
+#
+#  ★★ 取证边界(别把没量过的读成量过了):音频是 **Piper 合成的英文**,不是真人、不是中文。
+#    合成语音吐字比人清楚、没有噪声与口音 ⇒ 下面的数是**乐观下界**,真人只会更慢。
+#    **中文的数没有量到**(本机 Piper 只有一个英文语音),如实留白。
+# =============================================================================
+[measured]
+date = "2026-08-15"
+by = "10-core/speech/measure_asr_latency.py"
+tier = "lite"
+# ── CPU(今天真的在用的那一档)────────────────────────────────────────────
+#   ★★★ 耗时**与音频长短几乎无关** —— 这是 whisper 30 秒窗的必然结果:
+#     不论你说 0.8 秒还是 24 秒,编码器都按 30 秒算一遍,而在 CPU 上它就是全部成本。
+# ★★★ V38 第一版把这两行的出处标反了(写成「min = 24.1s 的话 / max = 0.8s 的话,越短越亏」),
+#   对抗式复核抓出来了。**7.6 那个最大值其实来自最长的那段(8.4s),而 0.8s 那段是最快的之一。**
+#   ⇒ 更正如下,并把「越短越亏」放回它真正成立的那一维(**比值,不是绝对秒数**)。
+cpu_transcribe_s_min = 5.36       # 12.1s 的话 @ cpu_threads=16
+cpu_transcribe_s_max = 7.75       # 8.3s 的话 @ 默认线程(★ 最长的那段,不是最短的)
+# ★ 这个区间**不随音频长短走** —— 它随线程档与跑次走:同一段 0.8s 的话,
+#   默认线程 7.05s、4 线程 5.66s、16 线程 5.43s(自己就横跨了大半个区间)。
+cpu_flat_across_audio_len = true  # ★ 同一档参数下,**实测区间 0.8s ~ 24.1s** 基本同一个数
+cpu_flat_measured_range_s = [0.8, 24.1]   # ★ 只在这个区间量过;>30s(多窗)没量,不许外推
+cpu_threads_barely_matters = true # 4 / 16 / 默认(32 核)三档实测 5.36–7.05s,没有可调空间
+# ★★ 「越短越亏」成立在**比值**上,不在绝对秒数上:绝对成本近乎恒定
+#   ⇒ 说得越短,同样这五六秒摊在越少的话上(2.0s 的话 RTF 3.73,24.1s 的话 RTF 0.23)。
+#   ★ 别把它读成「短音频的绝对耗时更长」——实测**不是**那样。
+note_rtf = "★ 实时率(RTF)对这条路**结构上不适用**:成本不随时长走。8.4s 的话 RTF 0.91,2.0s 的话 RTF 3.73 —— 引用任何单一 RTF 都会骗人。PROJECT_PLAN:1242 / STATE:996 的 0.385 属于此列。"
+note_floor = "★ [verified] 的 5.6s 不是冷启代价,是每次调用的地板。★ 判据说准:本轮唯一一次**真冷**的调用是那段 440Hz 正弦音(7.46s);样本表里那一列是**同一段音频的首次**,而此时模型已被正弦音跑热(7.52s),稳态 7.50s。三个数几乎不差 -- 冷热之间没有台阶,所以那 5.6s 是地板,不是冷启代价。"
+# ── GPU(★ 只是量过,**没有启用** —— 改档是裁定,见 [asr] 段)─────────────
+gpu_probed = true
+# ★ 记下**量它时用的参数** —— 一个不带参数的读数,下一个人没法复现,也没法判断它适不适用。
+#   ★★ 留神:上面 [asr] 段的 compute_type 是 `int8`;单把 device 改成 cuda 而不动
+#   compute_type,跑的**不是**下面这个读数量到的那套(CUDA 上 int8 与 float16 都支持,但不同档)。
+gpu_compute_type = "float16"
+cpu_compute_type = "int8"         # ← 与 [asr].compute_type 一致,即今天真在跑的那套
+gpu_transcribe_s = 0.18           # 2.2s 与 12.2s 的话都是这个数(稳态中位)
+# ★ 这一行第一版写的是 1.27 —— 那是**另一支笔**(临时探针)只量 `WhisperModel(...)` 的数,
+#   而本段自报出处是 `measure_asr_latency.py`,它量的是 `eng.load()`,**含 Piper TTS 一起加载**。
+#   ⇒ 按自报出处对齐成 2.19;ASR 单独加载约 1.3s。(对抗式复核抓出来的。)
+gpu_load_s = 2.19                 # eng.load() 全量:ASR(cuda/float16) + Piper TTS
+gpu_vram_gib = 2.226              # nvidia-smi 实测装载前后之差
+gpu_speedup_x = "30-40"
+note_gpu_defect = "★★ GPU 那条路今天**默认是坏的**,而且坏得很难查:模型加载会成功,第一次转写才抛 cublas64_12.dll 找不到。已在 server.py 的 add_cuda_dll_dirs 修掉(缺陷,不是裁定)。"
+# ── ★★★ 与准入闸对不上的那一格(如实记,本车道不改 config)──────────────
+note_admission = "★★★ 准入闸按 2.07 GiB 给 speech.lite 收费,而**今天这一档跑在 CPU 上、实占 0.002 GiB**(V16 实测)⇒ 在为一个没启用的东西付 2.07。★ 而 2.07 这个数**对 GPU 档基本是对的**(V38 实测 2.226,偏低 0.16 ⇒ fail-open 方向)。⇒ 收费该改成多少,取决于 CPU/GPU 那条裁定,两个答案不一样(CPU 档应 ≈0,GPU 档应 ≥2.3)。本车道**不改** config/vram-budget.toml,理由与移交见 decision-packets/v38-p5-first-batch-2026-08-15.md。"

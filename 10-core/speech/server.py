@@ -120,6 +120,37 @@ def load_launch_spec(path: Optional[Path] = None) -> Dict[str, Any]:
     return spec
 
 
+def add_cuda_dll_dirs() -> list:
+    """
+    让 `device = "cuda"` **真的能用** —— 否则它是一颗「装得上、一转写就炸」的雷。
+
+    ★★★ 实测(V38 · 2026-08-15,`measure_asr_latency.py`):把 device 换成 `cuda` 之后
+      `WhisperModel(...)` **加载成功**(1.27s,看起来一切正常),而**第一次** `transcribe()`
+      抛 `RuntimeError: Library cublas64_12.dll is not found or cannot be loaded`。
+      ⇒ 这正是 `model_loader.py` 文件头点名要防的那个形状:
+        **看起来支持,第一次真用时才炸**。所以它是缺陷,不是配置问题。
+
+    原因:本机 CUDA 运行时是 **pip wheel** 装的(`nvidia-cublas-cu12` 等),
+    DLL 躺在 `<venv>/Lib/site-packages/nvidia/*/bin`,而那几个目录**不在 DLL 搜索路径上**。
+
+    ★★ 为什么用 `PATH` 而不是 `os.add_dll_directory()`:两个都试过,
+      **只有 PATH 那条有效**。`add_dll_directory` 只影响 `LoadLibraryEx` 带
+      `LOAD_LIBRARY_SEARCH_*` 标志的调用;而 CTranslate2 是从**原生代码**里加载 cuBLAS 的,
+      走的是标准搜索序 ⇒ 它看不见 `add_dll_directory` 的名单,只看得见 `PATH`。
+      (PyTorch 自己会做这件事,CTranslate2 **不做** —— 所以这里补。)
+
+    ★ 只在 device 非 cpu 时调用:CPU 那条路今天一个字节都不该受影响。
+    """
+    import glob
+
+    added = []
+    for d in sorted(glob.glob(str(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "*" / "bin"))):
+        if os.path.isdir(d):
+            os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+            added.append(d)
+    return added
+
+
 def provenance_for(client_host: str, headers: Any) -> str:
     """
     由**通道**判定来源档位。★ 不看请求体,不看任何调用方自报的字段。
@@ -176,6 +207,12 @@ class SpeechEngines:
             if a.get("hub_offline", True):
                 os.environ["HF_HUB_OFFLINE"] = "1"
             os.environ.setdefault("HF_HOME", str(_cache_root() / "hf"))
+
+            # ★ 非 CPU 档必须先把 CUDA 的 DLL 目录喂进 PATH,否则**加载会成功、
+            #   第一次转写才炸**(见 add_cuda_dll_dirs 的实测记录)。
+            #   今天 launch.toml 写的是 cpu ⇒ 这一支走不到;它守的是**改档那一刻**。
+            if str(a.get("device", "cpu")).lower() != "cpu":
+                add_cuda_dll_dirs()
 
             try:
                 from faster_whisper import WhisperModel

@@ -1,4 +1,4 @@
-# V26 · 把那 58 条救活,并揪出一条被注释喂绿的假绿(D?)
+# V26 · 把那 58 条救活,并揪出一条被注释喂绿的假绿(D129)
 
 > 车道 `v26/revived-assertions` · 2026-08-09 · 提交 `e6eb498`(合并 `4044671`)
 > 边界:`20-client-win/admin/SelftestMoved.cs`(`app/Selftest.cs` **本轮没动**,理由见 §6)

@@ -571,11 +571,13 @@ public static partial class Selftest
     // ══════════════════════════════════════════════════════════════════════════
     static readonly Dictionary<string, string> KnownWrongAnchors = new(StringComparer.OrdinalIgnoreCase)
     {
-        [@"Views\DevicesView.cs"] =
-            "V21 把这个文件**拆分**了(不是改名):`app/Views/DevicesView.cs` 今天仍在、491 行,"
-          + "而管理端源码根底下没有它。⇒ 它底下那批断言读的是**客户端**的源码。"
-          + "★ 重新指向后实测 PASS 166→210 / FAIL 8→33,那 25 条红要逐条裁"
-          + "「该跟去客户端自检、还是本来就该撤」—— 协调层已裁:单开车道。",
+        // ★★★★ V39 · 2026-08-15:`Views\DevicesView.cs` 那一行**已按本表自己的纪律删掉**。
+        //   管理端这一侧最后一处指向它的锚点在本轮拆掉了(那批断言一半改指 `HostHubView.cs`、
+        //   一半搬去了 `app/Selftest.cs`)⇒ 这一趟它**不再落空** ⇒ 反向那条当场判红,
+        //   原话:「它已经修好了,把那一行从 KnownWrongAnchors 里删掉。这张表只许变短」。
+        //   ★ 记一句:那条登记里写着「`app/Views/DevicesView.cs` 今天仍在、**491 行**」——
+        //     实测今天是 **468 行**(V24/V30b 改过文案)。一条登记连自己引的数都会发霉,
+        //     这正是"只许变短"要防的东西。
         [@"Services\HubClient.cs"] =
             "`HubClient.cs` 在客户端,而且**没有**被 admin 的 csproj link 进来 ⇒ "
           + "它底下那两条测的是管理端不编译的代码。处置(移去客户端自检 / 撤掉)随上一条一起裁。",

@@ -1,4 +1,4 @@
-# V25 · 关栈判据的对外入口 + 副机那句把人送去错地方的报错(D?)
+# V25 · 关栈判据的对外入口 + 副机那句把人送去错地方的报错(D128)
 
 日期:2026-08-09 · 车道:`v25/gateway-stopgate-and-attribution`
 边界:拥有 `10-core/gateway/**` · `10-core/lan-edge/**` · `20-client-win/app/Services/HubClient.cs`
