@@ -151,7 +151,10 @@
 
          · AdminApp.cs   —— 出包布局(旁边装没装 admin / host)。**判据留客户端**:
            角色判定的第一条证据就是它,设置里那颗「打开管理端面板」按钮也靠它。
-           而管理端这边 `HostProvision` / `HubAdmin.StartEdgeCmd` 也要问同一个问题。
+           而管理端这边 `HostProvision`(`HostToolsDir()` 三处)与 `HostHubView` 也要问同一个问题。
+           ★ V37(2026-08-15)更正:这一行原来还并列着 `HubAdmin.StartEdgeCmd` —— 该方法**已删**
+             (纯死代码,全仓零引用;留痕见 `Services/HubAdmin.cs` 里它原来那个位置)。
+             ⇒ Link 本身**不受影响**:上面那几处足够撑住它,`AdminApp.cs` 仍然必须编进来。
          · HostSetup.cs  —— **角色判据那一半**(见该文件头)。管理端起网关时读的
            `GatewayPort` / `GatewayUpAsync` 就是客户端拨号读的那两个 ——
            两处各写一个字面量的话,「客户端拨到哪儿」与「管理端起在哪儿」会静默漂成两个数。
