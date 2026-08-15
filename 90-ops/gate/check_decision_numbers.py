@@ -143,6 +143,34 @@ _EXPECTED_DEBT = 14              # ★ 只许变短。变大 = 又漏了一个,�
 _HEADING_ANY = re.compile(r"^#{1,6} .*", re.M)
 _QMARK = "D" + "?"               # ★ 拼出来:否则本文件自己就是它要找的东西(第 1 条,已踩 9 次)
 
+# ★★★ 2026-08-11 扩宽 —— 起因是这道闸报「该取号而没取:**0**」的**同一天**,
+#   `admin-app-split-2026-08-07.md` 正躺在 main 里,抬头逐字写着「**(未取号 · 提议)**」。
+#   它从 2026-08-07 起就把理由写得很清楚(是提议不是裁定,用户没拍板)——
+#   **而这道闸一个字也读不懂**,因为它只认 `D` + 问号那一种形状。
+#   ⇒ 那份包**从来不在它的视野里**,于是「全清白」与「看不见」在那张表上长得一模一样。
+#   ★ 这是「零命中不是不存在」在本仓的**第三次**实例(前两次:V33/方向 B · D6-D7 误读)。
+#   ★★ 而这一次它伪装得最好:表上的数不是零命中,是 **0/17「已清空」** ——
+#     一个刚刚兑现过承诺的数字,比空表更不容易让人起疑。
+_ZH_DRAFTMARK = re.compile(r"(未取号|待取号|尚未取号|未编号|待编号)")
+# ★ 划掉的段不算:本仓纪律是「原文划掉不删」,于是**已经了结的旧待办仍带着这些字**。
+#   (实例:`p3c-signoff-2026-08-04.md` §5.3 那条「worktree-split 仍待取号并入」,
+#    2026-08-11 划掉并更正 —— 它描述的是**别的包**,而且那件事早在 08-04 当天就了结了。)
+#   不剥掉它,这条扩宽第一次跑就会误报,而**误报会训练人绕过闸** —— D117 裁死过这条。
+_STRIKE = re.compile(r"~~.*?~~", re.S)
+
+
+def _heading_marks_draft(txt: str) -> bool:
+    """抬头里有没有【自陈未取号】的标记 —— 两种形状:`D` + 问号,或中文「未取号/待取号」。
+
+    ★ 只看抬头、不 grep 全文:今天真有好几份包在**讲协议本身**
+      (「草案期一律写 D-问号,并入那刻取号」),grep 全文会把最负责任的写法判成欠号。
+    """
+    for h in _HEADING_ANY.findall(txt):
+        h = _STRIKE.sub("", h)
+        if _QMARK in h or _ZH_DRAFTMARK.search(h):
+            return True
+    return False
+
 _KNOWN_UNNUMBERED = {
     "admin-app-packaging-2026-08-08.md",
     "admin-app-phase2-migration-map-2026-08-08.md",
@@ -269,7 +297,7 @@ def main() -> int:
     unnumbered_now: list[str] = []
     for f in files:
         txt = f.read_text(encoding="utf-8", errors="replace")
-        if not any(_QMARK in h for h in _HEADING_ANY.findall(txt)):
+        if not _heading_marks_draft(txt):     # ★ 两种形状:D-问号 与中文「未取号」
             continue
         if _DRAFT.search(txt):          # ★ 包里写了看得见的豁免 ⇒ 放行
             continue
