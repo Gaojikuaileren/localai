@@ -20,9 +20,41 @@ public static class Selftest
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
     };
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★★ V36 · 客户端这一侧终于也把 SKIP 切成两类(管理端 V23 就切了)
+    //
+    //  ASSERTION-PITFALLS 第 19 条立的口径是:
+    //    · SKIP = **这个形态下本来就测不了**(发布产物旁边没有源码)⇒ 黄字,不判红;
+    //    · OWED = **本该跑得了却没跑成**(判据指错文件 / 那一段一条结果都没写出来)⇒ 判红。
+    //  管理端 V23 把它做完了,而**客户端这一份没跟着做** —— 于是 D117 那条裁定
+    //  「本该跑得了却没跑成要判红」在客户端这条路上**一天都没有成立过**:
+    //  客户端此前只会 `Console.WriteLine("  SKIP …")`,哨兵里连 `SKIP=` 字段都没有,
+    //  出包门禁与 `run-tests.ps1` 两边都读不到它。
+    //  ★ 「一个修法漏改一处,缺陷就完整地留在那一处」—— 这就是那一处。
+    //
+    //  ★★ 哨兵格式:头一段 `PASS=n FAIL=n` **逐字不动**
+    //    (`build-client.ps1` 与 `run-tests.ps1` 共用那条正则),新字段一律追加在后面。
+    // ══════════════════════════════════════════════════════════════════════════
+    static int _skip, _owed;
+
+    /// <summary>这个形态下**本来就测不了**。★ 不判红,但必须说得出自己没跑。</summary>
+    internal static void Skip(string what, string why)
+    {
+        _skip++;
+        Console.WriteLine("  SKIP  " + what + " —— " + why);
+    }
+
+    /// <summary>**本该跑得了却没跑成**。★ 计进 SKIP,同时计进 OWED —— 门禁看 OWED 判红。</summary>
+    internal static void Owed(string what, string why)
+    {
+        _skip++; _owed++;
+        Console.WriteLine("  OWED  " + what + " —— " + why);
+    }
+
     public static int Run()
     {
         int pass = 0, fail = 0;
+        _skip = _owed = 0;
         void Assert(bool c, string m) { if (c) { pass++; Console.WriteLine("  PASS  " + m); } else { fail++; Console.WriteLine("  FAIL  " + m); } }
 
         var tmp = Path.Combine(Path.GetTempPath(), "localai-client-selftest-" + Guid.NewGuid().ToString("N")[..8]);
@@ -1140,7 +1172,20 @@ public static class Selftest
                        "★★ 删共享会话的确认框必须如实说【会同步到其它设备】—— "
                        + "删除现在会传播,还写「只影响这台机器」就是界面在说假话");
                 Assert(cvShare.Contains("· 共享"), "会话行标出共享状态");
-                Assert(cvShare.Contains("从来没上传过"), "★ 如实说明现在只是标记、接入后才上传");
+                // ══════════════════════════════════════════════════════════════
+                //  ★★★★ V36 撤掉这里原有的一条:
+                //      Assert(cvShare.Contains("从来没上传过"), "★ 如实说明现在只是标记、接入后才上传");
+                //
+                //  ★ 它是 2026-08-05 那次「两处一起更正」**漏掉的第三处** —— 就贴在上面那两条旁边。
+                //  ★★ 实测(V36):「从来没上传过」在 `ChatView.cs` 里
+                //      **原文命中 1 次 · 去注释后 0 次** —— 它只活在 :809 那段注释里,
+                //      而那段注释逐字写着「★★★ 2026-08-05 用户裁定「删除共享要同步」——
+                //      **这句话反过来了**」。⇒ **判据在读一句解释它自己已经不成立的注释,然后判绿**
+                //      (ASSERTION-PITFALLS 第 21 条那个形状,一字不差)。
+                //  ★★★ 它的判词说的那件事(「现在只是标记、接入后才上传」)**今天是假的**:
+                //      删除会同步到其它设备。⇒ 不是把针脚改指别处 —— 那等于替它编一个新主张;
+                //      它守的那件事已经由上面那条 `NoComments(...)` 的断言**正着钉住**了。
+                // ══════════════════════════════════════════════════════════════
             }
             var puShare = TryReadSource(Path.Combine("Views", "ProjectUi.cs"));
             if (puShare is not null)
@@ -2229,7 +2274,16 @@ public static class Selftest
                 Assert(svSrc.Contains("ThresholdMax = 400_000"), "整理阈值滑条上限 400k 字符(≈128K token 级)");
                 // ★ V21:「总量上限」「保留期」两条跟着记忆库搬进管理端(锚点是 MemoryView.cs)。
                 Assert(svSrc.Contains("StorageUsage.Snapshot"), "同板块内显示当前缓存等占用大小");
-                Assert(svSrc.Contains("AI 尚未接入"), "★ 整理摘要在 AI 未接入时【不做事】并如实说明(不拼假摘要)");
+                // ★★★★ V36 · 这一条原来是 `svSrc.Contains("AI 尚未接入")`,而它是**假绿**:
+                //   「AI 尚未接入」在 `StorageView.cs` 里**原文命中 1 次 · 去注释后 0 次** ——
+                //   只活在 :143 那句注释里,而那句注释逐字写着
+                //   「2026-08-05 审计改写:原文说「AI 尚未接入(P4)」—— 模型 S11 就接上了」。
+                //   ⇒ 判据在读一句**解释它自己已经被改掉了**的注释,然后判绿(第 21 条)。
+                //   ★ 判词说的是「如实说明」= 界面上那句话,所以针脚要钉**今天界面上真说的那句**,
+                //     并且走 NoComments —— 界面文案只可能在字符串里,注释再怎么写都不算数。
+                Assert(NoComments(svSrc).Contains("这个功能还没有接上模型,本次未执行"),
+                       "★ 整理摘要在模型未接上时【不做事】并如实说明(不拼假摘要)—— "
+                       + "★★ 判据走 NoComments:上一版钉的是一句只剩在注释里的旧文案,一直假绿");
                 Assert(svSrc.Contains("不可逆") && svSrc.Contains("ConfirmDialog.Show(\"删除归档原文\""),
                        "★ 删除归档原文单独二次确认(勾了也要再确认)");
                 // ★ V21:记忆库空态那条同上,跟着搬。
@@ -3812,7 +3866,7 @@ public static class Selftest
             var appSrc = TryReadSource("App.xaml.cs");
             var calSrc = TryReadSource(Path.Combine("Views", "CalendarView.cs"));
             if (appSrc is null || calSrc is null)
-                Console.WriteLine("  SKIP  接线自检(发布环境无源码,开发/CI 下才跑)");
+                Skip("接线自检", "发布环境无源码,开发/CI 下才跑");
             else
             {
                 // ★ 示例数据已停止播种(用户要求 2026-07-31)—— 改成钉"清理发生在建窗口之前",
@@ -6361,7 +6415,18 @@ public static class Selftest
                 var appRootW = ClientSourceRoot();
                 var adminRootW = appRootW is null ? null
                     : Path.GetFullPath(Path.Combine(appRootW, "..", "admin"));
-                if (appRootW is not null && adminRootW is not null && Directory.Exists(adminRootW))
+                // ★★★★ V36:这一整段原来是**静默跳过**的(条件不成立就什么都不说)。
+                //   出包形态下它一条都不跑,而输出里看不出区别 —— 记一条 SKIP,把它说出来。
+                //   ★ 源码根在、而管理端树不在 ⇒ 那是**结构性意外**(仓库形态变了),记 OWED:
+                //     本该跑得了却没跑成,门禁该红。
+                if (appRootW is null)
+                    Skip("每个 json 只能有一个写者(两个工程合起来)",
+                         "发布产物旁边没有源码 —— 这一趟【一个 json 都没对过】");
+                else if (adminRootW is null || !Directory.Exists(adminRootW))
+                    Owed("每个 json 只能有一个写者(两个工程合起来)",
+                         $"客户端源码根在({appRootW}),却找不到管理端源码树({adminRootW})—— "
+                         + "判词说的是「两个工程合起来」,只有一半就等于没查");
+                else
                 {
                     static List<(string Proj, string File, string Text)> Tree(string root, string proj)
                     {
@@ -6571,8 +6636,8 @@ public static class Selftest
                     var leSrc = TryReadSource(Path.Combine("..", "..", "10-core", "lan-edge", "Program.cs"));
                     if (leSrc is null)
                         // ★ 发布产物旁边没有源码 ⇒ 这一趟【跳过】,不是判红(第 11 条)。
-                        Console.WriteLine("  SKIP  跨进程约定「上游网关够不着」两侧同词"
-                                          + "(读不到 10-core/lan-edge/Program.cs)");
+                        Skip("跨进程约定「上游网关够不着」两侧同词",
+                             "读不到 10-core/lan-edge/Program.cs(发布产物旁边没有源码)");
                     else
                         Assert(leSrc.Contains("UpstreamUnreachableType = \"" + HubClient.UpstreamGatewayDownType + "\""),
                                "★★★ lan-edge 那侧的 `Edge.UpstreamUnreachableType` 与客户端这侧的 "
@@ -7242,29 +7307,27 @@ public static class Selftest
                     // 品牌块已整体移除(用户裁定 2026-08-03):任务栏/托盘已有图标与名字,窗口里不再重复
                 Assert(!mwBrand.Contains("本地 AI 中枢\" FontWeight"), "★ 窗口左上不再放标题与图标块");
             }
-            {
-                // 结构性的按皮肤分叉必须【屈指可数且登记在案】。新增一处就会让这条挂掉,
-                // 逼着人回来确认"这真的必须按皮肤分结构吗,还是换个颜色令牌就够了"。
-                var forks = new List<string>();
-                var viewsDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Views");
-                if (Directory.Exists(viewsDir))
-                {
-                    foreach (var f in Directory.GetFiles(viewsDir, "*.cs"))
-                        foreach (var line in File.ReadAllLines(f))
-                        {
-                            var t = line.TrimStart();
-                            if (t.StartsWith("//")) continue;                       // 注释不算(踩过三次)
-                            if (t.Contains("ThemeManager.Current =")) forks.Add(Path.GetFileName(f));
-                        }
-                    var distinct = forks.Distinct().OrderBy(x => x).ToList();
-                    // ★ 收紧到【零】:暖萌的堆叠卡片砍掉之后,Views 下不该再有按皮肤分结构的地方。
-                    //   皮肤差异一律走颜色令牌(八个基色),结构三套一致 —— 这正是"每个皮肤改一点会
-                    //   导致混乱"的解法:改一次,三套同时对。
-                    Assert(distinct.Count == 0,
-                           "★ 按皮肤分【结构】的地方一处都不该有(皮肤差异一律走颜色令牌)"
-                           + (distinct.Count > 0 ? " 现有:" + string.Join(",", distinct) : ""));
-                }
-            }
+            // ══════════════════════════════════════════════════════════════════
+            //  ★★★★ V36 · 这里原本还有一条「按皮肤分【结构】的地方一处都不该有」
+            //
+            //  它写死了 `AppContext.BaseDirectory\..\..\..\Views`,而**门禁跑的是
+            //  `bin\Release\<tfm>\win-x64\`(四层)** ⇒ 那条路径解出 `app\bin\Release\Views`,
+            //  **不存在** ⇒ 整块 `if (Directory.Exists(...))` 静默跳过:
+            //  不计 PASS、不计 FAIL、不计 SKIP、连 SRCMISS 都不进(它不走 TryReadSource)。
+            //  ★ V36 实测(同一份源码、同一台机):
+            //      Debug\<tfm>\               PASS=2190  ← 这条**跑了**
+            //      Release\<tfm>\win-x64\     PASS=2186  ← 这条**一个字都没说**
+            //    差的 4 条里,这条占 1(另 3 条是紧接着的皮肤令牌,见下)。
+            //  ★★ 这个洞 2026-08-08 就被下面 8700 行那段的注释**写明**过,
+            //    当时的处置是「另起一条更宽的判据」,而这条**没删** ——
+            //    于是仓库里留着一条在门禁形态下永远不会说话、却占着「有人在守」那个位置的断言。
+            //
+            //  ⇒ 撤掉它。它守的那件事**已经被下面那条严格更宽的判据接管**:
+            //    `RunV14()` 里「按皮肤分【结构】的地方一处都不许有(**客户端与管理端一起算**)」,
+            //    锚点走 `ClientSourceRoot()`,不写死层数,而且连管理端一起扫。
+            //  ★ 不是"删掉一条断言" —— 是删掉一条**在门禁里从来没跑过的**重复品。
+            //    留着它更坏:它让人以为皮肤分叉这件事在客户端这一侧也被守着。
+            // ══════════════════════════════════════════════════════════════════
 
             // ---- 皮肤令牌齐备:三个皮肤必须定义同一组键,否则换肤会崩在缺键上 ----
             var need = new[] { "BgWindow", "BgSurface", "BgNav", "BgHover", "BgSelected", "FgPrimary",
@@ -7273,9 +7336,21 @@ public static class Selftest
                                "RadiusSm", "RadiusMd", "RadiusLg" };
             // 开发/CI 环境下源码 Theme 目录在旁边,能逐皮肤核对令牌齐全;单文件发布里这些 xaml
             // 已编进程序集资源(磁盘上没有源码目录),此检查跳过 —— 运行时皮肤从 pack 资源正常加载。
-            var themeDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Theme");
-            if (!Directory.Exists(themeDir))
-                Console.WriteLine("  SKIP  皮肤令牌一致性(发布环境:xaml 已作为 pack 资源编入,非磁盘文件)");
+            //
+            // ★★★★ V36 · 锚点从写死层数改成 `ClientSourceRoot()`
+            //   原来是 `AppContext.BaseDirectory\..\..\..\Theme`(三层)。它只在
+            //   `bin\Debug\<tfm>\` 那一种形态下解得对;门禁跑的 `Release\<tfm>\win-x64\` 是**四层**
+            //   ⇒ 解出 `app\bin\Release\Theme`,不存在 ⇒ 这三条**在门禁里从来没跑过**,
+            //     而它只打印一行 SKIP,客户端哨兵此前又没有 SKIP 字段 ⇒ 两条门禁都看不见。
+            //   ★ V36 实测:Debug 下三条 PASS;Release/win-x64 下三条消失、只剩一行没人读的 SKIP。
+            //   ⇒ 走共用锚点(要求 `Selftest.cs` 与 `localai-client.csproj` 同时在),
+            //     它在 Debug / Release / win-x64 三种输出布局下都解得对,发布产物旁边没有源码时才是 null。
+            var clientRootForTheme = ClientSourceRoot();
+            var themeDir = clientRootForTheme is null ? null : Path.Combine(clientRootForTheme, "Theme");
+            if (themeDir is null || !Directory.Exists(themeDir))
+                Skip("皮肤令牌一致性(三个皮肤定义同一组令牌)",
+                     "发布环境:xaml 已作为 pack 资源编入,磁盘上没有 Theme 目录 —— "
+                     + "★ 这一趟【三个皮肤一个都没核过】,别把 PASS 数读成「令牌齐备」");
             else foreach (var skin in new[] { "Breeze", "Ink", "Warm" })
             {
                 var xaml = File.ReadAllText(Path.Combine(themeDir, skin + ".xaml"));
@@ -7339,7 +7414,7 @@ public static class Selftest
             // ---- 真 manifest + 动画状态机 ----
             var petJson = TryReadSource(Path.Combine("Assets", "pet", "loading-cow-cat", "loading-cow-cat-animation-manifest-v1.json"));
             if (petJson is null)
-                Console.WriteLine("  SKIP  桌宠 manifest(发布环境没有源码目录)");
+                Skip("桌宠 manifest", "发布环境没有源码目录");
             else
             {
                 var m = Services.Pet.PetManifest.Parse(petJson);
@@ -8827,7 +8902,13 @@ public static class Selftest
                     : Path.GetDirectoryName(appRoot.TrimEnd(Path.DirectorySeparatorChar));
 
                 // 源码根不在(发布产物那一趟)⇒ 整段跳过,不判红(ASSERTION-PITFALLS 第 11 条)
-                if (appRoot is not null && winRoot is not null)
+                // ★★★★ V36:跳过要**说出来** —— 原来这里是静默的,而这一段扛着
+                //   「两个 exe 界面不许漂」那三条反漂断言。不说的话,「跳过了」与「全绿」
+                //   在输出里长得一模一样,而这正是本节自己那段注释在骂的形状。
+                if (appRoot is null || winRoot is null)
+                    Skip("UI 高度嵌合的三条反漂断言(客户端 ↔ 管理端)",
+                         "发布产物旁边没有源码 —— 这一趟【两边一次都没对过】");
+                else
                 {
                     var adminRoot = Path.Combine(winRoot, "admin");
                     Assert(Directory.Exists(adminRoot),
@@ -9094,7 +9175,7 @@ public static class Selftest
             for (int _i = _anchorCode.IndexOf(_anchorNeedle, StringComparison.Ordinal); _i >= 0;
                  _i = _anchorCode.IndexOf(_anchorNeedle, _i + 1, StringComparison.Ordinal)) _anchorN++;
             Assert(_anchorN == 1,
-                $"★★★ 源码根锚点只许出现在 SourceRootAnchors 一处,实测 {_anchorN} 处 —— "
+                $"★★★ 源码根锚点在【本文件】里只许出现在 SourceRootAnchors 一处,实测 {_anchorN} 处 —— "
                 + "又开始各写各的了。2026-08-08 那次「同一个修法漏改一处」就是这么来的");
             // ★ 元断言:提取器没有静默失灵。0 处也会让上面那条红,但理由会指错方向 ——
             //   「有人删了锚点」和「NoComments 把它吃掉了」是两回事,必须分得开。
@@ -9102,7 +9183,126 @@ public static class Selftest
                 "★★ 元断言:在自己的源码里找得到锚点字面量(找不到说明提取方式坏了,不是锚点没了)");
         }
 
-        Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}");
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★★★★ V36 · 上面那条判词说的是「只许有一处」,而它**只读 Selftest.cs 一个文件**
+        //
+        //  ⇒ 它一直报「1 处」并判绿,而客户端工程里**真实是 3 处**向上找源码根的走法:
+        //    `Selftest.cs` · `SelftestModelGate.cs` · `SelftestUiPromises.cs`。
+        //  后两处各自还带着**不同的第三锚点**(`Services/ModelReadiness.cs` /
+        //  `Views/DevicesView.cs`)⇒ 三份判据、三种"源码根在不在"的答案。
+        //  ★ 这正是 ASSERTION-PITFALLS 第 3b 条:**守卫只盖住了它自称范围的一部分**,
+        //    而它自称的范围就写在自己的判词里。
+        //  ★★ 更坏的一层:那条判据存在的**全部理由**就是"挡住明天有人再复制一份" ——
+        //    而复制**已经发生了两次**,它一次都没响。
+        //
+        //  ⇒ 判据换成扫**整个客户端编译集**里的自检文件,数「向上找源码根」那段走法。
+        //    针拼出来(第 1 条:否则这条判据自己就是它要找的那一处)。
+        //  ★ 读不到源码就跳过,不判红(第 11 条)。
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            var _all = TryReadAllSources();
+            var _stFiles = _all.Where(x => Path.GetFileName(x.Path).StartsWith("Selftest", StringComparison.Ordinal))
+                               .ToList();
+            if (_stFiles.Count == 0)
+            {
+                // ★ 源码根不在旁边(发布产物那一趟)= 本来就测不了 ⇒ SKIP;
+                //   源码根在、却一个自检文件都枚举不到 = **本该跑得了却没跑成** ⇒ OWED(门禁判红)。
+                if (SourceRootPresent())
+                    Owed("「向上找源码根的走法只许有一处」",
+                         "源码根就在旁边,而客户端编译集里一个 Selftest*.cs 都没枚举到 —— "
+                         + "枚举器坏了,而它坏掉的表现是这条判据**一直绿**");
+                else
+                    Skip("「向上找源码根的走法只许有一处」", "发布产物旁边没有源码,扫不了编译集");
+            }
+            else
+            {
+                var _walkNeedle = "AppContext" + ".BaseDirectory";
+                var _walkSites = new List<string>();
+                foreach (var (p, t) in _stFiles)
+                {
+                    var code = NoComments(t);
+                    for (int i = code.IndexOf(_walkNeedle, StringComparison.Ordinal); i >= 0;
+                         i = code.IndexOf(_walkNeedle, i + 1, StringComparison.Ordinal))
+                        _walkSites.Add(p);
+                }
+                Assert(_stFiles.Count >= 3,
+                    $"★★ 元断言:真的扫到了客户端的自检文件(实得 {_stFiles.Count} 个)—— "
+                    + "扫到 0 个时下面那条会报「0 处」,而 0 处与「收拢好了」是两回事");
+                Assert(_walkSites.Count == 1,
+                    $"★★★★ 【全客户端自检】里「从 {_walkNeedle} 往上找源码根」的走法只许有一处,"
+                    // ★ 逐文件报**次数**,不是去重后的文件名 —— 红测时实测过一次:
+                    //   同一个文件里出现两处,去重之后打印出来只有一个名字,读起来像「只有一处」。
+                    + $"实测 {_walkSites.Count} 处:"
+                    + string.Join(" · ", _walkSites.GroupBy(x => x).Select(g => $"{g.Key}×{g.Count()}")) + " —— "
+                    + "★ 上一版这条只读 Selftest.cs 自己,于是它报 1 处判绿,"
+                    + "而 SelftestModelGate.cs 与 SelftestUiPromises.cs 各自带着一份拷贝、"
+                    + "还各带一个不同的第三锚点。**判据只盖住了它自称范围的一部分**(第 3b 条)。");
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  ★★★★★ V36 · 去注释器**自己**的定标(与管理端那一组逐条同款)
+        //
+        //  ★ 为什么客户端这边也要:V36 实测出管理端那份 `NoComments` **不认字符串字面量**
+        //    (一句 `$"https://…"` 里的 `//` 被当成注释起点 ⇒ 本行后半截连同收尾引号被吃掉
+        //    ⇒ 引号奇偶错位 ⇒ 建立其上的 `CodeOnly` 从那儿往后把代码当字符串剥掉
+        //    ⇒ `!CodeOnly(源码).Contains("X")` **静默恒真**)。
+        //  ★★★ 写这段注释时我以为「客户端这两份今天是对的(它们各自带着字符串分支)」——
+        //    **那句话被这组定标当场证伪了**:客户端这两份认字符串、却**不认字符字面量**,
+        //    于是 `'"'` 里那个双引号被当成字符串起点,从那儿一路吞到下一个 `"` ——
+        //    中间的注释因此**没被剥掉**、代码被当成字符串。
+        //    实测:补字符字面量分支**之前**,定标 ②④⑤⑥ 四条红。
+        //  ★ 也就是说两边各坏各的:管理端坏在「字符串里的 //」,客户端坏在「字符字面量」。
+        //    **两个方向都得钉,少钉一个就会留下另一半。**
+        //  ★★ 而「今天是对的」与「有人在守着它对」本来就是两回事:
+        //    没红过的护栏和没有护栏是一回事。
+        //  ★★★ 定标喂的是**合成源码**,不依赖本仓任何内容 —— 它测的是尺,不是被量的东西。
+        // ══════════════════════════════════════════════════════════════════════
+        {
+            const string _u = "https:" + "//example";
+            var _src =
+                "class X {\n"
+              + "    string A() => $\"" + _u + "/a\"; void MarkerSameLine() { }\n"
+              + "    void MarkerAfterUrl() { }\n"
+              + "    char Q() => '\"';\n"
+              + "    void MarkerAfterCharQuote() { }\n"
+              + "    // MarkerInComment\n"
+              + "    string B() => \"MarkerInString\";\n"
+              + "}\n";
+            var _noc = NoComments(_src);
+            Assert(_noc.Contains("MarkerSameLine") && _noc.Contains("MarkerAfterUrl"),
+                "★★★★ 定标①:`NoComments` 不把**字符串里的 `//`** 当注释起点 —— "
+                + "当成了的话本行后半截连同收尾引号一起被吃掉,而且引号奇偶从此错位");
+            Assert(_noc.Contains("MarkerAfterCharQuote"),
+                "★★★ 定标①b:字符字面量 `'\"'` 里那个双引号不是字符串起点");
+            Assert(!_noc.Contains("MarkerInComment"),
+                "★★ 定标②:`NoComments` 真的剥掉了行注释(反方向:剥不掉就是个恒等函数)");
+            Assert(_noc.Contains("MarkerInString"),
+                "★★ 定标③:`NoComments` **保留字符串**(剥字符串的那种会让文案判据恒真,第 3c 条)");
+            var _code = CodeOnly(_src);
+            Assert(_code.Contains("MarkerAfterUrl") && _code.Contains("MarkerAfterCharQuote"),
+                "★★★★ 定标④:`CodeOnly` 同上 —— 它一错位就会让 "
+                + "`!CodeOnly(源码).Contains(\"X\")` 这类**反向**断言**静默恒真**");
+            Assert(!_code.Contains("MarkerInComment") && !_code.Contains("MarkerInString"),
+                "★★ 定标⑤:`CodeOnly` 注释与字符串**都**剥掉了(反方向)");
+            Assert(!CodeOnly(_src).Contains("MarkerInString") && CodeOnly(_src).Contains("MarkerAfterUrl"),
+                "★★★ 定标⑥:该抓的抓得到、该放的放得过 —— 前五条的合体,"
+                + "挡住「把某一条定标改到刚好通过」那种修法");
+        }
+
+        RunCommentFedGuard(Assert);
+
+        // ★★★ `OWED=` **无条件打印**(哪怕是 0)—— 这一条是 V36 当天实测出来的:
+        //   `run-tests.ps1` 读的是**控制台汇总行**(不是哨兵文件),而"只在 >0 时才印"会让
+        //   它读不到字段 ⇒ 打出「口径不明:这份 exe 比本脚本旧」。
+        //   **那句话在正常的一趟里是假的**,而一条天天说假话的提示会被人学会无视。
+        //   ⇒ 字段恒在:`OWED=0` 与「没有 OWED 字段」必须是两件看得出区别的事。
+        Console.WriteLine($"\nP3c 客户端 selftest: PASS={pass} FAIL={fail}"
+                          + (_skip > 0 ? $"  SKIP={_skip}" : "") + $"  OWED={_owed}");
+        if (_skip > 0)
+            Console.WriteLine("  ★ SKIP 不是 PASS —— 上面每条都写了为什么跳过,不要把它读成通过。");
+        if (_owed > 0)
+            Console.WriteLine("  ★★ OWED = 【本该跑得了却没跑成】—— 出包门禁与 run-tests 都会因此判红。");
         // ★★ 口径必须跟着数字走。发布产物里源码不可读 ⇒ 一批结构/接线断言整段跳过,
         //   而它们既不计 PASS 也不计 FAIL、更不计 SKIP。不写出来的话,
         //   852 会被拿去和开发树的 1900 对账,而那两个数根本不在同一个量程上。
@@ -9120,6 +9320,203 @@ public static class Selftest
         }
         WriteSentinel(pass, fail);
         return fail > 0 ? 1 : 0;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ★★★★★ V36 · 「正向断言被注释喂绿」的护栏(ASSERTION-PITFALLS 第 21 条)
+    //
+    //  第 21 条 2026-08-09 立的时候只装了**半个护栏**:V26 把管理端四条切片换成
+    //  `SliceBody`,V30b 又在客户端换了一批 —— 两次都是**手工普查一遍、改完就完**。
+    //  ⇒ 挡不住"明天又写一条"。而这个病的表现是**假绿**:一声不响,还占着
+    //    「这件事有人在守」那个位置。V36 普查实测:客户端 + 管理端一共 **21 处**
+    //    今天就在被注释喂绿(那句话在目标文件里**原文有、去注释后没有**),
+    //    其中 2 处的判词说的是界面文案,而那句文案**早就被改掉了** ——
+    //    留在原地的只有一段解释"我把它改掉了"的注释,判据正读着它判绿。
+    //
+    //  ★ 判据(这一条自己):把**每一处** `var x = TryReadSource(…)` 之后的
+    //    `x.Contains("<中文>")` 都跑一遍,拿目标文件的**原文**与**去注释后**各数一次。
+    //      · 原文有 · 去注释后没有  ⇒ 这条今天就是靠注释绿的
+    //      · 需要是**有意查注释**的,写进下面 `CommentPinned` 并说明理由
+    //      · 针里自带 `//` 的**自动豁免** —— 它已经把"我查的是注释"写在针上了
+    //  ★★ 两个方向都钉:登记表里的条目哪天**不再**靠注释绿了,也要红 ——
+    //    一张只增不减的赦免名单,下一个人就不会再信它(第 16 条:错话钉在原地)。
+    //  ★★★ 零命中判红:扫不到候选 = 解析器坏了,而它坏掉的表现是**这条一直绿**。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// **有意去查注释**的那些(第 21 条明文允许的唯一例外:"那种要在旁边写明这条查的是注释")。
+    /// 键 = <c>目标文件相对路径|那句话</c>。★ 这张表**只许变短**:下面反向那条钉着它。
+    /// </summary>
+    static readonly Dictionary<string, string> CommentPinned = new(StringComparer.Ordinal)
+    {
+        ["Views/ChatView.cs|虚线"] =
+            "在 `Contains(\"GhostButton\") && Contains(\"虚线\") || Contains(\"StrokeDashArray\")` 里,"
+          + "承重的是第三个析取项(`StrokeDashArray` 是真代码);「虚线」只是同一件事的中文说法。",
+        ["Views/ChatView.cs|只是显示折叠"] =
+            "钉的就是 `ChatView.cs:2111` 那句注释本身 —— 「折叠只是显示、给 AI 的永远是全文」"
+          + "是一条**没有代码形态**的纪律,它的载体只能是注释。",
+        ["Views/ChatView.cs|只读就是只读"] =
+            "同上:钉 `:643` 那句纪律注释(已删项目的空间标签不许复活)。",
+        ["Services/AudioDriver.cs|没有注册表卸载项 = 未安装"] =
+            "钉 `:70` 那句实测教训的注释(2026-07-31 用户卸载后仍报「已安装」)。",
+        ["Services/IdentityGuess.cs|这个类连 MemberContext 都不碰"] =
+            "它是 `Contains(\"MemberContext\") == false || Contains(\"…都不碰\")` 的第二个析取项 ——"
+          + "**有意**留的注释出口:真要引用 MemberContext 时必须在注释里交代。",
+        ["Views/Ui.cs|用两条【居中的矩形】拼"] =
+            "钉 `:130` 那句实现约定的注释(不许改回 Path,理由写在那儿)。",
+        ["Views/SettingsView.cs|Authenticode 签名在这里把关"] =
+            "钉 `:377` 行尾那句注释 —— 它标的是「签名校验发生在这一行」这个事实。",
+        ["Services/TodoCenter.cs|纯本机数据"] =
+            "钉文件头 `:8` 那段 D57 裁定原文。",
+        ["Services/TodoCenter.cs|不会自愈"] =
+            "同上,`:17`(必须在界面上说清的那句直接后果)。",
+        ["Services/BuildInfo.cs|不编一个版本号"] =
+            "钉文件头 `:6` 那条纪律:拿不到就说拿不到,不装一个版本号。",
+        ["../transport/ClientTransport.cs|自报的、未被六词覆盖的】信息"] =
+            "钉 `:152` 那段安全口径注释(clientVersion 只作显示)。",
+        ["../transport/ClientTransport.cs|两边用的是同一个值"] =
+            "钉 `:156` 那段说明(protocol_version 进了 SAS transcript,但两边同值)。",
+        ["Services/HubDiscovery.cs|发现不建立信任"] =
+            "钉文件头 `:10` 那条最要紧的安全纪律。",
+        ["Views/DevicesView.cs|绝不替用户挑"] =
+            "它是 `… || Contains(\"请自己挑一个\")` 的第一个析取项;承重的是第二个 ——"
+          + "「请自己挑一个」是 `:463` 上真的界面文案。",
+    };
+
+    /// <summary>读源码但**不计** SRCHIT/SRCMISS —— 本护栏是判据的判据,不该污染那两个数。</summary>
+    static string? ReadNoTally(string relative)
+    {
+        var root = ClientSourceRoot();
+        if (root is null) return null;
+        var p = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+        try { return File.Exists(p) ? File.ReadAllText(p) : null; } catch { return null; }
+    }
+
+    static void RunCommentFedGuard(Action<bool, string> assert)
+    {
+        var selftests = TryReadAllSources()
+            .Where(x => Path.GetFileName(x.Path).StartsWith("Selftest", StringComparison.Ordinal))
+            .ToList();
+        if (selftests.Count == 0)
+        {
+            if (SourceRootPresent())
+                Owed("「正向断言被注释喂绿」护栏",
+                     "源码根就在旁边,而一个 Selftest*.cs 都没枚举到 —— 护栏本身在空跑");
+            else
+                Skip("「正向断言被注释喂绿」护栏", "发布产物旁边没有源码,读不到自检源码,也读不到被判的文件");
+            return;
+        }
+
+        var asg = new System.Text.RegularExpressions.Regex(@"^\s*var\s+(\w+)\s*=\s*(.+)$");
+        var cleaned = new System.Text.RegularExpressions.Regex(@"\b(Body|NoComments|CodeOnly|SliceBody)\s*\(");
+        var reads = new System.Text.RegularExpressions.Regex(@"TryReadSource\s*\(\s*(.+)$");
+        var quoted = new System.Text.RegularExpressions.Regex("\"([^\"]*)\"");
+        var calls = new System.Text.RegularExpressions.Regex(
+            "(?<![\\w.])(\\w+)\\??\\.Contains\\(\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+
+        int candidates = 0, fedNow = 0, skippedEscapes = 0;
+        var unregistered = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (file, text) in selftests)
+        {
+            var lines = text.Replace("\r\n", "\n").Split('\n');
+            var raw = new Dictionary<string, string>(StringComparer.Ordinal);   // 变量 -> 目标相对路径
+            var clean = new HashSet<string>(StringComparer.Ordinal);
+            var inBlock = false;
+            foreach (var line in lines)
+            {
+                var t = line.TrimStart();
+                if (inBlock) { if (line.Contains("*/", StringComparison.Ordinal)) inBlock = false; continue; }
+                if (t.StartsWith("//", StringComparison.Ordinal)) continue;
+                if (t.StartsWith("/*", StringComparison.Ordinal))
+                { inBlock = !line.Contains("*/", StringComparison.Ordinal); continue; }
+
+                var ma = asg.Match(line);
+                if (ma.Success)
+                {
+                    var name = ma.Groups[1].Value; var rhs = ma.Groups[2].Value;
+                    if (cleaned.IsMatch(rhs)) { clean.Add(name); raw.Remove(name); }
+                    else
+                    {
+                        var mr = reads.Match(rhs);
+                        if (mr.Success)
+                        {
+                            var arg = mr.Groups[1].Value;
+                            var parts = new List<string>();
+                            foreach (System.Text.RegularExpressions.Match q in quoted.Matches(
+                                         arg.Contains("Path.Combine", StringComparison.Ordinal)
+                                             ? arg[(arg.IndexOf("Path.Combine", StringComparison.Ordinal))..]
+                                             : arg))
+                                parts.Add(q.Groups[1].Value);
+                            if (parts.Count > 0) { raw[name] = string.Join("/", parts); clean.Remove(name); }
+                        }
+                    }
+                }
+
+                foreach (System.Text.RegularExpressions.Match mc in calls.Matches(line))
+                {
+                    var v = mc.Groups[1].Value; var lit = mc.Groups[2].Value;
+                    if (clean.Contains(v) || !raw.TryGetValue(v, out var target)) continue;
+                    if (!lit.Any(ch => ch >= '一' && ch <= '鿿')) continue;
+                    // ★ 针里带 `//` = 它把"我查的是注释"写在自己身上了 ⇒ 自动豁免(第 21 条那条例外)
+                    if (lit.Contains("//", StringComparison.Ordinal)) continue;
+                    // ★ 带转义的字面量不猜:C# 源码里的 `\"` 与文件里的字节不是一回事。
+                    //   数出来、印出来 —— 一个没说自己漏了什么的扫描器比不扫更坏(第 15 条)。
+                    if (lit.Contains('\\')) { skippedEscapes++; continue; }
+                    var key = target + "|" + lit;
+                    if (!seen.Add(key + "@" + file)) continue;
+                    candidates++;
+                    var body = ReadNoTally(target);
+                    if (body is null) continue;                       // 锚点指错的账由 SRCMISS 那一格管
+                    if (!body.Contains(lit, StringComparison.Ordinal)) continue;   // 这条今天是红的,不归本护栏
+                    if (NoComments(body).Contains(lit, StringComparison.Ordinal)) continue;  // 代码里也有 ⇒ 绿得对
+                    fedNow++;
+                    if (!CommentPinned.ContainsKey(key))
+                        unregistered.Add($"{file} 拿 {target} 判「{lit}」");
+                }
+            }
+        }
+
+        Console.WriteLine($"  (注释喂绿护栏:候选 {candidates} 条 · 今天靠注释绿的 {fedNow} 条 · "
+                          + $"登记在案 {CommentPinned.Count} 条 · 带转义跳过 {skippedEscapes} 条)");
+
+        assert(candidates >= 100,
+            $"★★ 元断言:护栏真的解析出了候选(实得 {candidates} 条)—— "
+            + "解析器坏掉那天它会报 0 条,而 **0 条与「一处都没有」在输出里长得一模一样**");
+
+        assert(unregistered.Count == 0,
+            "★★★★ 没有**新的**「正向断言被注释喂绿」(第 21 条)"
+            + (unregistered.Count > 0
+                ? $"\n        —— 下面这 {unregistered.Count} 条今天就是靠一句注释绿的:\n        "
+                  + string.Join("\n        ", unregistered)
+                  + "\n        ★ 那句话在目标文件里**原文有、去注释后没有**。"
+                  + "本仓的习惯是「删掉之后把原文留在注释里说明为什么删」⇒ 判据正在读一句"
+                  + "解释它自己已经不成立的注释。要么把针脚改钉代码里真有的那句(走 NoComments),"
+                  + "要么它确实是**有意查注释**的 —— 那就写进 CommentPinned 并说明理由。"
+                : ""));
+
+        var stale = CommentPinned.Keys.Where(k => !seen.Any(s => s.StartsWith(k + "@", StringComparison.Ordinal))
+                                                  || !IsStillCommentFed(k)).ToList();
+        assert(stale.Count == 0,
+            "★★★ `CommentPinned` 里没有发霉的条目(每一条都还真的靠注释绿着)"
+            + (stale.Count > 0
+                ? "\n        —— " + string.Join("\n        ", stale)
+                  + "\n        ★ 只有正向那一条的话,这张表会变成一张只增不减的赦免名单:"
+                  + "那句话哪天回到代码里了,登记还在,下一个人会以为这儿有个已知的坑。"
+                : ""));
+    }
+
+    /// <summary>登记表某一条今天**还是**靠注释绿的吗。★ 反向那条判据用它。</summary>
+    static bool IsStillCommentFed(string key)
+    {
+        var i = key.IndexOf('|');
+        if (i < 0) return false;
+        var body = ReadNoTally(key[..i]);
+        if (body is null) return false;
+        var lit = key[(i + 1)..];
+        return body.Contains(lit, StringComparison.Ordinal)
+               && !NoComments(body).Contains(lit, StringComparison.Ordinal);
     }
 
     /// <summary>环境变量:出包门禁用它指定「自检结果哨兵」的落点。</summary>
@@ -9151,7 +9548,13 @@ public static class Selftest
             // ★ 追加 SRCMISS/SRCHIT:出包门禁靠它把「这个数在量什么」印出来。
             //   ★★ 追加在 FAIL 之后,既有的 `PASS=(\d+)\s+FAIL=(\d+)` 正则照常匹配 ——
             //     改哨兵格式时**必须**保证这一点,否则门禁会当场判「哨兵内容不认得」。
-            File.WriteAllText(path, $"PASS={pass} FAIL={fail} SRCHIT={_srcHit} SRCMISS={_srcMiss}\n");
+            // ★★★ V36 追加 SKIP/OWED:在此之前客户端哨兵里**没有**这两个字段,
+            //   于是「本该跑得了却没跑成」在客户端这条路上门禁一无所知(第 19 条那个形状)。
+            //   ★ 仍然追加在 SRCMISS 之后,`PASS=(\d+)\s+FAIL=(\d+)` 那条共用正则照常匹配。
+            //   ★ 没有 LIFE —— 那一条是管理端专有的(托盘右键关闭 → 栈真的没了),
+            //     客户端凭空写一个 LIFE=1 等于伪造一份没人跑过的证据。
+            File.WriteAllText(path,
+                $"PASS={pass} FAIL={fail} SRCHIT={_srcHit} SRCMISS={_srcMiss} SKIP={_skip} OWED={_owed}\n");
         }
         catch (Exception ex)
         {
@@ -9271,6 +9674,22 @@ public static class Selftest
                 if (i < src.Length) sb.Append(src[i]);
                 continue;
             }
+            // ★★★★ V36 补:**字符字面量**。`'"'` 里那个双引号会被上面那条当成字符串起点,
+            //   于是从那儿一路吞到下一个 `"` —— 中间的注释因此**没被剥掉**、代码被当成字符串。
+            //   ★ 这不是假想:`SelftestUiPromises.cs` / `SelftestMoved.cs` 里就写着 `'"'`,
+            //     而 `TryReadAllSources()` 会把自检文件一起读进来。
+            //   ★★ 定标就在 Run() 里(六条,两个方向都钉);修之前定标②④⑤⑥ 红。
+            if (src[i] == '\'')
+            {
+                sb.Append(src[i]); i++;
+                while (i < src.Length && src[i] != '\'')
+                {
+                    if (src[i] == '\\') { sb.Append(src[i]); i++; if (i >= src.Length) break; }
+                    sb.Append(src[i]); i++;
+                }
+                if (i < src.Length) sb.Append(src[i]);
+                continue;
+            }
             sb.Append(src[i]);
         }
         return sb.ToString();
@@ -9308,6 +9727,17 @@ public static class Selftest
                     i++;
                 }
                 sb.Append("\"\"");
+                continue;
+            }
+            // ★★★★ V36 补:字符字面量(理由同 NoComments 里那一段 —— `'"'` 会让它从那儿起失步)
+            if (src[i] == '\'')
+            {
+                i++;
+                while (i < src.Length && src[i] != '\'')
+                {
+                    if (src[i] == '\\') i++;
+                    i++;
+                }
                 continue;
             }
             sb.Append(src[i]);
@@ -9406,8 +9836,13 @@ public static class Selftest
     /// <summary>
     /// 找客户端源码根;找不到返回 null —— **发布产物那一趟就是 null,那不是错误**。
     /// ★ 本探测不计入 SRCHIT/SRCMISS:它是判据的前提,不是被判的对象。
+    /// <para>★★★★ V36 起 <c>internal</c>:`SelftestModelGate` 与 `SelftestUiPromises`
+    /// 此前**各自带着一份拷贝**(而且 ModelGate 那份还多要一个第三锚点)。
+    /// 上面那条「锚点只许有一处」当时读的只有 `Selftest.cs` 自己 ⇒ 它报 1 处并判绿,
+    /// 而工程里其实是 **3 处** —— 判词说的是"只许有一处",判据只盖住了它自己那一个文件。
+    /// ⇒ 三处收拢到这一个函数,并把那条判据的范围拓到**整个客户端编译集**。</para>
     /// </summary>
-    static string? ClientSourceRoot()
+    internal static string? ClientSourceRoot()
     {
         var dir = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && dir is not null; i++)

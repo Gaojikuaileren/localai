@@ -27,6 +27,54 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ★★★★ V36 · 并发闸(D124③ 只登记了,代码一直没动)
+#
+#  为什么它必须存在:本脚本**没有**任何并发保护,而两次构建同时跑会互相踩:
+#    · 驻留编译器(VBCSCompiler,跑在 dotnet.exe 里)会锁住 `obj\Release\`
+#      ⇒ 后一趟报一句「dotnet 一个字都没输出」的进程级死法(上面 Invoke-Publish
+#        那段注释里那条排查建议,第一句就是「先查有没有第二个构建在跑」);
+#    · 更坏的一半:两趟**共用同一个 dist 目录**。A 的 exe + B 的 VERSION.txt
+#      拼出来的那一份**每个文件都成立、合起来是假的** —— 而它长得和一次干净出包一模一样。
+#  ★ 2026-08-11 没撞上,**是因为那天只有一条车道在跑,不是因为它被挡住了**。
+#
+#  ★★ 判据形状(为什么是 PID 存活而不是"锁文件在不在"):
+#    锁文件残留(上一趟被 Ctrl-C / 蓝屏 / 被杀)会变成一条**永久的假红**,
+#    而假红会训练人绕过门禁 —— D82 已经因此失效过两条,第 5 条整节记的就是这个代价。
+#    ⇒ 锁里记 **PID + 起始时间 + 仓库路径**;PID 不在了就当陈旧锁,覆盖并**明说**。
+#  ★★★ 判红时**不产出任何东西**:先判、再干活,顺序不能反 ——
+#    "先出了一半再发现冲突"和没有闸的区别只是多浪费十五分钟。
+# ══════════════════════════════════════════════════════════════════════════════
+$buildLock = Join-Path ([IO.Path]::GetTempPath()) 'localai-build-client.lock'
+if (Test-Path $buildLock) {
+    $lockTxt = ''
+    try { $lockTxt = (Get-Content $buildLock -Raw -ErrorAction Stop).Trim() } catch { }
+    $lockPid = 0
+    if ($lockTxt -match '^PID=(\d+)') { $lockPid = [int]$Matches[1] }
+    $alive = $false
+    if ($lockPid -gt 0) {
+        try { $null = Get-Process -Id $lockPid -ErrorAction Stop; $alive = $true } catch { $alive = $false }
+    }
+    if ($alive) {
+        Write-Host ""
+        Write-Host "X 已经有另一次出包在跑 —— 本次【不产出任何东西】。" -ForegroundColor Red
+        Write-Host "  锁:$buildLock" -ForegroundColor Red
+        ($lockTxt -split "`r?`n") | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+        Write-Host "  ★ 为什么不让两趟一起跑:驻留编译器会锁住 obj\Release\(表现是一句" -ForegroundColor Red
+        Write-Host "    「dotnet 一个字都没输出」的死法),而且两趟共用同一个 dist 目录 ——" -ForegroundColor Red
+        Write-Host "    A 的 exe 配 B 的 VERSION.txt,**每个文件都成立、合起来是假的**。" -ForegroundColor Red
+        Write-Host "  ⇒ 等那一趟跑完再来;确认它已经死了的话,删掉上面那个锁文件。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  ! 捡到一个陈旧的出包锁(PID=$lockPid 已经不在了)—— 覆盖它继续。" -ForegroundColor Yellow
+    Write-Host "    原锁内容:$($lockTxt -replace "`r?`n", ' | ')" -ForegroundColor DarkGray
+}
+Set-Content -Path $buildLock -Encoding utf8 -Value @(
+    "PID=$PID"
+    "起始=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    "仓库=$repo"
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ★★★ 发布失败时**必须把 dotnet 的原话打出来**(2026-08-10 实测踩到)。
 #
 #  那天 `[1]` 报了一句「X 发布失败」就退出,**dotnet 一个字都没吐** ——
@@ -182,7 +230,9 @@ if (-not $Out) {
     Write-Host "    ★ 这【不是】部署位($repo\dist\$clientDirName)—— 出完包部署位不会动。" -ForegroundColor Yellow
     Write-Host "      要落位就别带 -Out。" -ForegroundColor Yellow
 }
-New-Item -ItemType Directory -Force -Path $Out | Out-Null
+# ★★★★ V36:这里原来紧跟着一句 `New-Item -Force -Path $Out` —— **挪到占用闸之后**了。
+#   理由:占用闸判红时的承诺是「现在停下**什么都还没动**」,而先建目录就已经动了 dist。
+#   三个产物目录一律在闸**通过之后**才建(见 [0c])。
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  [0] ★★★ V31:主机端产物目录 + **开工前的占用闸**。
@@ -231,48 +281,110 @@ if (-not $HostOut) {
     Write-Host "  ! 指定了 -HostOut:$HostOut" -ForegroundColor Yellow
     Write-Host "    ★ 这【不是】部署位 —— 出完包 dist\$hostDirName 不会动。" -ForegroundColor Yellow
 }
-New-Item -ItemType Directory -Force -Path $HostOut | Out-Null
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ★★★ 开工前先问一句:**要被覆盖的那个 Edge** 此刻在不在跑。
+#  [0b] ★★★★ V36:管理端产物目录**提前算出来** —— 占用闸要盖住它
 #
-#  这不是理论顾虑,是实测:2026-08-09 跑本脚本时 Edge 就活着(PID 15452)。
-#  主机上 `启动Edge.cmd` 起来的就是这个 exe,而出包多半发生在栈还活着的时候。
-#  exe/dll 被占用时 `dotnet publish` 会在写文件那一步失败,而它的报错
-#  (MSB3021 / 拒绝访问)**不会提到"Edge 在跑"** —— 排查方向会跑偏到权限或杀软上。
+#  ★ 它原来是在 [3] 那儿(约 600 行)才算的,而占用闸在这上面 ⇒
+#    闸**结构上不可能**知道 dist\admin 会被写。下面 [3] 那段只剩一句"已经算过了"。
+#  ★★ `$adminDirName` 仍是这个字面量,而 [3b] 有一条断言拿它与
+#    `AdminApp.AdminDirName` 源码常量对拍 —— 漂了就判红。那条判据一个字没动。
+# ══════════════════════════════════════════════════════════════════════════════
+$adminDirName = 'admin'
+if (-not $AdminOut) { $AdminOut = Join-Path (Split-Path $Out -Parent) $adminDirName }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  [0c] ★★★★★ V36 · 占用闸盖住**这一趟会写的每一个产物**(此前只盖住三件里的一件)
 #
-#  ★★ 判据比的是**路径**,不是进程名:
-#    往 `-HostOut <别处>` 出一份拿去比对的包,与"落位那份正被占用"是两件事,
-#    只按进程名拦的话前者会被无辜挡下 —— 而一条会误挡的闸,会被人加 `-Force` 绕过去。
-#  ★★★ 但读不到路径时**fail-closed**(当成"就是它"):
-#    读不到的原因通常是权限,而"猜它不是"猜错的后果是发布在写文件时炸掉,
-#    并且报错指不到这儿。宁可多问一句。
+#  ★ 上一版这里只问一句 `Get-Process -Name localai-lan-edge` —— 全文件唯一一处 Get-Process。
+#    而这一趟**三件都直接写落位**:[1]→dist\client · [3]→dist\admin · [5]→dist\host。
+#    ⇒ 闸的**位置**是对的(开工前、动任何产物之前),**覆盖面**没跟上。
+#  ★★ 而管理端是**常驻托盘程序**,主机上它本来就开着 ⇒ [3] 在写 exe 那一步炸掉,
+#    而此时 [1] 已经把 dist\client 的 exe 覆盖过了。
+#  ★★★ 危害比"三个目录分裂"更重:client 的 `SHA256.txt` / `VERSION.txt` / 安装说明
+#    **全都写在 [3] 之后** ⇒ [3] 一死,dist\client 是【新 exe + 上一轮的三份文本】,
+#    SHA256 与 exe 对不上 —— **而那份安装说明正让人"装之前先对一遍哈希"**。
+#    一个让人按它做、做完得出错误结论的说明,比没有说明更坏。
+#  ★ 最常撞的其实是 [1]:客户端走 HKCU 自启,主机上它也开着,占着自己的 exe。
 #
-#  ★★ 明确**不**自动去杀它:D116 立的是「关栈动谁」要有裁定 ——
-#    Edge 一停,所有副机连接当场断,而这是用户可见、不可自动恢复的后果。
+#  ══ 判据形状(为什么**不是**一张"这几个进程"的清单)══
+#  一张手写的进程清单会被逐条做完,然后给出"全覆盖了"的假象 —— 而真正会撞的那个不在表上。
+#  ⇒ 反过来推:**先列出这一趟会写哪些文件**(`$writeTargets`,与真正去写它们的那几行
+#    用的是同一批变量),再由它导出:
+#      ① 会被写的**目录**集合 ⇒ 跑在这些目录里的**任何** exe 都算占用者
+#         —— 不问它叫什么名字,新增一个产物 exe 也自动被盖住;
+#      ② 会被写的 exe **基名**集合 ⇒ 只在**读不到进程路径**时用(fail-closed,理由见下)。
+#  ★ ① 是主判据,② 只是兜底 —— 反过来的话就又变成一张名字清单了。
+#
+#  ★★ 比的是**路径**不是名字:往 `-Out <别处>` 出一份拿去比对的包,与
+#    "落位那份正被占用"是两件事;只按名字拦会把前者无辜挡下,
+#    而一条会误挡的闸会被人加 `-Force` 绕过去(第 5 条量过这个代价)。
+#  ★★★ 读不到路径时 **fail-closed**(当成"就是它"):读不到通常是权限,
+#    而"猜它不是"猜错的后果是发布在写文件那一步炸掉,报错还指不到这儿。
+#
+#  ★★ 明确**不**自动去杀它们:D116 立的是「关栈动谁」要有裁定 ——
+#    Edge 一停所有副机连接当场断,管理端一停托盘里那套就没了。
 #    出包脚本没有资格替用户做这个决定。⇒ 说清楚,然后停下,让人自己关。
 # ══════════════════════════════════════════════════════════════════════════════
-$edgeProcName = [IO.Path]::GetFileNameWithoutExtension($hostExeName)
-$hostOutNorm  = (Resolve-Path -LiteralPath $HostOut).Path.TrimEnd('\')
-$edgeBlockers = @()
-foreach ($ep in @(Get-Process -Name $edgeProcName -ErrorAction SilentlyContinue)) {
-    $epPath = $null
-    try { $epPath = $ep.Path } catch { $epPath = $null }
-    if (-not $epPath) {
-        $edgeBlockers += "PID $($ep.Id)(★ 读不到它的路径 —— 按 fail-closed 当成就是它)"
-    } elseif ((Split-Path $epPath -Parent).TrimEnd('\') -eq $hostOutNorm) {
-        $edgeBlockers += "PID $($ep.Id)  $epPath"
+$writeTargets = @(
+    @{ Path = (Join-Path $Out      'localai-client.exe');   Who = '客户端';        Step = '[1]' }
+    @{ Path = (Join-Path $AdminOut 'localai-admin.exe');    Who = '主机管理端';    Step = '[3]' }
+    @{ Path = (Join-Path $HostOut  $hostExeName);           Who = '主机端 Edge';   Step = '[5]' }
+    @{ Path = (Join-Path $HostOut  'localai-identity.exe'); Who = '主机端 identity'; Step = '[5]' }
+)
+# ★ 这四个路径变量下面照原样用(`$exe` / `$adminExe` / `$hostExe` / `$identityExe`),
+#   **不再各自 Join-Path 一次** —— 两处各算一遍的话,闸检查的和真正被写的可以是两个地方。
+$exe         = $writeTargets[0].Path
+$adminExe    = $writeTargets[1].Path
+$hostExe     = $writeTargets[2].Path
+$identityExe = $writeTargets[3].Path
+
+$targetDirs  = @($writeTargets | ForEach-Object {
+    [IO.Path]::GetFullPath((Split-Path $_.Path -Parent)).TrimEnd('\') } | Select-Object -Unique)
+$targetNames = @($writeTargets | ForEach-Object {
+    [IO.Path]::GetFileNameWithoutExtension($_.Path) } | Select-Object -Unique)
+
+$occupied = @()
+foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
+    $pPath = $null
+    try { $pPath = $proc.Path } catch { $pPath = $null }
+    if ($pPath) {
+        $pDir = [IO.Path]::GetFullPath((Split-Path $pPath -Parent)).TrimEnd('\')
+        # ① 主判据:它跑在一个**这一趟会写**的目录里 —— 不问它叫什么
+        if ($targetDirs -contains $pDir) {
+            $occupied += "PID $($proc.Id)  $pPath"
+        }
+    } elseif ($targetNames -contains $proc.ProcessName) {
+        # ② 兜底:路径读不到(多半是权限),而名字对得上 ⇒ fail-closed,宁可多问一句
+        $occupied += "PID $($proc.Id)  $($proc.ProcessName)(★ 读不到它的路径 —— 按 fail-closed 当成就是它)"
     }
 }
-if ($edgeBlockers.Count -gt 0) {
-    Write-Host "X 要被覆盖的那个 Edge 正在运行 —— 发布会写不进去,而且现在停下**什么都还没动**。" -ForegroundColor Red
-    $edgeBlockers | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
-    Write-Host "  ★ 请先把「启动Edge」那个窗口关掉,再重跑本脚本。" -ForegroundColor Red
-    Write-Host "  ★★ 本脚本【有意】不替你杀它:Edge 一停,所有副机连接当场断" -ForegroundColor Red
+if ($occupied.Count -gt 0) {
+    Write-Host ""
+    Write-Host "X 要被覆盖的产物里有正在运行的 —— 发布会写不进去,而现在停下**什么都还没动**。" -ForegroundColor Red
+    $occupied | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    Write-Host "  ---- 这一趟会写的产物(闸就是从这张表推出来的)----" -ForegroundColor Red
+    $writeTargets | ForEach-Object { Write-Host "    $($_.Step) $($_.Who)  $($_.Path)" -ForegroundColor Red }
+    Write-Host "  ★ 请先把对应的程序关掉(客户端 / 托盘里的主机管理端 / 「启动Edge」那个窗口),再重跑。" -ForegroundColor Red
+    Write-Host "  ★★ 本脚本【有意】不替你杀它们:Edge 一停所有副机连接当场断" -ForegroundColor Red
     Write-Host "     (D116:关栈动谁要有裁定 —— 用户可见、不可自动恢复的后果)。" -ForegroundColor Red
-    Write-Host "  ★ 只想出一份拿去比对、不碰落位的包:加 -Out <别处>(host 会跟着去 <别处>\..\$hostDirName)。" -ForegroundColor Red
+    Write-Host "  ★★★ 为什么必须在这儿拦住:client 的 SHA256/VERSION/安装说明都写在 [3] 之后 ——" -ForegroundColor Red
+    Write-Host "     [3] 中途死掉的话,dist\client 会是【新 exe + 上一轮的三份文本】," -ForegroundColor Red
+    Write-Host "     SHA256 与 exe 对不上,而那份安装说明正让人装之前先对一遍哈希。" -ForegroundColor Red
+    Write-Host "  ★ 只想出一份拿去比对、不碰落位的包:加 -Out <别处>(admin/host 会跟着去 <别处> 旁边)。" -ForegroundColor Red
     exit 1
 }
+
+# ★ 闸过了才建目录 —— 顺序不能反(见上面 [0] 那句「什么都还没动」)。
+New-Item -ItemType Directory -Force -Path $Out      | Out-Null
+New-Item -ItemType Directory -Force -Path $AdminOut | Out-Null
+New-Item -ItemType Directory -Force -Path $HostOut  | Out-Null
+
+# ★★★★ V36:这里原来是一段**只问 Edge 一个进程**的占用闸(全文件唯一一处 `Get-Process`)。
+#   它已经被上面 [0c] 那段**从「这一趟会写哪些文件」推出来的**闸取代 ——
+#   起因原文留在 [0c] 里:2026-08-09 实测 Edge 活着(PID 15452);
+#   而管理端与客户端都是主机上**本来就开着**的程序,它们一个都没在那道闸的覆盖面里。
+#   ★ 「闸的位置对了、覆盖面没跟上」—— 位置那一半仍然照旧:动任何产物之前跑完。
 
 Write-Host "[1] 发布单文件 exe(自包含,win-x64)…"
 Push-Location $app
@@ -286,7 +398,8 @@ try {
         '-o',$Out,'--nologo','-v','q')
 } finally { Pop-Location }   # ★ 失败也要退栈:Invoke-Publish 里是 exit,但留个 finally 免得将来改成 throw 时漏掉
 
-$exe = Join-Path $Out 'localai-client.exe'
+# ★ V36:`$exe` 已在 [0c] 的 `$writeTargets` 里算过 —— 这里**不再算第二遍**。
+#   两处各算一遍的话,占用闸检查的和真正被写的可以是两个地方。
 if (-not (Test-Path $exe)) { Write-Host "X 没有产出 exe" -ForegroundColor Red; exit 1 }
 
 Write-Host "[2] 自检（发布产物本身跑一遍）…"
@@ -460,7 +573,12 @@ function Invoke-GateSelftest {
         if ($owed -lt 0) {
             Write-Host "      ! 哨兵里没有 OWED/LIFE —— 这份自检还没有把「这个形态下测不了」与「本该跑而没跑」分开。" -ForegroundColor Yellow
             Write-Host "        ★ 不判红,但这一趟【本该跑而没跑】的那些在门禁里仍然是隐形的。" -ForegroundColor Yellow
-            Write-Host "        ★★ 今天只有管理端那份带这两个字段;客户端那份是**已知的未了项**(V23 交回里登记着)。" -ForegroundColor Yellow
+            # ★ V36 更正:上一版这里写着「今天只有管理端那份带这两个字段;客户端那份是已知的未了项」——
+            #   **那句话 V36 起是假的**。客户端哨兵现在是 `PASS FAIL SRCHIT SRCMISS SKIP OWED`
+            #   (没有 LIFE:生命周期那条是管理端专有的,客户端凭空写一个 LIFE=1 等于伪造证据)。
+            #   ⇒ 走到这一档只剩一种可能:这份 exe 比本脚本旧。
+            Write-Host "        ★★ 两份自检 V36 起都带 OWED(客户端没有 LIFE —— 那条是管理端专有的)。" -ForegroundColor Yellow
+            Write-Host "           走到这一档 = 这份 exe 比本脚本旧,先重新出一次包再对账。" -ForegroundColor Yellow
         } elseif ($skip -gt 0) {
             Write-Host "      ★ 跳过 $skip 条(OWED=0)：都是【这个形态下测不了】那一类 —— 发布产物旁边没有源码、" -ForegroundColor Yellow
             Write-Host "        这台机器上没装某个外部程序、某个端口被真东西占着。逐条原因见自检输出，" -ForegroundColor Yellow
@@ -544,9 +662,14 @@ Write-Host "[3] 发布管理端(单文件,win-x64)…"
 # ══════════════════════════════════════════════════════════════════════════════
 # ★ 与 `20-client-win/app/Services/AdminApp.cs` 的 `AdminDirName` 对齐;
 #   下面 [3b] 有一条断言拿源码里的常量与这个值对拍,漂了就判红。
-$adminDirName = 'admin'
-if (-not $AdminOut) { $AdminOut = Join-Path (Split-Path $Out -Parent) $adminDirName }
-New-Item -ItemType Directory -Force -Path $AdminOut | Out-Null
+# ★★★★ V36:`$adminDirName` / `$AdminOut` / 目录创建都**提前到 [0b]/[0c]** 了 ——
+#   占用闸必须知道这一趟会写 dist\admin,否则它结构上不可能盖住管理端。
+#   这里只留一句自证:走到这儿它们必须已经有值(没有 = 上面那段被人删了)。
+if (-not $adminDirName -or -not $AdminOut) {
+    Write-Host "X [3] 走到这儿 `$adminDirName/`$AdminOut 还是空的 —— [0b] 那段被删了?" -ForegroundColor Red
+    Write-Host "  ★ 不许在这里补算一遍:补算会让占用闸(它按 [0b] 的值推产物)与真正被写的地方分家。" -ForegroundColor Red
+    exit 1
+}
 $adminProj = Join-Path $repo '20-client-win\admin\localai-admin.csproj'
 if (-not (Test-Path $adminProj)) {
     # ★ 零命中判红:找不到 = 路径写错或工程被删,两种都得当场知道,不许静默跳过。
@@ -557,7 +680,7 @@ Invoke-Publish '管理端' @(
     '-p:PublishSingleFile=true','-p:IncludeNativeLibrariesForSelfExtract=true',
     '-p:EnableCompressionInSingleFile=true',"-p:InformationalVersion=$ver",
     '-o',$AdminOut,'--nologo','-v','q')
-$adminExe = Join-Path $AdminOut 'localai-admin.exe'
+# ★ V36:`$adminExe` 已在 [0c] 的 `$writeTargets` 里算过 —— 这里不再算第二遍(理由同 [1])。
 if (-not (Test-Path $adminExe)) { Write-Host "X 没有产出管理端 exe" -ForegroundColor Red; exit 1 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -792,8 +915,7 @@ foreach ($hp in $hostProjects) {
         Write-Host "X 没有产出 $($hp.Exe)" -ForegroundColor Red; exit 1
     }
 }
-$hostExe     = Join-Path $HostOut $hostExeName
-$identityExe = Join-Path $HostOut 'localai-identity.exe'
+# ★ V36:`$hostExe` / `$identityExe` 已在 [0c] 的 `$writeTargets` 里算过(理由同 [1])。
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  [5b] ★★★ 验:客户端旁边找得到主机端 —— 而且是**这一次发的**那一个。
@@ -1050,6 +1172,39 @@ $otherLines
   ★★ 没有版本戳的那些:说不清是哪一版、也复现不出来。
     要拷去装机的话**不要用它们**,用上面那三个。
 "@
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ★★★★ V36 · 反向:产物目录里**真的出现了**哪些 exe,必须都在 [0c] 那张表上
+#
+#  ★ [0c] 的主判据(「跑在会被写的目录里的任何 exe 都算占用者」)本来就不认名字,
+#    所以新增一个产物 exe 在**拦截**上是自动被盖住的。这一条守的是**另一半**:
+#    那张表还会被**打印给人看**(「这一趟会写的产物」),
+#    一张漏了一件的表会让人以为"就这几件" —— 而下一个人会照它去关程序。
+#  ★★ 判据是**扫出来的**,不是手写的:枚举三个目录里实际存在的 `*.exe`,
+#    与 `$writeTargets` 对拍。多出来一件就判红,逼着人把它登记进去。
+#  ★ 放在这里(全部发布完成之后)而不是开头:开头那会儿目录里还是上一轮的东西。
+# ══════════════════════════════════════════════════════════════════════════════
+$declaredExes = @($writeTargets | ForEach-Object { [IO.Path]::GetFullPath($_.Path) })
+$actualExes = @(
+    @($Out, $AdminOut, $HostOut) | Select-Object -Unique | Where-Object { Test-Path $_ } |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter *.exe -File -ErrorAction SilentlyContinue } |
+    ForEach-Object { [IO.Path]::GetFullPath($_.FullName) }
+)
+$undeclared = @($actualExes | Where-Object { $declaredExes -notcontains $_ })
+if ($undeclared.Count -gt 0) {
+    Write-Host ""
+    Write-Host "X 产物目录里有 $($undeclared.Count) 个 exe **不在 [0c] 那张表上**:" -ForegroundColor Red
+    $undeclared | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    Write-Host "  ★ 那张表是占用闸打印给人看的「这一趟会写的产物」—— 漏一件,人就会照它去关程序," -ForegroundColor Red
+    Write-Host "    而漏掉的那个程序开着的时候,发布会在写它那一步炸掉,报错还指不到这儿。" -ForegroundColor Red
+    Write-Host "  ⇒ 把它加进 [0c] 的 `$writeTargets(连同它属于哪一步、给人怎么称呼)。" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  OK 产物 exe 与 [0c] 占用闸那张表逐个对上($($actualExes.Count) 个)" -ForegroundColor DarkGray
+
+# ★ V36 并发闸:干完活把锁摘掉。**尽力而为** —— 摘不掉也不要紧,
+#   下一趟看见 PID 已经不在会当陈旧锁覆盖掉(判据是 PID 存活,不是文件在不在)。
+Remove-Item $buildLock -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== 出包完成(三件,同一轮)===" -ForegroundColor Green
