@@ -1,4 +1,4 @@
-# V23 · 关栈:先修误杀,再让它被判据守住(D?)
+# V23 · 关栈:先修误杀,再让它被判据守住(D116)
 
 > 车道 `claude/stackstop-kill-safety-assertions-0ffd29` · 2026-08-09
 > 提交 `59c7af5` · 边界:`20-client-win/admin/**` + `90-ops/build-client.ps1`

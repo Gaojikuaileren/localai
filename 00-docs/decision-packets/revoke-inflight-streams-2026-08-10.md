@@ -1,4 +1,4 @@
-# V32 · 吊销要能掐掉在途的流(D?)
+# V32 · 吊销要能掐掉在途的流(D122)
 
 > 车道 `claude/revoke-inflight-streams-1bf4e9` · 2026-08-10
 > 边界:`10-core/lan-edge/**` · `10-core/gateway/gateway.py`(流式与鉴权几段)· `10-core/identity/Store.cs`
@@ -230,7 +230,7 @@ test_speech_contract / test_caller_identity                    全部 0 FAIL
 ---
 ---
 
-# V32b · 认人失败不许再一声不吭(D?)
+# V32b · 认人失败不许再一声不吭(D123)
 
 > 用户 2026-08-10 追加裁定,并进本车道 · 边界扩到 `10-core/gateway/caller_identity.py`
 > · `gpu_policy.py` · `sync_policy.py` · `test_caller_policy.py` · `test_gpu_policy.py`
@@ -361,7 +361,7 @@ X-LocalAI-Identity-Unresolved-Total: 7
 ---
 ---
 
-# V32c · 出包时撞到的一条**新缺陷**:`build-client.ps1` 没有并发闸(D?)
+# V32c · 出包时撞到的一条**新缺陷**:`build-client.ps1` 没有并发闸(D124)
 
 > 协调层 2026-08-10 裁定「现在出一次包」,而这一趟**当场又咬到一条**。
 > ★ 它与 V31 上午刚补的那条**不是同一条**,补丁也治不了它。
