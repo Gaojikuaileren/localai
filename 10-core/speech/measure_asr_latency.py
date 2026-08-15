@@ -185,7 +185,10 @@ def _run_tier(device: str, compute_type: str, samples: List[Tuple[str, bytes, fl
     print(f"\n  [对照] 冷启第一次 · {sine_s:.1f}s 440Hz 正弦音"
           f" -> {cold_s:.2f}s   ← [verified] 那个数是这一格")
 
-    print(f"\n  {'音频':<14}{'时长':>7}{'冷启':>9}{'稳态中位':>10}{'稳态RTF':>10}   识别出的字")
+    # ★ 这一列叫「首次」不叫「冷启」:上面那次正弦音已经把模型跑热了,
+    #   ⇒ 本表**没有一格是真冷的**,唯一真冷的那次是上面 [对照] 那一行。
+    #   (第一版把它印成「冷启」,而它不是 —— 对抗式复核抓出来的。)
+    print(f"\n  {'音频':<14}{'时长':>7}{'首次':>9}{'稳态中位':>10}{'稳态RTF':>10}   识别出的字")
     print(f"  {'-' * 72}")
     rows = []
     for label, wav, seconds in samples:

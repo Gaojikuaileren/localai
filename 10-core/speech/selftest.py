@@ -43,7 +43,27 @@ def check(name: str, cond: bool, extra: str = "") -> None:
         _p += 1
     else:
         _f += 1
-        print(f"  X {name}" + (f"   {extra}" if extra else ""))
+        _emit(f"  X {name}" + (f"   {extra}" if extra else ""))
+
+
+def _emit(line: str) -> None:
+    """打印一行,**保证打得出去**。
+
+    ★★★ 2026-08-15(V38)加的,起因是真踩了一次:本机控制台是 **cp936**,
+      而我给一条新断言写的失败消息里有个 `⇒`(U+21D2)—— gbk 编不了它。
+      于是那条断言一旦命中,`print` 抛 `UnicodeEncodeError`,
+      **整个套件当场死在那一行**:消息印不出来、后面二十条断言不跑、末尾汇总行也没有。
+      ⇒ 一条「只在出事时才说话」的断言,偏偏在出事那一刻把自己和别人一起带走了。
+
+    ★ 这与本仓已有的那条纪律同源(ASSERTION-PITFALLS 第 8 条:
+      机器要读的那几个字符在 cp936 下必须仍然完好),只是那条管的是**契约号**,
+      而失败消息此前没人管。⇒ 这里兜底:编不动的字符降级成 `?`,**绝不让打印杀掉套件**。
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        print(line.encode(enc, "replace").decode(enc, "replace"))
 
 
 class _StubEngines:
@@ -108,8 +128,25 @@ def main() -> int:
           spec["asr"]["device"] == "cpu")
     # ★ 反向:规格里**不许**出现 peak —— 显存数只有 vram-budget.toml 说了算。
     #   两处都写一个数,迟早对不上,而准入闸会照着错的那个放行。
-    check("★★ 启动规格里**没有** peak/显存字段(准入闸的唯一数据源是 vram-budget.toml)",
-          "peak" not in json.dumps(spec))
+    #
+    # ★★★ 2026-08-15(V38)必须把这条**判据本身**改准,否则它今天就是一句假话:
+    #   本轮往 `[measured]` 里写了一个 `gpu_vram_gib = 2.226`(第一次直接量 GPU 足迹)。
+    #   那**是一个显存数**,而这条断言原先的判词是「启动规格里没有 peak/显存字段」——
+    #   它今天仍然绿,**只因为它 grep 的是字面词 "peak"**,而那个键叫 gpu_vram_gib。
+    #   ⇒ 一条「绿着但判词已经不成立」的断言,比红的更坏。
+    #
+    #   真正要守的性质是:**准入闸的收费不许有第二个来源**。读数不是收费。
+    #   ⇒ 判据改成两半:① 规格正文([measured] 之外)一个显存数都不许有;
+    #                    ② [measured] 里的显存读数必须**名字上就自陈是读数**,不许叫 peak。
+    _spec_proper = {k: v for k, v in spec.items() if k != "measured"}
+    _vram_words = ("peak", "vram", "gib")
+    _hits = [w for w in _vram_words if w in json.dumps(_spec_proper).lower()]
+    check("★★ 启动规格正文里**没有任何显存字段**(准入闸的唯一数据源是 vram-budget.toml)"
+          " -- ★ [measured] 不算正文:它是读数,不是收费,单独判",
+          not _hits, f"命中 {_hits}")
+    check("★★ [measured] 里的显存读数**不许**叫 peak(叫 peak 就会被人当成收费的第二个来源)",
+          not any("peak" in k.lower() for k in spec.get("measured", {})),
+          str([k for k in spec.get("measured", {}) if "peak" in k.lower()]))
 
     # ══════════════════════════════════════════════════════════════════
     #  1b. ★★★ 启动规格的 device 与准入闸的收费**对不上** —— 这是一条
@@ -135,14 +172,22 @@ def main() -> int:
     # ★ 局部名字**不许**叫 `_f` —— 那是本文件失败计数器的名字,
     #   在 main() 里赋一次就把它变成局部量,末行那句 FAIL=… 会打印出一个文件对象。
     #   (写这条时真的踩了一次:PASS=27 FAIL=<BufferedReader …>。)
+    # ★★ 取值必须**取不到就判红,而不是抛**:组件一旦改名,直接下标会 KeyError
+    #   ⇒ 整个套件当场死,连汇总行都没有 —— 那是「崩」,不是「红」,两者差别很大。
     with open(_budget_path, "rb") as _bf:
-        _charged = tomllib.load(_bf)["components"]["speech.lite"]["peak"]
-    check("★★★ 【登记在案的不一致】device=cpu(实占 0.002)而闸按 2.07 收费 —— "
+        _comps = tomllib.load(_bf).get("components", {})
+    _charged = (_comps.get("speech.lite") or {}).get("peak")
+    # ★ 消息里**只用 ASCII 箭头**:本机控制台是 cp936,`⇒` 编不进去,
+    #   而失败消息印不出来 = 这条断言在最该说话的时候哑了(见 _emit 那段实测)。
+    check("★★★ 【登记在案的不一致】device=cpu(实占 0.002)而闸按 2.07 收费 -- "
           "两侧的值都没被单独动过。★ 你若动了其中一侧:另一侧必须同一轮跟着定"
-          "(裁 CPU ⇒ 收费应 ≈0;裁 GPU ⇒ 收费应 ≥2.3,V38 实测足迹 2.226)。"
+          "(裁 CPU -> 收费应约等于 0;裁 GPU -> 收费应不低于 2.3,V38 实测足迹 2.226)。"
           "出处:decision-packets/v38-p5-first-batch-2026-08-15.md",
-          spec["asr"]["device"] == "cpu" and abs(float(_charged) - 2.07) < 1e-9,
-          f"实得 device={spec['asr']['device']} / 收费={_charged}")
+          spec["asr"]["device"] == "cpu"
+          and _charged is not None and abs(float(_charged) - 2.07) < 1e-9,
+          f"实得 device={spec['asr']['device']} / 收费={_charged}"
+          + ("(★ speech.lite 在 vram-budget.toml 里找不到了 —— 组件改名了?)"
+             if _charged is None else ""))
 
     # ══════════════════════════════════════════════════════════════════
     #  2. ★★★ 架构底线:本服务**不得**持有任何实时音频通路
