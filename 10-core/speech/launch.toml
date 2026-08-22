@@ -205,3 +205,39 @@ gpu_speedup_x = "30-40"
 note_gpu_defect = "★★ GPU 那条路今天**默认是坏的**,而且坏得很难查:模型加载会成功,第一次转写才抛 cublas64_12.dll 找不到。已在 server.py 的 add_cuda_dll_dirs 修掉(缺陷,不是裁定)。"
 # ── ★★★ 与准入闸对不上的那一格(如实记,本车道不改 config)──────────────
 note_admission = "★★★ 准入闸按 2.07 GiB 给 speech.lite 收费,而**今天这一档跑在 CPU 上、实占 0.002 GiB**(V16 实测)⇒ 在为一个没启用的东西付 2.07。★ 而 2.07 这个数**对 GPU 档基本是对的**(V38 实测 2.226,偏低 0.16 ⇒ fail-open 方向)。⇒ 收费该改成多少,取决于 CPU/GPU 那条裁定,两个答案不一样(CPU 档应 ≈0,GPU 档应 ≥2.3)。本车道**不改** config/vram-budget.toml,理由与移交见 decision-packets/v38-p5-first-batch-2026-08-15.md。"
+
+# =============================================================================
+#  [measured.full] —— ★ V42(2026-08-22)· speech.**full** 第一次被量
+#
+#  ★ 为什么嵌在 [measured] 下面而不是新开一节:上面那条断言
+#    (「启动规格正文里没有任何显存字段」)排除的是**键名 measured 这一个**,
+#    新开一节写 gib/vram 会当场把它判红 —— 而那条断言是对的,该让路的是我。
+#
+#  ★★ 它的价值:V38 移交里逐字写着「speech.full 的 GPU 足迹**没有人量过**
+#    (V38 只量了 lite)。**别照 lite 推**」。这一节就是去把那一格填上,
+#    而结论恰恰证明「别照 lite 推」是对的 —— 两档**朝相反方向**偏。
+# =============================================================================
+[measured.full]
+date = "2026-08-22"
+by   = "10-core/speech/measure_asr_latency.py --tier full --gpu"
+repo = "Systran/faster-whisper-large-v3"
+# ── CPU(与 lite 同一条规律:与音频长短脱钩,只是更慢)──────────────────
+cpu_transcribe_s_min = 8.50       # 4.4s 的话
+cpu_transcribe_s_max = 9.30       # 8.2s 的话
+cpu_load_s = 5.81
+cpu_flat_across_audio_len = true  # 2.1 / 4.4 / 8.2 三段落在 8.50-9.30,同一个数
+# ── GPU(★ 同样只是量过,**没有启用**)────────────────────────────────
+gpu_compute_type = "float16"
+gpu_transcribe_s_min = 0.32       # 2.1s 与 4.5s 的话
+gpu_transcribe_s_max = 0.47       # 8.3s 的话
+gpu_load_s = 4.10
+gpu_vram_gib = 3.82               # 静卡上两次独立读数 3.812 / 3.823,高水位与装载后一致
+# ★★★ 这一条是本节存在的理由:**两档朝相反方向偏**。
+#   · speech.lite 收 2.07,实测 2.26-2.30 -> **收少了**约 0.23(fail-open,更该修);
+#   · speech.full 收 4.05,实测 3.82      -> **收多了**约 0.23(fail-safe,保守)。
+#   ⇒ 任何「按 lite 的偏差去推 full」的修法都会把 full 推向错误方向。
+charged_in_vram_budget = 4.05
+note_direction = "★★ speech.full 在册收费 4.05 高于实测 3.82(收多了约 0.23,方向保守);而 speech.lite 在册 2.07 低于实测 2.26-2.30(收少了约 0.23,方向 fail-open)。两档偏差方向相反 -- 这正是 V38 说的『别照 lite 推』。本车道**不改** config/vram-budget.toml:改它取决于 CPU/GPU 那条待裁,且会改变准入闸放行的集合。"
+# ── ★ 取证边界(别把没量过的读成量过了)────────────────────────────────
+note_evidence = "★ 音频仍是 Piper 合成的**英文**,不是真人、不是中文(与 [measured] 同一批样本)。★★ GPU 的**延迟**读数对同卡上别的程序极敏感:同一档 lite,静卡 0.21-0.27s,而 UnrealEditor 在跑时 0.61-0.73s(差 3 倍),一度出现『lite 比 full 还慢』这种不可能的排序。⇒ 上面的 GPU 秒数取自**静卡**(nvidia-smi 4.9 GiB / 1-2% 占用)。★ 相比之下**显存足迹**稳:装载后与跑完全部样本后一致(lite 2.296->2.295,full 3.819->3.823)。"
+note_cpu_band = "★ 本轮把 [measured] 那个 CPU 区间的上沿往外推了:V38 记 5.4-7.8,而 V42 复现时 lite 量到 8.77、full 量到 9.30。★ 结论(与时长脱钩、每次都是这个数量级)**没变**,变的是区间上沿 -- 那点差别来自机器当时的负载,不来自被测对象。"
