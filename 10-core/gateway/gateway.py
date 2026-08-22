@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import backend_key
 import e1_detector as e1
 import e4_egress as e4
+import e4_response as e4b
 import caller_identity
 import gpu_broker
 import model_loader
@@ -2105,6 +2106,71 @@ async def list_models(request: Request):
     return {"object": "list", "data": data}
 
 
+def upstream_stream_mode(effective_tier: str, body: dict) -> bool:
+    """这一路**要不要真的开一条流**。★ 唯一决定点 —— 调用方"想要什么形态"在别处读。
+
+    ★★★ 为什么抽成函数而不是就地一行:D81 决定 4「共同必修」写着
+      「`stream` 是**调用方控制**的 ⇒ **必须能强制 `stream=False`**」。
+      一条写在路由中间的表达式**没法被反过来验**;抽出来之后,
+      `test_e4_response.py` 可以拿「出境档位 + body 说 stream:true」直接问它一次,
+      要求它答 False —— 而这条判据**可以为假**(把下面两行调个顺序它就红)。
+    ★ 这里**没有**写成"再加一条 500 兜底" —— 一条永远走不到的分支是幻影死代码,
+      它看起来像防护,而它从来不会说话。判据要么可执行、要么别写。
+    """
+    if e4b.must_force_nonstream(effective_tier):
+        return False
+    return bool(body.get("stream", False))
+
+
+def _response_egress_blocked(alias: str, scan, want_stream: bool, hdrs: dict):
+    """E4 方向 B 拦下之后回给调用方的那一份。
+
+    ★ 形状**由 `e4_response.BLOCKED_REPLY_SHAPE` 决定,不由本函数决定** ——
+      「拦下时对面看到什么」是 D81 待裁 ③,本车道只把机制做出来、把形状留成可配。
+      `blocked_reply_text` 返回 `None` 就是「什么都收不到」那一档。
+    ★★ 仍然按**调用方要的形态**回(SSE / JSON):同 E1 与 E4 方向 A 的既有做法 ——
+      给一个默认 `stream:true` 的前端一份非流式 JSON,它会解析失败,
+      于是用户看到的是**报错**,而不是「这一轮没有发出去」的说明。
+    ★★★ 这里**不带任何解除入口**:出境没有放行按钮(结构上不存在),
+      而且文案里不许出现 E1 的解除暗号 —— `e4_response._assert_no_unlock_leak()`
+      在 import 期就把那条路焊死了(2026-07-28 本机踩过一次)。
+    """
+    msg = e4b.blocked_reply_text(scan.categories)
+    payload_tail = {"blocked": True,
+                    "categories": sorted(scan.categories),
+                    "undeclared_fields": scan.undeclared,
+                    "refused_fields": scan.refused}
+    if want_stream:
+        def sse_e4b():
+            base = {"id": "e4b-block", "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": f"{alias}(e4b-response-blocked)"}
+            if msg is not None:
+                yield ("data: " + json.dumps(
+                    dict(base, choices=[{"index": 0, "finish_reason": None,
+                                         "delta": {"role": "assistant", "content": msg}}]),
+                    ensure_ascii=False) + "\n\n")
+            yield ("data: " + json.dumps(
+                dict(base, choices=[{"index": 0, "finish_reason": "content_filter",
+                                     "delta": {}}]), ensure_ascii=False) + "\n\n")
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(sse_e4b(), media_type="text/event-stream", headers=hdrs)
+    # ★ silent 那一档给的是**空 choices**,不是「一条内容为空的消息」:
+    #   后者在对面那侧是"收到了一条空消息",前者才是"什么都没收到"。
+    #   代价写在决议包里 —— 桥必须认得空数组,否则它会在 choices[0] 上炸。
+    choices = ([] if msg is None else
+               [{"index": 0, "finish_reason": "content_filter",
+                 "message": {"role": "assistant", "content": msg}}])
+    return JSONResponse(
+        status_code=200,          # 对调用方是一条正常回复,不是错误(同 E1/E4)
+        headers=hdrs,
+        content={"id": "e4b-block", "object": "chat.completion",
+                 "created": int(time.time()), "model": f"{alias}(e4b-response-blocked)",
+                 "choices": choices,
+                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                 "x_localai_e4b": payload_tail},
+    )
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
@@ -2305,7 +2371,40 @@ async def chat_completions(request: Request):
     if isinstance(fwd.get("messages"), list):
         fwd["messages"] = system_prompt.ensure(fwd["messages"])
     upstream_url = backend.rstrip("/") + "/v1/chat/completions"
-    stream = bool(body.get("stream", False))
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ★★★ D?:E4 **方向 B**(响应回程出境闸)的挂点。D81 立了它,此后一直是空的。
+    #
+    #  ★★ 别和 D126 的「方向 B」搞混:那个是**后端上锁**(上面那段 backend_key),
+    #    已完成;这个是**答案发出去之前扫一遍**,两件事。
+    #
+    #  在此之前,两条真正载着模型输出的出口**都是零扫描**:
+    #    · 流式:`gen()` 的循环体只有 `yield chunk`(原样透传);
+    #    · 非流式:`r.json()` 之后直接 `JSONResponse(content=data)`。
+    #  全函数唯一的扫描点在**请求**方向(E1 与上面那段 E4)。
+    #
+    #  ★★★ 判据是 **sink 轴**,不是 `entry["egress"]`(D81 决定 1(1) 把两根轴分开写过):
+    #    `entry["egress"]` 说的是「**请求发给哪个模型**」;这里问的是「**答案发到哪儿**」。
+    #    一个 `egress=false` 的本地模型,答案照样能顺一条外联通道出去 ——
+    #    上面那道 E4 在那条路径上**全程不触发**,这就是本闸单独存在的理由。
+    #
+    #  ★★ `client_wants_stream` 与 `stream` 从这里开始**是两个东西**:
+    #    前者是**调用方要什么形态**(拦截响应要照它回,同 E1/E4);
+    #    后者是**我们真的要不要开一条流**。D81 决定 4「共同必修」写死:
+    #    `stream` 是调用方控制的 ⇒ 判据不能读它,**必须能强制关掉**。
+    #    ⇒ 出境 sink 一律 `False`,并且**连转发出去的 body 也改掉** ——
+    #      只改本地变量而 fwd 里还写着 `stream:true`,上游会回 SSE 而我们拿 `r.json()`
+    #      去解析它,表现成 502「后端返回的不是合法 JSON」:一条**说错原因**的错误。
+    # ══════════════════════════════════════════════════════════════════
+    client_wants_stream = bool(body.get("stream", False))
+    sink_egress = e4b.must_force_nonstream(effective_tier)
+    stream = upstream_stream_mode(effective_tier, body)
+    if sink_egress:
+        # D81 决定 3(用户裁定 2026-08-04):出境 sink **不走流式,发一整段** ——
+        #   已发出的 chunk 收不回;闸门要能拦,前提是内容**还在手里**。
+        #   ★ 局域网客户端(lan-device / trusted-local)不是出境 sink ⇒
+        #     它们走的还是下面那条流式分支,**一个字节、一次判断都没多**(见 gen())。
+        fwd["stream"] = False
 
     # ★★★ 认人失败要**跟着这一轮的回答**回到界面上(用户裁定 2026-08-10:
     #   「界面上要看得见」,而且**别做成弹窗** —— 一行状态、可点开看详情)。
@@ -2408,6 +2507,30 @@ async def chat_completions(request: Request):
                                        "upstream_bytes": len(r.content),
                                        "hint": "原文已记入主机日志 upstream_problem.jsonl"}},
                 )
+            # ══════════════════════════════════════════════════════════
+            #  ★★★ E4 方向 B:**答案发出去之前**在这里过闸。
+            #
+            #  ★ 位置刻意在**契约回写之前**:回写会把 `model` 改成
+            #    `alias(contract)`,而 `model` 是登记在册的**信封**字段 ——
+            #    先扫后写、还是先写后扫,扫的结果一个字都不该变。
+            #    放在前面是为了让"闸看到的就是上游原样返回的那份"这句话成立。
+            #  ★★ 扫的是 **`r.json()` 解出来的对象**,不是 `r.text` / `r.content`:
+            #    D81 决定 2(2)(本车道复测过)—— `normalize()` 不折 `\uXXXX`,
+            #    而那正是模型输出在原始字节里的形态。一个全角 IBAN 扫原始字节**零命中**。
+            #    ⇒ 谁把原始字节喂进 `scan_response`,谁就把这道闸关掉了,而且它全绿。
+            #      (`scan_response` 自己也挡了这一手:收到 bytes/str 直接判拒。)
+            # ══════════════════════════════════════════════════════════
+            if sink_egress:
+                e4br = e4b.scan_response(data)
+                if e4br.blocked:
+                    log_gate_rejection(session_id, e4br.categories, "response_egress_blocked")
+                    return _response_egress_blocked(
+                        alias, e4br, client_wants_stream,
+                        {**hdrs, "X-LocalAI-E4B": "response-egress-blocked",
+                         "X-LocalAI-E4B-Categories": ",".join(sorted(e4br.categories)),
+                         # ★ 未登记字段也回一个头:它是**运维要看的那一栏**
+                         #   (「上游加了什么字段」),而不是内容 —— 路径名不是凭证值。
+                         "X-LocalAI-E4B-Undeclared": ",".join(e4br.undeclared)[:400]})
             # 契约回写(§8.1.4):响应 model 字段回写真实契约
             if isinstance(data, dict):
                 data["model"] = f"{alias}({contract})"
