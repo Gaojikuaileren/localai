@@ -144,9 +144,24 @@ def main() -> int:
     check("★★ 启动规格正文里**没有任何显存字段**(准入闸的唯一数据源是 vram-budget.toml)"
           " -- ★ [measured] 不算正文:它是读数,不是收费,单独判",
           not _hits, f"命中 {_hits}")
-    check("★★ [measured] 里的显存读数**不许**叫 peak(叫 peak 就会被人当成收费的第二个来源)",
-          not any("peak" in k.lower() for k in spec.get("measured", {})),
-          str([k for k in spec.get("measured", {}) if "peak" in k.lower()]))
+    # ★★★ 2026-08-22(V42):这条原先只看 [measured] 的**顶层**键。
+    #   本轮往里加了嵌套表 `[measured.full]`(speech.full 的第一批读数),
+    #   而嵌套表里的键**这条断言看不见** —— 也就是说,我一边加了新读数,
+    #   一边给守它的那条断言开了个盲区。⇒ 改成**递归**收集所有层的键名。
+    #   (这与 V36 那批「静默失效」同一形状:闸还绿着,只是它已经不看那块地方了。)
+    def _all_keys(node) -> list:
+        out = []
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out.append(k)
+                out.extend(_all_keys(v))
+        return out
+
+    _measured_keys = _all_keys(spec.get("measured", {}))
+    check("★★ [measured] 里的显存读数**不许**叫 peak(叫 peak 就会被人当成收费的第二个来源)"
+          " -- ★ 含嵌套表([measured.full] 那种),V42 前这条只看顶层",
+          not any("peak" in k.lower() for k in _measured_keys),
+          str([k for k in _measured_keys if "peak" in k.lower()]))
 
     # ══════════════════════════════════════════════════════════════════
     #  1b. ★★★ 启动规格的 device 与准入闸的收费**对不上** —— 这是一条
@@ -188,6 +203,31 @@ def main() -> int:
           f"实得 device={spec['asr']['device']} / 收费={_charged}"
           + ("(★ speech.lite 在 vram-budget.toml 里找不到了 —— 组件改名了?)"
              if _charged is None else ""))
+
+    # ══════════════════════════════════════════════════════════════════
+    #  1c. ★★★ 2026-08-22(V42)· speech.**full** 那一格 —— 此前**没有任何东西钉着它**
+    #
+    #  V38 只钉了 speech.lite。而 full 的收费(4.05)在册里同样是一个没人量过的数,
+    #  V38 的移交逐字写着「speech.full 的 GPU 足迹**没有人量过**,**别照 lite 推**」。
+    #
+    #  ★ V42 去量了(measure_asr_latency.py --tier full --gpu,静卡两次读数 3.812/3.823):
+    #    · speech.full 收 4.05,实测 GPU 足迹 **3.82** -> **收多了**约 0.23(方向保守/fail-safe);
+    #    · speech.lite 收 2.07,实测 GPU 足迹 **2.26-2.30** -> **收少了**约 0.23(fail-open)。
+    #  ⇒ ★★ 两档**朝相反方向偏**。这正是「别照 lite 推」成立的证据:
+    #    谁若照 lite 的偏差(收少了)去调 full,会把一个本来保守的数推向 fail-open。
+    #
+    #  ★ 本条与 1b 同一条道理:钉的不是「对」,是**「它不会被无声地改掉」**。
+    #    本车道不改 config —— 改它取决于 CPU/GPU 那条待裁,且会改变准入闸放行的集合。
+    # ══════════════════════════════════════════════════════════════════
+    _charged_full = (_comps.get("speech.full") or {}).get("peak")
+    check("★★★ 【登记在案】speech.full 收费 4.05 没被单独动过 -- ★ 实测 GPU 足迹 3.82"
+          "(V42,静卡),即**收多了约 0.23**,方向保守。★ 注意它与 speech.lite **偏差方向相反**"
+          "(lite 收 2.07 / 实测 2.26-2.30,是收少了)-- **别照 lite 的偏差去推 full**。"
+          "出处:decision-packets/v42-p5-second-batch-2026-08-22.md",
+          _charged_full is not None and abs(float(_charged_full) - 4.05) < 1e-9,
+          f"实得 speech.full 收费={_charged_full}"
+          + ("(★ speech.full 在 vram-budget.toml 里找不到了 —— 组件改名了?)"
+             if _charged_full is None else ""))
 
     # ══════════════════════════════════════════════════════════════════
     #  2. ★★★ 架构底线:本服务**不得**持有任何实时音频通路
